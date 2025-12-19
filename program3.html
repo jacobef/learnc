@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Memory Boxes — Program 3</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="wrap">
+      <nav class="tabs">
+    <a href="program1.html">Program 1</a>
+    <a href="program2.html">Program 2</a>
+    <a href="program3.html" class="active">Program 3</a>
+    <a href="program4.html">Program 4</a>
+    <a href="program5.html">Program 5</a>
+    <a href="program6.html">Program 6</a>
+    <a href="program7a.html">Program 7A</a>
+    <a href="program7b.html">Program 7B</a>
+  </nav>
+
+  <p id="p3-instructions" class="intro hidden"></p>
+  <p id="p3-complete" class="intro hidden"></p>
+
+  <section>
+    <div class="row">
+      <div class="panel">
+        <div id="p3-code" class="codepane"></div>
+        <div class="controls">
+          <button id="p3-prev">Prev ◀</button>
+          <button id="p3-next">Next ▶</button>
+        </div>
+      </div>
+      <div class="panel">
+        <div id="p3-stage"></div>
+        <div class="controls">
+          <button id="p3-add" class="hidden">+ New box</button>
+          <button id="p3-check" class="hidden">Check</button>
+          <button id="p3-reset" class="hidden">Reset</button>
+          <button id="p3-hint-btn" type="button" class="hint-link hidden">Hint</button>
+          <span id="p3-status" class="muted"></span>
+        </div>
+        <div id="p3-hint" class="hint-inline hidden"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script src="shared.js"></script>
+<script src="program3.js"></script>
+</body>
+</html>
