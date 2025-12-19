@@ -9,7 +9,7 @@
   const NEXT_PAGE = 'program2.html';
 
   const p1 = {
-    lines:['int abc;','abc = 3;','abc = 5;'],
+    lines:['int m;','m = 3;','m = 5;'],
     boundary:0,
     addr:null,
     state3:null,
@@ -28,17 +28,16 @@
 
   function buildHint(){
     const box = readBoxState($('#p1-stage .vbox'));
-    if (isEmptyVal(box?.value||'')) return {html:'Line 3 assigns <code>abc = 5;</code>, so the value cannot stay empty.'};
-    if (box?.value!=='5') return {html:'The last line stores <code>5</code> in <code>abc</code>.'};
+    if (isEmptyVal(box?.value||'')) return {html:'Line 3 assigns <code>m = 5;</code>, so the value cannot stay empty.'};
+    if (box?.value!=='5') return {html:'The last line stores <code>5</code> in <code>m</code>.'};
     const ok = (p1.boundary===3 && box.type==='int' && box.value==='5');
     if (ok) return 'Looks good. Press Check.';
-    return 'Looks good—try pressing Check.';
   }
 
   function updateInstructions(){
     if (!instructions) return;
     if (p1.boundary===3){
-      instructions.innerHTML = 'Edit the box to what it will be after <code>abc = 5;</code> is run, then press Check.';
+      instructions.innerHTML = 'Edit the box to what it will be after <code>m = 5;</code> is run, then press Check.';
     } else {
       instructions.textContent = 'Use the Prev/Next buttons to see how the program changes the boxes.';
     }
@@ -78,14 +77,14 @@
 
     if (p1.boundary===1){
       if (p1.addr==null) p1.addr = randAddr('int');
-      stage.appendChild(vbox({addr:String(p1.addr),type:'int',value:'empty',name:'abc',editable:false}));
+      stage.appendChild(vbox({addr:String(p1.addr),type:'int',value:'empty',name:'m',editable:false}));
       stage.querySelector('.value').classList.add('placeholder','muted');
     } else if (p1.boundary===2){
       if (p1.addr==null) p1.addr = randAddr('int');
-      stage.appendChild(vbox({addr:String(p1.addr),type:'int',value:'3',name:'abc',editable:false}));
+      stage.appendChild(vbox({addr:String(p1.addr),type:'int',value:'3',name:'m',editable:false}));
     } else if (p1.boundary===3){
       if (p1.addr==null) p1.addr = randAddr('int');
-      const init = p1.state3 ?? {addr:String(p1.addr), type:'int', value:'3', name:'abc'};
+      const init = p1.state3 ?? {addr:String(p1.addr), type:'int', value:'3', name:'m'};
       const box=vbox({...init, editable});
       if (!editable) disableBoxEditing(box);
       stage.appendChild(box);

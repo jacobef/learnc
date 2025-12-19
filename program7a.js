@@ -10,15 +10,15 @@
 
   const p7a = {
     lines:[
-      'int a;',
-      'int b;',
-      'int* ptr;',
-      'ptr = &a;',
-      'ptr = &b;',
-      'int** pptr;',
-      'pptr = &ptr;',
-      'int* spare;',
-      'spare = ptr;'
+      'int deer;',
+      'int hare;',
+      'int* wolf;',
+      'wolf = &deer;',
+      'wolf = &hare;',
+      'int** bear;',
+      'bear = &wolf;',
+      'int* fox;',
+      'fox = wolf;'
     ],
     boundary:0,
     aAddr:randAddr('int'),
@@ -46,19 +46,19 @@
   function canonical(boundary){
     const state=[];
     if (boundary>=1){
-      state.push({name:'a', names:['a'], type:'int', value:'empty', address:String(p7a.aAddr)});
+      state.push({name:'deer', names:['deer'], type:'int', value:'empty', address:String(p7a.aAddr)});
     }
     if (boundary>=2){
-      state.push({name:'b', names:['b'], type:'int', value:'empty', address:String(p7a.bAddr)});
+      state.push({name:'hare', names:['hare'], type:'int', value:'empty', address:String(p7a.bAddr)});
     }
     if (boundary>=3){
-      state.push({name:'ptr', names:['ptr'], type:'int*', value:ptrTarget(boundary), address:String(p7a.ptrAddr)});
+      state.push({name:'wolf', names:['wolf'], type:'int*', value:ptrTarget(boundary), address:String(p7a.ptrAddr)});
     }
     if (boundary>=6){
-      state.push({name:'pptr', names:['pptr'], type:'int**', value:pptrTarget(boundary), address:String(p7a.pptrAddr)});
+      state.push({name:'bear', names:['bear'], type:'int**', value:pptrTarget(boundary), address:String(p7a.pptrAddr)});
     }
     if (boundary>=8){
-      state.push({name:'spare', names:['spare'], type:'int*', value: boundary>=9 ? String(p7a.bAddr) : 'empty', address:String(p7a.spareAddr)});
+      state.push({name:'fox', names:['fox'], type:'int*', value: boundary>=9 ? String(p7a.bAddr) : 'empty', address:String(p7a.spareAddr)});
     }
     return state;
   }
@@ -98,32 +98,32 @@
     if (!ws) return 'Step forward to reach the editable line.';
     const boxes=[...ws.querySelectorAll('.vbox')].map(v=>readBoxState(v));
     const by=Object.fromEntries(boxes.map(b=>[b.name,b]));
-    if (!by.a || !by.b || !by.ptr) return {html:'You still need boxes for <code>a</code>, <code>b</code>, and <code>ptr</code>.'};
-    if (p7a.boundary>=6 && !by.pptr) return {html:'You also need <code>pptr</code> for this line.'};
-    if (by.a.type!=='int' || by.b.type!=='int') return {html:'<code>a</code> and <code>b</code> are <code>int</code>s.'};
-    if (by.ptr.type!=='int*') return {html:'<code>ptr</code>\'s type is <code>int*</code>.'};
-    if (p7a.boundary>=6 && by.pptr && by.pptr.type!=='int**') return {html:'<code>pptr</code>\'s type is <code>int**</code>.'};
-    if (p7a.boundary>=8 && by.spare && by.spare.type!=='int*') return {html:'<code>spare</code> is an <code>int*</code>.'};
+    if (!by.deer || !by.hare || !by.wolf) return {html:'You still need boxes for <code>deer</code>, <code>hare</code>, and <code>wolf</code>.'};
+    if (p7a.boundary>=6 && !by.bear) return {html:'You need a box for <code>bear</code>.'};
+    if (by.deer.type!=='int' || by.hare.type!=='int') return {html:'<code>deer</code> and <code>hare</code> are <code>int</code>s.'};
+    if (by.wolf.type!=='int*') return {html:'<code>wolf</code>\'s type is <code>int*</code>.'};
+    if (p7a.boundary>=6 && by.bear && by.bear.type!=='int**') return {html:'<code>bear</code>\'s type is <code>int**</code>.'};
+    if (p7a.boundary>=8 && by.fox && by.fox.type!=='int*') return {html:'<code>fox</code> is an <code>int*</code>.'};
     // Skip address validation; addresses are generated for the user.
-    const ptrVal = (by.ptr.value||'').trim();
-    if (!ptrVal) return {html:'<code>ptr</code>\'s value should not be empty.'};
-    if (ptrVal!==String(p7a.bAddr)) return {html:'This line sets <code>ptr</code>\'s value to <code>b</code>\'s address.'};
+    const ptrVal = (by.wolf.value||'').trim();
+    if (!ptrVal) return {html:'<code>wolf</code>\'s value should not be empty.'};
+    if (ptrVal!==String(p7a.bAddr)) return {html:'This line sets <code>wolf</code>\'s value to <code>hare</code>\'s address.'};
     if (p7a.boundary>=6){
-      if (!by.pptr) return {html:'Add <code>pptr</code> for this line.'};
+      if (!by.bear) return {html:'You need a box for <code>bear</code>.'};
     }
     if (p7a.boundary===6){
-      const pptrVal = (by.pptr?.value||'').trim();
-      if (pptrVal && pptrVal!=='empty' && pptrVal!==String(p7a.ptrAddr)) return {html:'<code>pptr</code> starts out empty here.'};
+      const pptrVal = (by.bear?.value||'').trim();
+      if (pptrVal && pptrVal!=='empty' && pptrVal!==String(p7a.ptrAddr)) return {html:'<code>bear</code> starts out empty here.'};
     } else if (p7a.boundary===7){
-      const pptrVal = (by.pptr?.value||'').trim();
-      if (!pptrVal) return {html:'Set <code>pptr</code> to store <code>ptr</code>\'s address.'};
-      if (pptrVal!==String(p7a.ptrAddr)) return {html:'<code>pptr</code> should hold <code>ptr</code>\'s address.'};
+      const pptrVal = (by.bear?.value||'').trim();
+      if (!pptrVal) return {html:'Set <code>bear</code> to store <code>wolf</code>\'s address.'};
+      if (pptrVal!==String(p7a.ptrAddr)) return {html:'<code>bear</code> should hold <code>wolf</code>\'s address.'};
     }
     if (p7a.boundary===9){
-      if (!by.spare) return {html:'Add <code>spare</code> for this line.'};
-      const spareVal = (by.spare.value||'').trim();
-      if (spareVal===String(p7a.ptrAddr)) return {html:'<code>spare</code> is being assigned to <code>ptr</code>, not <code>&ptr</code>, so it should be set to <code>ptr</code>\'s value, not <code>ptr</code>\'s address.'};
-      if (spareVal!==String(p7a.bAddr)) return {html:'<code>spare</code>\'s value should be set to <code>ptr</code>\'s value.'};
+      if (!by.fox) return {html:'You need a box for <code>fox</code>.'};
+      const spareVal = (by.fox.value||'').trim();
+      if (spareVal===String(p7a.ptrAddr)) return {html:'<code>fox</code> is being assigned to <code>wolf</code>, not <code>&wolf</code>, so it should be set to <code>wolf</code>\'s value, not <code>wolf</code>\'s address.'};
+      if (spareVal!==String(p7a.bAddr)) return {html:'<code>fox</code>\'s value should be set to <code>wolf</code>\'s value.'};
     }
 
     if (isStepCorrect(boxes)) return 'Looks good. Press Check.';
@@ -213,17 +213,17 @@
   function isStepCorrect(boxes){
     const expected=canonical(p7a.boundary);
     const by=Object.fromEntries(boxes.map(b=>[b.name,b]));
-    const ptr=by.ptr;
-    const pptr=by.pptr;
-    const spare=by.spare;
+    const wolf=by.wolf;
+    const bear=by.bear;
+    const fox=by.fox;
     if (boxes.length!==expected.length) return false;
-    if (!by.a || !by.b || !ptr) return false;
-    if (by.a.type!=='int' || by.b.type!=='int' || ptr.type!=='int*') return false;
-    if (!isEmptyVal(by.a.value||'') || !isEmptyVal(by.b.value||'')) return false;
-    if ((ptr.value||'').trim()!==String(p7a.bAddr)) return false;
+    if (!by.deer || !by.hare || !wolf) return false;
+    if (by.deer.type!=='int' || by.hare.type!=='int' || wolf.type!=='int*') return false;
+    if (!isEmptyVal(by.deer.value||'') || !isEmptyVal(by.hare.value||'')) return false;
+    if ((wolf.value||'').trim()!==String(p7a.bAddr)) return false;
     if (p7a.boundary>=6){
-      if (!pptr || pptr.type!=='int**') return false;
-      const pval=(pptr.value||'').trim();
+      if (!bear || bear.type!=='int**') return false;
+      const pval=(bear.value||'').trim();
       if (p7a.boundary<7){
         if (pval && pval!=='empty') return false;
       } else {
@@ -231,8 +231,8 @@
       }
     }
     if (p7a.boundary>=8){
-      if (!spare || spare.type!=='int*') return false;
-      const sval=(spare.value||'').trim();
+      if (!fox || fox.type!=='int*') return false;
+      const sval=(fox.value||'').trim();
       if (p7a.boundary<9){
         if (sval && sval!=='empty') return false;
       } else {

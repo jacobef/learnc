@@ -9,10 +9,10 @@
   const NEXT_PAGE = 'program5.html';
 
   const p4 = {
-    lines:[{text:'int x;', editable:true, placeholder:''}],
+    lines:[{text:'int rain;', editable:true, placeholder:''}],
     userLines:{},
     pass:false,
-    expected:[{name:'total', type:'int', value:'empty', address:'(any)'}],
+    expected:[{name:'cloud', type:'int', value:'empty', address:'<i>(any)</i>'}],
     allocBase:null
   };
 
@@ -57,18 +57,18 @@
     const lines = normalizedLines()
       .map(l=>l.text.trim())
       .filter(t=>t && t!==';');
-    if (!lines.length) return {html:'Edit the line to create an empty box named <code>total</code>, of type <code>int</code>. Look at the earlier programs if you forget how this is done.'};
+    if (!lines.length) return {html:'Edit the line to create an empty box named <code>cloud</code>, of type <code>int</code>. Look at the earlier programs if you forget how this is done.'};
     const almostDecl = lines.find(l=>/^int\s+[A-Za-z_][A-Za-z0-9_]*\s*$/.test(l));
     const almostAssign = lines.find(l=>/^[A-Za-z_][A-Za-z0-9_]*\s*=\s*-?\d+\s*$/.test(l));
     if (almostDecl || almostAssign) return {html:'You forgot the semicolon.'};
-    if (!lines.some(l=>/int\s+total\s*;/.test(l))){
+    if (!lines.some(l=>/int\s+cloud\s*;/.test(l))){
       const wrongName = lines.find(l=>/^int\s+[A-Za-z_][A-Za-z0-9_]*\s*;/.test(l));
-      if (wrongName) return {html:'The variable\'s name should be <code>total</code>.'};
-      return {html:'Declare <code>total</code> as an <code>int</code>.'};
+      if (wrongName) return {html:'The variable\'s name should be <code>cloud</code>.'};
+      return {html:'Declare <code>cloud</code> as an <code>int</code>.'};
     }
-    const assignsTotal = lines.filter(l=>/total/.test(l));
-    if (assignsTotal.some(l=>/total\s*=/.test(l))) return {html:'Leave <code>total</code> empty—no assignments to <code>total</code>.'};
-    return {html:'Edit the line to create an empty box named <code>total</code>, of type <code>int</code>. Look at the earlier programs if you forget how this is done.'};
+    const assignsTotal = lines.filter(l=>/cloud/.test(l));
+    if (assignsTotal.some(l=>/cloud\s*=/.test(l))) return {html:'Leave <code>cloud</code> empty—no assignments to <code>cloud</code>.'};
+    return {html:'Edit the line to create an empty box named <code>cloud</code>, of type <code>int</code>. Look at the earlier programs if you forget how this is done.'};
   }
 
   function applyUserProgram(){

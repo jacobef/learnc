@@ -13,8 +13,8 @@
     boundary:0,
     baseState:[],
     expected:[
-      {name:'total', type:'int', value:'10', address:'(any)'},
-      {name:'count', type:'int', value:'5', address:'(any)'}
+      {name:'apple', type:'int', value:'10', address:'<i>(any)</i>'},
+      {name:'berry', type:'int', value:'5', address:'<i>(any)</i>'}
     ],
     userLines:{},
     pass:false,
@@ -97,12 +97,12 @@
     if (missingSemicolon) return {html:`You forgot the semicolon on line ${missingSemicolon.idx+1}.`};
     const redecl = firstRedeclaration(lines);
     if (redecl) return {html:`You declared <code>${redecl}</code> more than once.`};
-    if (!nonEmpty.length || !lines.some(l=>/int\s+total\s*;/.test(l))) return {html:'Declare total: try <code>int total;</code>.'};
-    if (!lines.some(l=>/int\s+count\s*;/.test(l))) return {html:'Declare count: try <code>int count;</code>.'};
-    const assignsTotal = lines.filter(l=>/total/.test(l));
-    if (!assignsTotal.some(l=>/total\s*=\s*10\s*;/.test(l))) return {html:'Store 10 in total with <code>total = 10;</code>.'};
-    const assignsCount = lines.filter(l=>/count/.test(l));
-    if (!assignsCount.some(l=>/count\s*=\s*5\s*;/.test(l))) return {html:'Store 5 in count with <code>count = 5;</code>.'};
+    if (!nonEmpty.length || !lines.some(l=>/int\s+apple\s*;/.test(l))) return {html:'Declare apple: try <code>int apple;</code>.'};
+    if (!lines.some(l=>/int\s+berry\s*;/.test(l))) return {html:'Declare berry: try <code>int berry;</code>.'};
+    const assignsTotal = lines.filter(l=>/apple/.test(l));
+    if (!assignsTotal.some(l=>/apple\s*=\s*10\s*;/.test(l))) return {html:'Store 10 in apple with <code>apple = 10;</code>.'};
+    const assignsCount = lines.filter(l=>/berry/.test(l));
+    if (!assignsCount.some(l=>/berry\s*=\s*5\s*;/.test(l))) return {html:'Store 5 in berry with <code>berry = 5;</code>.'};
     return {html:'Keep lines to simple declarations or assignments ending with semicolons.'};
   }
 

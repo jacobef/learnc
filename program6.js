@@ -10,7 +10,7 @@
   const NEXT_PAGE = 'program7a.html';
 
   const p5 = {
-    lines:['int x;','int y;','y = 1;','x = y;','y = 2;','y = x;'],
+    lines:['int hammer;','int drill;','drill = 1;','hammer = drill;','drill = 2;','drill = hammer;'],
     boundary:0,
     xAddr:MB.randAddr('int'),
     yAddr:MB.randAddr('int'),
@@ -33,14 +33,14 @@
     const ws=document.getElementById('p5workspace');
     const boxes=[...ws.querySelectorAll('.vbox')].map(v=>readBoxState(v));
     const by=Object.fromEntries(boxes.map(b=>[b.name,b]));
-    if (isEmptyVal(by.x.value||'')) return 'x already equals 1 from the earlier assignments.';
-    if (by.x.value!=='1') return {html:'<code>y = x;</code> should modify y, not x.'};
-    if (isEmptyVal(by.y.value||'')) return 'x = y; put y\'s value into x. What should y = x; do?';
-    if (by.y.value==='2' && by.x.value==='2') return 'Remember: this line does not change x. Only y should change here.';
-    if (by.y.value!=='1') return 'x = y; put y\'s value into x. What should y = x; do?';
-    const ok = boxes.length===2 && by.x && by.y &&
-               by.x.type==='int' && by.y.type==='int' &&
-               by.x.value==='1' && by.y.value==='1';
+    if (isEmptyVal(by.hammer.value||'')) return 'hammer already equals 1 from the earlier assignments.';
+    if (by.hammer.value!=='1') return {html:'<code>drill = hammer;</code> should modify drill, not hammer.'};
+    if (isEmptyVal(by.drill.value||'')) return 'hammer = drill; put drill\'s value into hammer. What should drill = hammer; do?';
+    if (by.drill.value==='2' && by.hammer.value==='2') return 'Remember: this line does not change hammer. Only drill should change here.';
+    if (by.drill.value!=='1') return 'hammer = drill; put drill\'s value into hammer. What should drill = hammer; do?';
+    const ok = boxes.length===2 && by.hammer && by.drill &&
+               by.hammer.type==='int' && by.drill.type==='int' &&
+               by.hammer.value==='1' && by.drill.value==='1';
     if (ok) return 'Looks good. Press Check.';
     const hasReset = !!document.getElementById('p5-reset');
     return hasReset
@@ -57,27 +57,27 @@
     const yAddr = String(p5.yAddr);
     const states = {
       1:[
-        {name:'x', type:'int', value:'empty', address:xAddr}
+        {name:'hammer', type:'int', value:'empty', address:xAddr}
       ],
       2:[
-        {name:'x', type:'int', value:'empty', address:xAddr},
-        {name:'y', type:'int', value:'empty', address:yAddr}
+        {name:'hammer', type:'int', value:'empty', address:xAddr},
+        {name:'drill', type:'int', value:'empty', address:yAddr}
       ],
       3:[
-        {name:'x', type:'int', value:'empty', address:xAddr},
-        {name:'y', type:'int', value:'1', address:yAddr}
+        {name:'hammer', type:'int', value:'empty', address:xAddr},
+        {name:'drill', type:'int', value:'1', address:yAddr}
       ],
       4:[
-        {name:'x', type:'int', value:'1', address:xAddr},
-        {name:'y', type:'int', value:'1', address:yAddr}
+        {name:'hammer', type:'int', value:'1', address:xAddr},
+        {name:'drill', type:'int', value:'1', address:yAddr}
       ],
       5:[
-        {name:'x', type:'int', value:'1', address:xAddr},
-        {name:'y', type:'int', value:'2', address:yAddr}
+        {name:'hammer', type:'int', value:'1', address:xAddr},
+        {name:'drill', type:'int', value:'2', address:yAddr}
       ],
       6:[
-        {name:'x', type:'int', value:'1', address:xAddr},
-        {name:'y', type:'int', value:'1', address:yAddr}
+        {name:'hammer', type:'int', value:'1', address:xAddr},
+        {name:'drill', type:'int', value:'1', address:yAddr}
       ]
     };
     return cloneBoxes(states[boundary] || []);
@@ -151,11 +151,11 @@
     if (!ws) return;
     const boxes=[...ws.querySelectorAll('.vbox')].map(v=>readBoxState(v));
     const by=Object.fromEntries(boxes.map(b=>[b.name,b]));
-    const x=by.x;
-    const y=by.y;
+    const hammer=by.hammer;
+    const drill=by.drill;
     const allTypesOk = boxes.every(b=>b.type==='int');
-    const ok = boxes.length===2 && x && y && allTypesOk &&
-               x.value==='1' && y.value==='1';
+    const ok = boxes.length===2 && hammer && drill && allTypesOk &&
+               hammer.value==='1' && drill.value==='1';
 
     $('#p5-status').textContent = ok ? 'correct' : 'incorrect';
     $('#p5-status').className   = ok ? 'ok' : 'err';

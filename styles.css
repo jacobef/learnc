@@ -159,12 +159,21 @@ button:hover:not([disabled]){
   display:flex;
   align-items:center;
   justify-content:center;
-  gap:8px;
-  flex-wrap:wrap;
+  flex-wrap:nowrap;
+  overflow:visible;
+  white-space:nowrap;
+  z-index:2;
 }
 .name-list{
   color:var(--name);
   font-weight:800;
+}
+.name-list-inner{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  white-space:nowrap;
+  position:relative;
 }
 .name-list .name-tag{
   border:none;
@@ -178,7 +187,31 @@ button:hover:not([disabled]){
   white-space:nowrap;
   color:var(--name);
   min-width:0;
+  flex:0 0 auto;
   position:relative;
+}
+.name-list.collapsible .name-extra{
+  display:none;
+}
+.name-list.collapsible.expanded .name-extra{
+  display:inline-flex;
+}
+.name-list.collapsible:not(.expanded) .name-tag:not(.single)::after{
+  display:none;
+}
+.name-list .name-toggle{
+  border:1px solid #ccc;
+  background:#f5f5f5;
+  color:#555;
+  font-size:10px;
+  border-radius:12px;
+  padding:3px 8px;
+  cursor:pointer;
+  line-height:1;
+  white-space:nowrap;
+}
+.name-list .name-toggle[aria-expanded="true"]{
+  background:#e9e9e9;
 }
 .name-list .name-tag.single{
   border-color:transparent;

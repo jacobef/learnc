@@ -9,10 +9,10 @@
   const NEXT_PAGE = 'program3.html';
 
   const p2 = {
-    lines:['int def;','int ghi;','def = 28;'],
+    lines:['int toaster;','int fridge;','toaster = 28;'],
     boundary:0,
-    defAddr:randAddr('int'),
-    ghiAddr:randAddr('int'),
+    toasterAddr:randAddr('int'),
+    fridgeAddr:randAddr('int'),
     stateGhi:null,
     stateAssign:null,
     passGhi:false,
@@ -30,41 +30,40 @@
   }
 
   function isGhiCorrect(box){
-    return box && box.name==='ghi' && box.type==='int' && isEmptyVal(box.value||'');
+    return box && box.name==='fridge' && box.type==='int' && isEmptyVal(box.value||'');
   }
 
-  function isAssignCorrect(defBox, ghiBox){
-    return defBox &&
-      defBox.name==='def' &&
-      defBox.type==='int' &&
-      defBox.value==='28' &&
-      (!ghiBox || isEmptyVal(ghiBox.value||''));
+  function isAssignCorrect(toasterBox, fridgeBox){
+    return toasterBox &&
+      toasterBox.name==='toaster' &&
+      toasterBox.type==='int' &&
+      toasterBox.value==='28' &&
+      (!fridgeBox || isEmptyVal(fridgeBox.value||''));
   }
 
   function buildHint(){
     const boxes=[...document.querySelectorAll('#p2-stage .vbox')].map(v=>readBoxState(v));
     if (p2.boundary===2){
-      const ghi = boxes.find(b=>b.name==='ghi') || boxes.find(b=>b.name && b.name!=='def') || boxes.find(b=>b);
-      if (!ghi) return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
-      if (!ghi.name) return {html:'Give the box a name. The variable is called <code>ghi</code>.'};
-      if (ghi.name!=='ghi') return {html:'The variable here is <code>ghi</code>, so the name should read <code>ghi</code>.'};
-      if (ghi.type!=='int') return {html:'<code>ghi</code> was declared as an <code>int</code>.'};
-      if (!isEmptyVal(ghi.value||'')) return {html:'Right after declaration the value should still be empty.'};
-      if (isGhiCorrect(ghi)) return 'Looks good. Press Check.';
+      const fridge = boxes.find(b=>b.name==='fridge') || boxes.find(b=>b.name && b.name!=='toaster') || boxes.find(b=>b);
+      if (!fridge) return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
+      if (!fridge.name) return {html:'Give the box a name. The variable is called <code>fridge</code>.'};
+      if (fridge.name!=='fridge') return {html:'The variable here is <code>fridge</code>, so the name should read <code>fridge</code>.'};
+      if (fridge.type!=='int') return {html:'<code>fridge</code> was declared as an <code>int</code>.'};
+      if (!isEmptyVal(fridge.value||'')) return {html:'Right after declaration the value should still be empty.'};
+      if (isGhiCorrect(fridge)) return 'Looks good. Press Check.';
       return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
     }
     if (p2.boundary===3){
-      const def = boxes.find(b=>b.name==='def') || boxes[0];
-      const ghi = boxes.find(b=>b.name==='ghi');
-      if (!def) return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
-      if (!def.name) return {html:'Give the box a name. The variable is called <code>def</code>.'};
-      if (def.name!=='def') return {html:'The variable here is <code>def</code>, so the name should read <code>def</code>.'};
-      if (def.type!=='int') return {html:'<code>def</code> was declared as an <code>int</code>.'};
-      if (ghi && ghi.value==='28' && def.value!=='28') return {html:'<code>28</code> belongs in <code>def</code>\'s value, not <code>ghi</code>.'};
-      if (ghi && !isEmptyVal(ghi.value||'')) return {html:'This line doesn\'t change <code>ghi</code>. Leave its value empty.'};
-      if (isEmptyVal(def.value||'')) return {html:'Set <code>def</code>\'s value to <code>28</code>.'};
-      if (def.value!=='28') return {html:'Line 3 assigns <code>def = 28;</code>.'};
-      if (isAssignCorrect(def, ghi)) return 'Looks good. Press Check.';
+      const toaster = boxes.find(b=>b.name==='toaster') || boxes[0];
+      const fridge = boxes.find(b=>b.name==='fridge');
+      if (!toaster) return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
+      if (toaster.name!=='toaster') return {html:'The variable here is <code>toaster</code>, so the name should read <code>toaster</code>.'};
+      if (toaster.type!=='int') return {html:'<code>toaster</code> was declared as an <code>int</code>.'};
+      if (fridge && fridge.value==='28' && toaster.value!=='28') return {html:'<code>28</code> belongs in <code>toaster</code>\'s value, not <code>fridge</code>.'};
+      if (fridge && !isEmptyVal(fridge.value||'')) return {html:'This line doesn\'t change <code>fridge</code>. Leave its value empty.'};
+      if (isEmptyVal(toaster.value||'')) return {html:'Set <code>toaster</code>\'s value to <code>28</code>.'};
+      if (toaster.value!=='28') return {html:'Line 3 assigns <code>toaster = 28;</code>.'};
+      if (isAssignCorrect(toaster, fridge)) return 'Looks good. Press Check.';
       return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
     }
     return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
@@ -73,9 +72,9 @@
   function updateInstructions(){
     if (!instructions) return;
     if (p2.boundary===2){
-      instructions.innerHTML = '<code>int ghi;</code> creates a new box. What should that new box look like?';
+      instructions.innerHTML = '<code>int fridge;</code> creates a new box. What should that new box look like?';
     } else if (p2.boundary===3){
-      instructions.innerHTML = 'What does <code>def = 28;</code> do?';
+      instructions.innerHTML = 'What does <code>toaster = 28;</code> do?';
     } else {
       instructions.textContent = 'Use Prev/Next to step through the program.';
     }
@@ -125,15 +124,15 @@
     wrap.className='grid';
 
     if (p2.boundary===1 || p2.boundary===2){
-      const defStatic=vbox({
-        addr:String(p2.defAddr),
+      const toasterStatic=vbox({
+        addr:String(p2.toasterAddr),
         type:'int',
         value:'empty',
-        name:'def',
+        name:'toaster',
         editable:false
       });
-      addPlaceholderIfEmpty(defStatic);
-      wrap.appendChild(defStatic);
+      addPlaceholderIfEmpty(toasterStatic);
+      wrap.appendChild(toasterStatic);
     }
 
     if (p2.boundary===1){
@@ -142,11 +141,11 @@
     }
 
     if (p2.boundary===2){
-      if (p2.ghiAddr==null) p2.ghiAddr = randAddr('int');
-      const seed = p2.stateGhi ?? {addr:String(p2.ghiAddr), type:'', value:'empty', name:''};
+      if (p2.fridgeAddr==null) p2.fridgeAddr = randAddr('int');
+      const seed = p2.stateGhi ?? {addr:String(p2.fridgeAddr), type:'', value:'empty', name:''};
       const editable = !p2.passGhi;
-      const ghi=vbox({
-        addr:String(p2.ghiAddr),
+      const fridge=vbox({
+        addr:String(p2.fridgeAddr),
         type: seed.type || '',
         value: seed.value ?? 'empty',
         name: seed.name || '',
@@ -154,9 +153,9 @@
         allowNameEdit:true,
         allowTypeEdit:true
       });
-      if (!editable) disableBoxEditing(ghi);
-      addPlaceholderIfEmpty(ghi);
-      wrap.appendChild(ghi);
+      if (!editable) disableBoxEditing(fridge);
+      addPlaceholderIfEmpty(fridge);
+      wrap.appendChild(fridge);
       stage.appendChild(wrap);
       if (editable){
         $('#p2-check').classList.remove('hidden');
@@ -166,38 +165,38 @@
     }
 
     if (p2.boundary===3){
-      // def for assignment
-      const seedDef = p2.stateAssign ?? {addr:String(p2.defAddr), type:'int', value:'empty', name:'def'};
+      // toaster for assignment
+      const seedDef = p2.stateAssign ?? {addr:String(p2.toasterAddr), type:'int', value:'empty', name:'toaster'};
       const editable = !p2.passAssign;
-      const defBox=vbox({
-        addr:String(p2.defAddr),
+      const toasterBox=vbox({
+        addr:String(p2.toasterAddr),
         type: seedDef.type || 'int',
         value: seedDef.value ?? 'empty',
-        name:'def',
+        name:'toaster',
         names: seedDef.names,
         editable,
         allowNameEdit:false,
         allowTypeEdit:false
       });
-      addPlaceholderIfEmpty(defBox);
-      wrap.appendChild(defBox);
+      addPlaceholderIfEmpty(toasterBox);
+      wrap.appendChild(toasterBox);
 
-      // carry over ghi for context
-      const ghiSeed = p2.stateGhi ?? {addr:String(p2.ghiAddr ?? randAddr('int')), type:'int', value:'empty', name:'ghi'};
-      const ghi=vbox({
-        addr:String(p2.ghiAddr ?? ghiSeed.addr),
-        type: ghiSeed.type || 'int',
-        value: ghiSeed.value ?? 'empty',
-        name: ghiSeed.name || 'ghi',
-        names: ghiSeed.names,
+      // carry over fridge for context
+      const fridgeSeed = p2.stateGhi ?? {addr:String(p2.fridgeAddr ?? randAddr('int')), type:'int', value:'empty', name:'fridge'};
+      const fridge=vbox({
+        addr:String(p2.fridgeAddr ?? fridgeSeed.addr),
+        type: fridgeSeed.type || 'int',
+        value: fridgeSeed.value ?? 'empty',
+        name: fridgeSeed.name || 'fridge',
+        names: fridgeSeed.names,
         editable
       });
-      addPlaceholderIfEmpty(ghi);
-      wrap.appendChild(ghi);
+      addPlaceholderIfEmpty(fridge);
+      wrap.appendChild(fridge);
 
       stage.appendChild(wrap);
       if (!editable){
-        disableBoxEditing(defBox);
+        disableBoxEditing(toasterBox);
       } else {
         hint.setButtonHidden(false);
         $('#p2-check').classList.remove('hidden');
@@ -209,15 +208,15 @@
     const boxes=[...document.querySelectorAll('#p2-stage .vbox')].map(v=>readBoxState(v));
     if (!boxes.length) return;
     if (p2.boundary===2){
-      const ghi = boxes.find(b=>b.name==='ghi') || boxes.find(b=>b.name && b.name!=='def');
-      if (ghi){
-        p2.stateGhi = {...ghi, addr:String(p2.ghiAddr)};
+      const fridge = boxes.find(b=>b.name==='fridge') || boxes.find(b=>b.name && b.name!=='toaster');
+      if (fridge){
+        p2.stateGhi = {...fridge, addr:String(p2.fridgeAddr)};
       }
     }
     if (p2.boundary===3){
-      const def = boxes.find(b=>b.name==='def');
-      if (def){
-        p2.stateAssign = {...def, addr:String(p2.defAddr)};
+      const toaster = boxes.find(b=>b.name==='toaster');
+      if (toaster){
+        p2.stateAssign = {...toaster, addr:String(p2.toasterAddr)};
       }
     }
   }
@@ -227,15 +226,15 @@
     const boxes=[...document.querySelectorAll('#p2-stage .vbox')].map(v=>readBoxState(v));
 
     if (p2.boundary===2){
-      const ghi = boxes.find(b=>b.name==='ghi') || boxes.find(b=>b.name && b.name!=='def');
-      const ok = isGhiCorrect(ghi);
+      const fridge = boxes.find(b=>b.name==='fridge') || boxes.find(b=>b.name && b.name!=='toaster');
+      const ok = isGhiCorrect(fridge);
       setStatus(ok ? 'correct' : 'incorrect', ok ? 'ok' : 'err');
       flashStatus($('#p2-status'));
       if (ok){
         document.querySelectorAll('#p2-stage .vbox').forEach(v=>disableBoxEditing(v));
         removeBoxDeleteButtons(document.getElementById('p2-stage'));
         p2.passGhi=true;
-        p2.stateGhi={...ghi, addr:String(p2.ghiAddr)};
+        p2.stateGhi={...fridge, addr:String(p2.fridgeAddr)};
         $('#p2-check').classList.add('hidden');
         hint.hide();
         $('#p2-hint-btn')?.classList.add('hidden');
@@ -246,16 +245,16 @@
     }
 
     if (p2.boundary===3){
-      const def = boxes.find(b=>b.name==='def');
-      const ghi = boxes.find(b=>b.name==='ghi');
-      const ok = isAssignCorrect(def, ghi);
+      const toaster = boxes.find(b=>b.name==='toaster');
+      const fridge = boxes.find(b=>b.name==='fridge');
+      const ok = isAssignCorrect(toaster, fridge);
       setStatus(ok ? 'correct' : 'incorrect', ok ? 'ok' : 'err');
       flashStatus($('#p2-status'));
       if (ok){
         document.querySelectorAll('#p2-stage .vbox').forEach(v=>disableBoxEditing(v));
         removeBoxDeleteButtons(document.getElementById('p2-stage'));
         p2.passAssign=true;
-        p2.stateAssign={...def, addr:String(p2.defAddr)};
+        p2.stateAssign={...toaster, addr:String(p2.toasterAddr)};
         $('#p2-check').classList.add('hidden');
         hint.hide();
         $('#p2-hint-btn')?.classList.add('hidden');

@@ -174,14 +174,27 @@
     return boxes;
   }
 
-  function vbox({addr='—', type='int', value='empty', name='', names=null, editable=false, allowNameAdd=false, allowNameDelete=false, allowNameEdit=false, allowTypeEdit=false}={}){
+  function vbox({addr='—', type='int', value='empty', name='', names=null, editable=false, allowNameAdd=false, allowNameDelete=false, allowNameEdit=false, allowTypeEdit=false, allowNameToggle=false}={}){
     const emptyDisplay = isEmptyVal(String(value||''));
     const displayValue = emptyDisplay ? '' : value;
     const resolvedNames = Array.isArray(names) && names.length ? names : (Array.isArray(name) ? name : [name]);
     const namesList = resolvedNames.filter(n=>n!==undefined && n!==null).map(n=>String(n));
+    const canToggleNames = allowNameToggle && namesList.length>1;
     const valueClasses = `value ${editable?'editable':''} ${emptyDisplay?'placeholder muted':''}`;
     const typeClasses  = `type ${allowTypeEdit?'editable':''}`;
     const nameClasses  = `name-tag ${editable?'editable':''}`;
+    const listClasses  = `name-list${canToggleNames ? ' collapsible' : ''}`;
+    const toggleBtn = canToggleNames
+      ? '<button class="name-toggle" type="button" aria-expanded="false">Show aliases</button>'
+      : '';
+    const addBtn = allowNameAdd ? '<button class="name-add" type="button" title="Add name">+</button>' : '';
+    const nameTags = namesList.map((n, idx)=>{
+      const extraClass = canToggleNames && idx>0 ? ' name-extra' : '';
+      const cls = namesList.length>1 ? `${nameClasses}${extraClass}` : `${nameClasses} single`;
+      const del = allowNameDelete ? `<button class="name-del" data-index="${idx}" type="button" title="Delete name">×</button>` : '';
+      return `<span class="${cls}"><span class="name-text">${n}</span>${del}</span>`;
+    }).join('');
+    const namesHtml = `${nameTags}${addBtn}${toggleBtn}`;
 
     const node = el(`
       <div class="vbox ${editable?'is-editable':''}">
@@ -193,13 +206,8 @@
         </div>
         <div class="lbl lbl-type">type</div>
         <div class="${typeClasses}">${type}</div>
-        <div class="name-list">
-          ${namesList.map((n, idx)=>{
-            const cls = namesList.length>1 ? nameClasses : `${nameClasses} single`;
-            const del = allowNameDelete ? `<button class="name-del" data-index="${idx}" type="button" title="Delete name">×</button>` : '';
-            return `<span class="${cls}"><span class="name-text">${n}</span>${del}</span>`;
-          }).join('')}
-          ${allowNameAdd ? '<button class="name-add" type="button" title="Add name">+</button>' : ''}
+        <div class="${listClasses}">
+          <div class="name-list-inner">${namesHtml}</div>
         </div>
         <div class="lbl lbl-name">${namesList.length>1 ? 'name(s)' : 'name'}</div>
       </div>
@@ -216,7 +224,8 @@
       const addBtn=node.querySelector('.name-add');
       if (addBtn){
         addBtn.onclick=()=>{
-          const span=el(`<span class="${nameClasses}"><span class="name-text"></span>${allowNameDelete?'<button class="name-del" type="button" title="Delete name">×</button>':''}</span>`);
+          const extraClass = canToggleNames ? ' name-extra' : '';
+          const span=el(`<span class="${nameClasses}${extraClass}"><span class="name-text"></span>${allowNameDelete?'<button class="name-del" type="button" title="Delete name">×</button>':''}</span>`);
           addBtn.before(span);
           const textEl = span.querySelector('.name-text');
           if (textEl){
@@ -238,6 +247,32 @@
           el.classList.add('editable');
         }
       });
+    }
+    if (canToggleNames){
+      const list = node.querySelector('.name-list');
+      const inner = node.querySelector('.name-list-inner');
+      const toggle = node.querySelector('.name-toggle');
+      if (list && toggle && inner){
+        const clampNames = ()=>{
+          inner.style.transform = '';
+          if (!list.classList.contains('expanded')) return;
+          if (!list.isConnected) return;
+          const listRect = list.getBoundingClientRect();
+          const innerRect = inner.getBoundingClientRect();
+          if (innerRect.left < listRect.left){
+            const shift = listRect.left - innerRect.left;
+            inner.style.transform = `translateX(${shift}px)`;
+          }
+        };
+        const setExpanded = expanded=>{
+          list.classList.toggle('expanded', expanded);
+          toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+          toggle.textContent = expanded ? 'Hide aliases' : 'Show aliases';
+          requestAnimationFrame(clampNames);
+        };
+        toggle.onclick=()=>setExpanded(!list.classList.contains('expanded'));
+        setExpanded(false);
+      }
     }
     return node;
   }
@@ -280,7 +315,7 @@
     return randAddr(type);
   }
 
-  function makeAnswerBox({name='', names=null, type='', value='empty', address=null, editable=true, deletable=editable, allowNameAdd=false, allowNameEdit=null, allowTypeEdit=null, nameEditable=null, typeEditable=null}={}){
+  function makeAnswerBox({name='', names=null, type='', value='empty', address=null, editable=true, deletable=editable, allowNameAdd=false, allowNameToggle=false, allowNameEdit=null, allowTypeEdit=null, nameEditable=null, typeEditable=null}={}){
     const resolvedAddr = address==null ? String(nextPooledAddr(type || 'int')) : String(address);
     const resolvedNameEdit = (allowNameEdit!==null && allowNameEdit!==undefined)
       ? allowNameEdit
@@ -300,6 +335,7 @@
       names,
       editable,
       allowNameAdd,
+      allowNameToggle,
       allowNameDelete:allowNameAdd,
       allowNameEdit:resolvedNameEdit,
       allowTypeEdit:resolvedTypeEdit
@@ -375,7 +411,7 @@
   }
 
   function restoreWorkspace(state, defaults, workspaceId, opts={}){
-    const {editable=true,deletable=editable, allowNameAdd=false, allowNameEdit=null, allowTypeEdit=null} = opts;
+    const {editable=true,deletable=editable, allowNameAdd=false, allowNameToggle=false, allowNameEdit=null, allowTypeEdit=null} = opts;
     const wrap=el(`<div class="grid" id="${workspaceId}"></div>`);
     if (Array.isArray(state) && state.length){
       state.forEach(st=>{
@@ -388,6 +424,7 @@
           editable,
           deletable,
           allowNameAdd,
+          allowNameToggle,
           allowNameEdit: allowNameEdit ?? st.nameEditable ?? st.allowNameEdit,
           allowTypeEdit: allowTypeEdit ?? st.typeEditable ?? st.allowTypeEdit
         });
@@ -405,6 +442,7 @@
           editable,
           deletable,
           allowNameAdd,
+          allowNameToggle,
           allowNameEdit: allowNameEdit ?? d.nameEditable ?? d.allowNameEdit,
           allowTypeEdit: allowTypeEdit ?? d.typeEditable ?? d.allowTypeEdit
         });
@@ -582,6 +620,16 @@
     if (t.classList?.contains('placeholder')){
       if (txt(t)==='') t.classList.add('muted');
       else t.classList.remove('muted');
+    }
+  });
+
+  document.addEventListener('keydown', e=>{
+    if (e.key!=='Enter') return;
+    const t=e.target;
+    if (!t?.isContentEditable) return;
+    if (t.classList?.contains('value') || t.classList?.contains('type') || t.classList?.contains('name-text')){
+      e.preventDefault();
+      t.blur();
     }
   });
 
