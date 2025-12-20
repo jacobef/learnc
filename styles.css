@@ -132,11 +132,10 @@ button:hover:not([disabled]){
   position:absolute;
   left:0;
   right:0;
-  top:50%;
+  top:6px;
   height:2px;
-  transform:translateY(-1px);
-  background:linear-gradient(90deg,transparent 0,var(--focus) 40%,var(--focus) 60%,transparent 100%);
-  opacity:0.35;
+  background:linear-gradient(90deg,transparent 0,var(--edit-line) 25%,var(--edit-line) 75%,transparent 100%);
+  opacity:0.5;
   pointer-events:none;
   z-index:0;
 }
@@ -144,9 +143,11 @@ button:hover:not([disabled]){
   position:relative;
   z-index:1;
 }
-.line.progress-mid .src,
-.line.progress-mid .ln{
+.line.progress-mid .src{
   color:var(--edit-line);
+}
+.line.progress-mid .ln{
+  color:#999;
 }
 
 .line .line-invalid{
