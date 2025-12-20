@@ -88,7 +88,8 @@
   }
 
   function renderCodePane2(){
-    renderCodePane($('#p2-code'), p2.lines, p2.boundary);
+    const progress = (p2.boundary===2 && !p2.passGhi) || (p2.boundary===3 && !p2.passAssign);
+    renderCodePane($('#p2-code'), p2.lines, p2.boundary, {progress});
   }
 
   function addPlaceholderIfEmpty(box){
@@ -235,6 +236,7 @@
         removeBoxDeleteButtons(document.getElementById('p2-stage'));
         p2.passGhi=true;
         p2.stateGhi={...fridge, addr:String(p2.fridgeAddr)};
+        renderCodePane2();
         $('#p2-check').classList.add('hidden');
         hint.hide();
         $('#p2-hint-btn')?.classList.add('hidden');
@@ -255,6 +257,7 @@
         removeBoxDeleteButtons(document.getElementById('p2-stage'));
         p2.passAssign=true;
         p2.stateAssign={...toaster, addr:String(p2.toasterAddr)};
+        renderCodePane2();
         $('#p2-check').classList.add('hidden');
         hint.hide();
         $('#p2-hint-btn')?.classList.add('hidden');

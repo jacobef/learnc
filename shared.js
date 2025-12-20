@@ -42,21 +42,24 @@
     return (n?.textContent || '').trim();
   }
 
-  function renderCodePane(root, lines, boundary){
+  function renderCodePane(root, lines, boundary, opts={}){
     root.innerHTML='';
     const code=el('<div class="codecol"></div>');
     root.appendChild(code);
     const addBoundary=()=>code.appendChild(el('<div class="boundary"></div>'));
+    const progress = !!opts.progress;
+    const progressIndex = (progress && boundary>0) ? boundary-1 : -1;
     if (boundary===0) addBoundary();
     for (let i=0;i<lines.length;i++){
       const lr=el('<div class="line"></div>');
       const ln=el(`<div class="ln">${i+1}</div>`);
       const src=el(`<div class="src">${lines[i]}</div>`);
       if (i<boundary) lr.classList.add('done');
+      if (i===progressIndex) lr.classList.add('progress-mid');
       lr.appendChild(ln);
       lr.appendChild(src);
       code.appendChild(lr);
-      if (i+1===boundary) addBoundary();
+      if (i+1===boundary && i!==progressIndex) addBoundary();
     }
   }
 

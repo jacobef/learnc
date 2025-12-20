@@ -49,7 +49,8 @@
   }
 
   function renderCodePane5(){
-    renderCodePane($('#p5-code'), p5.lines, p5.boundary);
+    const progress = (p5.boundary===6 && !p5.passes[6]);
+    renderCodePane($('#p5-code'), p5.lines, p5.boundary, {progress});
   }
 
   function canonical(boundary){
@@ -172,6 +173,7 @@
     ws.querySelectorAll('.vbox').forEach(v=>MB.disableBoxEditing(v));
     MB.removeBoxDeleteButtons(ws);
     p5.passes[6]=true;
+    renderCodePane5();
     $('#p5-check').classList.add('hidden');
     $('#p5-reset').classList.add('hidden');
     hint.hide();

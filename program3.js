@@ -83,7 +83,11 @@
   }
 
   function renderCodePane3(){
-    renderCodePane($('#p3-code'), p3.lines, p3.boundary);
+    const progress =
+      (p3.boundary===3 && !p3.pass3) ||
+      (p3.boundary===4 && !p3.pass4) ||
+      (p3.boundary===5 && !p3.pass5);
+    renderCodePane($('#p3-code'), p3.lines, p3.boundary, {progress});
   }
 
   function restoreDefaults(state, defaults){
@@ -247,6 +251,7 @@
         hint.hide();
         $('#p3-hint-btn')?.classList.add('hidden');
         p3.pass3=true;
+        renderCodePane3();
         MB.pulseNextButton('p3');
         pager.update();
       }
@@ -269,6 +274,7 @@
         hint.hide();
         $('#p3-hint-btn')?.classList.add('hidden');
         p3.pass4=true;
+        renderCodePane3();
         MB.pulseNextButton('p3');
         pager.update();
       }
@@ -291,6 +297,7 @@
         hint.hide();
         $('#p3-hint-btn')?.classList.add('hidden');
         p3.pass5=true;
+        renderCodePane3();
         MB.pulseNextButton('p3');
         pager.update();
       }

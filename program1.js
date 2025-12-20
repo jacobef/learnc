@@ -53,7 +53,8 @@
   }
 
   function renderCodePane1(){
-    renderCodePane($('#p1-code'), p1.lines, p1.boundary);
+    const progress = (p1.boundary===3 && !p1.passed);
+    renderCodePane($('#p1-code'), p1.lines, p1.boundary, {progress});
   }
 
   function p1Render(){
@@ -113,6 +114,7 @@
       disableBoxEditing($('#p1-stage .vbox'));
       MB.removeBoxDeleteButtons($('#p1-stage'));
       p1.passed=true;
+      renderCodePane1();
       $('#p1-check').classList.add('hidden');
       hint.hide();
       $('#p1-hint-btn')?.classList.add('hidden');

@@ -124,6 +124,30 @@ button:hover:not([disabled]){
   min-height:32px;
   border-bottom:1px solid #f2f2f2;
 }
+.line.progress-mid{
+  position:relative;
+}
+.line.progress-mid::after{
+  content:"";
+  position:absolute;
+  left:0;
+  right:0;
+  top:50%;
+  height:2px;
+  transform:translateY(-1px);
+  background:linear-gradient(90deg,transparent 0,var(--focus) 40%,var(--focus) 60%,transparent 100%);
+  opacity:0.35;
+  pointer-events:none;
+  z-index:0;
+}
+.line.progress-mid > *{
+  position:relative;
+  z-index:1;
+}
+.line.progress-mid .src,
+.line.progress-mid .ln{
+  color:var(--edit-line);
+}
 
 .line .line-invalid{
   margin-left:auto;

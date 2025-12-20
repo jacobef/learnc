@@ -133,8 +133,13 @@
       : 'Your program has a problem that isn\'t covered by a hint. Sorry.';
   }
 
+  function renderCode(){
+    const progress = editableSteps.has(p7a.boundary) && !p7a.passes[p7a.boundary];
+    renderCodePane($('#p7a-code'), p7a.lines, p7a.boundary, {progress});
+  }
+
   function render(){
-    renderCodePane($('#p7a-code'), p7a.lines, p7a.boundary);
+    renderCode();
     const stage=$('#p7a-stage');
     stage.innerHTML='';
     if (editableSteps.has(p7a.boundary) && p7a.passes[p7a.boundary]){
@@ -206,6 +211,7 @@
       hint.hide();
       $('#p7a-hint-btn')?.classList.add('hidden');
       MB.pulseNextButton('p7a');
+      renderCode();
       pager.update();
     }
   };
