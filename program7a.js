@@ -78,9 +78,23 @@
     return base;
   }
 
-  function updateStatus(){
+  function setInstructions(message){
     if (!instructions) return;
-    instructions.textContent = '';
+    if (message && message.trim()){
+      instructions.textContent = message;
+      instructions.classList.remove('hidden');
+    } else {
+      instructions.textContent = '';
+      instructions.classList.add('hidden');
+    }
+  }
+
+  function updateStatus(){
+    if (p7a.boundary===0){
+      setInstructions('No instructions for this one. Good luck!');
+    } else {
+      setInstructions('');
+    }
   }
 
   const hint = createHintController({
@@ -95,41 +109,41 @@
 
   function buildHint(){
     const ws=document.getElementById('p7aworkspace');
-    if (!ws) return 'Step forward to reach the editable line.';
+    if (!ws) return {html:'Use <span class="btn-ref">Run line</span> to reach the editable line.'};
     const boxes=[...ws.querySelectorAll('.vbox')].map(v=>readBoxState(v));
     const by=Object.fromEntries(boxes.map(b=>[b.name,b]));
-    if (!by.deer || !by.hare || !by.wolf) return {html:'You still need boxes for <code>deer</code>, <code>hare</code>, and <code>wolf</code>.'};
-    if (p7a.boundary>=6 && !by.bear) return {html:'You need a box for <code>bear</code>.'};
-    if (by.deer.type!=='int' || by.hare.type!=='int') return {html:'<code>deer</code> and <code>hare</code> are <code>int</code>s.'};
-    if (by.wolf.type!=='int*') return {html:'<code>wolf</code>\'s type is <code>int*</code>.'};
-    if (p7a.boundary>=6 && by.bear && by.bear.type!=='int**') return {html:'<code>bear</code>\'s type is <code>int**</code>.'};
-    if (p7a.boundary>=8 && by.fox && by.fox.type!=='int*') return {html:'<code>fox</code> is an <code>int*</code>.'};
+    if (!by.deer || !by.hare || !by.wolf) return {html:'You still need <code class="tok-name">deer</code>, <code class="tok-name">hare</code>, and <code class="tok-name">wolf</code> in the program state.'};
+    if (p7a.boundary>=6 && !by.bear) return {html:'You need <code class="tok-name">bear</code> in the program state.'};
+    if (by.deer.type!=='int' || by.hare.type!=='int') return {html:'<code class="tok-name">deer</code> and <code class="tok-name">hare</code> are <code class="tok-type">int</code>s.'};
+    if (by.wolf.type!=='int*') return {html:'<code class="tok-name">wolf</code>\'s type is <code class="tok-type">int*</code>.'};
+    if (p7a.boundary>=6 && by.bear && by.bear.type!=='int**') return {html:'<code class="tok-name">bear</code>\'s type is <code class="tok-type">int**</code>.'};
+    if (p7a.boundary>=8 && by.fox && by.fox.type!=='int*') return {html:'<code class="tok-name">fox</code> is an <code class="tok-type">int*</code>.'};
     // Skip address validation; addresses are generated for the user.
     const ptrVal = (by.wolf.value||'').trim();
-    if (!ptrVal) return {html:'<code>wolf</code>\'s value should not be empty.'};
-    if (ptrVal!==String(p7a.bAddr)) return {html:'This line sets <code>wolf</code>\'s value to <code>hare</code>\'s address.'};
+    if (!ptrVal) return {html:'<code class="tok-name">wolf</code>\'s value should not be empty.'};
+    if (ptrVal!==String(p7a.bAddr)) return {html:'This line sets <code class="tok-name">wolf</code>\'s value to <code class="tok-name">hare</code>\'s address.'};
     if (p7a.boundary>=6){
-      if (!by.bear) return {html:'You need a box for <code>bear</code>.'};
+      if (!by.bear) return {html:'You need <code class="tok-name">bear</code> in the program state.'};
     }
     if (p7a.boundary===6){
       const pptrVal = (by.bear?.value||'').trim();
-      if (pptrVal && pptrVal!=='empty' && pptrVal!==String(p7a.ptrAddr)) return {html:'<code>bear</code> starts out empty here.'};
+      if (pptrVal && pptrVal!=='empty' && pptrVal!==String(p7a.ptrAddr)) return {html:'<code class="tok-name">bear</code> starts out empty here.'};
     } else if (p7a.boundary===7){
       const pptrVal = (by.bear?.value||'').trim();
-      if (!pptrVal) return {html:'Set <code>bear</code> to store <code>wolf</code>\'s address.'};
-      if (pptrVal!==String(p7a.ptrAddr)) return {html:'<code>bear</code> should hold <code>wolf</code>\'s address.'};
+      if (!pptrVal) return {html:'Set <code class="tok-name">bear</code> to store <code class="tok-name">wolf</code>\'s address.'};
+      if (pptrVal!==String(p7a.ptrAddr)) return {html:'<code class="tok-name">bear</code> should hold <code class="tok-name">wolf</code>\'s address.'};
     }
     if (p7a.boundary===9){
-      if (!by.fox) return {html:'You need a box for <code>fox</code>.'};
+      if (!by.fox) return {html:'You need <code class="tok-name">fox</code> in the program state.'};
       const spareVal = (by.fox.value||'').trim();
-      if (spareVal===String(p7a.ptrAddr)) return {html:'<code>fox</code> is being assigned to <code>wolf</code>, not <code>&wolf</code>, so it should be set to <code>wolf</code>\'s value, not <code>wolf</code>\'s address.'};
-      if (spareVal!==String(p7a.bAddr)) return {html:'<code>fox</code>\'s value should be set to <code>wolf</code>\'s value.'};
+      if (spareVal===String(p7a.ptrAddr)) return {html:'<code class="tok-name">fox</code> is being assigned to <code class="tok-name">wolf</code>, not <code class="tok-addr">&amp;wolf</code>, so it should be set to <code class="tok-name">wolf</code>\'s value, not <code class="tok-name">wolf</code>\'s address.'};
+      if (spareVal!==String(p7a.bAddr)) return {html:'<code class="tok-name">fox</code>\'s value should be set to <code class="tok-name">wolf</code>\'s value.'};
     }
 
-    if (isStepCorrect(boxes)) return 'Looks good. Press Check.';
+    if (isStepCorrect(boxes)) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
     const hasReset = !!document.getElementById('p7a-reset');
     return hasReset
-      ? 'Your program has a problem that isn\'t covered by a hint. Try starting over on this step by clicking Reset.'
+      ? {html:'Your program has a problem that isn\'t covered by a hint. Try starting over on this step by clicking <span class="btn-ref">Reset</span>.'}
       : 'Your program has a problem that isn\'t covered by a hint. Sorry.';
   }
 
@@ -263,6 +277,10 @@
       if (editableSteps.has(boundary)) return !p7a.passes[boundary];
       if (boundary===p7a.lines.length) return !p7a.passes[p7a.lines.length];
       return false;
+    },
+    getStepBadge:step=>{
+      if (!editableSteps.has(step)) return '';
+      return p7a.passes[step] ? 'check' : 'note';
     }
   });
 

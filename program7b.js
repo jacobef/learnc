@@ -19,8 +19,9 @@
       'bear = &wolf;',
       'int* fox;',
       'fox = wolf;',
+      'deer = 50;',
       '*wolf = 11;',
-      '**bear = 22;',
+      '*bear = &deer;',
       'int elk;',
       'elk = *wolf;'
     ],
@@ -31,17 +32,18 @@
     pptrAddr:randAddr('int**'),
     spareAddr:randAddr('int*'),
     pulledAddr:randAddr('int'),
-    ws:Array(14).fill(null),
-    passes:Array(14).fill(false),
+    ws:Array(15).fill(null),
+    passes:Array(15).fill(false),
     aliasExplained:false
   };
 
-  const editableSteps = new Set([9,10,11,13]);
+  const editableSteps = new Set([9,11,12,14]);
 
   function ptrTarget(boundary){
     if (boundary<4) return 'empty';
     if (boundary<5) return String(p7.aAddr);
-    return String(p7.bAddr);
+    if (boundary<12) return String(p7.bAddr);
+    return String(p7.aAddr);
   }
 
   function pptrTarget(boundary){
@@ -51,12 +53,13 @@
 
   function canonical(boundary){
     const state=[];
+    const deerVal = boundary>=10 ? '50' : 'empty';
+    const hareVal = boundary>=11 ? '11' : 'empty';
     if (boundary>=1){
-      state.push({name:'deer', names:['deer'], type:'int', value:'empty', address:String(p7.aAddr)});
+      state.push({name:'deer', names:['deer'], type:'int', value:deerVal, address:String(p7.aAddr)});
     }
     if (boundary>=2){
-      const bVal = boundary>=11 ? '22' : (boundary>=10 ? '11' : 'empty');
-      state.push({name:'hare', names:['hare'], type:'int', value: bVal, address:String(p7.bAddr)});
+      state.push({name:'hare', names:['hare'], type:'int', value:hareVal, address:String(p7.bAddr)});
     }
     if (boundary>=3){
       state.push({name:'wolf', names:['wolf'], type:'int*', value:ptrTarget(boundary), address:String(p7.ptrAddr)});
@@ -92,10 +95,10 @@
       }
     }
     if (boundary>=8){
-      state.push({name:'fox', names:['fox'], type:'int*', value: boundary>=9 ? String(ptrTarget(boundary)) : 'empty', address:String(p7.spareAddr)});
+      state.push({name:'fox', names:['fox'], type:'int*', value: boundary>=9 ? String(p7.bAddr) : 'empty', address:String(p7.spareAddr)});
     }
-    if (boundary>=12){
-      state.push({name:'elk', names:['elk'], type:'int', value: boundary>=13 ? (state.find(b=>b.name==='hare')?.value || 'empty') : 'empty', address:String(p7.pulledAddr)});
+    if (boundary>=13){
+      state.push({name:'elk', names:['elk'], type:'int', value: boundary>=14 ? (state.find(b=>b.name==='deer')?.value || 'empty') : 'empty', address:String(p7.pulledAddr)});
     }
     return state;
   }
@@ -105,6 +108,39 @@
     const trimmed=value.trim();
     if (!trimmed || /^empty$/i.test(trimmed)) return 'empty';
     return trimmed;
+  }
+
+  function applyAliasNames(boxes){
+    const next = boxes.map(b=>({
+      ...b,
+      names: b.name ? [b.name] : []
+    }));
+    const byAddr = new Map();
+    const byName = new Map();
+    next.forEach(b=>{
+      const addr = b.addr ?? b.address;
+      if (addr!=null && addr!=='') byAddr.set(String(addr), b);
+      if (b.name) byName.set(b.name, b);
+    });
+    const addAlias = (box, alias)=>{
+      if (!box) return;
+      if (!box.names) box.names = [];
+      if (!box.names.includes(alias)) box.names.push(alias);
+    };
+    const wolf = byName.get('wolf');
+    const bear = byName.get('bear');
+    const wolfVal = normalizePtrValue(wolf?.value || '');
+    if (wolf && wolfVal!=='empty'){
+      addAlias(byAddr.get(String(wolfVal)), '*wolf');
+    }
+    const bearVal = normalizePtrValue(bear?.value || '');
+    if (bear && bearVal!=='empty'){
+      addAlias(byAddr.get(String(bearVal)), '*bear');
+      if (wolf && wolfVal!=='empty'){
+        addAlias(byAddr.get(String(wolfVal)), '**bear');
+      }
+    }
+    return next;
   }
 
   function carriedState(boundary){
@@ -123,25 +159,36 @@
     return cloneBoxes(prev);
   }
 
-  function updateStatus(){
+  function setInstructions(message, {html=false}={}){
     if (!instructions) return;
+    if (message && message.trim()){
+      if (html) instructions.innerHTML = message;
+      else instructions.textContent = message;
+      instructions.classList.remove('hidden');
+    } else {
+      instructions.textContent = '';
+      instructions.classList.add('hidden');
+    }
+  }
+
+  function updateStatus(){
     if (p7.boundary===0){
-      instructions.textContent = 'Let’s revisit 7A, but with some lines added at the end. To understand these new lines, we need a better understanding of what was going on in 7A. Click Next to continue.';
+      setInstructions('Let’s revisit 7A, but with some lines added at the end. To understand these new lines, we need a better understanding of what was going on in 7A. Click <span class="btn-ref">Run line 1</span> to continue.', {html:true});
       return;
     }
     if (p7.boundary===4){
-      instructions.innerHTML = 'When wolf is assigned to &deer, wolf&#8217;s value becomes deer&#8217;s address. Also, deer gains an additional name. Use the "Show aliases" toggle under deer to reveal this name.<br><br>We say that wolf now "points to" deer.';
+      setInstructions('When <code class="tok-name">wolf</code> is assigned to <code class="tok-addr">&amp;deer</code>, <code class="tok-name">wolf</code>&#8217;s value becomes <code class="tok-name">deer</code>&#8217;s address. Also, <code class="tok-name">deer</code> gains an additional name. Use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">deer</code> to reveal this name.<br><br>We say that <code class="tok-name">wolf</code> now "points to" <code class="tok-name">deer</code>.', {html:true});
       return;
     }
     if (p7.boundary===5){
-      instructions.innerHTML = 'When wolf is re-assigned to &hare, its value becomes hare&#8217;s address. Also, the *wolf name moves from deer to hare. Use the "Show aliases" toggle under hare to reveal *wolf. We say that wolf now "points to" hare.<br><br>In general, if some box X points to another box Y, then *X refers to Y. In this case, wolf points to hare, so *wolf refers to hare.<br><br>We&#8217;ll see the relevance of this alternate name later in the program.';
+      setInstructions('When <code class="tok-name">wolf</code> is set to <code class="tok-addr">&amp;hare</code>, the <code class="tok-name">*wolf</code> name moves from <code class="tok-name">deer</code> to <code class="tok-name">hare</code>. Use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">hare</code> to reveal it. We say that <code class="tok-name">wolf</code> now "points to" <code class="tok-name">hare</code>.<br><br>In general, if some variable <code class="tok-name">X</code> points to another variable <code class="tok-name">Y</code>, then <code class="tok-name">*X</code> refers to <code class="tok-name">Y</code>. In this case, <code class="tok-name">wolf</code> points to <code class="tok-name">hare</code>, so <code class="tok-name">*wolf</code> refers to <code class="tok-name">hare</code>.<br><br>We&#8217;ll see the relevance of this alternate name later in the code.', {html:true});
       return;
     }
     if (p7.boundary===7){
-      instructions.textContent = 'bear = &wolf; makes *bear refer to wolf, but it also adds another name to hare. Use the "Show aliases" toggle under hare to reveal it.\nSo, what is that new name? Recall that *wolf refers to hare. Replace "wolf" with "*bear": *{wolf} -> *{*bear}. So, "*wolf" becomes "**bear". Therefore, **bear also refers to hare.';
+      setInstructions('<code class="tok-line">bear = &amp;wolf;</code> adds the <code class="tok-name">*bear</code> name to <code class="tok-name">wolf</code>, and also adds a name to <code class="tok-name">hare</code>. Use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">hare</code> to reveal it.<br><br>To understand why, recall that <code class="tok-name">*bear</code> (aka <code class="tok-name">wolf</code>) points to <code class="tok-name">hare</code>. So we can add another asterisk to get the alternate name for <code class="tok-name">hare</code>: <code class="tok-name">**bear</code>.', {html:true});
       return;
     }
-    instructions.textContent = '';
+    setInstructions('');
   }
 
   function puzzleComplete(){
@@ -160,13 +207,13 @@
 
   function buildHint(){
     const ws=document.getElementById('p7bworkspace');
-    if (!ws) return 'Step forward to begin editing.';
+    if (!ws) return {html:'Use <span class="btn-ref">Run line</span> to begin editing.'};
     const boxes=[...ws.querySelectorAll('.vbox')].map(v=>readBoxState(v));
     const expected=canonical(p7.boundary);
     const byName=(name)=>boxes.find(b=>b.name===name || (b.names||[]).includes(name));
 
     const filledInt = ['deer','hare'].map(name=>byName(name)).find(box=>box && !isEmptyVal(box.value||''));
-    if (filledInt && p7.boundary<6) return {html:`<code>${filledInt.name}</code> hasn't stored a value—leave it empty.`};
+    if (filledInt && p7.boundary<6) return {html:`<code class="tok-name">${filledInt.name}</code> hasn't stored a value—leave it empty.`};
 
     const wolf=byName('wolf');
     const bear=byName('bear');
@@ -174,29 +221,30 @@
 
     if (p7.boundary===9){
       const normalized=bear ? normalizePtrValue(bear.value||'') : 'empty';
-      if (normalized!=='empty' && normalized!==String(p7.ptrAddr)) return {html:'<code>bear</code> should store <code>wolf</code>\'s address.'};
+      if (normalized!=='empty' && normalized!==String(p7.ptrAddr)) return {html:'<code class="tok-name">bear</code> should store <code class="tok-name">wolf</code>\'s address.'};
       const fox=byName('fox');
       const spareVal = fox ? normalizePtrValue(fox.value||'') : 'empty';
       const expectedPtr = wolf ? normalizePtrValue(wolf.value||'') : 'empty';
-      if (fox && spareVal!==expectedPtr) return {html:'<code>fox</code> should copy <code>wolf</code> (the address of <code>hare</code>).'};
-    } else if (p7.boundary===10){
-      const bBox=byName('hare');
-      if (bBox && bBox.value!=='11') return {html:'<code>*wolf</code> and <code>hare</code> are both names for the same box, so <code>*wolf = 11;</code> would be equivalent to <code>hare = 11;</code>.'};
+      if (fox && spareVal!==expectedPtr) return {html:'<code class="tok-name">fox</code> should copy <code class="tok-name">wolf</code> (the address of <code class="tok-name">hare</code>).'};
     } else if (p7.boundary===11){
       const bBox=byName('hare');
-      if (bBox && bBox.value!=='22') return {html:'<code>**bear</code> and <code>hare</code> are both names for the same box, so <code>**bear = 22;</code> would be equivalent to <code>hare = 22;</code>.'};
-    } else if (p7.boundary===13){
+      if (bBox && bBox.value!=='11') return {html:'<code class="tok-name">*wolf</code> and <code class="tok-name">hare</code> are both names for the same variable, so <code class="tok-line">*wolf = 11;</code> would be equivalent to <code class="tok-line">hare = 11;</code>.'};
+    } else if (p7.boundary===12){
+      const normalized = wolf ? normalizePtrValue(wolf.value||'') : 'empty';
+      if (normalized==='empty') return {html:'Set <code class="tok-name">wolf</code> to <code class="tok-addr">&amp;deer</code> with <code class="tok-line">*bear = &amp;deer;</code>.'};
+      if (normalized!==String(p7.aAddr)) return {html:'<code class="tok-line">*bear = &amp;deer;</code> sets <code class="tok-name">wolf</code> to <code class="tok-addr">&amp;deer</code>.'};
+    } else if (p7.boundary===14){
       const elk = byName('elk');
-      const bBox=byName('hare');
+      const bBox=byName('deer');
       const bVal = bBox?.value || '';
-      if (!elk) return {html:'Make sure <code>elk</code> exists for this line.'};
-      if (elk.value!==bVal) return {html:'<code>elk</code>\'s value should be set to <code>*wolf</code>\'s value.'};
+      if (!elk) return {html:'Make sure <code class="tok-name">elk</code> exists for this line.'};
+      if (elk.value!==bVal) return {html:'<code class="tok-name">elk</code>\'s value should be set to <code class="tok-name">*wolf</code>\'s value.'};
     }
-    const verdict = validateWorkspace(p7.boundary, boxes);
-    if (verdict.ok) return 'Looks good. Press Check.';
+    const verdict = validateWorkspace(p7.boundary, applyAliasNames(boxes));
+    if (verdict.ok) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
     const hasReset = !!document.getElementById('p7b-reset');
     return hasReset
-      ? 'Your program has a problem that isn\'t covered by a hint. Try starting over on this step by clicking Reset.'
+      ? {html:'Your program has a problem that isn\'t covered by a hint. Try starting over on this step by clicking <span class="btn-ref">Reset</span>.'}
       : 'Your program has a problem that isn\'t covered by a hint. Sorry.';
   }
 
@@ -239,7 +287,8 @@
 
   function save(){
     if (p7.boundary>=1 && p7.boundary<=p7.lines.length){
-      p7.ws[p7.boundary] = serializeWorkspace('p7bworkspace');
+      const snap = serializeWorkspace('p7bworkspace');
+      p7.ws[p7.boundary] = Array.isArray(snap) ? applyAliasNames(snap) : snap;
     }
   }
 
@@ -256,13 +305,14 @@
     const ws=document.getElementById('p7bworkspace');
     if (!ws) return;
     const boxes=[...ws.querySelectorAll('.vbox')].map(v=>readBoxState(v));
-    const verdict = validateWorkspace(p7.boundary, boxes);
+    const normalized = applyAliasNames(boxes);
+    const verdict = validateWorkspace(p7.boundary, normalized);
     $('#p7b-status').textContent = verdict.ok ? 'correct' : 'incorrect';
     $('#p7b-status').className   = verdict.ok ? 'ok' : 'err';
     MB.flashStatus($('#p7b-status'));
     if (verdict.ok){
       p7.passes[p7.boundary]=true;
-      p7.ws[p7.boundary]=boxes;
+      p7.ws[p7.boundary]=normalized;
       ws.querySelectorAll('.vbox').forEach(v=>MB.disableBoxEditing(v));
       MB.removeBoxDeleteButtons(ws);
       updateStatus();
@@ -287,7 +337,7 @@
     };
     for (const need of expected){
       const box=findBox(need);
-      if (!box) return {ok:false, message:`Missing the ${need.name} box.`};
+      if (!box) return {ok:false, message:`Missing ${need.name} in the program state.`};
       if (need.type==='int' && box.type!=='int') return {ok:false, message:`${need.name} must stay type int.`};
       if (need.type==='int*' && box.type!=='int*') return {ok:false, message:`${need.name} must be type int*.`};
       if (need.type==='int**' && box.type!=='int**') return {ok:false, message:'bear must be type int**.'};
@@ -301,7 +351,7 @@
         }
         if (Array.isArray(need.names)){
           const names = box.names || [];
-          if (!need.names.every(n=>names.includes(n))) return {ok:false, message:`Include alias ${need.names.find(n=>!names.includes(n))}.`};
+          if (!need.names.every(n=>names.includes(n))) return {ok:false, message:`Include other name ${need.names.find(n=>!names.includes(n))}.`};
         }
       } else {
         const normalized=normalizePtrValue(box.value||'');
@@ -325,6 +375,7 @@
     prefix:'p7b',
     lines:p7.lines,
     nextPage:NEXT_PAGE,
+    endLabel:'Finish',
     getBoundary:()=>p7.boundary,
     setBoundary:val=>{p7.boundary=val;},
     onBeforeChange:save,
@@ -336,6 +387,10 @@
       if (editableSteps.has(boundary)) return !p7.passes[boundary];
       if (boundary===p7.lines.length) return !p7.passes[p7.lines.length];
       return false;
+    },
+    getStepBadge:step=>{
+      if (!editableSteps.has(step)) return '';
+      return p7.passes[step] ? 'check' : 'note';
     }
   });
 

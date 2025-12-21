@@ -2,7 +2,8 @@
   const {
     $, randAddr, renderCodePane, vbox, readBoxState, isEmptyVal,
     createHintController, createStepper, flashStatus,
-    pulseNextButton, disableBoxEditing, removeBoxDeleteButtons
+    pulseNextButton, disableBoxEditing, removeBoxDeleteButtons,
+    restoreWorkspace, serializeWorkspace, makeAnswerBox
   } = MB;
 
   const instructions = $('#p2-instructions');
@@ -14,6 +15,7 @@
     toasterAddr:randAddr('int'),
     fridgeAddr:randAddr('int'),
     stateGhi:null,
+    wsGhi:null,
     stateAssign:null,
     passGhi:false,
     passAssign:false
@@ -46,24 +48,24 @@
     if (p2.boundary===2){
       const fridge = boxes.find(b=>b.name==='fridge') || boxes.find(b=>b.name && b.name!=='toaster') || boxes.find(b=>b);
       if (!fridge) return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
-      if (!fridge.name) return {html:'Give the box a name. The variable is called <code>fridge</code>.'};
-      if (fridge.name!=='fridge') return {html:'The variable here is <code>fridge</code>, so the name should read <code>fridge</code>.'};
-      if (fridge.type!=='int') return {html:'<code>fridge</code> was declared as an <code>int</code>.'};
+      if (!fridge.name) return {html:'Give this variable a name. The variable is called <code class="tok-name">fridge</code>.'};
+      if (fridge.name!=='fridge') return {html:'The variable here is <code class="tok-name">fridge</code>, so the name should read <code class="tok-name">fridge</code>.'};
+      if (fridge.type!=='int') return {html:'<code class="tok-name">fridge</code> was declared as an <code class="tok-type">int</code>.'};
       if (!isEmptyVal(fridge.value||'')) return {html:'Right after declaration the value should still be empty.'};
-      if (isGhiCorrect(fridge)) return 'Looks good. Press Check.';
+      if (isGhiCorrect(fridge)) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
       return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
     }
     if (p2.boundary===3){
       const toaster = boxes.find(b=>b.name==='toaster') || boxes[0];
       const fridge = boxes.find(b=>b.name==='fridge');
       if (!toaster) return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
-      if (toaster.name!=='toaster') return {html:'The variable here is <code>toaster</code>, so the name should read <code>toaster</code>.'};
-      if (toaster.type!=='int') return {html:'<code>toaster</code> was declared as an <code>int</code>.'};
-      if (fridge && fridge.value==='28' && toaster.value!=='28') return {html:'<code>28</code> belongs in <code>toaster</code>\'s value, not <code>fridge</code>.'};
-      if (fridge && !isEmptyVal(fridge.value||'')) return {html:'This line doesn\'t change <code>fridge</code>. Leave its value empty.'};
-      if (isEmptyVal(toaster.value||'')) return {html:'Set <code>toaster</code>\'s value to <code>28</code>.'};
-      if (toaster.value!=='28') return {html:'Line 3 assigns <code>toaster = 28;</code>.'};
-      if (isAssignCorrect(toaster, fridge)) return 'Looks good. Press Check.';
+      if (toaster.name!=='toaster') return {html:'The variable here is <code class="tok-name">toaster</code>, so the name should read <code class="tok-name">toaster</code>.'};
+      if (toaster.type!=='int') return {html:'<code class="tok-name">toaster</code> was declared as an <code class="tok-type">int</code>.'};
+      if (fridge && fridge.value==='28' && toaster.value!=='28') return {html:'<code class="tok-value">28</code> belongs in <code class="tok-name">toaster</code>\'s value, not <code class="tok-name">fridge</code>.'};
+      if (fridge && !isEmptyVal(fridge.value||'')) return {html:'This line doesn\'t change <code class="tok-name">fridge</code>. Leave its value empty.'};
+      if (isEmptyVal(toaster.value||'')) return {html:'Set <code class="tok-name">toaster</code>\'s value to <code class="tok-value">28</code>.'};
+      if (toaster.value!=='28') return {html:'Line 3 assigns <code class="tok-line">toaster = 28;</code>.'};
+      if (isAssignCorrect(toaster, fridge)) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
       return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
     }
     return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
@@ -72,11 +74,11 @@
   function updateInstructions(){
     if (!instructions) return;
     if (p2.boundary===2){
-      instructions.innerHTML = '<code>int fridge;</code> creates a new box. What should that new box look like?';
+      instructions.innerHTML = '<code class="tok-line">int fridge;</code> creates a new variable. Click <span class="btn-ref">New variable</span> and enter its attributes.';
     } else if (p2.boundary===3){
-      instructions.innerHTML = 'What does <code>toaster = 28;</code> do?';
+      instructions.innerHTML = 'What does <code class="tok-line">toaster = 28;</code> do?';
     } else {
-      instructions.textContent = 'Use Prev/Next to step through the program.';
+      instructions.innerHTML = 'Use <span class="btn-ref">Back</span> and <span class="btn-ref">Run line</span> to step through the code.';
     }
   }
 
@@ -107,6 +109,7 @@
     resetHint();
     hint.setButtonHidden(true);
     $('#p2-check').classList.add('hidden');
+    $('#p2-add').classList.add('hidden');
 
     const solved = (p2.boundary===2 && p2.passGhi) || (p2.boundary===3 && p2.passAssign);
     if (solved){
@@ -143,23 +146,31 @@
 
     if (p2.boundary===2){
       if (p2.fridgeAddr==null) p2.fridgeAddr = randAddr('int');
-      const seed = p2.stateGhi ?? {addr:String(p2.fridgeAddr), type:'', value:'empty', name:''};
       const editable = !p2.passGhi;
-      const fridge=vbox({
-        addr:String(p2.fridgeAddr),
-        type: seed.type || '',
-        value: seed.value ?? 'empty',
-        name: seed.name || '',
+      const defaults = [];
+      if (p2.stateGhi){
+        defaults.push({
+          name: p2.stateGhi.name || '',
+          type: p2.stateGhi.type || '',
+          value: p2.stateGhi.value ?? 'empty',
+          address: p2.stateGhi.addr ?? p2.stateGhi.address ?? String(p2.fridgeAddr)
+        });
+      }
+      const workspace = restoreWorkspace(p2.wsGhi, defaults, 'p2workspace', {
         editable,
+        deletable: editable,
         allowNameEdit:true,
         allowTypeEdit:true
       });
-      if (!editable) disableBoxEditing(fridge);
-      addPlaceholderIfEmpty(fridge);
-      wrap.appendChild(fridge);
+      workspace.classList.add('workspace-inline');
+      wrap.appendChild(workspace);
       stage.appendChild(wrap);
+      if (!editable){
+        workspace.querySelectorAll('.vbox').forEach(v=>disableBoxEditing(v));
+      }
       if (editable){
         $('#p2-check').classList.remove('hidden');
+        $('#p2-add').classList.remove('hidden');
         hint.setButtonHidden(false);
       }
       return;
@@ -206,14 +217,16 @@
   }
 
   function p2Save(){
+    if (p2.boundary===2){
+      const boxes=[...document.querySelectorAll('#p2-stage .vbox')].map(v=>readBoxState(v));
+      const ws = serializeWorkspace('p2workspace');
+      if (Array.isArray(ws)) p2.wsGhi = ws;
+      const fridge = boxes.find(b=>b.name==='fridge') || boxes.find(b=>b.name && b.name!=='toaster');
+      p2.stateGhi = fridge ? {...fridge, addr:String(p2.fridgeAddr)} : null;
+      return;
+    }
     const boxes=[...document.querySelectorAll('#p2-stage .vbox')].map(v=>readBoxState(v));
     if (!boxes.length) return;
-    if (p2.boundary===2){
-      const fridge = boxes.find(b=>b.name==='fridge') || boxes.find(b=>b.name && b.name!=='toaster');
-      if (fridge){
-        p2.stateGhi = {...fridge, addr:String(p2.fridgeAddr)};
-      }
-    }
     if (p2.boundary===3){
       const toaster = boxes.find(b=>b.name==='toaster');
       if (toaster){
@@ -236,8 +249,11 @@
         removeBoxDeleteButtons(document.getElementById('p2-stage'));
         p2.passGhi=true;
         p2.stateGhi={...fridge, addr:String(p2.fridgeAddr)};
+        const ws = serializeWorkspace('p2workspace');
+        if (Array.isArray(ws)) p2.wsGhi = ws;
         renderCodePane2();
         $('#p2-check').classList.add('hidden');
+        $('#p2-add').classList.add('hidden');
         hint.hide();
         $('#p2-hint-btn')?.classList.add('hidden');
         pulseNextButton('p2');
@@ -267,6 +283,12 @@
     }
   };
 
+  $('#p2-add').onclick=()=>{
+    const ws=document.getElementById('p2workspace');
+    if (!ws) return;
+    ws.appendChild(makeAnswerBox({allowNameEdit:true, allowTypeEdit:true}));
+  };
+
   const pager = createStepper({
     prefix:'p2',
     lines:p2.lines,
@@ -282,6 +304,11 @@
       if (boundary===2) return !p2.passGhi;
       if (boundary===3) return !p2.passAssign;
       return false;
+    },
+    getStepBadge:step=>{
+      if (step===2) return p2.passGhi ? 'check' : 'note';
+      if (step===3) return p2.passAssign ? 'check' : 'note';
+      return '';
     }
   });
 

@@ -14,9 +14,11 @@
     boundary:0,
     aAddr:randAddr('int'),
     bAddr:randAddr('int'),
+    ws1:null,
     ws3:null,
     ws4:null,
     ws5:null,
+    pass1:false,
     pass3:false,
     pass4:false,
     pass5:false
@@ -34,39 +36,45 @@
 
   function buildHint(){
     const ws=document.getElementById('p3workspace');
-    if (!ws) return 'Use “+ New box” to add the variables you need for this step.';
+    if (!ws) return {html:'Use <span class="btn-ref">+ New variable</span> to add the variables you need to the program state.'};
     const boxes=[...ws.querySelectorAll('.vbox')].map(v=>readBoxState(v));
-    if (!boxes.length) return 'Add boxes for the variables before checking.';
+    if (!boxes.length) return 'Add the variables to the program state before checking.';
 
     const by=Object.fromEntries(boxes.map(b=>[b.name,b]));
-    const required = (p3.boundary===3) ? ['north','south'] : ['north','south','east'];
+    const required = (p3.boundary===1)
+      ? ['north']
+      : (p3.boundary===3 ? ['north','south'] : ['north','south','east']);
     const missing = required.filter(name=>!by[name]);
-    if (missing.length) return {html:`You still need a box for <code>${missing[0]}</code>.`};
+    if (missing.length) return {html:`You still need <code class="tok-name">${missing[0]}</code> in the program state.`};
     if (boxes.length>required.length){
       const extra = boxes.find(b=>!required.includes(b.name));
-      return {html:`Only keep boxes for <code>${required.join('</code>, <code>')}</code>. Remove <code>${extra?.name || 'the extra box'}</code>.`};
+      return {html:`Only keep <code class="tok-name">${required.join('</code>, <code class="tok-name">')}</code> in the program state. Remove <code class="tok-name">${extra?.name || 'the extra variable'}</code>.`};
     }
     const wrongType = boxes.find(b=>b.type!=='int');
     if (wrongType){
-      const label = wrongType.name ? `<code>${wrongType.name}</code>` : 'This box';
-      const typeLabel = wrongType.type ? `<code>${wrongType.type}</code>` : '<code>unknown</code>';
-      return {html:`${label} should be an <code>int</code>, not a ${typeLabel}.`};
+      const label = wrongType.name ? `<code class="tok-name">${wrongType.name}</code>` : 'This variable';
+      const typeLabel = wrongType.type ? `<code class="tok-type">${wrongType.type}</code>` : '<code class="tok-type">unknown</code>';
+      return {html:`${label} should be an <code class="tok-type">int</code>, not a ${typeLabel}.`};
     }
 
-    if (p3.boundary===3){
-      if (by.north.value!=='5') return {html:'Line 3 assigns <code>north = 5;</code>.'};
-      if (!isEmptyVal(by.south.value||'')) return {html:'<code>south</code> has not been assigned yet—leave its value empty.'};
+    if (p3.boundary===1){
+      if (!isEmptyVal(by.north.value||'')) return {html:'<code class="tok-name">north</code> has not been assigned yet—leave its value empty.'};
+    } else if (p3.boundary===3){
+      if (by.north.value!=='5') return {html:'Line 3 assigns <code class="tok-line">north = 5;</code>.'};
+      if (!isEmptyVal(by.south.value||'')) return {html:'<code class="tok-name">south</code> has not been assigned yet—leave its value empty.'};
     } else if (p3.boundary===4){
-      if (!isEmptyVal(by.south.value||'')) return {html:'<code>south</code> is still empty at this point.'};
-      if (!isEmptyVal(by.east.value||'')) return {html:'<code>east</code> was just declared, so its value should be empty.'};
-      if (by.north.value!=='5') return {html:'<code>north</code> keeps the value <code>5</code>.'};
+      if (!isEmptyVal(by.south.value||'')) return {html:'<code class="tok-name">south</code> is still empty at this point.'};
+      if (!isEmptyVal(by.east.value||'')) return {html:'<code class="tok-name">east</code> was just declared, so its value should be empty.'};
+      if (by.north.value!=='5') return {html:'<code class="tok-name">north</code> keeps the value <code class="tok-value">5</code>.'};
     } else if (p3.boundary===5){
-      if (by.east.value!=='9') return {html:'Line 5 stores <code>9</code> in <code>east</code>.'};
-      if (!isEmptyVal(by.south.value||'')) return {html:'<code>south</code>\'s value should still be empty.'};
-      if (by.north.value!=='5') return {html:'<code>north</code>\'s value should remain 5.'};
+      if (by.east.value!=='9') return {html:'Line 5 stores <code class="tok-value">9</code> in <code class="tok-name">east</code>.'};
+      if (!isEmptyVal(by.south.value||'')) return {html:'<code class="tok-name">south</code>\'s value should still be empty.'};
+      if (by.north.value!=='5') return {html:'<code class="tok-name">north</code>\'s value should remain <code class="tok-value">5</code>.'};
     }
     const allTypesOk = boxes.every(b=>b.type==='int');
     const ok =
+      (p3.boundary===1 && boxes.length===1 && allTypesOk &&
+       by.north && isEmptyVal(by.north.value||'')) ||
       (p3.boundary===3 && boxes.length===2 && allTypesOk &&
        by.north && by.south && by.north.value==='5' && isEmptyVal(by.south.value||'')) ||
       (p3.boundary===4 && boxes.length===3 && allTypesOk &&
@@ -75,15 +83,16 @@
       (p3.boundary===5 && boxes.length===3 && allTypesOk &&
        by.north && by.south && by.east &&
        by.north.value==='5' && isEmptyVal(by.south.value||'') && by.east.value==='9');
-    if (ok) return 'Looks good. Press Check.';
+    if (ok) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
     const hasReset = !!document.getElementById('p3-reset');
     return hasReset
-      ? 'Your program has a problem that isn\'t covered by a hint. Try starting over on this step by clicking Reset.'
+      ? {html:'Your program has a problem that isn\'t covered by a hint. Try starting over on this step by clicking <span class="btn-ref">Reset</span>.'}
       : 'Your program has a problem that isn\'t covered by a hint. Sorry.';
   }
 
   function renderCodePane3(){
     const progress =
+      (p3.boundary===1 && !p3.pass1) ||
       (p3.boundary===3 && !p3.pass3) ||
       (p3.boundary===4 && !p3.pass4) ||
       (p3.boundary===5 && !p3.pass5);
@@ -100,6 +109,7 @@
     stage.innerHTML='';
     const instructions = $('#p3-instructions');
     const solved =
+      (p3.boundary===1 && p3.pass1) ||
       (p3.boundary===3 && p3.pass3) ||
       (p3.boundary===4 && p3.pass4) ||
       (p3.boundary===5 && p3.pass5);
@@ -116,11 +126,11 @@
 
     resetHint();
     if (instructions){
-      instructions.textContent = '';
-      if (p3.boundary===4 && !p3.pass4){
-        instructions.textContent = 'Make a new box for east.';
+      if (p3.boundary===0){
+        instructions.textContent = 'No instructions for this one. Good luck!';
         instructions.classList.remove('hidden');
       } else {
+        instructions.textContent = '';
         instructions.classList.add('hidden');
       }
     }
@@ -129,9 +139,16 @@
     if (p3.boundary===0){
       // blank
     } else if (p3.boundary===1){
-      const a=vbox({addr:String(p3.aAddr),type:'int',value:'empty',name:'north',editable:false});
-      a.querySelector('.value').classList.add('placeholder','muted');
-      stage.appendChild(a);
+      const editable = !p3.pass1;
+      const wrap = restoreWorkspace(p3.ws1, [], 'p3workspace', {editable, deletable:editable});
+      if (!editable) wrap.querySelectorAll('.vbox').forEach(v=>MB.disableBoxEditing(v));
+      stage.appendChild(wrap);
+      if (editable){
+        $('#p3-add').classList.remove('hidden');
+        $('#p3-reset').classList.remove('hidden');
+        $('#p3-check').classList.remove('hidden');
+        hint.setButtonHidden(false);
+      }
     } else if (p3.boundary===2){
       const wrap=el('<div class="grid"></div>');
       const a=vbox({addr:String(p3.aAddr),type:'int',value:'empty',name:'north',editable:false});
@@ -210,6 +227,7 @@
   }
 
   function saveWorkspace(){
+    if (p3.boundary===1) p3.ws1 = serializeWorkspace('p3workspace');
     if (p3.boundary===3) p3.ws3 = serializeWorkspace('p3workspace');
     if (p3.boundary===4) p3.ws4 = serializeWorkspace('p3workspace');
     if (p3.boundary===5) p3.ws5 = serializeWorkspace('p3workspace');
@@ -221,6 +239,7 @@
   };
 
   $('#p3-reset').onclick=()=>{
+    if (p3.boundary===1) p3.ws1=null;
     if (p3.boundary===3) p3.ws3=null;
     if (p3.boundary===4) p3.ws4=null;
     if (p3.boundary===5) p3.ws5=null;
@@ -234,6 +253,28 @@
     const boxes=[...ws.querySelectorAll('.vbox')].map(v=>readBoxState(v));
     const by=Object.fromEntries(boxes.map(b=>[b.name,b]));
     const allTypesOk = boxes.every(b=>b.type==='int');
+
+    if (p3.boundary===1){
+      const ok = boxes.length===1 && allTypesOk &&
+                 by.north && isEmptyVal(by.north.value||'');
+      $('#p3-status').textContent = ok ? 'correct' : 'incorrect';
+      $('#p3-status').className   = ok ? 'ok' : 'err';
+      MB.flashStatus($('#p3-status'));
+      if (ok){
+        ws.querySelectorAll('.vbox').forEach(v=>MB.disableBoxEditing(v));
+        MB.removeBoxDeleteButtons(ws);
+        $('#p3-check').classList.add('hidden');
+        $('#p3-add').classList.add('hidden');
+        $('#p3-reset').classList.add('hidden');
+        hint.hide();
+        $('#p3-hint-btn')?.classList.add('hidden');
+        p3.pass1=true;
+        renderCodePane3();
+        MB.pulseNextButton('p3');
+        pager.update();
+      }
+      return;
+    }
 
     if (p3.boundary===3){
       const ok = boxes.length===2 && allTypesOk &&
@@ -313,10 +354,18 @@
     onBeforeChange:saveWorkspace,
     onAfterChange:p3Render,
     isStepLocked:boundary=>{
+      if (boundary===1) return !p3.pass1;
       if (boundary===3) return !p3.pass3;
       if (boundary===4) return !p3.pass4;
       if (boundary===5) return !p3.pass5;
       return false;
+    },
+    getStepBadge:step=>{
+      if (step===1) return p3.pass1 ? 'check' : 'note';
+      if (step===3) return p3.pass3 ? 'check' : 'note';
+      if (step===4) return p3.pass4 ? 'check' : 'note';
+      if (step===5) return p3.pass5 ? 'check' : 'note';
+      return '';
     }
   });
 

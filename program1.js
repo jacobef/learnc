@@ -28,18 +28,18 @@
 
   function buildHint(){
     const box = readBoxState($('#p1-stage .vbox'));
-    if (isEmptyVal(box?.value||'')) return {html:'Line 3 assigns <code>m = 5;</code>, so the value cannot stay empty.'};
-    if (box?.value!=='5') return {html:'The last line stores <code>5</code> in <code>m</code>.'};
+    if (isEmptyVal(box?.value||'')) return {html:'Line 3 assigns <code class="tok-line">m = 5;</code>, so the value cannot stay empty.'};
+    if (box?.value!=='5') return {html:'The last line stores <code class="tok-value">5</code> in <code class="tok-name">m</code>.'};
     const ok = (p1.boundary===3 && box.type==='int' && box.value==='5');
-    if (ok) return 'Looks good. Press Check.';
+    if (ok) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
   }
 
   function updateInstructions(){
     if (!instructions) return;
     if (p1.boundary===3){
-      instructions.innerHTML = 'Edit the box to what it will be after <code>m = 5;</code> is run, then press Check.';
+      instructions.innerHTML = 'Edit the program state to what it should be after line 3 is run, then press <span class="btn-ref">Check</span>.';
     } else {
-      instructions.textContent = 'Use the Prev/Next buttons to see how the program changes the boxes.';
+      instructions.innerHTML = 'Use <span class="btn-ref">Back</span> and <span class="btn-ref">Run line</span> to see how the code changes the program state.';
     }
   }
 
@@ -137,6 +137,10 @@
     },
     isStepLocked:(boundary,isEnd)=>{
       return (!!isEnd) && !p1.passed;
+    },
+    getStepBadge:step=>{
+      if (step!==3) return '';
+      return p1.passed ? 'check' : 'note';
     }
   });
 

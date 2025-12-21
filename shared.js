@@ -112,7 +112,7 @@
     const raw = (src || '').replace(/\u00a0/g,' ');
     const s = raw.replace(/\s+/g,' ').trim();
     if (!s) return null;
-    let m = s.match(/^int\s*(\*{0,2})\s*([A-Za-z_][A-Za-z0-9_]*)\s*;$/);
+    let m = s.match(/^int\b\s*(\*{0,2})\s*([A-Za-z_][A-Za-z0-9_]*)\s*;$/);
     if (m){
       const stars = m[1] || '';
       const type = stars==='**' ? 'int**' : (stars==='*' ? 'int*' : 'int');
@@ -188,7 +188,7 @@
     const nameClasses  = `name-tag ${editable?'editable':''}`;
     const listClasses  = `name-list${canToggleNames ? ' collapsible' : ''}`;
     const toggleBtn = canToggleNames
-      ? '<button class="name-toggle" type="button" aria-expanded="false">Show aliases</button>'
+      ? '<button class="name-toggle" type="button" aria-expanded="false">Other names</button>'
       : '';
     const addBtn = allowNameAdd ? '<button class="name-add" type="button" title="Add name">+</button>' : '';
     const nameTags = namesList.map((n, idx)=>{
@@ -270,7 +270,7 @@
         const setExpanded = expanded=>{
           list.classList.toggle('expanded', expanded);
           toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-          toggle.textContent = expanded ? 'Hide aliases' : 'Show aliases';
+          toggle.textContent = expanded ? 'Hide other names' : 'Other names';
           requestAnimationFrame(clampNames);
         };
         toggle.onclick=()=>setExpanded(!list.classList.contains('expanded'));
@@ -524,7 +524,9 @@
     setBoundary,
     onBeforeChange,
     onAfterChange,
-    isStepLocked
+    isStepLocked,
+    getStepBadge,
+    endLabel
   }={}){
     if (!prefix) throw new Error('createStepper requires a prefix (e.g., "p1").');
     const prevBtn = document.getElementById(`${prefix}-prev`);
@@ -552,8 +554,17 @@
       if (prevBtn) prevBtn.disabled = (current===0);
       if (nextBtn){
         const atEnd = (current===total);
-        nextBtn.textContent = atEnd ? 'Next Program ▶▶' : 'Next ▶';
-        nextBtn.disabled = locked(current);
+        const badge = (!atEnd && typeof getStepBadge==='function') ? getStepBadge(current+1) : '';
+        const suffix = badge==='note' ? ' 🔧' : (badge==='check' ? ' ✅' : '');
+        const isLocked = locked(current);
+        const lockTag = isLocked ? ' 🔒' : '';
+        if (atEnd){
+          const label = endLabel || 'Next Program';
+          nextBtn.textContent = `${label}${lockTag} ▶▶`;
+        } else {
+          nextBtn.textContent = `Run line ${current+1}${suffix}${lockTag} ▶`;
+        }
+        nextBtn.disabled = isLocked;
       }
     }
 

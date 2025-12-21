@@ -66,7 +66,7 @@
       instructions.textContent = 'Program solved!';
       return;
     }
-    instructions.textContent = 'Write the program yourself.';
+    instructions.textContent = 'Write the code yourself.';
   }
 
   function normalizedLines(){
@@ -85,7 +85,7 @@
     const currentState = applyUserProgram();
     const expected = p5.expected;
     const match = statesMatch(currentState, expected);
-    if (match) return 'Looks good. Press Check.';
+    if (match) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
 
     const rawLines = normalizedLines();
     const lines = rawLines
@@ -96,13 +96,25 @@
     const missingSemicolon = nonEmpty.find(({t})=>!t.endsWith(';'));
     if (missingSemicolon) return {html:`You forgot the semicolon on line ${missingSemicolon.idx+1}.`};
     const redecl = firstRedeclaration(lines);
-    if (redecl) return {html:`You declared <code>${redecl}</code> more than once.`};
-    if (!nonEmpty.length || !lines.some(l=>/int\s+apple\s*;/.test(l))) return {html:'Declare apple: try <code>int apple;</code>.'};
-    if (!lines.some(l=>/int\s+berry\s*;/.test(l))) return {html:'Declare berry: try <code>int berry;</code>.'};
+    if (redecl) return {html:`You declared <code class="tok-name">${redecl}</code> more than once.`};
+    if (!nonEmpty.length || !lines.some(l=>/int\s+apple\s*;/.test(l))) return {html:'Declare apple: try <code class="tok-line">int apple;</code>.'};
+    if (!lines.some(l=>/int\s+berry\s*;/.test(l))) return {html:'Declare berry: try <code class="tok-line">int berry;</code>.'};
+    if (Array.isArray(currentState)){
+      const byName = Object.fromEntries(currentState.map(b=>[b.name, b]));
+      for (const exp of expected){
+        const actual = byName[exp.name];
+        if (!actual) continue;
+        const actualVal = String(actual.value ?? '');
+        const expectedVal = String(exp.value ?? '');
+        if (!isEmptyVal(actualVal) && actualVal !== expectedVal){
+          return {html:`<code class="tok-name">${exp.name}</code> should store <code class="tok-value">${expectedVal}</code>, not <code class="tok-value">${actualVal}</code>.`};
+        }
+      }
+    }
     const assignsTotal = lines.filter(l=>/apple/.test(l));
-    if (!assignsTotal.some(l=>/apple\s*=\s*10\s*;/.test(l))) return {html:'Store 10 in apple with <code>apple = 10;</code>.'};
+    if (!assignsTotal.some(l=>/apple\s*=\s*10\s*;/.test(l))) return {html:'Store 10 in apple with <code class="tok-line">apple = 10;</code>.'};
     const assignsCount = lines.filter(l=>/berry/.test(l));
-    if (!assignsCount.some(l=>/berry\s*=\s*5\s*;/.test(l))) return {html:'Store 5 in berry with <code>berry = 5;</code>.'};
+    if (!assignsCount.some(l=>/berry\s*=\s*5\s*;/.test(l))) return {html:'Store 5 in berry with <code class="tok-line">berry = 5;</code>.'};
     return {html:'Keep lines to simple declarations or assignments ending with semicolons.'};
   }
 
@@ -166,7 +178,7 @@
       const msg=document.createElement('div');
       msg.className='muted';
       msg.style.padding='8px';
-      msg.textContent='(no boxes yet)';
+      msg.textContent='(no variables yet)';
       grid.appendChild(msg);
     } else {
       boxes.forEach(b=>{

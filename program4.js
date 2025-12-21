@@ -32,7 +32,7 @@
       instructions.textContent = 'Program solved!';
       return;
     }
-    instructions.textContent = 'Until now, you have been editing the boxes to match the program. Now you will be editing the program to match the boxes. Edit the line so that "Expected final state" and "Your final state" match.';
+    instructions.textContent = 'Until now, you have been editing the program state to match the code. Now you will be editing the code to match the program state. Edit the line so that "Expected final state" and "Your final state" match.';
   }
 
   function normalizedLines(){
@@ -52,23 +52,23 @@
     const expected = p4.expected;
     const match = Array.isArray(actual) && actual.length===expected.length &&
       actual.every((b,i)=>b.name===expected[i].name && b.type===expected[i].type && String(b.value||'')===String(expected[i].value||''));
-    if (match) return 'Looks good. Press Check.';
+    if (match) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
 
     const lines = normalizedLines()
       .map(l=>l.text.trim())
       .filter(t=>t && t!==';');
-    if (!lines.length) return {html:'Edit the line to create an empty box named <code>cloud</code>, of type <code>int</code>. Look at the earlier programs if you forget how this is done.'};
+    if (!lines.length) return {html:'Edit the line to create an empty variable named <code class="tok-name">cloud</code>, of type <code class="tok-type">int</code>. Look at the earlier programs if you forget how this is done.'};
     const almostDecl = lines.find(l=>/^int\s+[A-Za-z_][A-Za-z0-9_]*\s*$/.test(l));
     const almostAssign = lines.find(l=>/^[A-Za-z_][A-Za-z0-9_]*\s*=\s*-?\d+\s*$/.test(l));
     if (almostDecl || almostAssign) return {html:'You forgot the semicolon.'};
     if (!lines.some(l=>/int\s+cloud\s*;/.test(l))){
       const wrongName = lines.find(l=>/^int\s+[A-Za-z_][A-Za-z0-9_]*\s*;/.test(l));
-      if (wrongName) return {html:'The variable\'s name should be <code>cloud</code>.'};
-      return {html:'Declare <code>cloud</code> as an <code>int</code>.'};
+      if (wrongName) return {html:'The variable\'s name should be <code class="tok-name">cloud</code>.'};
+      return {html:'Declare <code class="tok-name">cloud</code> as an <code class="tok-type">int</code>.'};
     }
     const assignsTotal = lines.filter(l=>/cloud/.test(l));
-    if (assignsTotal.some(l=>/cloud\s*=/.test(l))) return {html:'Leave <code>cloud</code> empty—no assignments to <code>cloud</code>.'};
-    return {html:'Edit the line to create an empty box named <code>cloud</code>, of type <code>int</code>. Look at the earlier programs if you forget how this is done.'};
+    if (assignsTotal.some(l=>/cloud\s*=/.test(l))) return {html:'Leave <code class="tok-name">cloud</code> empty—no assignments to <code class="tok-name">cloud</code>.'};
+    return {html:'Edit the line to create an empty variable named <code class="tok-name">cloud</code>, of type <code class="tok-type">int</code>. Look at the earlier programs if you forget how this is done.'};
   }
 
   function applyUserProgram(){
@@ -125,7 +125,7 @@
       const msg=document.createElement('div');
       msg.className='muted';
       msg.style.padding='8px';
-      msg.textContent='(no boxes yet)';
+      msg.textContent='(no variables yet)';
       grid.appendChild(msg);
     } else {
       boxes.forEach(b=>{
