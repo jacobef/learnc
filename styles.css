@@ -13,6 +13,7 @@
   --type-offset:70px;
   --focus:#1e77ff;
   --done:#19a974;
+  --ui-font:"Times New Roman",Times,serif;
 }
 
 html,body{
@@ -31,6 +32,8 @@ html,body{
 code{
   color:var(--code-line);
   font-weight:600;
+  font-size:1em;
+  line-height:inherit;
 }
 code.tok-name{color:var(--name);}
 code.tok-value{color:var(--value);}
@@ -69,7 +72,11 @@ h2{
   background:linear-gradient(135deg, rgba(30,119,255,0.08), rgba(30,119,255,0.08));
   border:1px solid rgba(30,119,255,0.18);
   box-shadow:0 6px 18px rgba(0,0,0,0.04);
-  font-size:18px;
+  font-size:22px;
+  font-family:var(--ui-font);
+}
+.intro code{
+  font-size:calc(1em - 2px);
 }
 
 .panel{
@@ -320,7 +327,7 @@ button:hover:not([disabled]){
   border:none;
   background:transparent;
   color:#c0392b;
-  font-size:13px;
+  font-size:16px;
   cursor:pointer;
   width:16px;
   height:16px;
@@ -619,13 +626,15 @@ nav.tabs a.active:hover{
 }
 
 .hint-inline{
-  font-size:12px;
+  font-size:16px;
   color:#555;
   margin-top:6px;
   max-width:360px;
+  font-family:var(--ui-font);
 }
 .hint-inline code{
   font-weight:600;
+  font-size:calc(1em - 2px);
 }
 
 .hint-link{
