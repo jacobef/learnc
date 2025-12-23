@@ -2,31 +2,41 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>C Variables — Program 5</title>
+<title>C Boxes — Program 5</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <div class="wrap">
-      <nav class="tabs">
-    <a href="program1.html">Program 1</a>
-    <a href="program2.html">Program 2</a>
-    <a href="program3.html">Program 3</a>
-    <a href="program4.html">Program 4</a>
-    <a href="program5.html" class="active">Program 5</a>
-    <a href="program6.html">Program 6</a>
-    <a href="program7a.html">Program 7A</a>
-    <a href="program7b.html">Program 7B</a>
-  </nav>
+  <nav class="tabs">
+      <a href="program1.html">1. Assignment I</a>
+      <a href="program2.html">2. Declaration</a>
+      <a href="program3.html">3. Review</a>
+      <a href="program4.html">4. Code Editing I</a>
+      <a href="program5.html" class="active">5. Code Editing II</a>
+      <a href="program6.html">6. Assignment II</a>
+      <a href="program7a.html">7A. Pointers</a>
+      <a href="program7b.html">7B. Dereferencing</a>
+      <a href="sandbox.html">Sandbox</a>
+    </nav>
+  <div class="main">
+      
   <p id="p5-instructions" class="intro"></p>
 
   <section>
     <div class="row">
       <div class="panel">
         <div class="panel-title code-title">Code</div>
-        <div id="p5-code" class="codepane"></div>
+        <div id="p5-code" class="codepane">
+          <div class="codepane-row">
+            <div id="p5-line-numbers" class="code-gutter" aria-hidden="true"></div>
+            <div class="code-editor-wrap">
+              <textarea id="p5-editor" class="code-textarea" spellcheck="false" rows="4"></textarea>
+            </div>
+            <div id="p5-error-gutter" class="code-error-gutter" aria-hidden="true"></div>
+          </div>
+        </div>
         <div class="controls">
-          <button id="p5-add-line">+ New line</button>
           <button id="p5-next">Next Program ▶▶</button>
         </div>
       </div>
@@ -41,6 +51,7 @@
       </div>
     </div>
   </section>
+  </div>
 </div>
 
 <script src="shared.js"></script>

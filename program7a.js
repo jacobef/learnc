@@ -27,7 +27,8 @@
     pptrAddr:randAddr('int**'),
     spareAddr:randAddr('int*'),
     ws:Array(10).fill(null),
-    passes:Array(10).fill(false)
+    passes:Array(10).fill(false),
+    baseline:Array(10).fill(null)
   };
 
   const editableSteps = new Set([5,6,7,9]);
@@ -107,17 +108,64 @@
     hint.hide();
   }
 
+  function normalizeState(list){
+    if (!Array.isArray(list)) return [];
+    return list.map(b=>({
+      name:(b.name || '').trim(),
+      type:(b.type || '').trim(),
+      value:String(b.value ?? '').trim(),
+      address:String(b.addr ?? b.address ?? '').trim()
+    })).sort((a,b)=>a.name.localeCompare(b.name));
+  }
+
+  function statesEqual(a,b){
+    const na = normalizeState(a);
+    const nb = normalizeState(b);
+    if (na.length!==nb.length) return false;
+    for (let i=0;i<na.length;i++){
+      const left = na[i];
+      const right = nb[i];
+      if (left.name!==right.name) return false;
+      if (left.type!==right.type) return false;
+      if (left.value!==right.value) return false;
+      if (left.address!==right.address) return false;
+    }
+    return true;
+  }
+
+  function ensureBaseline(boundary, state){
+    if (!p7a.baseline[boundary]) p7a.baseline[boundary]=cloneBoxes(state);
+    return p7a.baseline[boundary];
+  }
+
+  function updateResetVisibility(boundary){
+    const resetBtn = $('#p7a-reset');
+    if (!resetBtn) return;
+    const baseline = p7a.baseline[boundary];
+    const current = serializeWorkspace('p7aworkspace') || [];
+    const changed = Array.isArray(baseline) && !statesEqual(current, baseline);
+    resetBtn.classList.toggle('hidden', !changed);
+  }
+
+  function attachResetWatcher(wrap, boundary){
+    if (!wrap) return;
+    const refresh = ()=>updateResetVisibility(boundary);
+    wrap.addEventListener('input', refresh);
+    wrap.addEventListener('click', ()=>setTimeout(refresh, 0));
+    refresh();
+  }
+
   function buildHint(){
     const ws=document.getElementById('p7aworkspace');
-    if (!ws) return {html:'Use <span class="btn-ref">Run line</span> to reach the editable line.'};
+    if (!ws) return {html:'Use <span class="btn-ref">Run line 1 ▶</span> to reach the editable line.'};
     const boxes=[...ws.querySelectorAll('.vbox')].map(v=>readBoxState(v));
     const by=Object.fromEntries(boxes.map(b=>[b.name,b]));
     if (!by.deer || !by.hare || !by.wolf) return {html:'You still need <code class="tok-name">deer</code>, <code class="tok-name">hare</code>, and <code class="tok-name">wolf</code> in the program state.'};
     if (p7a.boundary>=6 && !by.bear) return {html:'You need <code class="tok-name">bear</code> in the program state.'};
-    if (by.deer.type!=='int' || by.hare.type!=='int') return {html:'<code class="tok-name">deer</code> and <code class="tok-name">hare</code> are <code class="tok-type">int</code>s.'};
-    if (by.wolf.type!=='int*') return {html:'<code class="tok-name">wolf</code>\'s type is <code class="tok-type">int*</code>.'};
-    if (p7a.boundary>=6 && by.bear && by.bear.type!=='int**') return {html:'<code class="tok-name">bear</code>\'s type is <code class="tok-type">int**</code>.'};
-    if (p7a.boundary>=8 && by.fox && by.fox.type!=='int*') return {html:'<code class="tok-name">fox</code> is an <code class="tok-type">int*</code>.'};
+    if (by.deer.type!=='int' || by.hare.type!=='int') return {html:'The types of <code class="tok-name">deer</code> and <code class="tok-name">hare</code> should be <code class="tok-type">int</code>.'};
+    if (by.wolf.type!=='int*') return {html:'<code class="tok-name">wolf</code>\'s type should be <code class="tok-type">int*</code>.'};
+    if (p7a.boundary>=6 && by.bear && by.bear.type!=='int**') return {html:'<code class="tok-name">bear</code>\'s type should be <code class="tok-type">int**</code>.'};
+    if (p7a.boundary>=8 && by.fox && by.fox.type!=='int*') return {html:'<code class="tok-name">fox</code>\'s type should be <code class="tok-type">int*</code>.'};
     // Skip address validation; addresses are generated for the user.
     const ptrVal = (by.wolf.value||'').trim();
     if (!ptrVal) return {html:'<code class="tok-name">wolf</code>\'s value should not be empty.'};
@@ -176,9 +224,10 @@
       stage.appendChild(wrap);
       if (editable){
         $('#p7a-check').classList.remove('hidden');
-        $('#p7a-reset').classList.remove('hidden');
         $('#p7a-add').classList.remove('hidden');
         hint.setButtonHidden(false);
+        ensureBaseline(p7a.boundary, defaults);
+        attachResetWatcher(wrap, p7a.boundary);
       } else {
         p7a.ws[p7a.boundary]=cloneBoxes(defaults);
         p7a.passes[p7a.boundary]=true;
@@ -202,6 +251,7 @@
   $('#p7a-add').onclick=()=>{
     const ws=document.getElementById('p7aworkspace');
     if (ws) ws.appendChild(makeAnswerBox({}));
+    updateResetVisibility(p7a.boundary);
   };
 
   $('#p7a-check').onclick=()=>{

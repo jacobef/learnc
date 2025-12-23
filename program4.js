@@ -60,7 +60,7 @@
     if (!lines.length) return {html:'Edit the line to create an empty variable named <code class="tok-name">cloud</code>, of type <code class="tok-type">int</code>. Look at the earlier programs if you forget how this is done.'};
     const almostDecl = lines.find(l=>/^int\s+[A-Za-z_][A-Za-z0-9_]*\s*$/.test(l));
     const almostAssign = lines.find(l=>/^[A-Za-z_][A-Za-z0-9_]*\s*=\s*-?\d+\s*$/.test(l));
-    if (almostDecl || almostAssign) return {html:'You forgot the semicolon.'};
+    if (almostDecl || almostAssign) return {html:'You need a semicolon at the end of the line.'};
     if (!lines.some(l=>/int\s+cloud\s*;/.test(l))){
       const wrongName = lines.find(l=>/^int\s+[A-Za-z_][A-Za-z0-9_]*\s*;/.test(l));
       if (wrongName) return {html:'The variable\'s name should be <code class="tok-name">cloud</code>.'};

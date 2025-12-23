@@ -34,7 +34,8 @@
     pulledAddr:randAddr('int'),
     ws:Array(15).fill(null),
     passes:Array(15).fill(false),
-    aliasExplained:false
+    aliasExplained:false,
+    baseline:Array(15).fill(null)
   };
 
   const editableSteps = new Set([9,11,12,14]);
@@ -173,7 +174,7 @@
 
   function updateStatus(){
     if (p7.boundary===0){
-      setInstructions('Let’s revisit 7A, but with some lines added at the end. To understand these new lines, we need a better understanding of what was going on in 7A. Click <span class="btn-ref">Run line 1</span> to continue.', {html:true});
+      setInstructions('Let’s revisit 7A, but with some lines added at the end. To understand these new lines, we need a better understanding of what was going on in 7A. Click <span class="btn-ref">Run line 1 ▶</span> to continue.', {html:true});
       return;
     }
     if (p7.boundary===4){
@@ -185,7 +186,7 @@
       return;
     }
     if (p7.boundary===7){
-      setInstructions('<code class="tok-line">bear = &amp;wolf;</code> adds the <code class="tok-name">*bear</code> name to <code class="tok-name">wolf</code>, and also adds a name to <code class="tok-name">hare</code>. Use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">hare</code> to reveal it.<br><br>To understand why, recall that <code class="tok-name">*bear</code> (aka <code class="tok-name">wolf</code>) points to <code class="tok-name">hare</code>. So we can add another asterisk to get the alternate name for <code class="tok-name">hare</code>: <code class="tok-name">**bear</code>.', {html:true});
+      setInstructions('<code class="tok-line">bear = &amp;wolf;</code> adds the <code class="tok-name">*bear</code> name to <code class="tok-name">wolf</code>, and also adds a name to <code class="tok-name">hare</code>. Use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">hare</code> to reveal it.<br><br>To understand why, recall that <code class="tok-name">*bear</code> (aka <code class="tok-name">wolf</code>) points to <code class="tok-name">hare</code>. So we can add another asterisk to <code class="tok-name">*bear</code> to get the alternate name for <code class="tok-name">hare</code>: <code class="tok-name">**bear</code>.', {html:true});
       return;
     }
     setInstructions('');
@@ -205,9 +206,56 @@
     hint.hide();
   }
 
+  function normalizeState(list){
+    if (!Array.isArray(list)) return [];
+    return list.map(b=>({
+      name:(b.name || '').trim(),
+      type:(b.type || '').trim(),
+      value:String(b.value ?? '').trim(),
+      address:String(b.addr ?? b.address ?? '').trim()
+    })).sort((a,b)=>a.name.localeCompare(b.name));
+  }
+
+  function statesEqual(a,b){
+    const na = normalizeState(a);
+    const nb = normalizeState(b);
+    if (na.length!==nb.length) return false;
+    for (let i=0;i<na.length;i++){
+      const left = na[i];
+      const right = nb[i];
+      if (left.name!==right.name) return false;
+      if (left.type!==right.type) return false;
+      if (left.value!==right.value) return false;
+      if (left.address!==right.address) return false;
+    }
+    return true;
+  }
+
+  function ensureBaseline(boundary, state){
+    if (!p7.baseline[boundary]) p7.baseline[boundary]=cloneBoxes(state);
+    return p7.baseline[boundary];
+  }
+
+  function updateResetVisibility(boundary){
+    const resetBtn = $('#p7b-reset');
+    if (!resetBtn) return;
+    const baseline = p7.baseline[boundary];
+    const current = serializeWorkspace('p7bworkspace') || [];
+    const changed = Array.isArray(baseline) && !statesEqual(current, baseline);
+    resetBtn.classList.toggle('hidden', !changed);
+  }
+
+  function attachResetWatcher(wrap, boundary){
+    if (!wrap) return;
+    const refresh = ()=>updateResetVisibility(boundary);
+    wrap.addEventListener('input', refresh);
+    wrap.addEventListener('click', ()=>setTimeout(refresh, 0));
+    refresh();
+  }
+
   function buildHint(){
     const ws=document.getElementById('p7bworkspace');
-    if (!ws) return {html:'Use <span class="btn-ref">Run line</span> to begin editing.'};
+    if (!ws) return {html:'Use <span class="btn-ref">Run line 1 ▶</span> to begin editing.'};
     const boxes=[...ws.querySelectorAll('.vbox')].map(v=>readBoxState(v));
     const expected=canonical(p7.boundary);
     const byName=(name)=>boxes.find(b=>b.name===name || (b.names||[]).includes(name));
@@ -221,15 +269,22 @@
 
     if (p7.boundary===9){
       const normalized=bear ? normalizePtrValue(bear.value||'') : 'empty';
-      if (normalized!=='empty' && normalized!==String(p7.ptrAddr)) return {html:'<code class="tok-name">bear</code> should store <code class="tok-name">wolf</code>\'s address.'};
+      if (normalized!=='empty' && normalized!==String(p7.ptrAddr)) return {html:'<code class="tok-name">bear</code>\'s value should be set to <code class="tok-name">wolf</code>\'s address.'};
       const fox=byName('fox');
       const spareVal = fox ? normalizePtrValue(fox.value||'') : 'empty';
       const expectedPtr = wolf ? normalizePtrValue(wolf.value||'') : 'empty';
-      if (fox && spareVal!==expectedPtr) return {html:'<code class="tok-name">fox</code> should copy <code class="tok-name">wolf</code> (the address of <code class="tok-name">hare</code>).'};
+      if (fox && spareVal!==expectedPtr) return {html:'<code class="tok-name">fox</code>\'s value should be set to <code class="tok-name">wolf</code>\'s value (the address of <code class="tok-name">hare</code>).'};
     } else if (p7.boundary===11){
+      const wolfVal = wolf ? normalizePtrValue(wolf.value||'') : 'empty';
+      const hareBox = byName('hare');
+      if (wolfVal==='11' && hareBox?.value!=='11') return {html:'<code class="tok-line">*wolf = 11;</code> assigns through <code class="tok-name">wolf</code>, so it should change <code class="tok-name">hare</code>, not <code class="tok-name">wolf</code>.'};
       const bBox=byName('hare');
       if (bBox && bBox.value!=='11') return {html:'<code class="tok-name">*wolf</code> and <code class="tok-name">hare</code> are both names for the same variable, so <code class="tok-line">*wolf = 11;</code> would be equivalent to <code class="tok-line">hare = 11;</code>.'};
     } else if (p7.boundary===12){
+      const deerAddr = String(p7.aAddr);
+      const bearVal = bear ? normalizePtrValue(bear.value||'') : 'empty';
+      const wolfVal = wolf ? normalizePtrValue(wolf.value||'') : 'empty';
+      if (bearVal===deerAddr && wolfVal!==deerAddr) return {html:'<code class="tok-line">*bear = &amp;deer;</code> assigns through <code class="tok-name">bear</code>, so it should change <code class="tok-name">wolf</code>, not <code class="tok-name">bear</code>.'};
       const normalized = wolf ? normalizePtrValue(wolf.value||'') : 'empty';
       if (normalized==='empty') return {html:'Set <code class="tok-name">wolf</code> to <code class="tok-addr">&amp;deer</code> with <code class="tok-line">*bear = &amp;deer;</code>.'};
       if (normalized!==String(p7.aAddr)) return {html:'<code class="tok-line">*bear = &amp;deer;</code> sets <code class="tok-name">wolf</code> to <code class="tok-addr">&amp;deer</code>.'};
@@ -276,8 +331,9 @@
       stage.appendChild(wrap);
       if (editable){
         $('#p7b-check').classList.remove('hidden');
-        $('#p7b-reset').classList.remove('hidden');
         hint.setButtonHidden(false);
+        ensureBaseline(p7.boundary, defaults);
+        attachResetWatcher(wrap, p7.boundary);
       } else {
         p7.ws[p7.boundary]=cloneBoxes(defaults);
         p7.passes[p7.boundary]=true;

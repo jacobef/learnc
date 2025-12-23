@@ -1,25 +1,40 @@
 (function(MB){
   const {
-    $, txt, renderCodePaneEditable, readEditableCodeLines, parseSimpleStatement,
-    applySimpleStatement, randAddr, vbox, isEmptyVal,
-    createHintController, createStepper, pulseNextButton, flashStatus, el
+    $, randAddr, vbox, isEmptyVal, createSimpleSimulator,
+    createHintController, createStepper, pulseNextButton, flashStatus
   } = MB;
 
   const instructions = $('#p5-instructions');
+  const editor = $('#p5-editor');
+  const lineNumbers = $('#p5-line-numbers');
+  const errorGutter = $('#p5-error-gutter');
+  const measureEl = (() => {
+    if (!editor || !editor.parentElement) return null;
+    const el = document.createElement('div');
+    el.className = 'code-textarea-measure';
+    el.setAttribute('aria-hidden', 'true');
+    editor.parentElement.appendChild(el);
+    return el;
+  })();
   const NEXT_PAGE = 'program6.html';
 
   const p5 = {
-    lines:[{text:'', editable:true, placeholder:''}],
-    boundary:0,
-    baseState:[],
+    text: editor ? editor.value : '',
     expected:[
       {name:'apple', type:'int', value:'10', address:'<i>(any)</i>'},
       {name:'berry', type:'int', value:'5', address:'<i>(any)</i>'}
     ],
-    userLines:{},
     pass:false,
     allocBase:null
   };
+
+  const simulator = createSimpleSimulator({
+    allowVarAssign:true,
+    allowDeclAssign:true,
+    allowDeclAssignVar:true,
+    requireSourceValue:true,
+    allowPointers:true
+  });
 
   function allocFactory(){
     if (p5.allocBase==null) p5.allocBase = randAddr('int');
@@ -29,12 +44,6 @@
       next += 4;
       return String(addr);
     };
-  }
-
-  function initBaseState(){
-    if (!p5.baseState.length){
-      p5.baseState = [];
-    }
   }
 
   function statesMatch(actual, expected){
@@ -69,16 +78,126 @@
     instructions.textContent = 'Write the code yourself.';
   }
 
-  function normalizedLines(){
-    const map = readEditableCodeLines($('#p5-code'));
-    const lines = p5.lines.map((line, idx)=>{
-      const val = map[idx];
-      return {
-        ...line,
-        text: (val!=null ? val : line.text) || ''
-      };
+  function getEditorText(){
+    return editor ? editor.value : (p5.text || '');
+  }
+
+  function getRawLines(){
+    return getEditorText().split(/\r?\n/);
+  }
+
+  function classifyLineStatuses(lines){
+    return simulator.classifyLineStatuses(lines, {alloc: allocFactory()});
+  }
+
+  function getLineHeightPx(){
+    if (!editor) return 32;
+    const style = window.getComputedStyle(editor);
+    const lh = parseFloat(style.lineHeight);
+    return Number.isFinite(lh) ? lh : 32;
+  }
+
+  function autoSizeEditor(){
+    if (!editor) return;
+    editor.style.height = 'auto';
+    editor.style.height = `${editor.scrollHeight}px`;
+  }
+
+  function measureWrapCounts(lines){
+    if (!editor || !measureEl) return lines.map(()=>1);
+    const style = window.getComputedStyle(editor);
+    const paddingLeft = parseFloat(style.paddingLeft) || 0;
+    const paddingRight = parseFloat(style.paddingRight) || 0;
+    const contentWidth = Math.max(1, editor.clientWidth - paddingLeft - paddingRight);
+    measureEl.style.width = `${contentWidth}px`;
+    measureEl.style.fontFamily = style.fontFamily;
+    measureEl.style.fontSize = style.fontSize;
+    measureEl.style.fontWeight = style.fontWeight;
+    measureEl.style.letterSpacing = style.letterSpacing;
+    measureEl.style.lineHeight = style.lineHeight;
+    const lineHeight = getLineHeightPx();
+    return lines.map(line=>{
+      measureEl.textContent = line === '' ? ' ' : line;
+      const h = measureEl.scrollHeight;
+      return Math.max(1, Math.ceil(h / lineHeight - 0.01));
     });
-    return lines;
+  }
+
+  function updateLineGutters(){
+    autoSizeEditor();
+    const lines = getRawLines();
+    const count = Math.max(lines.length, 1);
+    const lineHeight = getLineHeightPx();
+    const wraps = measureWrapCounts(lines);
+    if (lineNumbers){
+      const frag = document.createDocumentFragment();
+      for (let i=1;i<=count;i++){
+        const num = document.createElement('div');
+        num.className = 'code-line-number';
+        num.style.height = `${(wraps[i-1] || 1) * lineHeight}px`;
+        num.textContent = String(i);
+        frag.appendChild(num);
+      }
+      lineNumbers.innerHTML = '';
+      lineNumbers.appendChild(frag);
+      if (editor) lineNumbers.style.height = `${editor.clientHeight}px`;
+    }
+    if (errorGutter){
+      const {invalid, incomplete, errorKinds, info} = classifyLineStatuses(lines);
+      const frag = document.createDocumentFragment();
+      for (let i=0;i<count;i++){
+        const cell = document.createElement('div');
+        cell.className = 'code-error-line';
+        cell.style.height = `${(wraps[i] || 1) * lineHeight}px`;
+        if (invalid.has(i)){
+          cell.classList.add('is-invalid');
+          const kind = errorKinds?.get(i) || 'compile';
+          cell.textContent = kind === 'ub' ? '💣' : '🚫';
+          cell.title = kind === 'ub' ? 'Line causes undefined behavior' : 'Line does not compile';
+          if (info?.has(i)){
+            const infoMsg = info.get(i);
+            const title = (infoMsg && typeof infoMsg === 'object') ? infoMsg.text : infoMsg;
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'error-info-btn';
+            btn.textContent = 'i';
+            btn.title = title || '';
+            cell.appendChild(btn);
+          }
+        } else if (incomplete.has(i)){
+          cell.classList.add('is-incomplete');
+          cell.textContent = '...';
+          cell.title = 'Line is incomplete';
+          if (info?.has(i)){
+            const infoMsg = info.get(i);
+            const title = (infoMsg && typeof infoMsg === 'object') ? infoMsg.text : infoMsg;
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'error-info-btn';
+            btn.textContent = 'i';
+            btn.title = title || '';
+            cell.appendChild(btn);
+          }
+        } else if (info?.has(i)){
+          const infoMsg = info.get(i);
+          const title = (infoMsg && typeof infoMsg === 'object') ? infoMsg.text : infoMsg;
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'error-info-btn';
+          btn.textContent = 'i';
+          btn.title = title || '';
+          cell.appendChild(btn);
+        }
+        frag.appendChild(cell);
+      }
+      errorGutter.innerHTML = '';
+      errorGutter.appendChild(frag);
+      if (editor) errorGutter.style.height = `${editor.clientHeight}px`;
+    }
+    if (editor){
+      if (lineNumbers) lineNumbers.scrollTop = editor.scrollTop;
+      if (errorGutter) errorGutter.scrollTop = editor.scrollTop;
+    }
   }
 
   function buildHint(){
@@ -87,18 +206,20 @@
     const match = statesMatch(currentState, expected);
     if (match) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
 
-    const rawLines = normalizedLines();
-    const lines = rawLines
-      .map(l=>l.text.trim());
-    const nonEmpty = lines
-      .map((t,idx)=>({t,idx}))
-      .filter(({t})=>t && t!==';');
-    const missingSemicolon = nonEmpty.find(({t})=>!t.endsWith(';'));
-    if (missingSemicolon) return {html:`You forgot the semicolon on line ${missingSemicolon.idx+1}.`};
-    const redecl = firstRedeclaration(lines);
+    const text = getEditorText();
+    const missingLine = simulator.findMissingSemicolonLine(text);
+    if (missingLine != null) return {html:`You need a semicolon at the end of line ${missingLine}.`};
+
+    const tokens = simulator.tokenizeProgram(text);
+    const parsedStatements = simulator.parseStatements(text);
+    const redecl = firstRedeclaration(parsedStatements);
     if (redecl) return {html:`You declared <code class="tok-name">${redecl}</code> more than once.`};
-    if (!nonEmpty.length || !lines.some(l=>/int\s+apple\s*;/.test(l))) return {html:'Declare apple: try <code class="tok-line">int apple;</code>.'};
-    if (!lines.some(l=>/int\s+berry\s*;/.test(l))) return {html:'Declare berry: try <code class="tok-line">int berry;</code>.'};
+    const hasTokens = tokens.some(t=>!(t.type==='sym' && t.value===';'));
+    const declNames = new Set(parsedStatements
+      .filter(s=>s.kind==='decl' || s.kind==='declAssign' || s.kind==='declAssignVar' || s.kind==='declAssignRef')
+      .map(s=>s.name));
+    if (!hasTokens || !declNames.has('apple')) return {html:'Declare apple: try <code class="tok-line">int apple;</code>.'};
+    if (!declNames.has('berry')) return {html:'Declare berry: try <code class="tok-line">int berry;</code>.'};
     if (Array.isArray(currentState)){
       const byName = Object.fromEntries(currentState.map(b=>[b.name, b]));
       for (const exp of expected){
@@ -107,59 +228,58 @@
         const actualVal = String(actual.value ?? '');
         const expectedVal = String(exp.value ?? '');
         if (!isEmptyVal(actualVal) && actualVal !== expectedVal){
-          return {html:`<code class="tok-name">${exp.name}</code> should store <code class="tok-value">${expectedVal}</code>, not <code class="tok-value">${actualVal}</code>.`};
+          return {html:`<code class="tok-name">${exp.name}</code>\'s value should be <code class="tok-value">${expectedVal}</code>, not <code class="tok-value">${actualVal}</code>.`};
         }
       }
     }
-    const assignsTotal = lines.filter(l=>/apple/.test(l));
-    if (!assignsTotal.some(l=>/apple\s*=\s*10\s*;/.test(l))) return {html:'Store 10 in apple with <code class="tok-line">apple = 10;</code>.'};
-    const assignsCount = lines.filter(l=>/berry/.test(l));
-    if (!assignsCount.some(l=>/berry\s*=\s*5\s*;/.test(l))) return {html:'Store 5 in berry with <code class="tok-line">berry = 5;</code>.'};
+    const appleAssign = parsedStatements.find(s=>
+      (s.kind==='assign' || s.kind==='declAssign') && s.name==='apple' && String(s.value)==='10'
+    );
+    if (!appleAssign) return {html:'Store 10 in apple with <code class="tok-line">apple = 10;</code>.'};
+    const berryAssign = parsedStatements.find(s=>
+      (s.kind==='assign' || s.kind==='declAssign') && s.name==='berry' && String(s.value)==='5'
+    );
+    if (!berryAssign) return {html:'Store 5 in berry with <code class="tok-line">berry = 5;</code>.'};
     return {html:'Keep lines to simple declarations or assignments ending with semicolons.'};
   }
 
   function applyUserProgram(){
-    initBaseState();
-    const map = readEditableCodeLines($('#p5-code'));
-    const lines = p5.lines.map((line, idx)=>{
-      const text = (map[idx]!=null ? map[idx] : line.text) || '';
-      return {...line, text};
-    });
-    p5.userLines = map;
-    let state = [];
-    const alloc = allocFactory();
-    const seenDecl = new Set();
-    for (const line of lines){
-      const parsed = parseSimpleStatement(line.text);
-      const trimmed = (line.text || '').trim();
-      if (!parsed){
-        if (!trimmed || trimmed===';') continue;
-        return null;
+    const text = getEditorText();
+    p5.text = text;
+    return simulator.applyProgram(text, {alloc: allocFactory()});
+  }
+
+  function getProgramOutcome(){
+    const lines = getRawLines();
+    const status = classifyLineStatuses(lines);
+    let hasCompile = status.incomplete.size > 0;
+    let hasUb = false;
+    if (status.errorKinds){
+      for (const kind of status.errorKinds.values()){
+        if (kind === 'ub') hasUb = true;
+        else hasCompile = true;
       }
-      if (parsed.kind==='decl'){
-        if (seenDecl.has(parsed.name)) return null;
-        seenDecl.add(parsed.name);
-      }
-      const next = applySimpleStatement(state, parsed, {alloc, allowRedeclare:false});
-      if (!next) return null;
-      state = next;
     }
-    return state;
+    if (hasCompile) return {kind:'compile', state:null};
+    if (hasUb) return {kind:'ub', state:null};
+    const state = applyUserProgram();
+    if (!state) return {kind:'compile', state:null};
+    return {kind:'ok', state};
   }
 
   function renderStage(){
     const stage=$('#p5-stage');
     stage.innerHTML='';
     const expected = p5.expected;
-    const actual = applyUserProgram();
+    const outcome = getProgramOutcome();
     const group=document.createElement('div');
     group.className='state-group two-col';
     group.appendChild(renderState('Expected final state', expected));
-    group.appendChild(renderState('Your final state', actual));
+    group.appendChild(renderState('Your final state', outcome.state, outcome.kind));
     stage.appendChild(group);
   }
 
-  function renderState(title, boxes){
+  function renderState(title, boxes, status='ok'){
     const wrap=document.createElement('div');
     wrap.className='state-panel';
     const heading=document.createElement('div');
@@ -168,9 +288,37 @@
     wrap.appendChild(heading);
     const grid=document.createElement('div');
     grid.className='grid';
-    if (boxes===null){
+    if (status === 'compile'){
       const msg=document.createElement('div');
-      msg.className='muted';
+      msg.className='muted state-status';
+      msg.style.padding='8px';
+      msg.textContent='(this code is not valid)';
+      grid.appendChild(msg);
+    } else if (status === 'ub'){
+      const msg=document.createElement('div');
+      msg.className='muted state-status';
+      msg.style.padding='8px';
+      const label=document.createElement('span');
+      label.textContent='Kaboom! ';
+      msg.appendChild(label);
+      const link=document.createElement('button');
+      link.type='button';
+      link.className='ub-explain-link';
+      link.textContent='[What is undefined behavior?]';
+      const explain=document.createElement('div');
+      explain.className='ub-explain hidden';
+      explain.textContent='Undefined behavior means the C standard does not define what happens. The program might crash, act strangely, or appear to work.';
+      link.addEventListener('click', (e)=>{
+        e.preventDefault();
+        e.stopPropagation();
+        explain.classList.toggle('hidden');
+      });
+      msg.appendChild(link);
+      msg.appendChild(explain);
+      grid.appendChild(msg);
+    } else if (boxes===null){
+      const msg=document.createElement('div');
+      msg.className='muted state-status';
       msg.style.padding='8px';
       msg.textContent='(this code is not valid)';
       grid.appendChild(msg);
@@ -191,67 +339,20 @@
     return wrap;
   }
 
-  function linesForRender(){
-    return p5.lines.map((line,idx)=>({
-      text: (p5.userLines[idx]!=null ? p5.userLines[idx] : line.text) || '',
-      placeholder: line.placeholder,
-      editable:true,
-      deletable: p5.lines.length>1
-    }));
-  }
-
-  function invalidLineIndexes(){
-    const map = readEditableCodeLines($('#p5-code'));
-    const set=new Set();
-    let state=[];
-    const alloc = allocFactory();
-    const seenDecl=new Set();
-    for (let i=0;i<p5.lines.length;i++){
-      const text = (map[i]!=null ? map[i] : p5.lines[i].text) || '';
-      const trimmed = text.trim();
-      if (!trimmed || trimmed===';') continue;
-      const parsed = parseSimpleStatement(text);
-      if (!parsed){ set.add(i); continue; }
-      if (parsed.kind==='decl'){
-        if (seenDecl.has(parsed.name)){
-          set.add(i);
-          continue;
-        }
-        seenDecl.add(parsed.name);
-      }
-      const next = applySimpleStatement(state, parsed, {alloc, allowRedeclare:false});
-      if (!next){ set.add(i); continue; }
-      state = next;
-    }
-    return set;
-  }
-
-  function firstRedeclaration(lines){
+  function firstRedeclaration(statements){
     const seen=new Set();
-    for (const t of lines){
-      const parsed=parseSimpleStatement(t);
-      if (parsed && parsed.kind==='decl'){
-        if (seen.has(parsed.name)) return parsed.name;
-        seen.add(parsed.name);
+    for (const stmt of statements){
+      if (stmt.kind==='decl' || stmt.kind==='declAssign' || stmt.kind==='declAssignVar' || stmt.kind==='declAssignRef'){
+        if (seen.has(stmt.name)) return stmt.name;
+        seen.add(stmt.name);
       }
     }
     return null;
   }
 
-  function markInvalidLines(set){
-    const code=$('#p5-code .codecol');
-    if (!code) return;
-    code.querySelectorAll('.line-invalid').forEach(n=>n.remove());
-    code.querySelectorAll('.line').forEach((line,idx)=>{
-      if (!set.has(idx)) return;
-      const icon=el('<span class=\"line-invalid\" aria-label=\"Invalid line\" title=\"Line would not compile\">🚫</span>');
-      line.appendChild(icon);
-    });
-  }
-
   function render(){
-    renderCodePaneEditable($('#p5-code'), linesForRender(), null);
-    markInvalidLines(invalidLineIndexes());
+    if (editor && editor.value !== p5.text) editor.value = p5.text;
+    updateLineGutters();
     renderStage();
     resetHint();
     if (p5.pass){
@@ -264,100 +365,38 @@
     const editable = !p5.pass;
     const checkBtn=$('#p5-check');
     const hintBtn=$('#p5-hint-btn');
-    const addBtn=$('#p5-add-line');
     if (editable){
       checkBtn?.classList.remove('hidden');
       hintBtn?.classList.remove('hidden');
-      addBtn?.classList.remove('hidden');
     } else {
       checkBtn?.classList.add('hidden');
       hintBtn?.classList.add('hidden');
-      addBtn?.classList.add('hidden');
     }
+    if (editor) editor.readOnly = !editable;
     updateInstructions();
-    bindLineAdd();
   }
 
-  function bindLineAdd(){
-    const code = $('#p5-code');
-    if (!code) return;
-    code.querySelectorAll('.code-editable').forEach(el=>{
-      el.oninput = ()=>{
-        renderStage();
-        markInvalidLines(invalidLineIndexes());
-      };
-      el.onkeydown = e=>{
-        if (e.key==='Enter'){ e.preventDefault(); addLine(); }
-        if (e.key==='Backspace'){
-          const t=txt(el);
-          if (t===''){
-            const idx=Number(el.dataset.index||-1);
-            if (idx>=0 && p5.lines.length>1){
-              removeLine(idx, {focusPrev:true});
-              e.preventDefault();
-            }
-          }
-        }
-      };
+  if (editor){
+    editor.addEventListener('input', ()=>{
+      p5.text = editor.value;
+      updateLineGutters();
+      renderStage();
     });
-    code.querySelectorAll('.code-delete').forEach(btn=>{
-      btn.onclick=()=>{
-        const idx=Number(btn.dataset.index||-1);
-        if (idx>=0) removeLine(idx);
-      };
-    });
-  }
-
-  function addLine(){
-    p5.lines.push({text:'', editable:true, placeholder:''});
-    render();
-    focusLastLine();
-  }
-
-  $('#p5-add-line').onclick=addLine;
-
-  function focusLastLine(){
-    const code=$('#p5-code');
-    if (!code) return;
-    const nodes=code.querySelectorAll('.code-editable');
-    const last=nodes[nodes.length-1];
-    if (last){
-      last.focus();
-      const range=document.createRange();
-      range.selectNodeContents(last);
-      range.collapse(false);
-      const sel=window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
+    if (lineNumbers){
+      editor.addEventListener('scroll', ()=>{
+        lineNumbers.scrollTop = editor.scrollTop;
+      });
     }
-  }
-
-  function removeLine(idx, {focusPrev=false}={}){
-    if (p5.lines.length<=1) return;
-    p5.lines.splice(idx,1);
-    const newMap={};
-    Object.entries(p5.userLines||{}).forEach(([k,v])=>{
-      const i=Number(k);
-      if (i<idx) newMap[i]=v;
-      else if (i>idx) newMap[i-1]=v;
-    });
-    p5.userLines=newMap;
-    render();
-    if (focusPrev){
-      const code=$('#p5-code');
-      if (code){
-        const nodes=code.querySelectorAll('.code-editable');
-        const target=nodes[Math.max(0, idx-1)] || nodes[0];
-        if (target){
-          target.focus();
-          const range=document.createRange();
-          range.selectNodeContents(target);
-          range.collapse(false);
-          const sel=window.getSelection();
-          sel.removeAllRanges();
-          sel.addRange(range);
-        }
-      }
+    if (errorGutter){
+      editor.addEventListener('scroll', ()=>{
+        errorGutter.scrollTop = editor.scrollTop;
+      });
+    }
+    editor.addEventListener('mouseup', updateLineGutters);
+    window.addEventListener('resize', updateLineGutters);
+    if (typeof ResizeObserver !== 'undefined'){
+      const ro = new ResizeObserver(()=>updateLineGutters());
+      ro.observe(editor);
     }
   }
 
@@ -373,13 +412,8 @@
       ws?.querySelectorAll('.vbox').forEach(v=>MB.disableBoxEditing(v));
       MB.removeBoxDeleteButtons(ws);
       p5.pass=true;
-      const code=$('#p5-code');
-      code?.querySelectorAll('.code-editable').forEach(el=>{
-        el.removeAttribute('contenteditable');
-        el.classList.remove('code-editable');
-      });
+      if (editor) editor.readOnly = true;
       $('#p5-check').classList.add('hidden');
-      $('#p5-add-line')?.classList.add('hidden');
       hint.hide();
       $('#p5-hint-btn')?.classList.add('hidden');
       pulseNextButton('p5');

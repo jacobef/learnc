@@ -46,21 +46,23 @@
   function buildHint(){
     const boxes=[...document.querySelectorAll('#p2-stage .vbox')].map(v=>readBoxState(v));
     if (p2.boundary===2){
+      if (boxes.length<2) return {html:'Read the instructions.'};
       const fridge = boxes.find(b=>b.name==='fridge') || boxes.find(b=>b.name && b.name!=='toaster') || boxes.find(b=>b);
       if (!fridge) return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
-      if (!fridge.name) return {html:'Give this variable a name. The variable is called <code class="tok-name">fridge</code>.'};
-      if (fridge.name!=='fridge') return {html:'The variable here is <code class="tok-name">fridge</code>, so the name should read <code class="tok-name">fridge</code>.'};
-      if (fridge.type!=='int') return {html:'<code class="tok-name">fridge</code> was declared as an <code class="tok-type">int</code>.'};
+      if (!fridge.name) return {html:'The new variable\'s name should be <code class="tok-name">fridge</code>.'};
+      if (fridge.name!=='fridge') return {html:'The new variable\'s name should be <code class="tok-name">fridge</code>.'};
+      if (fridge.type!=='int') return {html:'<code class="tok-name">fridge</code>\'s type should be <code class="tok-type">int</code>.'};
       if (!isEmptyVal(fridge.value||'')) return {html:'Right after declaration the value should still be empty.'};
       if (isGhiCorrect(fridge)) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
       return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
     }
     if (p2.boundary===3){
+      if (boxes.length<2) return {html:'Read the instructions.'};
       const toaster = boxes.find(b=>b.name==='toaster') || boxes[0];
       const fridge = boxes.find(b=>b.name==='fridge');
       if (!toaster) return 'Your program has a problem that isn\'t covered by a hint. Sorry.';
       if (toaster.name!=='toaster') return {html:'The variable here is <code class="tok-name">toaster</code>, so the name should read <code class="tok-name">toaster</code>.'};
-      if (toaster.type!=='int') return {html:'<code class="tok-name">toaster</code> was declared as an <code class="tok-type">int</code>.'};
+      if (toaster.type!=='int') return {html:'<code class="tok-name">toaster</code>\'s type should be <code class="tok-type">int</code>.'};
       if (fridge && fridge.value==='28' && toaster.value!=='28') return {html:'<code class="tok-value">28</code> belongs in <code class="tok-name">toaster</code>\'s value, not <code class="tok-name">fridge</code>.'};
       if (fridge && !isEmptyVal(fridge.value||'')) return {html:'This line doesn\'t change <code class="tok-name">fridge</code>. Leave its value empty.'};
       if (isEmptyVal(toaster.value||'')) return {html:'Set <code class="tok-name">toaster</code>\'s value to <code class="tok-value">28</code>.'};
@@ -74,11 +76,12 @@
   function updateInstructions(){
     if (!instructions) return;
     if (p2.boundary===2){
-      instructions.innerHTML = '<code class="tok-line">int fridge;</code> creates a new variable. Click <span class="btn-ref">New variable</span> and enter its attributes.';
+      instructions.innerHTML = '<code class="tok-line">int fridge;</code> creates a new variable. Click <span class="btn-ref">+ New variable</span> and enter its attributes.';
     } else if (p2.boundary===3){
       instructions.innerHTML = 'What does <code class="tok-line">toaster = 28;</code> do?';
     } else {
-      instructions.innerHTML = 'Use <span class="btn-ref">Back</span> and <span class="btn-ref">Run line</span> to step through the code.';
+      const runLabel = `Run line ${p2.boundary+1} ▶`;
+      instructions.innerHTML = `Use <span class="btn-ref">Back ◀</span> and <span class="btn-ref">${runLabel}</span> to step through the code.`;
     }
   }
 

@@ -28,8 +28,8 @@
 
   function buildHint(){
     const box = readBoxState($('#p1-stage .vbox'));
-    if (isEmptyVal(box?.value||'')) return {html:'Line 3 assigns <code class="tok-line">m = 5;</code>, so the value cannot stay empty.'};
-    if (box?.value!=='5') return {html:'The last line stores <code class="tok-value">5</code> in <code class="tok-name">m</code>.'};
+    if (isEmptyVal(box?.value||'')) return {html:'Line 3 assigns <code class="tok-line">m = 5;</code>, so the value shouldn\'t be empty.'};
+    if (box?.value!=='5') return {html:'Line 2 (<code class="tok-line">m = 3;</code>) stored <code class="tok-value">3</code> in <code class="tok-name">m</code>, so what should line 3 (<code class="tok-line">m = 5;</code>) do?'};
     const ok = (p1.boundary===3 && box.type==='int' && box.value==='5');
     if (ok) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
   }
@@ -39,7 +39,8 @@
     if (p1.boundary===3){
       instructions.innerHTML = 'Edit the program state to what it should be after line 3 is run, then press <span class="btn-ref">Check</span>.';
     } else {
-      instructions.innerHTML = 'Use <span class="btn-ref">Back</span> and <span class="btn-ref">Run line</span> to see how the code changes the program state.';
+      const runLabel = `Run line ${p1.boundary+1} ▶`;
+      instructions.innerHTML = `Use the <span class="btn-ref">Back ◀</span> and <span class="btn-ref">${runLabel}</span> buttons to see how the code changes the program state.`;
     }
   }
 

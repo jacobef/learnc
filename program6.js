@@ -17,7 +17,8 @@
     yAddr:MB.randAddr('int'),
     ws:Array(7).fill(null),
     snaps:Array(7).fill(null),
-    passes:Array(7).fill(false)
+    passes:Array(7).fill(false),
+    baseline:Array(7).fill(null)
   };
 
   const hint = createHintController({
@@ -28,6 +29,52 @@
 
   function resetHint(){
     hint.hide();
+  }
+
+  function normalizeState(list){
+    if (!Array.isArray(list)) return [];
+    return list.map(b=>({
+      name:(b.name || '').trim(),
+      type:(b.type || '').trim(),
+      value:String(b.value ?? '').trim(),
+      address:String(b.addr ?? b.address ?? '').trim()
+    })).sort((a,b)=>a.name.localeCompare(b.name));
+  }
+
+  function statesEqual(a,b){
+    const na = normalizeState(a);
+    const nb = normalizeState(b);
+    if (na.length!==nb.length) return false;
+    for (let i=0;i<na.length;i++){
+      const left = na[i];
+      const right = nb[i];
+      if (left.name!==right.name) return false;
+      if (left.type!==right.type) return false;
+      if (left.value!==right.value) return false;
+      if (left.address!==right.address) return false;
+    }
+    return true;
+  }
+
+  function ensureBaseline(boundary, state){
+    if (!p5.baseline[boundary]) p5.baseline[boundary]=cloneBoxes(state);
+    return p5.baseline[boundary];
+  }
+
+  function updateResetVisibility(baseline){
+    const resetBtn = $('#p5-reset');
+    if (!resetBtn) return;
+    const current = serializeWorkspace('p5workspace') || [];
+    const changed = Array.isArray(baseline) && !statesEqual(current, baseline);
+    resetBtn.classList.toggle('hidden', !changed);
+  }
+
+  function attachResetWatcher(wrap, baseline){
+    if (!wrap) return;
+    const refresh = ()=>updateResetVisibility(baseline);
+    wrap.addEventListener('input', refresh);
+    wrap.addEventListener('click', ()=>setTimeout(refresh, 0));
+    refresh();
   }
 
   function setInstructions(message){
@@ -63,6 +110,7 @@
       if (ok) return {html:'Looks good. Press <span class="btn-ref">Check</span>.'};
     }
     if (p5.boundary===6){
+      if ((by.drill?.value || '').trim().toLowerCase()==='hammer') return {html:'<code class="tok-name">drill</code>\'s value should be <code class="tok-name">hammer</code>\'s value, not the literal word \"hammer\".'};
       if (isEmptyVal(by.hammer.value||'')) return {html:'<code class="tok-name">hammer</code> already equals <code class="tok-value">1</code> from the earlier assignments.'};
       if (by.hammer.value!=='1') return {html:'<code class="tok-line">drill = hammer;</code> should modify <code class="tok-name">drill</code>, not <code class="tok-name">hammer</code>.'};
       if (isEmptyVal(by.drill.value||'')) return {html:'<code class="tok-line">hammer = drill;</code> puts <code class="tok-name">drill</code>\'s value into <code class="tok-name">hammer</code>. What should <code class="tok-line">drill = hammer;</code> do?'};
@@ -158,7 +206,8 @@
       stage.appendChild(wrap);
       if (editable){
         $('#p5-check').classList.remove('hidden');
-        $('#p5-reset').classList.remove('hidden');
+        const baseline = ensureBaseline(boundary, state);
+        attachResetWatcher(wrap, baseline);
       } else if (state.length){
         const snapshot = cloneBoxes(state);
         p5.ws[boundary] = snapshot;

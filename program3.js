@@ -21,7 +21,8 @@
     pass1:false,
     pass3:false,
     pass4:false,
-    pass5:false
+    pass5:false,
+    baseline:{}
   };
 
   const hint = createHintController({
@@ -34,6 +35,53 @@
     hint.hide();
   }
 
+  function normalizeState(list){
+    if (!Array.isArray(list)) return [];
+    return list.map(b=>({
+      name:(b.name || '').trim(),
+      type:(b.type || '').trim(),
+      value:String(b.value ?? '').trim(),
+      address:String(b.addr ?? b.address ?? '').trim()
+    })).sort((a,b)=>a.name.localeCompare(b.name));
+  }
+
+  function statesEqual(a,b){
+    const na = normalizeState(a);
+    const nb = normalizeState(b);
+    if (na.length!==nb.length) return false;
+    for (let i=0;i<na.length;i++){
+      const left = na[i];
+      const right = nb[i];
+      if (left.name!==right.name) return false;
+      if (left.type!==right.type) return false;
+      if (left.value!==right.value) return false;
+      if (left.address!==right.address) return false;
+    }
+    return true;
+  }
+
+  function ensureBaseline(boundary, state){
+    if (!p3.baseline[boundary]) p3.baseline[boundary]=cloneStateBoxes(state);
+    return p3.baseline[boundary];
+  }
+
+  function updateResetVisibility(boundary){
+    const resetBtn = $('#p3-reset');
+    if (!resetBtn) return;
+    const baseline = p3.baseline[boundary];
+    const current = serializeWorkspace('p3workspace') || [];
+    const changed = Array.isArray(baseline) && !statesEqual(current, baseline);
+    resetBtn.classList.toggle('hidden', !changed);
+  }
+
+  function attachResetWatcher(wrap, boundary){
+    if (!wrap) return;
+    const refresh = ()=>updateResetVisibility(boundary);
+    wrap.addEventListener('input', refresh);
+    wrap.addEventListener('click', ()=>setTimeout(refresh, 0));
+    refresh();
+  }
+
   function buildHint(){
     const ws=document.getElementById('p3workspace');
     if (!ws) return {html:'Use <span class="btn-ref">+ New variable</span> to add the variables you need to the program state.'};
@@ -44,6 +92,14 @@
     const required = (p3.boundary===1)
       ? ['north']
       : (p3.boundary===3 ? ['north','south'] : ['north','south','east']);
+    const coreRequired = (p3.boundary>=4) ? ['north','south'] : required;
+    const missingCore = coreRequired.filter(name=>!by[name]);
+    if (missingCore.length) return {html:`You still need <code class="tok-name">${missingCore[0]}</code> in the program state.`};
+    if (p3.boundary>=4){
+      const extras = boxes.filter(b=>!['north','south'].includes(b.name));
+      if (!extras.length) return {html:'You still need to create a new variable for <code class="tok-name">east</code>.'};
+      if (!extras.some(b=>b.name==='east')) return {html:'The new variable\'s name should be <code class="tok-name">east</code>.'};
+    }
     const missing = required.filter(name=>!by[name]);
     if (missing.length) return {html:`You still need <code class="tok-name">${missing[0]}</code> in the program state.`};
     if (boxes.length>required.length){
@@ -54,7 +110,7 @@
     if (wrongType){
       const label = wrongType.name ? `<code class="tok-name">${wrongType.name}</code>` : 'This variable';
       const typeLabel = wrongType.type ? `<code class="tok-type">${wrongType.type}</code>` : '<code class="tok-type">unknown</code>';
-      return {html:`${label} should be an <code class="tok-type">int</code>, not a ${typeLabel}.`};
+      return {html:`${label}\'s type should be <code class="tok-type">int</code>, not ${typeLabel}.`};
     }
 
     if (p3.boundary===1){
@@ -145,9 +201,10 @@
       stage.appendChild(wrap);
       if (editable){
         $('#p3-add').classList.remove('hidden');
-        $('#p3-reset').classList.remove('hidden');
         $('#p3-check').classList.remove('hidden');
         hint.setButtonHidden(false);
+        ensureBaseline(1, []);
+        attachResetWatcher(wrap, 1);
       }
     } else if (p3.boundary===2){
       const wrap=el('<div class="grid"></div>');
@@ -168,9 +225,13 @@
       stage.appendChild(wrap);
       if (editable){
         $('#p3-add').classList.remove('hidden');
-        $('#p3-reset').classList.remove('hidden');
         $('#p3-check').classList.remove('hidden');
         hint.setButtonHidden(false);
+        ensureBaseline(3, [
+          {name:'north', type:'int', value:'empty', address:String(p3.aAddr)},
+          {name:'south', type:'int', value:'empty', address:String(p3.bAddr)}
+        ]);
+        attachResetWatcher(wrap, 3);
       }
     } else if (p3.boundary===4){
       const defaults = (()=>{
@@ -191,9 +252,10 @@
       stage.appendChild(wrap);
       if (editable){
         $('#p3-add').classList.remove('hidden');
-        $('#p3-reset').classList.remove('hidden');
         $('#p3-check').classList.remove('hidden');
         hint.setButtonHidden(false);
+        ensureBaseline(4, defaults);
+        attachResetWatcher(wrap, 4);
       }
     } else if (p3.boundary===5){
       const defaults = (()=>{
@@ -218,9 +280,10 @@
       stage.appendChild(wrap);
       if (editable){
         $('#p3-add').classList.remove('hidden');
-        $('#p3-reset').classList.remove('hidden');
         $('#p3-check').classList.remove('hidden');
         hint.setButtonHidden(false);
+        ensureBaseline(5, defaults);
+        attachResetWatcher(wrap, 5);
       }
     }
 
@@ -236,6 +299,7 @@
   $('#p3-add').onclick=()=>{
     const ws=document.getElementById('p3workspace');
     if (ws) ws.appendChild(makeAnswerBox({}));
+    updateResetVisibility(p3.boundary);
   };
 
   $('#p3-reset').onclick=()=>{

@@ -177,6 +177,850 @@
     return boxes;
   }
 
+    function createSimpleSimulator(opts={}){
+    const {
+      allowVarAssign=false,
+      allowDeclAssign=true,
+      allowDeclAssignVar=false,
+      requireSourceValue=false,
+      allowPointers=false
+    } = opts;
+
+    function tokenizeProgram(src=''){
+      const tokens = [];
+      let i = 0;
+      let line = 0;
+      let col = 0;
+      while (i < src.length){
+        const ch = src[i];
+        if (ch === '\r'){
+          i++;
+          if (src[i] === '\n') i++;
+          line++;
+          col = 0;
+          continue;
+        }
+        if (ch === '\n'){
+          i++;
+          line++;
+          col = 0;
+          continue;
+        }
+        if (/\s/.test(ch)){ i++; col++; continue; }
+        if (ch==='*' || ch==='&' || ch==='=' || ch===';'){
+          tokens.push({type:'sym', value:ch, line, col});
+          i++;
+          col++;
+          continue;
+        }
+        if (/[A-Za-z_]/.test(ch)){
+          const startCol = col;
+          let j = i + 1;
+          while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j++;
+          const ident = src.slice(i, j);
+          tokens.push({type: ident==='int' ? 'kw' : 'ident', value: ident, line, col:startCol});
+          col += (j - i);
+          i = j;
+          continue;
+        }
+        if (ch==='-' || /[0-9]/.test(ch)){
+          const startCol = col;
+          let j = i;
+          if (src[j]==='-'){
+            if (!/[0-9]/.test(src[j+1] || '')){
+              tokens.push({type:'unknown', value:ch, line, col});
+              i++;
+              col++;
+              continue;
+            }
+            j++;
+          }
+          while (j < src.length && /[0-9]/.test(src[j])) j++;
+          tokens.push({type:'number', value: src.slice(i, j), line, col:startCol});
+          col += (j - i);
+          i = j;
+          continue;
+        }
+        tokens.push({type:'unknown', value:ch, line, col});
+        i++;
+        col++;
+      }
+      return tokens;
+    }
+
+    function hasDeclaredPrefix(prefix, names){
+      if (!prefix || !names || !names.size) return false;
+      for (const name of names){
+        if (name.startsWith(prefix)) return true;
+      }
+      return false;
+    }
+
+    function resolveDeclType(stars){
+      if (!Number.isFinite(stars) || stars < 0) return null;
+      if (stars === 0) return 'int';
+      if (!allowPointers) return null;
+      return `int${'*'.repeat(stars)}`;
+    }
+
+    function isPointerType(type){
+      const depth = pointerDepth(type);
+      return Number.isFinite(depth) && depth > 0;
+    }
+
+    function pointerDepth(type){
+      if (type === 'int') return 0;
+      const match = String(type || '').match(/^int(\*+)$/);
+      return match ? match[1].length : null;
+    }
+
+    function makePointerType(depth){
+      if (!Number.isFinite(depth) || depth < 0) return null;
+      return depth === 0 ? 'int' : `int${'*'.repeat(depth)}`;
+    }
+
+    function isRefCompatible(targetType, refType){
+      const targetDepth = pointerDepth(targetType);
+      const refDepth = pointerDepth(refType);
+      if (!Number.isFinite(targetDepth) || !Number.isFinite(refDepth)) return false;
+      return targetDepth === refDepth + 1;
+    }
+
+    function expectedPointerTypeForRef(refType){
+      const refDepth = pointerDepth(refType);
+      if (!Number.isFinite(refDepth)) return null;
+      return makePointerType(refDepth + 1);
+    }
+
+    function isDeclPrefix(tokens){
+      if (!tokens.length) return false;
+      if (tokens[0].type!=='kw' || tokens[0].value!=='int') return false;
+      let idx = 1;
+      let stars = 0;
+      while (idx < tokens.length && tokens[idx].type === 'sym' && tokens[idx].value === '*'){
+        if (!allowPointers) return false;
+        stars++;
+        idx++;
+      }
+      if (!resolveDeclType(stars)) return false;
+      if (idx === tokens.length) return true;
+      if (tokens[idx].type !== 'ident') return false;
+      idx++;
+      if (idx === tokens.length) return true;
+      if (!(allowDeclAssign || allowDeclAssignVar)) return false;
+      if (tokens[idx].type !== 'sym' || tokens[idx].value !== '=') return false;
+      idx++;
+      if (idx === tokens.length) return true;
+      const rhs = tokens[idx];
+      if (rhs.type === 'number'){
+        return idx === tokens.length - 1 && allowDeclAssign && stars === 0;
+      }
+      if (rhs.type === 'ident'){
+        return idx === tokens.length - 1 && allowDeclAssignVar;
+      }
+      if (rhs.type === 'sym' && rhs.value === '&'){
+        if (!allowPointers || !allowDeclAssignVar) return false;
+        if (!isPointerType(resolveDeclType(stars))) return false;
+        if (idx === tokens.length - 1) return true;
+        return tokens[idx + 1]?.type === 'ident' && idx + 2 === tokens.length;
+      }
+      return false;
+    }
+
+    function isAssignPrefix(tokens, declaredNames){
+      if (!tokens.length) return false;
+      if (tokens[0].type!=='ident') return false;
+      const name = tokens[0].value;
+      if (tokens.length === 1) return hasDeclaredPrefix(name, declaredNames);
+      if (tokens[1].type!=='sym' || tokens[1].value!=='=') return false;
+      if (!declaredNames?.has(name)) return false;
+      if (tokens.length === 2) return true;
+      const t2 = tokens[2];
+      if (t2.type==='number'){
+        return tokens.length === 3;
+      }
+      if (t2.type==='ident' && allowVarAssign){
+        return tokens.length === 3 && hasDeclaredPrefix(t2.value, declaredNames);
+      }
+      if (t2.type==='sym' && t2.value==='&' && allowPointers){
+        if (tokens.length === 3) return true;
+        return tokens.length === 4 && tokens[3].type === 'ident';
+      }
+      return false;
+    }
+
+    function isDerefPrefix(tokens, declaredNames){
+      if (!allowPointers) return false;
+      if (!tokens.length) return false;
+      let idx = 0;
+      while (idx < tokens.length && tokens[idx].type === 'sym' && tokens[idx].value === '*') idx++;
+      if (idx === 0) return false;
+      if (idx === tokens.length) return true;
+      if (tokens[idx].type !== 'ident') return false;
+      const name = tokens[idx].value;
+      if (idx === tokens.length - 1) return hasDeclaredPrefix(name, declaredNames);
+      idx++;
+      if (tokens[idx].type !== 'sym' || tokens[idx].value !== '=') return false;
+      if (!declaredNames?.has(name)) return false;
+      idx++;
+      if (idx >= tokens.length) return true;
+      const rhs = tokens[idx];
+      if (rhs.type === 'number') return idx === tokens.length - 1;
+      if (rhs.type === 'ident' && allowVarAssign){
+        return idx === tokens.length - 1 && hasDeclaredPrefix(rhs.value, declaredNames);
+      }
+      if (rhs.type === 'sym' && rhs.value === '&' && allowPointers){
+        if (idx === tokens.length - 1) return true;
+        return idx === tokens.length - 2 && tokens[idx + 1].type === 'ident';
+      }
+      return false;
+    }
+
+    function isStatementPrefix(tokens, declaredNames, allowIntPrefix){
+      if (!tokens.length) return false;
+      if (tokens.some(t=>t.type==='unknown')) return false;
+      if (!allowPointers && tokens.some(t=>t.type==='sym' && (t.value==='*' || t.value==='&'))) return false;
+      if (tokens.length === 1){
+        const t0 = tokens[0];
+        if (t0.type==='kw' && t0.value==='int') return true;
+        if (t0.type==='ident'){
+          if (allowIntPrefix && 'int'.startsWith(t0.value)) return true;
+          return hasDeclaredPrefix(t0.value, declaredNames);
+        }
+        if (allowPointers && t0.type==='sym' && t0.value==='*') return true;
+      }
+      return isDeclPrefix(tokens) || isAssignPrefix(tokens, declaredNames) || isDerefPrefix(tokens, declaredNames);
+    }
+
+    function parseStatementTokens(tokens){
+      if (!tokens.length) return null;
+      if (tokens[0].type==='kw' && tokens[0].value==='int'){
+        let idx = 1;
+        let stars = 0;
+        while (idx < tokens.length && tokens[idx].type === 'sym' && tokens[idx].value === '*'){
+          if (!allowPointers) return null;
+          stars++;
+          idx++;
+        }
+        const declType = resolveDeclType(stars);
+        if (!declType) return null;
+        if (idx >= tokens.length || tokens[idx].type !== 'ident') return null;
+        const name = tokens[idx].value;
+        idx++;
+        if (idx === tokens.length){
+          return {kind:'decl', name, type:declType};
+        }
+        if (!(allowDeclAssign || allowDeclAssignVar)) return null;
+        if (tokens[idx].type !== 'sym' || tokens[idx].value !== '=') return null;
+        idx++;
+        if (idx >= tokens.length) return null;
+        const rhs = tokens[idx];
+        if (rhs.type === 'number' && allowDeclAssign && stars === 0 && idx === tokens.length - 1){
+          return {kind:'declAssign', name, value:rhs.value, valueKind:'num', declType};
+        }
+        if (rhs.type === 'ident' && allowDeclAssignVar && idx === tokens.length - 1){
+          return {kind:'declAssignVar', name, src:rhs.value, declType};
+        }
+        if (allowPointers && allowDeclAssignVar && rhs.type === 'sym' && rhs.value === '&' && isPointerType(declType)){
+          const next = tokens[idx + 1];
+          if (next?.type === 'ident' && idx + 2 === tokens.length){
+            return {kind:'declAssignRef', name, ref:next.value, declType};
+          }
+        }
+        return null;
+      }
+      if (allowPointers && tokens[0].type==='sym' && tokens[0].value==='*'){
+        let idx = 0;
+        let depth = 0;
+        while (idx < tokens.length && tokens[idx].type === 'sym' && tokens[idx].value === '*'){
+          depth++;
+          idx++;
+        }
+        if (idx >= tokens.length || tokens[idx].type !== 'ident') return null;
+        const name = tokens[idx].value;
+        idx++;
+        if (idx >= tokens.length || tokens[idx].type !== 'sym' || tokens[idx].value !== '=') return null;
+        idx++;
+        if (idx >= tokens.length) return null;
+        const rhs = tokens[idx];
+        if (rhs.type === 'number' && idx === tokens.length - 1){
+          return {kind:'assignDeref', name, value:rhs.value, depth};
+        }
+        if (rhs.type === 'ident' && allowVarAssign && idx === tokens.length - 1){
+          return {kind:'assignDerefVar', name, src:rhs.value, depth};
+        }
+        if (rhs.type === 'sym' && rhs.value === '&' && allowPointers){
+          const next = tokens[idx + 1];
+          if (next?.type === 'ident' && idx + 2 === tokens.length){
+            return {kind:'assignDerefRef', name, ref:next.value, depth};
+          }
+        }
+      }
+      if (tokens.length === 4 &&
+        tokens[0].type==='ident' &&
+        tokens[1].type==='sym' && tokens[1].value==='=' &&
+        tokens[2].type==='sym' && tokens[2].value==='&' &&
+        tokens[3].type==='ident' &&
+        allowPointers){
+        return {kind:'assignRef', name:tokens[0].value, ref:tokens[3].value};
+      }
+      if (tokens.length === 3 &&
+        tokens[0].type==='ident' &&
+        tokens[1].type==='sym' && tokens[1].value==='='){
+        if (tokens[2].type==='number'){
+          return {kind:'assign', name:tokens[0].value, value:tokens[2].value, valueKind:'num'};
+        }
+        if (tokens[2].type==='ident' && allowVarAssign){
+          return {kind:'assignVar', name:tokens[0].value, src:tokens[2].value};
+        }
+      }
+      return null;
+    }
+
+    function parseDeclAssignRefFallback(tokens){
+      if (!allowPointers) return null;
+      if (!tokens.length) return null;
+      if (tokens[0].type!=='kw' || tokens[0].value!=='int') return null;
+      let idx = 1;
+      let stars = 0;
+      while (idx < tokens.length && tokens[idx].type === 'sym' && tokens[idx].value === '*'){
+        stars++;
+        idx++;
+      }
+      const declType = resolveDeclType(stars);
+      if (!declType) return null;
+      if (idx >= tokens.length || tokens[idx].type !== 'ident') return null;
+      const name = tokens[idx].value;
+      idx++;
+      if (idx + 2 !== tokens.length - 1) return null;
+      if (tokens[idx].type !== 'sym' || tokens[idx].value !== '=') return null;
+      if (tokens[idx + 1].type !== 'sym' || tokens[idx + 1].value !== '&') return null;
+      if (tokens[idx + 2].type !== 'ident') return null;
+      return {name, ref: tokens[idx + 2].value, declType};
+    }
+
+    function applyAssignVar(state, stmt){
+      const boxes = cloneBoxes(state);
+      const by = Object.fromEntries(boxes.map(b=>[b.name,b]));
+      const target = by[stmt.name];
+      const source = by[stmt.src];
+      if (!target || !source) return null;
+      if (requireSourceValue && isEmptyVal(source.value ?? '')) return null;
+      const sameType = target.type === source.type;
+      const isInt = target.type === 'int' && source.type === 'int';
+      const isPtr = sameType && isPointerType(target.type);
+      if (!isInt && !isPtr) return null;
+      target.value = String(source.value ?? 'empty');
+      if (isPtr && target.value && target.value !== 'empty'){
+        const aliasTarget = boxes.find(b=>b.address===String(target.value));
+        if (aliasTarget){
+          const alias = `*${stmt.name}`;
+          const names = aliasTarget.names || [aliasTarget.name].filter(Boolean);
+          if (!names.includes(alias)) names.push(alias);
+          aliasTarget.names = names;
+        }
+      }
+      return boxes;
+    }
+
+    function applyAssignRef(state, stmt){
+      const boxes = cloneBoxes(state);
+      const by = Object.fromEntries(boxes.map(b=>[b.name,b]));
+      const target = by[stmt.name];
+      const refBox = by[stmt.ref];
+      if (!target || !refBox || !refBox.address) return null;
+      const targetDepth = pointerDepth(target.type);
+      const refDepth = pointerDepth(refBox.type);
+      if (!Number.isFinite(targetDepth) || !Number.isFinite(refDepth)) return null;
+      if (targetDepth !== refDepth + 1) return null;
+      target.value = String(refBox.address);
+      const alias = `*${stmt.name}`;
+      const names = refBox.names || [refBox.name].filter(Boolean);
+      if (!names.includes(alias)) names.push(alias);
+      refBox.names = names;
+      return boxes;
+    }
+
+    function resolveDerefTarget(state, ptrName, depth){
+      const by = Object.fromEntries(state.map(b=>[b.name,b]));
+      const ptr = by[ptrName];
+      if (!ptr) return {error:'missing'};
+      let current = ptr;
+      for (let i=0; i<depth; i++){
+        if (!isPointerType(current.type)) return {error:'type'};
+        if (!current.value || current.value === 'empty') return {error:'empty'};
+        const next = state.find(b=>b.address===String(current.value));
+        if (!next) return {error:'unknown'};
+        current = next;
+      }
+      return {target: current};
+    }
+
+    function applyAssignDeref(state, stmt){
+      const boxes = cloneBoxes(state);
+      const {target} = resolveDerefTarget(boxes, stmt.name, stmt.depth || 1);
+      if (!target) return null;
+      const targetDepth = pointerDepth(target.type);
+      if (!Number.isFinite(targetDepth)) return null;
+      if (stmt.kind === 'assignDeref'){
+        if (targetDepth !== 0) return null;
+        target.value = String(stmt.value);
+      } else if (stmt.kind === 'assignDerefVar'){
+        const by = Object.fromEntries(boxes.map(b=>[b.name,b]));
+        const source = by[stmt.src];
+        if (!source) return null;
+        if (requireSourceValue && isEmptyVal(source.value ?? '')) return null;
+        if (pointerDepth(source.type) !== targetDepth) return null;
+        target.value = String(source.value ?? 'empty');
+      } else if (stmt.kind === 'assignDerefRef'){
+        const by = Object.fromEntries(boxes.map(b=>[b.name,b]));
+        const refBox = by[stmt.ref];
+        if (!refBox || !refBox.address) return null;
+        if (!isRefCompatible(target.type, refBox.type)) return null;
+        target.value = String(refBox.address);
+      }
+      if (targetDepth > 0 && target.value && target.value !== 'empty'){
+        const aliasTarget = boxes.find(b=>b.address===String(target.value));
+        if (aliasTarget){
+          const alias = `${'*'.repeat(stmt.depth || 1)}${stmt.name}`;
+          const names = aliasTarget.names || [aliasTarget.name].filter(Boolean);
+          if (!names.includes(alias)) names.push(alias);
+          aliasTarget.names = names;
+        }
+      }
+      return boxes;
+    }
+
+    function applyAssignDerefVar(state, stmt){
+      return applyAssignDeref(state, stmt);
+    }
+
+    function applyStatement(state, stmt, opts){
+      if (!stmt) return state;
+      if (stmt.kind==='declAssign'){
+        const decl = {kind:'decl', name:stmt.name, type:stmt.declType || 'int'};
+        const afterDecl = applySimpleStatement(state, decl, opts);
+        if (!afterDecl) return null;
+        const assign = {kind:'assign', name:stmt.name, value:stmt.value, valueKind:'num'};
+        return applySimpleStatement(afterDecl, assign, opts);
+      }
+      if (stmt.kind==='declAssignVar'){
+        const decl = {kind:'decl', name:stmt.name, type:stmt.declType || 'int'};
+        const afterDecl = applySimpleStatement(state, decl, opts);
+        if (!afterDecl) return null;
+        const assignVar = {kind:'assignVar', name:stmt.name, src:stmt.src};
+        return applyStatement(afterDecl, assignVar, opts);
+      }
+      if (stmt.kind==='declAssignRef'){
+        const decl = {kind:'decl', name:stmt.name, type:stmt.declType || 'int*'};
+        const afterDecl = applySimpleStatement(state, decl, opts);
+        if (!afterDecl) return null;
+        const assignRef = {kind:'assignRef', name:stmt.name, ref:stmt.ref};
+        return applyAssignRef(afterDecl, assignRef);
+      }
+      if (stmt.kind==='assignVar'){
+        return applyAssignVar(state, stmt);
+      }
+      if (stmt.kind==='assignRef'){
+        return applyAssignRef(state, stmt);
+      }
+      if (stmt.kind==='assignDeref' || stmt.kind==='assignDerefVar' || stmt.kind==='assignDerefRef'){
+        return applyAssignDeref(state, stmt);
+      }
+      return applySimpleStatement(state, stmt, opts);
+    }
+
+    function missingDeclError(name, typeLabel='int'){
+      const text = `You can't assign to ${name} before declaring it. You need to first declare it (${typeLabel} ${name};) prior to this line.`;
+      const html = `You can't assign to <code class="tok-name">${name}</code> before declaring it. You need to first declare it (<code class="tok-line">${typeLabel} ${name};</code>) prior to this line.`;
+      return {error:{text, html}, kind:'compile'};
+    }
+
+    function typeMismatchError(name, expectedType){
+      const text = `${name}'s type would need to be ${expectedType} for this line to work.`;
+      const html = `<code class="tok-name">${name}</code>'s type would need to be <code class="tok-type">${expectedType}</code> for this line to work.`;
+      return {error:{text, html}, kind:'compile'};
+    }
+
+    function describeTokensError(tokens, seenDecl){
+      if (!tokens.length) return 'Line has an error.';
+      if (tokens.some(t=>t.type==='unknown')) return 'That line has a character that does not belong in a declaration or assignment.';
+      if (!allowPointers && tokens.some(t=>t.type==='sym' && (t.value==='*' || t.value==='&'))){
+        return 'Pointers are not supported here.';
+      }
+      if (tokens[0].type==='kw' && tokens[0].value==='int'){
+        if (tokens.length === 1) return 'A declaration needs a variable name.';
+        if (tokens.length >= 2 && tokens[1].type==='sym' && tokens[1].value==='*'){
+          let idx = 1;
+          while (idx < tokens.length && tokens[idx].type==='sym' && tokens[idx].value==='*') idx++;
+          if (tokens[idx]?.type !== 'ident') return 'A declaration needs a variable name.';
+          if (tokens[idx + 1]?.type === 'sym' && tokens[idx + 1].value === '=' &&
+            tokens[idx + 2]?.type === 'number'){
+            return 'Pointer declarations should assign from an address, like "int* name = &x;".';
+          }
+          return 'A declaration needs a variable name.';
+        }
+        if (tokens[1].type!=='ident') return 'A declaration needs a variable name.';
+        if (allowDeclAssign || allowDeclAssignVar) return 'Declarations should look like "int name;" or "int name = value;".';
+        return 'Declarations should look like "int name;".';
+      }
+      if (allowPointers && tokens[0].type==='sym' && tokens[0].value==='*'){
+        return 'Assignments through pointers should look like "*name = value;".';
+      }
+      if (tokens[0].type==='ident'){
+        const name = tokens[0].value;
+        if (!hasDeclaredPrefix(name, seenDecl)) return `You can't use ${name} before declaring it.`;
+        if (tokens.length === 1) return 'Assignments should look like "name = value;".';
+        if (tokens[1].type!=='sym' || tokens[1].value!=='=') return 'Assignments should use "=".';
+        if (tokens.length === 2) return 'Assignment needs a value on the right.';
+        const rhs = tokens[2];
+        if (rhs.type==='ident' && !allowVarAssign) return 'Assignments should use a number.';
+        if (rhs.type==='ident' && !hasDeclaredPrefix(rhs.value, seenDecl)){
+          return `You can't use ${rhs.value} before declaring it.`;
+        }
+        return 'Assignments should look like "name = value;".';
+      }
+      return 'Line should be a declaration or assignment.';
+    }
+
+    function validateStatement(tokens, state, seenDecl, alloc, lineNumber){
+      if (tokens.some(t=>t.type==='unknown')){
+        return {error:'That line has a character that does not belong in a declaration or assignment.', kind:'compile'};
+      }
+      if (!allowPointers && tokens.some(t=>t.type==='sym' && (t.value==='*' || t.value==='&'))){
+        return {error:'Pointers are not supported here.', kind:'compile'};
+      }
+      const parsed = parseStatementTokens(tokens);
+      if (!parsed){
+        const refAssign = parseDeclAssignRefFallback(tokens);
+        if (refAssign){
+          const by = Object.fromEntries(state.map(b=>[b.name,b]));
+          const refBox = by[refAssign.ref];
+          if (!refBox){
+            return {error:`You can't use ${refAssign.ref} before declaring it.`, kind:'compile'};
+          }
+          const expected = expectedPointerTypeForRef(refBox.type);
+          if (expected && refAssign.declType !== expected){
+            return typeMismatchError(refAssign.name, expected);
+          }
+        }
+        return {error:describeTokensError(tokens, seenDecl), kind:'compile'};
+      }
+      if (parsed.kind==='decl' || parsed.kind==='declAssign' || parsed.kind==='declAssignVar' || parsed.kind==='declAssignRef'){
+        if (seenDecl.has(parsed.name)) return {error:`You already declared ${parsed.name}.`, kind:'compile'};
+        if (parsed.kind==='declAssignVar'){
+          const by = Object.fromEntries(state.map(b=>[b.name,b]));
+          if (!by[parsed.src]){
+            return {error:`You can't use ${parsed.src} before declaring it.`, kind:'compile'};
+          }
+          if (requireSourceValue && isEmptyVal(by[parsed.src].value ?? '')){
+            return {error:`${parsed.src} doesn't have a value yet.`, kind:'ub'};
+          }
+        }
+        if (parsed.kind==='declAssignRef'){
+          const by = Object.fromEntries(state.map(b=>[b.name,b]));
+          const refBox = by[parsed.ref];
+          if (!refBox){
+            return {error:`You can't use ${parsed.ref} before declaring it.`, kind:'compile'};
+          }
+          if (!isRefCompatible(parsed.declType, refBox.type)){
+            const expected = expectedPointerTypeForRef(refBox.type);
+            if (expected) return typeMismatchError(parsed.name, expected);
+            return {error:'That assignment is not valid here.', kind:'compile'};
+          }
+        }
+      } else if (parsed.kind==='assign'){
+        if (!seenDecl.has(parsed.name)){
+          return missingDeclError(parsed.name, 'int');
+        }
+      } else if (parsed.kind==='assignVar'){
+        const by = Object.fromEntries(state.map(b=>[b.name,b]));
+        if (!by[parsed.name]){
+          const typeLabel = by[parsed.src]?.type || 'int';
+          return missingDeclError(parsed.name, typeLabel);
+        }
+        if (!by[parsed.src]){
+          return {error:`You can't use ${parsed.src} before declaring it.`, kind:'compile'};
+        }
+        if (requireSourceValue && isEmptyVal(by[parsed.src].value ?? '')){
+          return {error:`${parsed.src} doesn't have a value yet.`, kind:'ub'};
+        }
+      } else if (parsed.kind==='assignRef'){
+        const by = Object.fromEntries(state.map(b=>[b.name,b]));
+        if (!by[parsed.name]){
+          const refType = by[parsed.ref]?.type || 'int';
+          const typeLabel = expectedPointerTypeForRef(refType) || 'int*';
+          return missingDeclError(parsed.name, typeLabel);
+        }
+        const refBox = by[parsed.ref];
+        if (!refBox){
+          return {error:`You can't use ${parsed.ref} before declaring it.`, kind:'compile'};
+        }
+        if (!isPointerType(by[parsed.name].type)){
+          const expected = expectedPointerTypeForRef(refBox.type) || 'int*';
+          return typeMismatchError(parsed.name, expected);
+        }
+        if (!isRefCompatible(by[parsed.name].type, refBox.type)){
+          const expected = expectedPointerTypeForRef(refBox.type);
+          if (expected) return typeMismatchError(parsed.name, expected);
+          return {error:'That assignment is not valid here.', kind:'compile'};
+        }
+      } else if (parsed.kind==='assignDeref' || parsed.kind==='assignDerefVar' || parsed.kind==='assignDerefRef'){
+        const by = Object.fromEntries(state.map(b=>[b.name,b]));
+        const ptr = by[parsed.name];
+        const depth = parsed.depth || 1;
+        if (!ptr){
+          return missingDeclError(parsed.name, makePointerType(depth) || `int${'*'.repeat(depth)}`);
+        }
+        const ptrDepth = pointerDepth(ptr.type);
+        if (!Number.isFinite(ptrDepth) || ptrDepth < depth){
+          return typeMismatchError(parsed.name, makePointerType(depth) || `int${'*'.repeat(depth)}`);
+        }
+        let expectedPtrDepth = depth;
+        if (parsed.kind === 'assignDerefVar'){
+          if (!by[parsed.src]){
+            return {error:`You can't use ${parsed.src} before declaring it.`, kind:'compile'};
+          }
+          const srcDepth = pointerDepth(by[parsed.src].type);
+          expectedPtrDepth = Number.isFinite(srcDepth) ? depth + srcDepth : depth;
+        }
+        if (parsed.kind === 'assignDerefRef'){
+          if (!by[parsed.ref]){
+            return {error:`You can't use ${parsed.ref} before declaring it.`, kind:'compile'};
+          }
+          const refDepth = pointerDepth(by[parsed.ref].type);
+          expectedPtrDepth = Number.isFinite(refDepth) ? depth + refDepth + 1 : depth + 1;
+        }
+        if (ptrDepth !== expectedPtrDepth){
+          return typeMismatchError(parsed.name, makePointerType(expectedPtrDepth) || `int${'*'.repeat(expectedPtrDepth)}`);
+        }
+        let current = ptr;
+        for (let i=0; i<depth; i++){
+          if (!isPointerType(current.type)){
+            return typeMismatchError(parsed.name, makePointerType(depth) || `int${'*'.repeat(depth)}`);
+          }
+          if (!current.value || current.value === 'empty'){
+            return {error:`${parsed.name} doesn't have a value yet.`, kind:'ub'};
+          }
+          const next = state.find(b=>b.address===String(current.value));
+          if (!next){
+            return {error:`${parsed.name} doesn't point to a known variable.`, kind:'ub'};
+          }
+          current = next;
+        }
+        if (parsed.kind === 'assignDerefVar'){
+          if (requireSourceValue && isEmptyVal(by[parsed.src].value ?? '')){
+            return {error:`${parsed.src} doesn't have a value yet.`, kind:'ub'};
+          }
+        }
+      }
+      const next = applyStatement(state, parsed, {alloc, allowRedeclare:false});
+      if (!next) return {error:'That assignment is not valid here.', kind:'compile'};
+      return {next, parsed};
+    }
+
+    function splitStatements(tokens){
+      const parts = [];
+      let current = [];
+      let startLine = 0;
+      for (const tok of tokens){
+        if (tok.type==='sym' && tok.value===';'){
+          parts.push({
+            tokens: current,
+            startLine: current[0]?.line ?? startLine,
+            endLine: tok.line,
+            hasSemicolon: true
+          });
+          current = [];
+          startLine = tok.line;
+          continue;
+        }
+        if (!current.length) startLine = tok.line;
+        current.push(tok);
+      }
+      if (current.length){
+        parts.push({
+          tokens: current,
+          startLine: current[0]?.line ?? startLine,
+          endLine: current[current.length-1].line,
+          hasSemicolon: false
+        });
+      }
+      return parts;
+    }
+
+    function findMissingSemicolonInTokens(tokens){
+      for (let i=1;i<=tokens.length;i++){
+        if (parseStatementTokens(tokens.slice(0, i))){
+          if (i < tokens.length) return tokens[i-1].line;
+        }
+      }
+      return null;
+    }
+
+    function findMissingSemicolonLine(text){
+      const tokens = tokenizeProgram(text);
+      const parts = splitStatements(tokens);
+      for (const part of parts){
+        if (!part.tokens.length) continue;
+        const missingInside = findMissingSemicolonInTokens(part.tokens);
+        if (missingInside != null) return missingInside + 1;
+        const parsed = parseStatementTokens(part.tokens);
+        if (parsed && !part.hasSemicolon) return part.endLine + 1;
+      }
+      return null;
+    }
+
+    function parseStatements(text){
+      const tokens = tokenizeProgram(text);
+      const parts = splitStatements(tokens);
+      const statements = [];
+      for (const part of parts){
+        if (!part.tokens.length) continue;
+        const parsed = parseStatementTokens(part.tokens);
+        if (parsed && part.hasSemicolon) statements.push(parsed);
+      }
+      return statements;
+    }
+
+    function classifyLineStatuses(lines, opts={}){
+      const invalid = new Set();
+      const incomplete = new Set();
+      const errors = new Map();
+      const errorKinds = new Map();
+      const info = new Map();
+      const text = lines.join('\n');
+      const tokens = tokenizeProgram(text);
+      let tokenIndex = 0;
+      let currentTokens = [];
+      let state = [];
+      const alloc = opts.alloc || (type=>String(randAddr(type||'int')));
+      const seenDecl = new Set();
+      const escapeHtml = value => String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+      const toStatementSnippet = (startLine, startCol, endLine)=>{
+        const safeStart = Math.max(0, startLine || 0);
+        const safeEnd = Math.max(safeStart, endLine || 0);
+        const parts = [];
+        if (safeStart === safeEnd){
+          parts.push((lines[safeStart] || '').slice(startCol || 0));
+        } else {
+          parts.push((lines[safeStart] || '').slice(startCol || 0));
+          for (let i=safeStart+1;i<=safeEnd;i++){
+            parts.push(lines[i] || '');
+          }
+        }
+        return parts.join('\n').replace(/\n/g, ' ').trim();
+      };
+      for (let lineIndex=0; lineIndex<lines.length; lineIndex++){
+        let status = '';
+        while (tokenIndex < tokens.length && tokens[tokenIndex].line === lineIndex){
+          const tok = tokens[tokenIndex];
+          if (tok.type==='sym' && tok.value===';'){
+            if (currentTokens.length){
+              const result = validateStatement(currentTokens, state, seenDecl, alloc, tok.line + 1);
+              if (result.error){
+                status = 'invalid';
+                errors.set(tok.line, result.error);
+                errorKinds.set(tok.line, result.kind || 'compile');
+                const startLine = currentTokens[0]?.line;
+                const startCol = currentTokens[0]?.col;
+                const errKind = result.kind || 'compile';
+                if (errKind === 'compile' && Number.isFinite(startLine) && tok.line > startLine){
+                  const snippet = toStatementSnippet(startLine, startCol, tok.line);
+                  const text = `This statement spans multiple lines and has a compilation error. In C, a line break acts like a space, so your statement is ${snippet}.`;
+                  const html = `This statement spans multiple lines and has a compilation error. In C, a line break acts like a space, so your statement is <code class="tok-line">${escapeHtml(snippet)}</code>.`;
+                  info.set(tok.line, {text, html});
+                }
+              } else {
+                const startLine = currentTokens[0]?.line;
+                const startCol = currentTokens[0]?.col;
+                if (Number.isFinite(startLine) && tok.line > startLine){
+                  const text = 'This statement spans multiple lines. In C, a line break acts like a space, so it still compiles.';
+                  info.set(tok.line, {text, html: text});
+                }
+                if (result.parsed?.kind==='decl' || result.parsed?.kind==='declAssign' || result.parsed?.kind==='declAssignVar'){
+                  seenDecl.add(result.parsed.name);
+                }
+                state = result.next;
+              }
+              currentTokens = [];
+            }
+            tokenIndex++;
+            continue;
+          }
+          currentTokens.push(tok);
+          tokenIndex++;
+        }
+        if (status !== 'invalid' && currentTokens.length){
+          const lastLine = currentTokens[currentTokens.length-1]?.line;
+          if (lastLine === lineIndex){
+            const lineText = lines[lineIndex] || '';
+            const allowIntPrefix = !/\s$/.test(lineText);
+            const isPrefix = isStatementPrefix(currentTokens, seenDecl, allowIntPrefix);
+            if (isPrefix){
+              const hasMoreTokens = tokenIndex < tokens.length;
+              if (!hasMoreTokens){
+                status = 'incomplete';
+                const startLine = currentTokens[0]?.line;
+                const startCol = currentTokens[0]?.col;
+                if (Number.isFinite(startLine) && lineIndex > startLine){
+                  const snippet = toStatementSnippet(startLine, startCol, lineIndex);
+                  const text = `This statement spans multiple lines and is incomplete. In C, a line break acts like a space, so your statement so far is ${snippet}.`;
+                  const html = `This statement spans multiple lines and is incomplete. In C, a line break acts like a space, so your statement so far is <code class="tok-line">${escapeHtml(snippet)}</code>.`;
+                  info.set(lineIndex, {text, html});
+                }
+              }
+            } else {
+              status = 'invalid';
+              errors.set(lineIndex, describeTokensError(currentTokens, seenDecl));
+              errorKinds.set(lineIndex, 'compile');
+            }
+          }
+        }
+        if (status === 'invalid') invalid.add(lineIndex);
+        else if (status === 'incomplete') incomplete.add(lineIndex);
+      }
+      return {invalid, incomplete, errors, errorKinds, info};
+    }
+
+    function applyProgram(text, opts={}){
+      const tokens = tokenizeProgram(text);
+      const parts = splitStatements(tokens);
+      let state = [];
+      const alloc = opts.alloc || (type=>String(randAddr(type||'int')));
+      const seenDecl = new Set();
+      for (const part of parts){
+        if (!part.tokens.length) continue;
+        const parsed = parseStatementTokens(part.tokens);
+        if (!parsed) return null;
+        if (!part.hasSemicolon) return null;
+        if (parsed.kind==='decl' || parsed.kind==='declAssign' || parsed.kind==='declAssignVar'){
+          if (seenDecl.has(parsed.name)) return null;
+          seenDecl.add(parsed.name);
+        }
+        const next = applyStatement(state, parsed, {alloc, allowRedeclare:false});
+        if (!next) return null;
+        state = next;
+      }
+      return state;
+    }
+
+    return {
+      tokenizeProgram,
+      splitStatements,
+      parseStatementTokens,
+      parseStatements,
+      classifyLineStatuses,
+      findMissingSemicolonLine,
+      applyProgram
+    };
+  }
+
   function vbox({addr='—', type='int', value='empty', name='', names=null, editable=false, allowNameAdd=false, allowNameDelete=false, allowNameEdit=false, allowTypeEdit=false, allowNameToggle=false}={}){
     const emptyDisplay = isEmptyVal(String(value||''));
     const displayValue = emptyDisplay ? '' : value;
@@ -555,17 +1399,33 @@
       if (nextBtn){
         const atEnd = (current===total);
         const badge = (!atEnd && typeof getStepBadge==='function') ? getStepBadge(current+1) : '';
-        const suffix = badge==='note' ? ' 🔧' : (badge==='check' ? ' ✅' : '');
+        const badgeTag = badge==='note' ? '🔧' : (badge==='check' ? '✅' : '');
         const isLocked = locked(current);
         const lockTag = isLocked ? ' 🔒' : '';
+        const labelPrefix = badgeTag ? `${badgeTag} ` : '';
         if (atEnd){
           const label = endLabel || 'Next Program';
-          nextBtn.textContent = `${label}${lockTag} ▶▶`;
+          nextBtn.textContent = `${labelPrefix}${label}${lockTag} ▶▶`;
         } else {
-          nextBtn.textContent = `Run line ${current+1}${suffix}${lockTag} ▶`;
+          nextBtn.textContent = `${labelPrefix}Run line ${current+1}${lockTag} ▶`;
         }
         nextBtn.disabled = isLocked;
       }
+    }
+
+    function sidebarParamValue(){
+      return document.body.classList.contains('sidebar-collapsed') ? '0' : '1';
+    }
+
+    function withSidebarParam(url){
+      if (!url) return url;
+      const [base, hash=''] = url.split('#');
+      const [path, query=''] = base.split('?');
+      const params = new URLSearchParams(query);
+      params.set('sidebar', sidebarParamValue());
+      const nextQuery = params.toString();
+      const hashPart = hash ? `#${hash}` : '';
+      return nextQuery ? `${path}?${nextQuery}${hashPart}` : `${path}${hashPart}`;
     }
 
     function goTo(target){
@@ -588,7 +1448,7 @@
       const current = boundary();
       clearPulse();
       if (current===total){
-        if (!nextBtn?.disabled && nextPage) window.location.href = nextPage;
+        if (!nextBtn?.disabled && nextPage) window.location.href = withSidebarParam(nextPage);
         return;
       }
       if (locked(current)) return;
@@ -717,6 +1577,56 @@
     initInstructionWatcher();
   }
 
+  function applySidebarStateFromUrl(){
+    const params = new URLSearchParams(window.location.search);
+    const state = params.get('sidebar');
+    if (state==='0') document.body.classList.add('sidebar-collapsed');
+    if (state==='1') document.body.classList.remove('sidebar-collapsed');
+  }
+
+  applySidebarStateFromUrl();
+
+  function initSidebarToggle(){
+    const wrap = document.querySelector('.wrap');
+    const nav = wrap?.querySelector('nav');
+    if (!wrap || !nav) return;
+    if (!nav.id) nav.id = 'sidebar';
+    let btn = document.querySelector('.sidebar-toggle');
+    if (!btn){
+      btn = el('<button type="button" class="sidebar-toggle"><span class="hamburger" aria-hidden="true"><span></span><span></span><span></span></span><span class="sr-only">Toggle sidebar</span></button>');
+      document.body.appendChild(btn);
+    }
+    btn.setAttribute('aria-controls', nav.id);
+    const updateLabel = ()=>{
+      const hidden = document.body.classList.contains('sidebar-collapsed');
+      const label = hidden ? 'Show sidebar' : 'Hide sidebar';
+      btn.setAttribute('aria-label', label);
+      btn.setAttribute('aria-expanded', hidden ? 'false' : 'true');
+      const sr = btn.querySelector('.sr-only');
+      if (sr) sr.textContent = label;
+    };
+    const updateUrl = ()=>{
+      const hidden = document.body.classList.contains('sidebar-collapsed');
+      const params = new URLSearchParams(window.location.search);
+      params.set('sidebar', hidden ? '0' : '1');
+      const query = params.toString();
+      const next = `${window.location.pathname}?${query}${window.location.hash}`;
+      window.history.replaceState(null, '', next);
+    };
+    btn.addEventListener('click', ()=>{
+      document.body.classList.toggle('sidebar-collapsed');
+      updateLabel();
+      updateUrl();
+    });
+    updateLabel();
+  }
+
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', initSidebarToggle, {once:true});
+  } else {
+    initSidebarToggle();
+  }
+
   function flashStatus(el){
     if (!el) return;
     el.classList.remove('status-flash');
@@ -728,7 +1638,7 @@
   global.MB = {
     $, el, randAddr, isEmptyVal, txt,
     renderCodePane, renderCodePaneEditable, readEditableCodeLines,
-    parseSimpleStatement, applySimpleStatement,
+    parseSimpleStatement, applySimpleStatement, createSimpleSimulator,
     vbox, readBoxState, makeAnswerBox,
     cloneStateBoxes, ensureBox, cloneBoxes, firstNonEmptyClone,
     serializeWorkspace, restoreWorkspace, setHintContent,
