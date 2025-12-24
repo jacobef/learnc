@@ -1,53 +1,69 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<title>C Boxes — Sandbox</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="styles.css">
-</head>
-<body>
-<div class="wrap">
-  <nav class="tabs">
-      <a href="program1.html">1. Assignment I</a>
-      <a href="program2.html">2. Declaration</a>
-      <a href="program3.html">3. Review</a>
-      <a href="program4.html">4. Code Editing I</a>
-      <a href="program5.html">5. Code Editing II</a>
-      <a href="program6.html">6. Assignment II</a>
-      <a href="program7a.html">7A. Pointers</a>
-      <a href="program7b.html">7B. Dereferencing</a>
-      <a href="sandbox.html" class="active">Sandbox</a>
-    </nav>
-  <div class="main">
+    <head>
+        <meta charset="utf-8" />
+        <title>C Boxes — Sandbox</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <link rel="stylesheet" href="styles.css" />
+    </head>
+    <body>
+        <div class="wrap">
+            <nav class="tabs">
+                <a href="index.html">Home</a>
+                <a href="program1.html">1. Assignment I</a>
+                <a href="program2.html">2. Declaration</a>
+                <a href="program3.html">3. Review</a>
+                <a href="program4.html">4. Code Editing I</a>
+                <a href="program5.html">5. Code Editing II</a>
+                <a href="program6.html">6. Assignment II</a>
+                <a href="program7a.html">7A. Pointers</a>
+                <a href="program7b.html">7B. Dereferencing</a>
+                <a href="sandbox.html" class="active">Sandbox</a>
+            </nav>
+            <div class="main">
+                <p id="sandbox-instructions" class="intro"></p>
 
-  <p id="sandbox-instructions" class="intro"></p>
-
-  <section>
-    <div class="row">
-      <div class="panel">
-        <div class="panel-title code-title">Code</div>
-        <div id="sandbox-code" class="codepane">
-          <div class="codepane-row">
-            <div id="sandbox-line-numbers" class="code-gutter" aria-hidden="true"></div>
-            <div class="code-editor-wrap">
-              <textarea id="sandbox-editor" class="code-textarea" spellcheck="false" rows="4"></textarea>
+                <section>
+                    <div class="row">
+                        <div class="panel">
+                            <div class="panel-title code-title">Code</div>
+                            <div id="sandbox-code" class="codepane">
+                                <div class="codepane-row">
+                                    <div
+                                        id="sandbox-line-numbers"
+                                        class="code-gutter"
+                                        aria-hidden="true"
+                                    ></div>
+                                    <div class="code-editor-wrap">
+                                        <textarea
+                                            id="sandbox-editor"
+                                            class="code-textarea"
+                                            spellcheck="false"
+                                            rows="4"
+                                        ></textarea>
+                                    </div>
+                                    <div
+                                        id="sandbox-error-gutter"
+                                        class="code-error-gutter"
+                                        aria-hidden="true"
+                                    ></div>
+                                </div>
+                            </div>
+                            <div
+                                id="sandbox-error-detail"
+                                class="hint-inline hidden"
+                            ></div>
+                        </div>
+                        <div class="panel program-state-panel">
+                            <div class="panel-title">Program state</div>
+                            <div id="sandbox-stage"></div>
+                        </div>
+                    </div>
+                </section>
             </div>
-            <div id="sandbox-error-gutter" class="code-error-gutter" aria-hidden="true"></div>
-          </div>
         </div>
-        <div id="sandbox-error-detail" class="hint-inline hidden"></div>
-      </div>
-      <div class="panel program-state-panel">
-        <div class="panel-title">Program state</div>
-        <div id="sandbox-stage"></div>
-      </div>
-    </div>
-  </section>
-  </div>
-</div>
 
-<script src="shared.js"></script>
-<script src="sandbox.js"></script>
-</body>
+        <script src="shared.js"></script>
+        <script src="sandbox.js"></script>
+    </body>
 </html>
