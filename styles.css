@@ -425,29 +425,41 @@ button:hover:not([disabled]){
   cursor:text;
   background:var(--edit-bg);
 }
-.name-list{
+.name-stack{
   position:absolute;
+  top:var(--name-stack-top);
   left:0;
   right:var(--type-offset);
-  bottom:4px;
   display:flex;
+  flex-direction:column;
   align-items:center;
-  justify-content:center;
-  flex-wrap:nowrap;
-  overflow:visible;
-  white-space:nowrap;
+  gap:4px;
   z-index:2;
 }
 .name-list{
+  position:relative;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  flex-wrap:wrap;
+  overflow:visible;
+  white-space:normal;
+  width:calc(100% + var(--name-overflow));
+  margin-left:calc(var(--name-overflow) / -2);
+  margin-right:calc(var(--name-overflow) / -2);
   color:var(--name);
   font-weight:800;
 }
 .name-list-inner{
-  display:inline-flex;
+  display:flex;
+  flex-wrap:wrap;
   align-items:center;
+  justify-content:center;
   gap:8px;
-  white-space:nowrap;
+  white-space:normal;
   position:relative;
+  width:100%;
+  max-width:100%;
 }
 .name-list .name-tag{
   border:none;
@@ -621,10 +633,14 @@ button:hover:not([disabled]){
 }
 
 .vbox{
+  --name-stack-space:0px;
+  --name-stack-top:160px;
+  --name-overflow:48px;
   position:relative;
   width:150px;
   height:200px;
   margin:8px 0;
+  margin-bottom:calc(8px + var(--name-stack-space));
   padding-right:var(--type-offset);
 }
 
@@ -719,6 +735,13 @@ button:hover:not([disabled]){
   padding-left:6px;
 }
 .lbl-name{bottom:-8px;left:0;right:var(--type-offset);text-align:center;}
+.name-stack .lbl-name{
+  position:relative;
+  bottom:auto;
+  left:auto;
+  right:auto;
+  text-align:center;
+}
 
 .editable{
   background:var(--edit-bg);
@@ -913,5 +936,8 @@ nav.tabs a.active:hover{
 
 @media (max-width:900px){
   .row{grid-template-columns:1fr;}
-  .vbox{width:100%;}
+  .vbox{
+    width:100%;
+    --name-overflow:0px;
+  }
 }

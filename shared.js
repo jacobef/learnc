@@ -156,10 +156,20 @@
       const refBox = by[stmt.ref];
       if (!refBox || !refBox.address) return null;
       target.value = String(refBox.address);
-      const alias = `*${stmt.name}`;
-      const names = refBox.names || [refBox.name].filter(Boolean);
-      if (!names.includes(alias)) names.push(alias);
-      refBox.names = names;
+      const depth = (target.type.match(/\*/g) || []).length;
+      let current = refBox;
+      for (let level=1; level<=depth; level++){
+        const alias = `${'*'.repeat(level)}${stmt.name}`;
+        const names = current.names || [current.name].filter(Boolean);
+        if (!names.includes(alias)) names.push(alias);
+        current.names = names;
+        if (level === depth) break;
+        const nextAddr = current.value;
+        if (!nextAddr || nextAddr === 'empty') break;
+        const nextBox = boxes.find(b=>b.address===String(nextAddr));
+        if (!nextBox) break;
+        current = nextBox;
+      }
       return boxes;
     }
     if (stmt.kind==='assignDeref'){
@@ -534,10 +544,19 @@
       if (!Number.isFinite(targetDepth) || !Number.isFinite(refDepth)) return null;
       if (targetDepth !== refDepth + 1) return null;
       target.value = String(refBox.address);
-      const alias = `*${stmt.name}`;
-      const names = refBox.names || [refBox.name].filter(Boolean);
-      if (!names.includes(alias)) names.push(alias);
-      refBox.names = names;
+      let current = refBox;
+      for (let level=1; level<=targetDepth; level++){
+        const alias = `${'*'.repeat(level)}${stmt.name}`;
+        const names = current.names || [current.name].filter(Boolean);
+        if (!names.includes(alias)) names.push(alias);
+        current.names = names;
+        if (level === targetDepth) break;
+        const nextAddr = current.value;
+        if (!nextAddr || nextAddr === 'empty') break;
+        const nextBox = boxes.find(b=>b.address===String(nextAddr));
+        if (!nextBox) break;
+        current = nextBox;
+      }
       return boxes;
     }
 
@@ -1021,6 +1040,34 @@
     };
   }
 
+  let nameStackResizeInstalled = false;
+  function updateNameStackSpacing(node){
+    if (!node) return;
+    const stack = node.querySelector('.name-stack');
+    if (!stack) return;
+    if (!node.isConnected) return;
+    const boxRect = node.getBoundingClientRect();
+    const stackRect = stack.getBoundingClientRect();
+    const overflow = Math.max(0, Math.ceil(stackRect.bottom - boxRect.bottom));
+    node.style.setProperty('--name-stack-space', `${overflow}px`);
+  }
+
+  function watchNameStack(node){
+    const stack = node?.querySelector('.name-stack');
+    if (!stack) return;
+    const update = ()=>updateNameStackSpacing(node);
+    requestAnimationFrame(update);
+    if (typeof ResizeObserver !== 'undefined'){
+      const ro = new ResizeObserver(update);
+      ro.observe(stack);
+    } else if (!nameStackResizeInstalled){
+      nameStackResizeInstalled = true;
+      window.addEventListener('resize', ()=>{
+        document.querySelectorAll('.vbox').forEach(box=>updateNameStackSpacing(box));
+      });
+    }
+  }
+
   function vbox({addr='—', type='int', value='empty', name='', names=null, editable=false, allowNameAdd=false, allowNameDelete=false, allowNameEdit=false, allowTypeEdit=false, allowNameToggle=false}={}){
     const emptyDisplay = isEmptyVal(String(value||''));
     const displayValue = emptyDisplay ? '' : value;
@@ -1053,12 +1100,16 @@
         </div>
         <div class="lbl lbl-type">type</div>
         <div class="${typeClasses}">${type}</div>
-        <div class="${listClasses}">
-          <div class="name-list-inner">${namesHtml}</div>
+        <div class="name-stack">
+          <div class="${listClasses}">
+            <div class="name-list-inner">${namesHtml}</div>
+          </div>
+          <div class="lbl lbl-name">${namesList.length>1 ? 'name(s)' : 'name'}</div>
         </div>
-        <div class="lbl lbl-name">${namesList.length>1 ? 'name(s)' : 'name'}</div>
       </div>
     `);
+
+    const scheduleNameStack = ()=>requestAnimationFrame(()=>updateNameStackSpacing(node));
 
     if (editable){
       node.querySelector('.value').setAttribute('contenteditable','true');
@@ -1084,8 +1135,12 @@
           }
           const delBtn = span.querySelector('.name-del');
           if (delBtn){
-            delBtn.onclick=()=>span.remove();
+            delBtn.onclick=()=>{
+              span.remove();
+              scheduleNameStack();
+            };
           }
+          scheduleNameStack();
         };
       }
       node.querySelectorAll('.name-text').forEach(el=>{
@@ -1116,11 +1171,13 @@
           toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
           toggle.textContent = expanded ? 'Hide other names' : 'Other names';
           requestAnimationFrame(clampNames);
+          scheduleNameStack();
         };
         toggle.onclick=()=>setExpanded(!list.classList.contains('expanded'));
         setExpanded(false);
       }
     }
+    watchNameStack(node);
     return node;
   }
 

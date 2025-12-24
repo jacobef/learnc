@@ -211,7 +211,7 @@
       grid.appendChild(msg);
     } else {
       boxes.forEach(b=>{
-        const node=vbox({addr:b.address, type:b.type, value:b.value, name:b.name, editable:false});
+        const node=vbox({addr:b.address, type:b.type, value:b.value, name:b.name, names:b.names, editable:false, allowNameToggle:true});
         if (isEmptyVal(b.value||'')) node.querySelector('.value').classList.add('placeholder','muted');
         grid.appendChild(node);
       });

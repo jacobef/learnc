@@ -97,6 +97,15 @@
     }
     if (boundary>=8){
       state.push({name:'fox', names:['fox'], type:'int*', value: boundary>=9 ? String(p7.bAddr) : 'empty', address:String(p7.spareAddr)});
+      const foxTarget = boundary>=9 ? String(p7.bAddr) : 'empty';
+      if (foxTarget!=='empty'){
+        const tgt = state.find(b=>b.address===String(foxTarget));
+        if (tgt){
+          const names = tgt.names || [tgt.name];
+          if (!names.includes('*fox')) names.push('*fox');
+          tgt.names = names;
+        }
+      }
     }
     if (boundary>=13){
       state.push({name:'elk', names:['elk'], type:'int', value: boundary>=14 ? (state.find(b=>b.name==='deer')?.value || 'empty') : 'empty', address:String(p7.pulledAddr)});
@@ -130,9 +139,14 @@
     };
     const wolf = byName.get('wolf');
     const bear = byName.get('bear');
+    const fox = byName.get('fox');
     const wolfVal = normalizePtrValue(wolf?.value || '');
     if (wolf && wolfVal!=='empty'){
       addAlias(byAddr.get(String(wolfVal)), '*wolf');
+    }
+    const foxVal = normalizePtrValue(fox?.value || '');
+    if (fox && foxVal!=='empty'){
+      addAlias(byAddr.get(String(foxVal)), '*fox');
     }
     const bearVal = normalizePtrValue(bear?.value || '');
     if (bear && bearVal!=='empty'){
@@ -142,6 +156,55 @@
       }
     }
     return next;
+  }
+
+  function rebuildNameList(boxEl, namesList){
+    const list = boxEl.querySelector('.name-list');
+    const inner = boxEl.querySelector('.name-list-inner');
+    const label = boxEl.querySelector('.lbl-name');
+    if (!list || !inner || !label) return;
+    const editable = boxEl.classList.contains('is-editable');
+    const nameClasses = `name-tag${editable ? ' editable' : ''}`;
+    const wasExpanded = list.classList.contains('expanded');
+    const canToggle = namesList.length > 1;
+    list.className = `name-list${canToggle ? ' collapsible' : ''}${wasExpanded && canToggle ? ' expanded' : ''}`;
+    const nameTags = namesList.map((n, idx)=>{
+      const extraClass = canToggle && idx>0 ? ' name-extra' : '';
+      const cls = namesList.length>1 ? `${nameClasses}${extraClass}` : `${nameClasses} single`;
+      return `<span class="${cls}"><span class="name-text">${n}</span></span>`;
+    }).join('');
+    const toggleBtn = canToggle
+      ? `<button class="name-toggle" type="button" aria-expanded="${wasExpanded ? 'true' : 'false'}">${wasExpanded ? 'Hide other names' : 'Other names'}</button>`
+      : '';
+    inner.innerHTML = `${nameTags}${toggleBtn}`;
+    label.textContent = namesList.length>1 ? 'name(s)' : 'name';
+    if (canToggle){
+      const toggle = inner.querySelector('.name-toggle');
+      if (toggle){
+        const setExpanded = expanded=>{
+          list.classList.toggle('expanded', expanded);
+          toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+          toggle.textContent = expanded ? 'Hide other names' : 'Other names';
+        };
+        toggle.onclick=()=>setExpanded(!list.classList.contains('expanded'));
+      }
+    }
+  }
+
+  function refreshAliasNames(wrap){
+    if (!wrap) return;
+    const boxes=[...wrap.querySelectorAll('.vbox')].map(v=>readBoxState(v));
+    const normalized = applyAliasNames(boxes);
+    const byName = new Map();
+    normalized.forEach(b=>{
+      if (b.name) byName.set(String(b.name), b);
+    });
+    wrap.querySelectorAll('.vbox').forEach(v=>{
+      const base = readBoxState(v)?.name || '';
+      const next = byName.get(base);
+      if (!next || !Array.isArray(next.names)) return;
+      rebuildNameList(v, next.names);
+    });
   }
 
   function carriedState(boundary){
@@ -247,7 +310,10 @@
 
   function attachResetWatcher(wrap, boundary){
     if (!wrap) return;
-    const refresh = ()=>updateResetVisibility(boundary);
+    const refresh = ()=>{
+      updateResetVisibility(boundary);
+      refreshAliasNames(wrap);
+    };
     wrap.addEventListener('input', refresh);
     wrap.addEventListener('click', ()=>setTimeout(refresh, 0));
     refresh();
