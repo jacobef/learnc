@@ -20,17 +20,22 @@
   const NEXT_PAGE = "program4.html";
 
   const p3 = {
-    lines: ["int north;", "int south;", "north = 5;", "int east;", "east = 9;"],
+    lines: [
+      "int north;",
+      "int south;",
+      "north = 5;",
+      "int east = 9;",
+      "int west = 15;",
+    ],
     boundary: 0,
     aAddr: randAddr("int"),
     bAddr: randAddr("int"),
+    cAddr: randAddr("int"),
     ws1: null,
     ws3: null,
-    ws4: null,
     ws5: null,
     pass1: false,
     pass3: false,
-    pass4: false,
     pass5: false,
     baseline: {},
   };
@@ -110,7 +115,9 @@
         ? ["north"]
         : p3.boundary === 3
           ? ["north", "south"]
-          : ["north", "south", "east"];
+          : p3.boundary === 5
+            ? ["north", "south", "east", "west"]
+            : ["north", "south", "east"];
     const coreRequired = p3.boundary >= 4 ? ["north", "south"] : required;
     const missingCore = coreRequired.filter((name) => !by[name]);
     if (missingCore.length)
@@ -127,6 +134,16 @@
         return {
           html: 'The new variable\'s name should be <code class="tok-name">east</code>.',
         };
+      if (p3.boundary === 5) {
+        if (extras.length < 2)
+          return {
+            html: 'You still need to create a new variable for <code class="tok-name">west</code>.',
+          };
+        if (!extras.some((b) => b.name === "west"))
+          return {
+            html: 'The new variable\'s name should be <code class="tok-name">west</code>.',
+          };
+      }
     }
     const missing = required.filter((name) => !by[name]);
     if (missing.length)
@@ -167,22 +184,26 @@
           html: '<code class="tok-name">south</code> has not been assigned yet—leave its value empty.',
         };
     } else if (p3.boundary === 4) {
-      if (!isEmptyVal(by.south.value || ""))
-        return {
-          html: '<code class="tok-name">south</code> is still empty at this point.',
-        };
-      if (!isEmptyVal(by.east.value || ""))
-        return {
-          html: '<code class="tok-name">east</code> was just declared, so its value should be empty.',
-        };
       if (by.north.value !== "5")
         return {
           html: '<code class="tok-name">north</code> keeps the value <code class="tok-value">5</code>.',
         };
-    } else if (p3.boundary === 5) {
+      if (!isEmptyVal(by.south.value || ""))
+        return {
+          html: '<code class="tok-name">south</code> is still empty at this point.',
+        };
       if (by.east.value !== "9")
         return {
-          html: 'Line 5 stores <code class="tok-value">9</code> in <code class="tok-name">east</code>.',
+          html: 'Line 4 declares <code class="tok-name">east</code> and assigns <code class="tok-value">9</code>.',
+        };
+    } else if (p3.boundary === 5) {
+      if (by.west?.value !== "15")
+        return {
+          html: 'Line 5 declares <code class="tok-name">west</code> and assigns <code class="tok-value">15</code>.',
+        };
+      if (by.east.value !== "9")
+        return {
+          html: '<code class="tok-name">east</code>\'s value should stay <code class="tok-value">9</code>.',
         };
       if (!isEmptyVal(by.south.value || ""))
         return {
@@ -215,16 +236,18 @@
         by.east &&
         by.north.value === "5" &&
         isEmptyVal(by.south.value || "") &&
-        isEmptyVal(by.east.value || "")) ||
+        by.east.value === "9") ||
       (p3.boundary === 5 &&
-        boxes.length === 3 &&
+        boxes.length === 4 &&
         allTypesOk &&
         by.north &&
         by.south &&
         by.east &&
+        by.west &&
         by.north.value === "5" &&
         isEmptyVal(by.south.value || "") &&
-        by.east.value === "9");
+        by.east.value === "9" &&
+        by.west.value === "15");
     if (ok)
       return { html: 'Looks good. Press <span class="btn-ref">Check</span>.' };
     const hasReset = !!document.getElementById("p3-reset");
@@ -239,7 +262,6 @@
     const progress =
       (p3.boundary === 1 && !p3.pass1) ||
       (p3.boundary === 3 && !p3.pass3) ||
-      (p3.boundary === 4 && !p3.pass4) ||
       (p3.boundary === 5 && !p3.pass5);
     renderCodePane($("#p3-code"), p3.lines, p3.boundary, { progress });
   }
@@ -256,7 +278,6 @@
     const solved =
       (p3.boundary === 1 && p3.pass1) ||
       (p3.boundary === 3 && p3.pass3) ||
-      (p3.boundary === 4 && p3.pass4) ||
       (p3.boundary === 5 && p3.pass5);
     if (solved) {
       $("#p3-status").textContent = "correct";
@@ -365,6 +386,34 @@
         attachResetWatcher(wrap, 3);
       }
     } else if (p3.boundary === 4) {
+      const wrap = el('<div class="grid"></div>');
+      const north = vbox({
+        addr: String(p3.aAddr),
+        type: "int",
+        value: "5",
+        name: "north",
+        editable: false,
+      });
+      const south = vbox({
+        addr: String(p3.bAddr),
+        type: "int",
+        value: "empty",
+        name: "south",
+        editable: false,
+      });
+      const east = vbox({
+        addr: String(p3.cAddr),
+        type: "int",
+        value: "9",
+        name: "east",
+        editable: false,
+      });
+      south.querySelector(".value").classList.add("placeholder", "muted");
+      wrap.appendChild(north);
+      wrap.appendChild(south);
+      wrap.appendChild(east);
+      stage.appendChild(wrap);
+    } else if (p3.boundary === 5) {
       const defaults = (() => {
         const base = cloneStateBoxes(p3.ws3);
         if (!base.length) {
@@ -372,7 +421,7 @@
             {
               name: "north",
               type: "int",
-              value: "empty",
+              value: "5",
               address: String(p3.aAddr),
             },
             {
@@ -380,6 +429,12 @@
               type: "int",
               value: "empty",
               address: String(p3.bAddr),
+            },
+            {
+              name: "east",
+              type: "int",
+              value: "9",
+              address: String(p3.cAddr),
             },
           );
         }
@@ -393,55 +448,11 @@
           type: "int",
           address: String(p3.bAddr),
         });
-        return base;
-      })();
-      const editable = !p3.pass4;
-      const wrap = restoreWorkspace(p3.ws4, defaults, "p3workspace", {
-        editable,
-        deletable: editable,
-      });
-      if (!editable)
-        wrap.querySelectorAll(".vbox").forEach((v) => MB.disableBoxEditing(v));
-      stage.appendChild(wrap);
-      if (editable) {
-        $("#p3-add").classList.remove("hidden");
-        $("#p3-check").classList.remove("hidden");
-        hint.setButtonHidden(false);
-        ensureBaseline(4, defaults);
-        attachResetWatcher(wrap, 4);
-      }
-    } else if (p3.boundary === 5) {
-      const defaults = (() => {
-        const base = cloneStateBoxes(p3.ws4);
-        if (!base.length) {
-          const prior = cloneStateBoxes(p3.ws3);
-          base.push(...prior);
-        }
-        if (!base.length) {
-          base.push(
-            {
-              name: "north",
-              type: "int",
-              value: "empty",
-              address: String(p3.aAddr),
-            },
-            {
-              name: "south",
-              type: "int",
-              value: "empty",
-              address: String(p3.bAddr),
-            },
-          );
-        }
         ensureBox(base, {
-          name: "north",
+          name: "east",
           type: "int",
-          address: String(p3.aAddr),
-        });
-        ensureBox(base, {
-          name: "south",
-          type: "int",
-          address: String(p3.bAddr),
+          value: "9",
+          address: String(p3.cAddr),
         });
         return base;
       })();
@@ -466,7 +477,6 @@
   function saveWorkspace() {
     if (p3.boundary === 1) p3.ws1 = serializeWorkspace("p3workspace");
     if (p3.boundary === 3) p3.ws3 = serializeWorkspace("p3workspace");
-    if (p3.boundary === 4) p3.ws4 = serializeWorkspace("p3workspace");
     if (p3.boundary === 5) p3.ws5 = serializeWorkspace("p3workspace");
   }
 
@@ -479,7 +489,6 @@
   $("#p3-reset").onclick = () => {
     if (p3.boundary === 1) p3.ws1 = null;
     if (p3.boundary === 3) p3.ws3 = null;
-    if (p3.boundary === 4) p3.ws4 = null;
     if (p3.boundary === 5) p3.ws5 = null;
     p3Render();
   };
@@ -544,45 +553,18 @@
       return;
     }
 
-    if (p3.boundary === 4) {
-      const ok =
-        boxes.length === 3 &&
-        allTypesOk &&
-        by.north &&
-        by.south &&
-        by.east &&
-        by.north.value === "5" &&
-        isEmptyVal(by.south.value || "") &&
-        isEmptyVal(by.east.value || "");
-      $("#p3-status").textContent = ok ? "correct" : "incorrect";
-      $("#p3-status").className = ok ? "ok" : "err";
-      MB.flashStatus($("#p3-status"));
-      if (ok) {
-        ws.querySelectorAll(".vbox").forEach((v) => MB.disableBoxEditing(v));
-        MB.removeBoxDeleteButtons(ws);
-        $("#p3-check").classList.add("hidden");
-        $("#p3-add").classList.add("hidden");
-        $("#p3-reset").classList.add("hidden");
-        hint.hide();
-        $("#p3-hint-btn")?.classList.add("hidden");
-        p3.pass4 = true;
-        renderCodePane3();
-        MB.pulseNextButton("p3");
-        pager.update();
-      }
-      return;
-    }
-
     if (p3.boundary === 5) {
       const ok =
-        boxes.length === 3 &&
+        boxes.length === 4 &&
         allTypesOk &&
         by.north &&
         by.south &&
         by.east &&
+        by.west &&
         by.north.value === "5" &&
         isEmptyVal(by.south.value || "") &&
-        by.east.value === "9";
+        by.east.value === "9" &&
+        by.west.value === "15";
       $("#p3-status").textContent = ok ? "correct" : "incorrect";
       $("#p3-status").className = ok ? "ok" : "err";
       MB.flashStatus($("#p3-status"));
@@ -615,14 +597,12 @@
     isStepLocked: (boundary) => {
       if (boundary === 1) return !p3.pass1;
       if (boundary === 3) return !p3.pass3;
-      if (boundary === 4) return !p3.pass4;
       if (boundary === 5) return !p3.pass5;
       return false;
     },
     getStepBadge: (step) => {
       if (step === 1) return p3.pass1 ? "check" : "note";
       if (step === 3) return p3.pass3 ? "check" : "note";
-      if (step === 4) return p3.pass4 ? "check" : "note";
       if (step === 5) return p3.pass5 ? "check" : "note";
       return "";
     },

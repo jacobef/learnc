@@ -44,8 +44,14 @@
 
   function updateInstructions() {
     if (!instructions) return;
-    instructions.textContent =
-      "Write C declarations and assignments. The program state updates as you type.";
+    const base =
+      "This is the sandbox. The program state will update as you write code.";
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("finished") === "1") {
+      instructions.innerHTML = `You finished the tutorial as it currently exists, congrats! Many more problems will be coming later.<br><br>${base}`;
+    } else {
+      instructions.textContent = base;
+    }
   }
 
   function parseErrorMessage(message) {

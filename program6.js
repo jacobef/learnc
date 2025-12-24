@@ -8,6 +8,7 @@
     serializeWorkspace,
     readBoxState,
     isEmptyVal,
+    makeAnswerBox,
     createHintController,
     createStepper,
   } = MB;
@@ -19,8 +20,7 @@
   const p5 = {
     lines: [
       "int hammer;",
-      "int drill;",
-      "drill = 1;",
+      "int drill = 1;",
       "hammer = drill;",
       "drill = 2;",
       "drill = hammer;",
@@ -28,10 +28,10 @@
     boundary: 0,
     xAddr: MB.randAddr("int"),
     yAddr: MB.randAddr("int"),
-    ws: Array(7).fill(null),
-    snaps: Array(7).fill(null),
-    passes: Array(7).fill(false),
-    baseline: Array(7).fill(null),
+    ws: Array(6).fill(null),
+    snaps: Array(6).fill(null),
+    passes: Array(6).fill(false),
+    baseline: Array(6).fill(null),
   };
 
   const hint = createHintController({
@@ -115,7 +115,15 @@
     const ws = document.getElementById("p5workspace");
     const boxes = [...ws.querySelectorAll(".vbox")].map((v) => readBoxState(v));
     const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    if (p5.boundary === 3) {
+    if (p5.boundary === 2) {
+      if (!by.hammer)
+        return {
+          html: 'You still need <code class="tok-name">hammer</code> in the program state.',
+        };
+      if (!by.drill)
+        return {
+          html: 'You still need <code class="tok-name">drill</code> in the program state.',
+        };
       if (!isEmptyVal(by.hammer.value || ""))
         return {
           html: '<code class="tok-name">hammer</code> should still be empty here.',
@@ -126,7 +134,7 @@
         };
       if (by.drill.value !== "1")
         return {
-          html: 'Line 3 stores <code class="tok-value">1</code> in <code class="tok-name">drill</code>.',
+          html: 'Line 2 stores <code class="tok-value">1</code> in <code class="tok-name">drill</code>.',
         };
       const ok =
         boxes.length === 2 &&
@@ -141,7 +149,11 @@
           html: 'Looks good. Press <span class="btn-ref">Check</span>.',
         };
     }
-    if (p5.boundary === 6) {
+    if (p5.boundary === 5) {
+      if (!by.hammer || !by.drill)
+        return {
+          html: 'You still need <code class="tok-name">hammer</code> and <code class="tok-name">drill</code> in the program state.',
+        };
       if ((by.drill?.value || "").trim().toLowerCase() === "hammer")
         return {
           html: '<code class="tok-name">drill</code>\'s value should be <code class="tok-name">hammer</code>\'s value, not the literal word \"hammer\".',
@@ -189,8 +201,8 @@
 
   function renderCodePane5() {
     const progress =
-      (p5.boundary === 3 && !p5.passes[3]) ||
-      (p5.boundary === 6 && !p5.passes[6]);
+      (p5.boundary === 2 && !p5.passes[2]) ||
+      (p5.boundary === 5 && !p5.passes[5]);
     renderCodePane($("#p5-code"), p5.lines, p5.boundary, { progress });
   }
 
@@ -201,21 +213,17 @@
       1: [{ name: "hammer", type: "int", value: "empty", address: xAddr }],
       2: [
         { name: "hammer", type: "int", value: "empty", address: xAddr },
-        { name: "drill", type: "int", value: "empty", address: yAddr },
+        { name: "drill", type: "int", value: "1", address: yAddr },
       ],
       3: [
-        { name: "hammer", type: "int", value: "empty", address: xAddr },
+        { name: "hammer", type: "int", value: "1", address: xAddr },
         { name: "drill", type: "int", value: "1", address: yAddr },
       ],
       4: [
         { name: "hammer", type: "int", value: "1", address: xAddr },
-        { name: "drill", type: "int", value: "1", address: yAddr },
-      ],
-      5: [
-        { name: "hammer", type: "int", value: "1", address: xAddr },
         { name: "drill", type: "int", value: "2", address: yAddr },
       ],
-      6: [
+      5: [
         { name: "hammer", type: "int", value: "1", address: xAddr },
         { name: "drill", type: "int", value: "1", address: yAddr },
       ],
@@ -227,12 +235,12 @@
     if (boundary <= 0) return [];
     const stored = firstNonEmptyClone(p5.ws[boundary], p5.snaps[boundary]);
     if (stored.length) return cloneBoxes(stored);
-    if (boundary === 3 && !p5.passes[3]) {
-      const prev = firstNonEmptyClone(p5.ws[2], p5.snaps[2]);
+    if (boundary === 2 && !p5.passes[2]) {
+      const prev = firstNonEmptyClone(p5.ws[1], p5.snaps[1]);
       if (prev.length) return cloneBoxes(prev);
     }
-    if (boundary === 6) {
-      const prev = firstNonEmptyClone(p5.ws[5], p5.snaps[5]);
+    if (boundary === 5) {
+      const prev = firstNonEmptyClone(p5.ws[4], p5.snaps[4]);
       if (prev.length) return cloneBoxes(prev);
     }
     return canonical(boundary);
@@ -245,7 +253,7 @@
     stage.innerHTML = "";
     const boundary = p5.boundary;
     const atSolved =
-      (boundary === 3 && p5.passes[3]) || (boundary === 6 && p5.passes[6]);
+      (boundary === 2 && p5.passes[2]) || (boundary === 5 && p5.passes[5]);
     if (atSolved) {
       $("#p5-status").textContent = "correct";
       $("#p5-status").className = "ok";
@@ -255,22 +263,24 @@
     }
     $("#p5-check").classList.add("hidden");
     $("#p5-reset").classList.add("hidden");
+    $("#p5-add").classList.add("hidden");
 
     resetHint();
     hint.setButtonHidden(
-      !((boundary === 3 && !p5.passes[3]) || (boundary === 6 && !p5.passes[6])),
+      !((boundary === 2 && !p5.passes[2]) || (boundary === 5 && !p5.passes[5])),
     );
     if (boundary > 0) {
       const editable =
-        (boundary === 3 && !p5.passes[3]) || (boundary === 6 && !p5.passes[6]);
+        (boundary === 2 && !p5.passes[2]) || (boundary === 5 && !p5.passes[5]);
       const state = stateFor(boundary);
       const wrap = restoreWorkspace(p5.ws[boundary], state, "p5workspace", {
         editable,
-        deletable: false,
+        deletable: editable && boundary === 2,
       });
       stage.appendChild(wrap);
       if (editable) {
         $("#p5-check").classList.remove("hidden");
+        if (boundary === 2) $("#p5-add").classList.remove("hidden");
         const baseline = ensureBaseline(boundary, state);
         attachResetWatcher(wrap, baseline);
       } else if (state.length) {
@@ -288,24 +298,31 @@
   }
 
   $("#p5-reset").onclick = () => {
-    if (p5.boundary === 3) {
-      p5.ws[3] = null;
-      p5.snaps[3] = null;
-      p5.passes[3] = false;
+    if (p5.boundary === 2) {
+      p5.ws[2] = null;
+      p5.snaps[2] = null;
+      p5.passes[2] = false;
       render();
       return;
     }
-    if (p5.boundary === 6) {
-      p5.ws[6] = null;
-      p5.snaps[6] = null;
-      p5.passes[6] = false;
+    if (p5.boundary === 5) {
+      p5.ws[5] = null;
+      p5.snaps[5] = null;
+      p5.passes[5] = false;
       render();
     }
   };
 
+  $("#p5-add").onclick = () => {
+    const ws = document.getElementById("p5workspace");
+    if (!ws) return;
+    ws.appendChild(makeAnswerBox({}));
+    updateResetVisibility(p5.baseline[p5.boundary]);
+  };
+
   $("#p5-check").onclick = () => {
     resetHint();
-    if (p5.boundary !== 3 && p5.boundary !== 6) return;
+    if (p5.boundary !== 2 && p5.boundary !== 5) return;
     const ws = document.getElementById("p5workspace");
     if (!ws) return;
     const boxes = [...ws.querySelectorAll(".vbox")].map((v) => readBoxState(v));
@@ -314,7 +331,7 @@
     const drill = by.drill;
     const allTypesOk = boxes.every((b) => b.type === "int");
     let ok = false;
-    if (p5.boundary === 3) {
+    if (p5.boundary === 2) {
       ok =
         boxes.length === 2 &&
         hammer &&
@@ -367,13 +384,13 @@
     onBeforeChange: save,
     onAfterChange: render,
     isStepLocked: (boundary) => {
-      if (boundary === 3) return !p5.passes[3];
-      if (boundary === 6) return !p5.passes[6];
+      if (boundary === 2) return !p5.passes[2];
+      if (boundary === 5) return !p5.passes[5];
       return false;
     },
     getStepBadge: (step) => {
-      if (step === 3) return p5.passes[3] ? "check" : "note";
-      if (step === 6) return p5.passes[6] ? "check" : "note";
+      if (step === 2) return p5.passes[2] ? "check" : "note";
+      if (step === 5) return p5.passes[5] ? "check" : "note";
       return "";
     },
   });
