@@ -24,6 +24,12 @@ body {
     font-family: ui-monospace, Menlo, Consolas, monospace;
 }
 
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
 .wrap {
     max-width: none;
     margin: 0;
@@ -341,6 +347,7 @@ h2 {
     background: var(--panel);
     border-radius: 8px;
     position: relative;
+    min-width: 0;
 }
 .program-state-panel {
     padding-top: 28px;
@@ -906,6 +913,7 @@ button:hover:not([disabled]) {
     --name-stack-top: 160px;
     --name-overflow: 48px;
     position: relative;
+    box-sizing: content-box;
     width: 150px;
     height: 200px;
     margin: 8px 0;
@@ -1128,9 +1136,16 @@ nav.tabs a.active:hover {
     border-color: rgba(30, 119, 255, 0.3);
 }
 
+@media (min-width: 901px) {
+    .codepane {
+        font-size: 18px;
+    }
+}
+
 @media (max-width: 900px) {
     .wrap {
         display: block;
+        padding: 64px 16px 32px;
     }
     .wrap > nav {
         position: static;
@@ -1139,6 +1154,10 @@ nav.tabs a.active:hover {
     }
     .wrap > .main {
         grid-column: auto;
+    }
+    body.sidebar-collapsed .wrap {
+        padding-left: 16px;
+        padding-right: 16px;
     }
     nav {
         flex-direction: row;
@@ -1150,6 +1169,18 @@ nav.tabs a.active:hover {
         margin: 0;
     }
     .ref-row {
+        grid-template-columns: 1fr;
+    }
+    .panel-title {
+        max-width: 90%;
+        white-space: normal;
+        text-align: center;
+    }
+    .codepane {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    .state-group.two-col {
         grid-template-columns: 1fr;
     }
 }
@@ -1248,6 +1279,7 @@ nav.tabs a.active:hover {
     }
     .vbox {
         width: 100%;
+        box-sizing: border-box;
         --name-overflow: 0px;
     }
 }
