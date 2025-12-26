@@ -396,13 +396,17 @@
         if (idx === tokens.length - 1) return true;
         return tokens[idx + 1]?.type === "ident" && idx + 2 === tokens.length;
       }
-      if (rhs.type === "sym" && rhs.value === "*" && allowPointers) {
+      if (
+        rhs.type === "sym" &&
+        (rhs.value === "*" || rhs.value === "&") &&
+        allowPointers
+      ) {
         if (!allowDeclAssignVar) return false;
         let j = idx;
         while (
           j < tokens.length &&
           tokens[j].type === "sym" &&
-          tokens[j].value === "*"
+          (tokens[j].value === "*" || tokens[j].value === "&")
         )
           j++;
         if (j === tokens.length) return true;
@@ -428,20 +432,24 @@
           tokens.length === 3 && hasDeclaredPrefix(t2.value, declaredNames)
         );
       }
-      if (t2.type === "sym" && t2.value === "&" && allowPointers) {
-        if (tokens.length === 3) return true;
-        return tokens.length === 4 && tokens[3].type === "ident";
-      }
-      if (t2.type === "sym" && t2.value === "*" && allowPointers) {
+      if (
+        t2.type === "sym" &&
+        (t2.value === "&" || t2.value === "*") &&
+        allowPointers
+      ) {
         let j = 2;
         while (
           j < tokens.length &&
           tokens[j].type === "sym" &&
-          tokens[j].value === "*"
+          (tokens[j].value === "*" || tokens[j].value === "&")
         )
           j++;
         if (j === tokens.length) return true;
-        return tokens[j].type === "ident" && j === tokens.length - 1;
+        if (tokens[j].type !== "ident") return false;
+        return (
+          j === tokens.length - 1 &&
+          hasDeclaredPrefix(tokens[j].value, declaredNames)
+        );
       }
       return false;
     }
@@ -474,20 +482,24 @@
           hasDeclaredPrefix(rhs.value, declaredNames)
         );
       }
-      if (rhs.type === "sym" && rhs.value === "&" && allowPointers) {
-        if (idx === tokens.length - 1) return true;
-        return idx === tokens.length - 2 && tokens[idx + 1].type === "ident";
-      }
-      if (rhs.type === "sym" && rhs.value === "*" && allowPointers) {
+      if (
+        rhs.type === "sym" &&
+        (rhs.value === "&" || rhs.value === "*") &&
+        allowPointers
+      ) {
         let j = idx;
         while (
           j < tokens.length &&
           tokens[j].type === "sym" &&
-          tokens[j].value === "*"
+          (tokens[j].value === "*" || tokens[j].value === "&")
         )
           j++;
         if (j === tokens.length) return true;
-        return tokens[j].type === "ident" && j === tokens.length - 1;
+        if (tokens[j].type !== "ident") return false;
+        return (
+          j === tokens.length - 1 &&
+          hasDeclaredPrefix(tokens[j].value, declaredNames)
+        );
       }
       return false;
     }
@@ -570,19 +582,31 @@
           return { kind: "ref", name: next.value };
         }
       }
-      if (rhs.type === "sym" && rhs.value === "*" && allowPointers) {
+      if (
+        rhs.type === "sym" &&
+        (rhs.value === "*" || rhs.value === "&") &&
+        allowPointers
+      ) {
         let j = idx;
         let depth = 0;
         while (
           j < tokens.length &&
           tokens[j].type === "sym" &&
-          tokens[j].value === "*"
+          (tokens[j].value === "*" || tokens[j].value === "&")
         ) {
           depth++;
           j++;
         }
-        if (depth > 0 && tokens[j]?.type === "ident" && j + 1 === tokens.length) {
-          return { kind: "deref", name: tokens[j].value, depth };
+        if (
+          depth > 0 &&
+          tokens[j]?.type === "ident" &&
+          j + 1 === tokens.length
+        ) {
+          const ops = tokens.slice(idx, j).map((tok) => String(tok.value));
+          if (ops.every((op) => op === "*")) {
+            return { kind: "deref", name: tokens[j].value, depth };
+          }
+          return { kind: "unary", name: tokens[j].value, ops };
         }
       }
       return null;
@@ -689,6 +713,32 @@
             };
           }
         }
+        if (allowPointers && allowDeclAssignVar && rhs.type === "sym") {
+          let j = idx;
+          const ops = [];
+          while (
+            j < tokens.length &&
+            tokens[j].type === "sym" &&
+            (tokens[j].value === "*" || tokens[j].value === "&")
+          ) {
+            ops.push(tokens[j].value);
+            j++;
+          }
+          if (
+            ops.length > 0 &&
+            ops.includes("&") &&
+            tokens[j]?.type === "ident" &&
+            j + 1 === tokens.length
+          ) {
+            return {
+              kind: "declAssignUnary",
+              name,
+              src: tokens[j].value,
+              ops,
+              declType,
+            };
+          }
+        }
         return null;
       }
       const unary = parseUnaryLhs(tokens);
@@ -768,6 +818,39 @@
             name: tokens[0].value,
             ptr: tokens[j].value,
             depth,
+          };
+        }
+      }
+      if (
+        allowPointers &&
+        tokens.length >= 4 &&
+        tokens[0].type === "ident" &&
+        tokens[1].type === "sym" &&
+        tokens[1].value === "=" &&
+        tokens[2].type === "sym" &&
+        (tokens[2].value === "*" || tokens[2].value === "&")
+      ) {
+        let j = 2;
+        const ops = [];
+        while (
+          j < tokens.length &&
+          tokens[j].type === "sym" &&
+          (tokens[j].value === "*" || tokens[j].value === "&")
+        ) {
+          ops.push(tokens[j].value);
+          j++;
+        }
+        if (
+          ops.length > 0 &&
+          ops.includes("&") &&
+          tokens[j]?.type === "ident" &&
+          j + 1 === tokens.length
+        ) {
+          return {
+            kind: "assignUnaryRhs",
+            name: tokens[0].value,
+            src: tokens[j].value,
+            ops,
           };
         }
       }
@@ -973,6 +1056,67 @@
       return { target: current.box, label, type: current.type };
     }
 
+    function resolveUnaryExpr(state, ops, name) {
+      const by = Object.fromEntries(state.map((b) => [b.name, b]));
+      const base = by[name];
+      if (!base) return { error: "missing", name };
+      let current = {
+        kind: "lvalue",
+        type: base.type,
+        value: base.value,
+        address: base.address ?? "",
+        box: base,
+        refBox: null,
+      };
+      let label = name;
+      for (let i = ops.length - 1; i >= 0; i--) {
+        const op = ops[i];
+        if (op === "&") {
+          const nextLabel = `&${label}`;
+          if (current.kind !== "lvalue" || !current.address) {
+            return { error: "not_lvalue", label: nextLabel };
+          }
+          const depth = pointerDepth(current.type);
+          const nextDepth = Number.isFinite(depth) ? depth + 1 : 1;
+          current = {
+            kind: "rvalue",
+            type: makePointerType(nextDepth) || "int*",
+            value: String(current.address),
+            address: "",
+            box: null,
+            refBox: current.box,
+          };
+          label = nextLabel;
+          continue;
+        }
+        if (op === "*") {
+          const nextLabel = `*${label}`;
+          const depth = pointerDepth(current.type);
+          if (!Number.isFinite(depth) || depth < 1) {
+            return { error: "not_deref", label: nextLabel };
+          }
+          const ptrVal = String(current.value ?? "").trim();
+          if (!ptrVal || /^empty$/i.test(ptrVal)) {
+            return { error: "empty", label };
+          }
+          const target = state.find(
+            (b) => String(b.address ?? "") === String(ptrVal),
+          );
+          if (!target) return { error: "unknown", label: nextLabel };
+          current = {
+            kind: "lvalue",
+            type: makePointerType(depth - 1) || "int",
+            value: target.value,
+            address: target.address ?? "",
+            box: target,
+            refBox: null,
+          };
+          label = nextLabel;
+        }
+      }
+      return { result: current, label };
+    }
+
     function minBaseDepthForOps(ops) {
       let delta = 0;
       let required = 0;
@@ -986,6 +1130,73 @@
         }
       }
       return Math.max(0, required);
+    }
+
+    function validateUnaryRhs(state, targetType, targetName, ops, src) {
+      const by = Object.fromEntries(state.map((b) => [b.name, b]));
+      const base = by[src];
+      const minDepth = minBaseDepthForOps(ops || []);
+      const requiredBaseType =
+        makePointerType(minDepth) || `int${"*".repeat(minDepth)}`;
+      if (!base) {
+        return {
+          error: `You can't use ${src} before declaring it.`,
+          kind: "compile",
+        };
+      }
+      const baseDepth = pointerDepth(base.type);
+      if (!Number.isFinite(baseDepth) || baseDepth < minDepth) {
+        return typeMismatchError(src, requiredBaseType);
+      }
+      const resolved = resolveUnaryExpr(state, ops, src);
+      if (resolved?.error === "empty") {
+        return {
+          error: `${resolved.label} doesn't have a value yet, so it can't be dereferenced.`,
+          kind: "ub",
+        };
+      }
+      if (resolved?.error === "unknown") {
+        return {
+          error: `${resolved.label} doesn't point to a known variable.`,
+          kind: "ub",
+        };
+      }
+      if (resolved?.error === "not_deref") {
+        return {
+          error: `${resolved.label} is not a valid dereference.`,
+          kind: "compile",
+        };
+      }
+      if (resolved?.error === "not_lvalue") {
+        return { error: "That assignment is not valid here.", kind: "compile" };
+      }
+      const result = resolved?.result;
+      if (!result) {
+        return { error: "That assignment is not valid here.", kind: "compile" };
+      }
+      const targetDepth = pointerDepth(targetType);
+      const resultDepth = pointerDepth(result.type);
+      if (!Number.isFinite(targetDepth) || !Number.isFinite(resultDepth)) {
+        return { error: "That assignment is not valid here.", kind: "compile" };
+      }
+      if (targetDepth !== resultDepth) {
+        return typeMismatchError(
+          targetName,
+          makePointerType(resultDepth) || `int${"*".repeat(resultDepth)}`,
+        );
+      }
+      if (targetDepth === 0 && result.type !== "int") {
+        return typeMismatchError(targetName, "int");
+      }
+      if (result.kind === "lvalue") {
+        if (requireSourceValue && isEmptyVal(result.value ?? "")) {
+          return {
+            error: `${resolved.label} doesn't have a value yet.`,
+            kind: "ub",
+          };
+        }
+      }
+      return null;
     }
 
     function applyAssignUnary(state, stmt) {
@@ -1027,7 +1238,65 @@
           depth: stmt.rhs.depth,
         });
       }
+      if (stmt.rhs.kind === "unary") {
+        return applyAssignUnaryRhs(boxes, {
+          kind: "assignUnaryRhs",
+          name: targetName,
+          src: stmt.rhs.name,
+          ops: stmt.rhs.ops,
+        });
+      }
       return null;
+    }
+
+    function applyAssignUnaryRhs(state, stmt) {
+      const boxes = cloneBoxes(state);
+      const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
+      const target = by[stmt.name];
+      if (!target) return null;
+      const resolved = resolveUnaryExpr(boxes, stmt.ops, stmt.src);
+      if (!resolved?.result) return null;
+      const result = resolved.result;
+      const targetDepth = pointerDepth(target.type);
+      const resultDepth = pointerDepth(result.type);
+      if (!Number.isFinite(targetDepth) || !Number.isFinite(resultDepth))
+        return null;
+      if (targetDepth !== resultDepth) return null;
+      if (targetDepth === 0 && result.type !== "int") return null;
+      const value =
+        result.kind === "lvalue" ? result.box?.value : result.value;
+      if (requireSourceValue && isEmptyVal(value ?? "")) return null;
+      target.value = String(value ?? "empty");
+      if (targetDepth > 0 && target.value && target.value !== "empty") {
+        if (result.kind === "rvalue" && result.refBox) {
+          let current = result.refBox;
+          for (let level = 1; level <= targetDepth; level++) {
+            const alias = `${"*".repeat(level)}${stmt.name}`;
+            const names = current.names || [current.name].filter(Boolean);
+            if (!names.includes(alias)) names.push(alias);
+            current.names = names;
+            if (level === targetDepth) break;
+            const nextAddr = current.value;
+            if (!nextAddr || nextAddr === "empty") break;
+            const nextBox = boxes.find(
+              (b) => b.address === String(nextAddr),
+            );
+            if (!nextBox) break;
+            current = nextBox;
+          }
+        } else {
+          const aliasTarget = boxes.find(
+            (b) => b.address === String(target.value),
+          );
+          if (aliasTarget) {
+            const alias = `*${stmt.name}`;
+            const names = aliasTarget.names || [aliasTarget.name].filter(Boolean);
+            if (!names.includes(alias)) names.push(alias);
+            aliasTarget.names = names;
+          }
+        }
+      }
+      return boxes;
     }
 
     function applyAssignFromDeref(state, stmt) {
@@ -1112,6 +1381,22 @@
         if (!afterDecl) return null;
         return applyAssignFromDeref(afterDecl, stmt);
       }
+      if (stmt.kind === "declAssignUnary") {
+        const decl = {
+          kind: "decl",
+          name: stmt.name,
+          type: stmt.declType || "int",
+        };
+        const afterDecl = applySimpleStatement(state, decl, opts);
+        if (!afterDecl) return null;
+        const assignUnaryRhs = {
+          kind: "assignUnaryRhs",
+          name: stmt.name,
+          src: stmt.src,
+          ops: stmt.ops,
+        };
+        return applyAssignUnaryRhs(afterDecl, assignUnaryRhs);
+      }
       if (stmt.kind === "assignVar") {
         return applyAssignVar(state, stmt);
       }
@@ -1120,6 +1405,9 @@
       }
       if (stmt.kind === "assignUnary") {
         return applyAssignUnary(state, stmt);
+      }
+      if (stmt.kind === "assignUnaryRhs") {
+        return applyAssignUnaryRhs(state, stmt);
       }
       if (stmt.kind === "assignFromDeref") {
         return applyAssignFromDeref(state, stmt);
@@ -1260,7 +1548,8 @@
         parsed.kind === "declAssign" ||
         parsed.kind === "declAssignVar" ||
         parsed.kind === "declAssignRef" ||
-        parsed.kind === "declAssignDeref"
+        parsed.kind === "declAssignDeref" ||
+        parsed.kind === "declAssignUnary"
       ) {
         if (seenDecl.has(parsed.name))
           return {
@@ -1361,6 +1650,16 @@
               kind: "ub",
             };
           }
+        }
+        if (parsed.kind === "declAssignUnary") {
+          const err = validateUnaryRhs(
+            state,
+            parsed.declType || "int",
+            parsed.name,
+            parsed.ops,
+            parsed.src,
+          );
+          if (err) return err;
         }
       } else if (parsed.kind === "assign") {
         if (!seenDecl.has(parsed.name)) {
@@ -1533,7 +1832,31 @@
               kind: "ub",
             };
           }
+        } else if (parsed.rhs.kind === "unary") {
+          const err = validateUnaryRhs(
+            state,
+            target.type,
+            target.name,
+            parsed.rhs.ops,
+            parsed.rhs.name,
+          );
+          if (err) return err;
         }
+      } else if (parsed.kind === "assignUnaryRhs") {
+        const by = Object.fromEntries(state.map((b) => [b.name, b]));
+        const target = by[parsed.name];
+        if (!target) {
+          const typeLabel = "int";
+          return missingDeclError(parsed.name, typeLabel);
+        }
+        const err = validateUnaryRhs(
+          state,
+          target.type,
+          target.name,
+          parsed.ops,
+          parsed.src,
+        );
+        if (err) return err;
       } else if (parsed.kind === "assignRef") {
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
         if (!by[parsed.name]) {
@@ -2693,6 +3016,7 @@
     const updateLabel = () => {
       const hidden = document.body.classList.contains("sidebar-collapsed");
       const label = hidden ? "Show sidebar" : "Hide sidebar";
+      btn.classList.toggle("is-expanded", !hidden);
       btn.setAttribute("aria-label", label);
       btn.setAttribute("aria-expanded", hidden ? "false" : "true");
       const sr = btn.querySelector(".sr-only");

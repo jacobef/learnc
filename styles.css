@@ -125,6 +125,16 @@ code.tok-line {
     background: #333;
     border-radius: 2px;
 }
+.sidebar-toggle.is-expanded .hamburger {
+    width: 18px;
+    height: 3px;
+    background: #333;
+    border-radius: 2px;
+    display: block;
+}
+.sidebar-toggle.is-expanded .hamburger span {
+    display: none;
+}
 .sr-only {
     position: absolute;
     width: 1px;
@@ -188,7 +198,7 @@ h2 {
     color: #233;
     text-transform: uppercase;
     letter-spacing: 1.2px;
-    margin-top: 6px;
+    margin-top: 18px;
     font-family: var(--ui-font);
 }
 
