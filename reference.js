@@ -82,6 +82,19 @@
     wrap.textContent = text;
     return wrap;
   }
+
+  function note(text) {
+    const wrap = document.createElement("div");
+    wrap.className = "ref-note-inline";
+    wrap.textContent = text;
+    return wrap;
+  }
+
+  function inlineRow() {
+    const wrap = document.createElement("div");
+    wrap.className = "ref-inline";
+    return wrap;
+  }
   function card({ title, syntax, text, note, buildVisual }) {
     const card = document.createElement("div");
     card.className = "ref-card";
@@ -136,25 +149,25 @@
         addr: "A",
         type: "T",
         value: OPTIONAL,
-        name: UNKNOWN,
+        name: "N",
       });
       const boxValue = makeBox({
         addr: OPTIONAL,
         type: "T",
         value: "V",
-        name: UNKNOWN,
+        name: OPTIONAL,
       });
       const oldBox = makeBox({
         addr: "A",
         type: "T",
         value: OPTIONAL,
-        name: UNKNOWN,
+        name: "N",
       });
       const updated = makeBox({
         addr: "A",
         type: "T",
         value: "V",
-        name: UNKNOWN,
+        name: "N",
       });
       visual.appendChild(before);
       visual.appendChild(op("="));
@@ -185,6 +198,24 @@
   addSection("Expressions");
 
   card({
+    title: "Integer",
+    syntax: "123",
+    text: "Evaluates to an integer rvalue.",
+    buildVisual: (visual) => {
+      const box = makeBox(
+        { addr: "", type: "int", value: "123", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      visual.appendChild(note("(for example)"));
+      const row = inlineRow();
+      row.appendChild(expr("123"));
+      row.appendChild(arrow("evaluates to"));
+      row.appendChild(box);
+      visual.appendChild(row);
+    },
+  });
+
+  card({
     title: "Variable Name",
     syntax: "N",
     text: "Evaluates to the box named N.",
@@ -213,7 +244,8 @@
         name: UNKNOWN,
       });
       const pBox = makeBox(
-        { addr: OPTIONAL, type: "T*", value: "A", name: UNKNOWN },
+        { addr: "", type: "T*", value: "A", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
       );
       visual.appendChild(op("&"));
       visual.appendChild(nBox);
@@ -228,7 +260,7 @@
     text: "Evaluates to the box at the address stored in P.",
     buildVisual: (visual) => {
       const ptr = makeBox(
-        { addr: OPTIONAL, type: "T*", value: OPTIONAL, name: UNKNOWN },
+        { addr: OPTIONAL, type: "T*", value: "A", name: OPTIONAL },
       );
       const target = makeBox(
         { addr: "A", type: "T", value: OPTIONAL, name: UNKNOWN },

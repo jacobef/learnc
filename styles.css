@@ -300,6 +300,26 @@ h2 {
     font-family: var(--ui-font);
 }
 
+.ref-note-inline {
+    font-size: 14px;
+    font-weight: 600;
+    color: #555;
+    font-family: var(--ui-font);
+    width: 100%;
+}
+
+.ref-inline {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.ref-inline .vbox {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
 .ref-box {
     display: flex;
     flex-direction: column;

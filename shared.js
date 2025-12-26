@@ -9,10 +9,20 @@
     return t.content.firstElementChild;
   }
 
+  function parseType(type = "int") {
+    const clean = String(type || "").trim();
+    const match = clean.match(/^(int|long)(\*+)?$/);
+    if (!match) return { base: null, depth: null };
+    const base = match[1];
+    const depth = match[2] ? match[2].length : 0;
+    return { base, depth };
+  }
+
   function typeInfo(type = "int") {
-    const clean = (type || "int").trim();
-    if (!clean) return { size: 4, align: 4 };
-    if (clean.includes("*")) return { size: 8, align: 8 };
+    const { base, depth } = parseType(type);
+    if (!base) return { size: 4, align: 4 };
+    if (depth > 0) return { size: 8, align: 8 };
+    if (base === "long") return { size: 8, align: 8 };
     return { size: 4, align: 4 };
   }
 
@@ -120,11 +130,19 @@
     const raw = (src || "").replace(/\u00a0/g, " ");
     const s = raw.replace(/\s+/g, " ").trim();
     if (!s) return null;
-    let m = s.match(/^int\b\s*(\*{0,2})\s*([A-Za-z_][A-Za-z0-9_]*)\s*;$/);
+    let m = s.match(
+      /^(int|long)\b\s*(\*{0,2})\s*([A-Za-z_][A-Za-z0-9_]*)\s*;$/,
+    );
     if (m) {
-      const stars = m[1] || "";
-      const type = stars === "**" ? "int**" : stars === "*" ? "int*" : "int";
-      return { kind: "decl", name: m[2], type };
+      const base = m[1];
+      const stars = m[2] || "";
+      const type =
+        stars === "**"
+          ? `${base}**`
+          : stars === "*"
+            ? `${base}*`
+            : base;
+      return { kind: "decl", name: m[3], type };
     }
     m = s.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?\d+)\s*;$/);
     if (m) return { kind: "assign", name: m[1], value: m[2], valueKind: "num" };
@@ -162,14 +180,16 @@
       const target = by[stmt.name];
       if (!target) return null;
       if (stmt.kind === "assign") {
-        if (target.type !== "int") return null;
+        const { base, depth } = parseType(target.type);
+        if (!base || depth !== 0) return null;
         target.value = String(stmt.value);
         return boxes;
       }
       // assignRef
-      if (target.type !== "int*" && target.type !== "int**") return null;
+      if (!isPointerType(target.type)) return null;
       const refBox = by[stmt.ref];
       if (!refBox || !refBox.address) return null;
+      if (!isRefCompatible(target.type, refBox.type)) return null;
       target.value = String(refBox.address);
       const depth = (target.type.match(/\*/g) || []).length;
       let current = refBox;
@@ -189,7 +209,14 @@
     }
     if (stmt.kind === "assignDeref") {
       const ptr = by[stmt.name];
-      if (!ptr || ptr.type !== "int*" || !ptr.value || ptr.value === "empty")
+      const { base, depth } = parseType(ptr?.type);
+      if (
+        !ptr ||
+        !base ||
+        depth !== 1 ||
+        !ptr.value ||
+        ptr.value === "empty"
+      )
         return null;
       const targetBox = boxes.find((b) => b.address === String(ptr.value));
       if (!targetBox) return null;
@@ -249,7 +276,7 @@
           while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j++;
           const ident = src.slice(i, j);
           tokens.push({
-            type: ident === "int" ? "kw" : "ident",
+            type: ident === "int" || ident === "long" ? "kw" : "ident",
             value: ident,
             line,
             col: startCol,
@@ -296,27 +323,28 @@
       return false;
     }
 
-    function resolveDeclType(stars) {
+    function resolveDeclType(stars, baseType = "int") {
       if (!Number.isFinite(stars) || stars < 0) return null;
-      if (stars === 0) return "int";
+      if (!baseType || (baseType !== "int" && baseType !== "long")) return null;
+      if (stars === 0) return baseType;
       if (!allowPointers) return null;
-      return `int${"*".repeat(stars)}`;
+      return `${baseType}${"*".repeat(stars)}`;
     }
 
     function isPointerType(type) {
-      const depth = pointerDepth(type);
+      const { depth } = parseType(type);
       return Number.isFinite(depth) && depth > 0;
     }
 
     function pointerDepth(type) {
-      if (type === "int") return 0;
-      const match = String(type || "").match(/^int(\*+)$/);
-      return match ? match[1].length : null;
+      const { depth } = parseType(type);
+      return depth;
     }
 
-    function makePointerType(depth) {
+    function makePointerType(depth, base = "int") {
       if (!Number.isFinite(depth) || depth < 0) return null;
-      return depth === 0 ? "int" : `int${"*".repeat(depth)}`;
+      if (base !== "int" && base !== "long") return null;
+      return depth === 0 ? base : `${base}${"*".repeat(depth)}`;
     }
 
     const INT32_MIN = -2147483648n;
@@ -335,6 +363,17 @@
       }
     }
 
+    function numericLiteralErrorForType(value, type) {
+      const { base, depth } = parseType(type);
+      if (!base || depth !== 0) return null;
+      const status = classifyNumericLiteral(value);
+      if (base === "long") {
+        return status === "compile" ? numericLiteralError(status) : null;
+      }
+      if (base === "int") return numericLiteralError(status);
+      return null;
+    }
+
     function numericLiteralError(kind) {
       if (kind === "compile")
         return {
@@ -347,22 +386,29 @@
     }
 
     function isRefCompatible(targetType, refType) {
-      const targetDepth = pointerDepth(targetType);
-      const refDepth = pointerDepth(refType);
-      if (!Number.isFinite(targetDepth) || !Number.isFinite(refDepth))
+      const { base: targetBase, depth: targetDepth } = parseType(targetType);
+      const { base: refBase, depth: refDepth } = parseType(refType);
+      if (
+        !targetBase ||
+        !refBase ||
+        !Number.isFinite(targetDepth) ||
+        !Number.isFinite(refDepth)
+      )
         return false;
-      return targetDepth === refDepth + 1;
+      return targetBase === refBase && targetDepth === refDepth + 1;
     }
 
     function expectedPointerTypeForRef(refType) {
-      const refDepth = pointerDepth(refType);
-      if (!Number.isFinite(refDepth)) return null;
-      return makePointerType(refDepth + 1);
+      const { base, depth } = parseType(refType);
+      if (!base || !Number.isFinite(depth)) return null;
+      return makePointerType(depth + 1, base);
     }
 
     function isDeclPrefix(tokens) {
       if (!tokens.length) return false;
-      if (tokens[0].type !== "kw" || tokens[0].value !== "int") return false;
+      if (tokens[0].type !== "kw") return false;
+      const baseType = tokens[0].value;
+      if (baseType !== "int" && baseType !== "long") return false;
       let idx = 1;
       let stars = 0;
       while (
@@ -374,7 +420,7 @@
         stars++;
         idx++;
       }
-      if (!resolveDeclType(stars)) return false;
+      if (!resolveDeclType(stars, baseType)) return false;
       if (idx === tokens.length) return true;
       if (tokens[idx].type !== "ident") return false;
       idx++;
@@ -392,7 +438,7 @@
       }
       if (rhs.type === "sym" && rhs.value === "&") {
         if (!allowPointers || !allowDeclAssignVar) return false;
-        if (!isPointerType(resolveDeclType(stars))) return false;
+        if (!isPointerType(resolveDeclType(stars, baseType))) return false;
         if (idx === tokens.length - 1) return true;
         return tokens[idx + 1]?.type === "ident" && idx + 2 === tokens.length;
       }
@@ -552,9 +598,14 @@
         return false;
       if (tokens.length === 1) {
         const t0 = tokens[0];
-        if (t0.type === "kw" && t0.value === "int") return true;
+        if (t0.type === "kw" && (t0.value === "int" || t0.value === "long"))
+          return true;
         if (t0.type === "ident") {
-          if (allowIntPrefix && "int".startsWith(t0.value)) return true;
+          if (
+            allowIntPrefix &&
+            ("int".startsWith(t0.value) || "long".startsWith(t0.value))
+          )
+            return true;
           return hasDeclaredPrefix(t0.value, declaredNames);
         }
         if (allowPointers && t0.type === "sym" && t0.value === "*") return true;
@@ -633,7 +684,9 @@
 
     function parseStatementTokens(tokens) {
       if (!tokens.length) return null;
-      if (tokens[0].type === "kw" && tokens[0].value === "int") {
+      if (tokens[0].type === "kw") {
+        const baseType = tokens[0].value;
+        if (baseType !== "int" && baseType !== "long") return null;
         let idx = 1;
         let stars = 0;
         while (
@@ -645,7 +698,7 @@
           stars++;
           idx++;
         }
-        const declType = resolveDeclType(stars);
+        const declType = resolveDeclType(stars, baseType);
         if (!declType) return null;
         if (idx >= tokens.length || tokens[idx].type !== "ident") return null;
         const name = tokens[idx].value;
@@ -860,7 +913,9 @@
     function parseDeclAssignRefFallback(tokens) {
       if (!allowPointers) return null;
       if (!tokens.length) return null;
-      if (tokens[0].type !== "kw" || tokens[0].value !== "int") return null;
+      if (tokens[0].type !== "kw") return null;
+      const baseType = tokens[0].value;
+      if (baseType !== "int" && baseType !== "long") return null;
       let idx = 1;
       let stars = 0;
       while (
@@ -871,7 +926,7 @@
         stars++;
         idx++;
       }
-      const declType = resolveDeclType(stars);
+      const declType = resolveDeclType(stars, baseType);
       if (!declType) return null;
       if (idx >= tokens.length || tokens[idx].type !== "ident") return null;
       const name = tokens[idx].value;
@@ -891,10 +946,17 @@
       const source = by[stmt.src];
       if (!target || !source) return null;
       if (requireSourceValue && isEmptyVal(source.value ?? "")) return null;
+      const { base: targetBase, depth: targetDepth } = parseType(target.type);
+      const { base: sourceBase, depth: sourceDepth } = parseType(source.type);
       const sameType = target.type === source.type;
-      const isInt = target.type === "int" && source.type === "int";
+      const isScalar =
+        targetBase &&
+        sourceBase &&
+        targetBase === sourceBase &&
+        targetDepth === 0 &&
+        sourceDepth === 0;
       const isPtr = sameType && isPointerType(target.type);
-      if (!isInt && !isPtr) return null;
+      if (!isScalar && !isPtr) return null;
       target.value = String(source.value ?? "empty");
       if (isPtr && target.value && target.value !== "empty") {
         const aliasTarget = boxes.find(
@@ -916,11 +978,8 @@
       const target = by[stmt.name];
       const refBox = by[stmt.ref];
       if (!target || !refBox || !refBox.address) return null;
+      if (!isRefCompatible(target.type, refBox.type)) return null;
       const targetDepth = pointerDepth(target.type);
-      const refDepth = pointerDepth(refBox.type);
-      if (!Number.isFinite(targetDepth) || !Number.isFinite(refDepth))
-        return null;
-      if (targetDepth !== refDepth + 1) return null;
       target.value = String(refBox.address);
       let current = refBox;
       for (let level = 1; level <= targetDepth; level++) {
@@ -958,7 +1017,7 @@
       const boxes = cloneBoxes(state);
       const { target } = resolveDerefTarget(boxes, stmt.name, stmt.depth || 1);
       if (!target) return null;
-      const targetDepth = pointerDepth(target.type);
+      const { base: targetBase, depth: targetDepth } = parseType(target.type);
       if (!Number.isFinite(targetDepth)) return null;
       if (stmt.kind === "assignDeref") {
         if (targetDepth !== 0) return null;
@@ -968,7 +1027,14 @@
         const source = by[stmt.src];
         if (!source) return null;
         if (requireSourceValue && isEmptyVal(source.value ?? "")) return null;
-        if (pointerDepth(source.type) !== targetDepth) return null;
+        const { base: sourceBase, depth: sourceDepth } = parseType(source.type);
+        if (
+          !sourceBase ||
+          !targetBase ||
+          sourceBase !== targetBase ||
+          sourceDepth !== targetDepth
+        )
+          return null;
         target.value = String(source.value ?? "empty");
       } else if (stmt.kind === "assignDerefRef") {
         const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
@@ -1014,11 +1080,11 @@
           if (current.kind !== "lvalue" || !current.address) {
             return { error: "not_lvalue", label: nextLabel };
           }
-          const depth = pointerDepth(current.type);
+          const { base, depth } = parseType(current.type);
           const nextDepth = Number.isFinite(depth) ? depth + 1 : 1;
           current = {
             kind: "rvalue",
-            type: makePointerType(nextDepth) || "int*",
+            type: makePointerType(nextDepth, base || "int") || "int*",
             value: String(current.address),
             address: "",
             box: null,
@@ -1028,7 +1094,7 @@
         }
         if (op === "*") {
           const nextLabel = `*${label}`;
-          const depth = pointerDepth(current.type);
+          const { base, depth } = parseType(current.type);
           if (!Number.isFinite(depth) || depth < 1) {
             return { error: "not_deref", label: nextLabel };
           }
@@ -1042,7 +1108,7 @@
           if (!target) return { error: "unknown", label: nextLabel };
           current = {
             kind: "lvalue",
-            type: makePointerType(depth - 1) || "int",
+            type: makePointerType(depth - 1, base || "int") || "int",
             value: target.value,
             address: target.address ?? "",
             box: target,
@@ -1076,11 +1142,11 @@
           if (current.kind !== "lvalue" || !current.address) {
             return { error: "not_lvalue", label: nextLabel };
           }
-          const depth = pointerDepth(current.type);
+          const { base, depth } = parseType(current.type);
           const nextDepth = Number.isFinite(depth) ? depth + 1 : 1;
           current = {
             kind: "rvalue",
-            type: makePointerType(nextDepth) || "int*",
+            type: makePointerType(nextDepth, base || "int") || "int*",
             value: String(current.address),
             address: "",
             box: null,
@@ -1091,7 +1157,7 @@
         }
         if (op === "*") {
           const nextLabel = `*${label}`;
-          const depth = pointerDepth(current.type);
+          const { base, depth } = parseType(current.type);
           if (!Number.isFinite(depth) || depth < 1) {
             return { error: "not_deref", label: nextLabel };
           }
@@ -1105,7 +1171,7 @@
           if (!target) return { error: "unknown", label: nextLabel };
           current = {
             kind: "lvalue",
-            type: makePointerType(depth - 1) || "int",
+            type: makePointerType(depth - 1, base || "int") || "int",
             value: target.value,
             address: target.address ?? "",
             box: target,
@@ -1136,8 +1202,10 @@
       const by = Object.fromEntries(state.map((b) => [b.name, b]));
       const base = by[src];
       const minDepth = minBaseDepthForOps(ops || []);
+      const { base: srcBase } = parseType(base?.type);
       const requiredBaseType =
-        makePointerType(minDepth) || `int${"*".repeat(minDepth)}`;
+        makePointerType(minDepth, srcBase || "int") ||
+        `int${"*".repeat(minDepth)}`;
       if (!base) {
         return {
           error: `You can't use ${src} before declaring it.`,
@@ -1174,19 +1242,22 @@
       if (!result) {
         return { error: "That assignment is not valid here.", kind: "compile" };
       }
-      const targetDepth = pointerDepth(targetType);
-      const resultDepth = pointerDepth(result.type);
-      if (!Number.isFinite(targetDepth) || !Number.isFinite(resultDepth)) {
+      const { base: targetBase, depth: targetDepth } = parseType(targetType);
+      const { base: resultBase, depth: resultDepth } = parseType(result.type);
+      if (
+        !targetBase ||
+        !resultBase ||
+        !Number.isFinite(targetDepth) ||
+        !Number.isFinite(resultDepth)
+      ) {
         return { error: "That assignment is not valid here.", kind: "compile" };
       }
-      if (targetDepth !== resultDepth) {
+      if (targetBase !== resultBase || targetDepth !== resultDepth) {
         return typeMismatchError(
           targetName,
-          makePointerType(resultDepth) || `int${"*".repeat(resultDepth)}`,
+          makePointerType(resultDepth, resultBase) ||
+            `int${"*".repeat(resultDepth)}`,
         );
-      }
-      if (targetDepth === 0 && result.type !== "int") {
-        return typeMismatchError(targetName, "int");
       }
       if (result.kind === "lvalue") {
         if (requireSourceValue && isEmptyVal(result.value ?? "")) {
@@ -1257,12 +1328,16 @@
       const resolved = resolveUnaryExpr(boxes, stmt.ops, stmt.src);
       if (!resolved?.result) return null;
       const result = resolved.result;
-      const targetDepth = pointerDepth(target.type);
-      const resultDepth = pointerDepth(result.type);
-      if (!Number.isFinite(targetDepth) || !Number.isFinite(resultDepth))
+      const { base: targetBase, depth: targetDepth } = parseType(target.type);
+      const { base: resultBase, depth: resultDepth } = parseType(result.type);
+      if (
+        !targetBase ||
+        !resultBase ||
+        !Number.isFinite(targetDepth) ||
+        !Number.isFinite(resultDepth)
+      )
         return null;
-      if (targetDepth !== resultDepth) return null;
-      if (targetDepth === 0 && result.type !== "int") return null;
+      if (targetBase !== resultBase || targetDepth !== resultDepth) return null;
       const value =
         result.kind === "lvalue" ? result.box?.value : result.value;
       if (requireSourceValue && isEmptyVal(value ?? "")) return null;
@@ -1310,11 +1385,16 @@
         stmt.depth || 1,
       );
       if (!source) return null;
-      const targetDepth = pointerDepth(target.type);
-      const sourceDepth = pointerDepth(source.type);
-      if (!Number.isFinite(targetDepth) || !Number.isFinite(sourceDepth))
+      const { base: targetBase, depth: targetDepth } = parseType(target.type);
+      const { base: sourceBase, depth: sourceDepth } = parseType(source.type);
+      if (
+        !targetBase ||
+        !sourceBase ||
+        !Number.isFinite(targetDepth) ||
+        !Number.isFinite(sourceDepth)
+      )
         return null;
-      if (targetDepth !== sourceDepth) return null;
+      if (targetBase !== sourceBase || targetDepth !== sourceDepth) return null;
       if (requireSourceValue && isEmptyVal(source.value ?? "")) return null;
       target.value = String(source.value ?? "empty");
       if (targetDepth > 0 && target.value && target.value !== "empty") {
@@ -1446,7 +1526,10 @@
       ) {
         return "Pointers are not supported here.";
       }
-      if (tokens[0].type === "kw" && tokens[0].value === "int") {
+      if (tokens[0].type === "kw") {
+        const baseType = tokens[0].value;
+        if (baseType !== "int" && baseType !== "long")
+          return "A declaration needs a variable name.";
         if (tokens.length === 1) return "A declaration needs a variable name.";
         if (
           tokens.length >= 2 &&
@@ -1467,15 +1550,15 @@
             tokens[idx + 1].value === "=" &&
             tokens[idx + 2]?.type === "number"
           ) {
-            return 'Pointer declarations should assign from an address, like "int* name = &x;".';
+            return `Pointer declarations should assign from an address, like "${baseType}* name = &x;".`;
           }
           return "A declaration needs a variable name.";
         }
         if (tokens[1].type !== "ident")
           return "A declaration needs a variable name.";
         if (allowDeclAssign || allowDeclAssignVar)
-          return 'Declarations should look like "int name;" or "int name = value;".';
-        return 'Declarations should look like "int name;".';
+          return 'Declarations should look like "int name;" or "long name;" or "int name = value;".';
+        return 'Declarations should look like "int name;" or "long name;".';
       }
       if (
         allowPointers &&
@@ -1590,8 +1673,10 @@
           }
         }
         if (parsed.kind === "declAssign" && parsed.valueKind === "num") {
-          const status = classifyNumericLiteral(parsed.value);
-          const err = numericLiteralError(status);
+          const err = numericLiteralErrorForType(
+            parsed.value,
+            parsed.declType || "int",
+          );
           if (err) return err;
         }
         if (parsed.kind === "declAssignDeref") {
@@ -1604,19 +1689,27 @@
             };
           }
           const depth = parsed.depth || 1;
-          const ptrDepth = pointerDepth(ptr.type);
-          const declDepth = pointerDepth(parsed.declType || "int");
-          if (!Number.isFinite(ptrDepth) || ptrDepth < depth) {
+          const { base: ptrBase, depth: ptrDepth } = parseType(ptr.type);
+          const { base: declBase, depth: declDepth } = parseType(
+            parsed.declType || "int",
+          );
+          if (!ptrBase || !declBase) {
             return typeMismatchError(
               parsed.ptr,
               makePointerType(depth) || `int${"*".repeat(depth)}`,
             );
           }
+          if (!Number.isFinite(ptrDepth) || ptrDepth < depth) {
+            return typeMismatchError(
+              parsed.ptr,
+              makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
+            );
+          }
           const resultDepth = ptrDepth - depth;
-          if (declDepth !== resultDepth) {
+          if (declBase !== ptrBase || declDepth !== resultDepth) {
             return typeMismatchError(
               parsed.name,
-              makePointerType(resultDepth) ||
+              makePointerType(resultDepth, ptrBase) ||
                 `int${"*".repeat(resultDepth)}`,
             );
           }
@@ -1626,7 +1719,7 @@
             if (!isPointerType(current.type)) {
               return typeMismatchError(
                 parsed.ptr,
-                makePointerType(depth) || `int${"*".repeat(depth)}`,
+                makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
               );
             }
             if (!current.value || current.value === "empty") {
@@ -1666,11 +1759,11 @@
           return missingDeclError(parsed.name, "int");
         }
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
-        if (by[parsed.name]?.type === "int") {
-          const status = classifyNumericLiteral(parsed.value);
-          const err = numericLiteralError(status);
-          if (err) return err;
-        }
+        const err = numericLiteralErrorForType(
+          parsed.value,
+          by[parsed.name]?.type || "int",
+        );
+        if (err) return err;
       } else if (parsed.kind === "assignVar") {
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
         if (!by[parsed.name]) {
@@ -1693,8 +1786,10 @@
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
         const base = by[parsed.name];
         const minDepth = minBaseDepthForOps(parsed.ops || []);
+        const { base: baseType } = parseType(base?.type);
         const requiredBaseType =
-          makePointerType(minDepth) || `int${"*".repeat(minDepth)}`;
+          makePointerType(minDepth, baseType || "int") ||
+          `int${"*".repeat(minDepth)}`;
         if (!base) {
           return missingDeclError(parsed.name, requiredBaseType);
         }
@@ -1729,11 +1824,10 @@
           return { error: "That assignment is not valid here.", kind: "compile" };
         }
         if (parsed.rhs.kind === "num") {
-          if (target.type !== "int") {
-            return typeMismatchError(target.name, "int");
-          }
-          const status = classifyNumericLiteral(parsed.rhs.value);
-          const err = numericLiteralError(status);
+          const err = numericLiteralErrorForType(
+            parsed.rhs.value,
+            target.type,
+          );
           if (err) return err;
         } else if (parsed.rhs.kind === "var") {
           const source = by[parsed.rhs.name];
@@ -1749,10 +1843,17 @@
               kind: "ub",
             };
           }
+          const { base: targetBase, depth: targetDepth } = parseType(target.type);
+          const { base: sourceBase, depth: sourceDepth } = parseType(source.type);
           const sameType = target.type === source.type;
-          const isInt = target.type === "int" && source.type === "int";
+          const isScalar =
+            targetBase &&
+            sourceBase &&
+            targetBase === sourceBase &&
+            targetDepth === 0 &&
+            sourceDepth === 0;
           const isPtr = sameType && isPointerType(target.type);
-          if (!isInt && !isPtr) {
+          if (!isScalar && !isPtr) {
             return typeMismatchError(target.name, source.type);
           }
         } else if (parsed.rhs.kind === "ref") {
@@ -1784,19 +1885,25 @@
             };
           }
           const depth = parsed.rhs.depth || 1;
-          const ptrDepth = pointerDepth(ptr.type);
-          if (!Number.isFinite(ptrDepth) || ptrDepth < depth) {
+          const { base: ptrBase, depth: ptrDepth } = parseType(ptr.type);
+          const { base: targetBase, depth: targetDepth } = parseType(target.type);
+          if (!ptrBase || !targetBase) {
             return typeMismatchError(
               parsed.rhs.name,
               makePointerType(depth) || `int${"*".repeat(depth)}`,
             );
           }
+          if (!Number.isFinite(ptrDepth) || ptrDepth < depth) {
+            return typeMismatchError(
+              parsed.rhs.name,
+              makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
+            );
+          }
           const resultDepth = ptrDepth - depth;
-          const targetDepth = pointerDepth(target.type);
-          if (targetDepth !== resultDepth) {
+          if (targetBase !== ptrBase || targetDepth !== resultDepth) {
             return typeMismatchError(
               target.name,
-              makePointerType(resultDepth) ||
+              makePointerType(resultDepth, ptrBase) ||
                 `int${"*".repeat(resultDepth)}`,
             );
           }
@@ -1806,7 +1913,7 @@
             if (!isPointerType(current.type)) {
               return typeMismatchError(
                 parsed.rhs.name,
-                makePointerType(depth) || `int${"*".repeat(depth)}`,
+                makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
               );
             }
             if (!current.value || current.value === "empty") {
@@ -1897,11 +2004,12 @@
             makePointerType(depth) || `int${"*".repeat(depth)}`,
           );
         }
-        const ptrDepth = pointerDepth(ptr.type);
-        if (!Number.isFinite(ptrDepth) || ptrDepth < depth) {
+        const { base: ptrBase, depth: ptrDepth } = parseType(ptr.type);
+        if (!ptrBase || !Number.isFinite(ptrDepth) || ptrDepth < depth) {
           return typeMismatchError(
             parsed.name,
-            makePointerType(depth) || `int${"*".repeat(depth)}`,
+            makePointerType(depth, ptrBase || "int") ||
+              `int${"*".repeat(depth)}`,
           );
         }
         let expectedPtrDepth = depth;
@@ -1912,7 +2020,16 @@
               kind: "compile",
             };
           }
-          const srcDepth = pointerDepth(by[parsed.src].type);
+          const { base: srcBase, depth: srcDepth } = parseType(
+            by[parsed.src].type,
+          );
+          if (!srcBase || srcBase !== ptrBase) {
+            return typeMismatchError(
+              parsed.src,
+              makePointerType(ptrDepth - depth, ptrBase) ||
+                `int${"*".repeat(ptrDepth - depth)}`,
+            );
+          }
           expectedPtrDepth = Number.isFinite(srcDepth)
             ? depth + srcDepth
             : depth;
@@ -1924,7 +2041,16 @@
               kind: "compile",
             };
           }
-          const refDepth = pointerDepth(by[parsed.ref].type);
+          const { base: refBase, depth: refDepth } = parseType(
+            by[parsed.ref].type,
+          );
+          if (!refBase || refBase !== ptrBase) {
+            return typeMismatchError(
+              parsed.ref,
+              makePointerType(ptrDepth - depth, ptrBase) ||
+                `int${"*".repeat(ptrDepth - depth)}`,
+            );
+          }
           expectedPtrDepth = Number.isFinite(refDepth)
             ? depth + refDepth + 1
             : depth + 1;
@@ -1932,7 +2058,7 @@
         if (ptrDepth !== expectedPtrDepth) {
           return typeMismatchError(
             parsed.name,
-            makePointerType(expectedPtrDepth) ||
+            makePointerType(expectedPtrDepth, ptrBase) ||
               `int${"*".repeat(expectedPtrDepth)}`,
           );
         }
@@ -1941,7 +2067,7 @@
           if (!isPointerType(current.type)) {
             return typeMismatchError(
               parsed.name,
-              makePointerType(depth) || `int${"*".repeat(depth)}`,
+              makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
             );
           }
           if (!current.value || current.value === "empty") {
@@ -1968,9 +2094,11 @@
           }
         }
         if (parsed.kind === "assignDeref") {
-          const status = classifyNumericLiteral(parsed.value);
-          const err = numericLiteralError(status);
-          if (err) return err;
+          const { target } = resolveDerefTarget(state, parsed.name, depth);
+          if (target) {
+            const err = numericLiteralErrorForType(parsed.value, target.type);
+            if (err) return err;
+          }
         }
       } else if (parsed.kind === "assignFromDeref") {
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
@@ -1986,19 +2114,25 @@
           };
         }
         const depth = parsed.depth || 1;
-        const ptrDepth = pointerDepth(ptr.type);
-        if (!Number.isFinite(ptrDepth) || ptrDepth < depth) {
+        const { base: ptrBase, depth: ptrDepth } = parseType(ptr.type);
+        const { base: targetBase, depth: targetDepth } = parseType(target.type);
+        if (!ptrBase || !targetBase) {
           return typeMismatchError(
             parsed.ptr,
             makePointerType(depth) || `int${"*".repeat(depth)}`,
           );
         }
+        if (!Number.isFinite(ptrDepth) || ptrDepth < depth) {
+          return typeMismatchError(
+            parsed.ptr,
+            makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
+          );
+        }
         const resultDepth = ptrDepth - depth;
-        const targetDepth = pointerDepth(target.type);
-        if (targetDepth !== resultDepth) {
+        if (targetBase !== ptrBase || targetDepth !== resultDepth) {
           return typeMismatchError(
             parsed.name,
-            makePointerType(resultDepth) ||
+            makePointerType(resultDepth, ptrBase) ||
               `int${"*".repeat(resultDepth)}`,
           );
         }
@@ -2008,7 +2142,7 @@
           if (!isPointerType(current.type)) {
             return typeMismatchError(
               parsed.ptr,
-              makePointerType(depth) || `int${"*".repeat(depth)}`,
+              makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
             );
           }
           if (!current.value || current.value === "empty") {
