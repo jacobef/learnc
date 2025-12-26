@@ -6,6 +6,9 @@
   const lineNumbers = $("#sandbox-line-numbers");
   const errorGutter = $("#sandbox-error-gutter");
   const errorDetail = $("#sandbox-error-detail");
+  const exprInput = $("#sandbox-expr");
+  const exprResult = $("#sandbox-expr-result");
+  const exprError = $("#sandbox-expr-error");
   const measureEl = (() => {
     if (!editor || !editor.parentElement) return null;
     const el = document.createElement("div");
@@ -31,6 +34,201 @@
     requireSourceValue: true,
     allowPointers: true,
   });
+
+  const INT32_MIN = -2147483648n;
+  const INT32_MAX = 2147483647n;
+  const INT64_MIN = -9223372036854775808n;
+  const INT64_MAX = 9223372036854775807n;
+
+  function classifyNumericLiteral(value) {
+    try {
+      const n = BigInt(String(value));
+      if (n < INT64_MIN || n > INT64_MAX) return "compile";
+      if (n < INT32_MIN || n > INT32_MAX) return "ub";
+      return "ok";
+    } catch {
+      return "compile";
+    }
+  }
+
+  function literalTypeFor(value) {
+    const status = classifyNumericLiteral(value);
+    if (status === "compile")
+      return { error: "That number is too large to represent.", kind: "compile" };
+    if (status === "ub") return { type: "long" };
+    return { type: "int" };
+  }
+
+  function typeInfo(type) {
+    const cleaned = String(type || "").trim();
+    const match = cleaned.match(/^(.*?)(\*+)$/);
+    if (!match) return { base: cleaned, depth: 0 };
+    return { base: match[1], depth: match[2].length };
+  }
+
+  function makePointerType(base, depth) {
+    if (!Number.isFinite(depth) || depth < 0) return null;
+    if (depth === 0) return base;
+    return `${base}${"*".repeat(depth)}`;
+  }
+
+  function parseExpressionTokens(src = "") {
+    const tokens = [];
+    let i = 0;
+    while (i < src.length) {
+      const ch = src[i];
+      if (/\s/.test(ch)) {
+        i++;
+        continue;
+      }
+      if (ch === "*" || ch === "&") {
+        tokens.push({ type: "sym", value: ch });
+        i++;
+        continue;
+      }
+      if (/[A-Za-z_]/.test(ch)) {
+        let j = i + 1;
+        while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j++;
+        tokens.push({ type: "ident", value: src.slice(i, j) });
+        i = j;
+        continue;
+      }
+      if (ch === "-" || /[0-9]/.test(ch)) {
+        let j = i;
+        if (src[j] === "-") {
+          if (!/[0-9]/.test(src[j + 1] || "")) {
+            return { error: "That line has a character that does not belong in an expression." };
+          }
+          j++;
+        }
+        while (j < src.length && /[0-9]/.test(src[j])) j++;
+        tokens.push({ type: "number", value: src.slice(i, j) });
+        i = j;
+        continue;
+      }
+      return { error: "That line has a character that does not belong in an expression." };
+    }
+    return { tokens };
+  }
+
+  function parseExpression(src = "") {
+    const { tokens, error } = parseExpressionTokens(src);
+    if (error) return { error };
+    if (!tokens.length) return { error: "Enter an expression to evaluate." };
+    const ops = [];
+    let idx = 0;
+    while (
+      idx < tokens.length &&
+      tokens[idx].type === "sym" &&
+      (tokens[idx].value === "*" || tokens[idx].value === "&")
+    ) {
+      ops.push(tokens[idx].value);
+      idx++;
+    }
+    if (idx >= tokens.length) return { error: "Expression needs a value." };
+    const primary = tokens[idx];
+    idx++;
+    if (idx < tokens.length)
+      return { error: "Only unary * and & are supported in this sandbox." };
+    if (primary.type !== "ident" && primary.type !== "number")
+      return { error: "Expression needs a variable name or number." };
+    return { ops, primary };
+  }
+
+  function showExprError(message) {
+    if (!exprError) return;
+    exprError.textContent = message || "";
+    exprError.classList.toggle("hidden", !message);
+  }
+
+  function evaluateExpression(expr, state) {
+    const parsed = parseExpression(expr);
+    if (parsed.error) return { error: parsed.error, kind: "compile" };
+    const { ops, primary } = parsed;
+    const byName = new Map();
+    state.forEach((b) => {
+      if (b.name) byName.set(b.name, b);
+      if (Array.isArray(b.names)) {
+        b.names.forEach((n) => {
+          if (n) byName.set(n, b);
+        });
+      }
+    });
+    let current;
+    let label = primary.value;
+    if (primary.type === "ident") {
+      const box = byName.get(primary.value);
+      if (!box)
+        return { error: `Unknown variable ${primary.value}.`, kind: "compile" };
+      current = {
+        kind: "lvalue",
+        type: box.type,
+        value: box.value,
+        address: box.address ?? box.addr ?? "",
+      };
+    } else {
+      const status = literalTypeFor(primary.value);
+      if (status.error) return { error: status.error, kind: status.kind };
+      current = {
+        kind: "rvalue",
+        type: status.type || "int",
+        value: primary.value,
+        address: "",
+      };
+    }
+
+    for (let i = ops.length - 1; i >= 0; i--) {
+      const op = ops[i];
+      if (op === "&") {
+        const nextLabel = `&${label}`;
+        if (current.kind !== "lvalue" || !current.address) {
+          return { error: `${nextLabel} is not valid here.`, kind: "compile" };
+        }
+        const { base, depth } = typeInfo(current.type);
+        current = {
+          kind: "rvalue",
+          type: makePointerType(base || "int", depth + 1),
+          value: String(current.address),
+          address: "",
+        };
+        label = nextLabel;
+      } else if (op === "*") {
+        const nextLabel = `*${label}`;
+        const { base, depth } = typeInfo(current.type);
+        if (!Number.isFinite(depth) || depth < 1) {
+          return {
+            error: `${nextLabel} is not a valid dereference.`,
+            kind: "compile",
+          };
+        }
+        const ptrVal = String(current.value ?? "").trim();
+        if (!ptrVal || /^empty$/i.test(ptrVal)) {
+          return {
+            error: `${label} doesn't have a value yet, so it can't be dereferenced.`,
+            kind: "ub",
+          };
+        }
+        const target = state.find(
+          (b) => String(b.address ?? b.addr ?? "") === String(ptrVal),
+        );
+        if (!target) {
+          return {
+            error: `${nextLabel} doesn't point to a known variable.`,
+            kind: "ub",
+          };
+        }
+        current = {
+          kind: "lvalue",
+          type: makePointerType(base || "int", depth - 1),
+          value: target.value,
+          address: target.address ?? target.addr ?? "",
+        };
+        label = nextLabel;
+      }
+    }
+
+    return { result: current, label };
+  }
 
   function allocFactory() {
     if (sandbox.allocBase == null) sandbox.allocBase = randAddr("int");
@@ -166,6 +364,35 @@
     stage.innerHTML = "";
     const outcome = getProgramOutcome();
     stage.appendChild(renderState("", outcome.state, outcome.kind));
+    renderExpression(outcome);
+  }
+
+  function renderExpression(outcome) {
+    if (!exprResult || !exprInput) return;
+    exprResult.innerHTML = "";
+    showExprError("");
+    const expr = exprInput.value.trim();
+    if (!expr) return;
+    if (!outcome || outcome.kind !== "ok") {
+      showExprError("Fix the code before evaluating expressions.");
+      return;
+    }
+    const evaluated = evaluateExpression(expr, outcome.state || []);
+    if (evaluated.error) {
+      showExprError(evaluated.error);
+      return;
+    }
+    const { result } = evaluated;
+    const node = vbox({
+      addr: result.address ? String(result.address) : "—",
+      type: result.type || "int",
+      value: result.value ?? "empty",
+      name: null,
+      editable: false,
+    });
+    if (!result.address) node.classList.add("no-addr");
+    node.classList.add("no-name");
+    exprResult.appendChild(node);
   }
 
   function renderState(title, boxes, status = "ok") {
@@ -434,4 +661,10 @@
   updateInstructions();
   renderStage();
   updateLineGutters();
+
+  if (exprInput) {
+    exprInput.addEventListener("input", () => {
+      renderExpression(getProgramOutcome());
+    });
+  }
 })(window.MB);

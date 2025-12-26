@@ -21,7 +21,8 @@
     lines: [
       "int deer;",
       "int hare;",
-      "int* wolf = &deer;",
+      "int* wolf;",
+      "wolf = &deer;",
       "wolf = &hare;",
       "int** bear = &wolf;",
       "int* fox = wolf;",
@@ -37,30 +38,30 @@
     pptrAddr: randAddr("int**"),
     spareAddr: randAddr("int*"),
     pulledAddr: randAddr("int"),
-    ws: Array(11).fill(null),
-    passes: Array(11).fill(false),
+    ws: Array(12).fill(null),
+    passes: Array(12).fill(false),
     aliasExplained: false,
-    baseline: Array(11).fill(null),
+    baseline: Array(12).fill(null),
   };
 
-  const editableSteps = new Set([6, 8, 9, 10]);
+  const editableSteps = new Set([7, 9, 10, 11]);
 
   function ptrTarget(boundary) {
-    if (boundary < 3) return "empty";
-    if (boundary < 4) return String(p7.aAddr);
-    if (boundary < 9) return String(p7.bAddr);
+    if (boundary < 4) return "empty";
+    if (boundary < 5) return String(p7.aAddr);
+    if (boundary < 10) return String(p7.bAddr);
     return String(p7.aAddr);
   }
 
   function pptrTarget(boundary) {
-    if (boundary < 5) return "empty";
+    if (boundary < 6) return "empty";
     return String(p7.ptrAddr);
   }
 
   function canonical(boundary) {
     const state = [];
-    const deerVal = boundary >= 7 ? "50" : "empty";
-    const hareVal = boundary >= 8 ? "11" : "empty";
+    const deerVal = boundary >= 8 ? "50" : "empty";
+    const hareVal = boundary >= 9 ? "11" : "empty";
     if (boundary >= 1) {
       state.push({
         name: "deer",
@@ -97,7 +98,7 @@
         }
       }
     }
-    if (boundary >= 5) {
+    if (boundary >= 6) {
       state.push({
         name: "bear",
         names: ["bear"],
@@ -126,7 +127,7 @@
         }
       }
     }
-    if (boundary >= 6) {
+    if (boundary >= 7) {
       state.push({
         name: "fox",
         names: ["fox"],
@@ -144,7 +145,7 @@
         }
       }
     }
-    if (boundary >= 10) {
+    if (boundary >= 11) {
       state.push({
         name: "elk",
         names: ["elk"],
@@ -302,21 +303,21 @@
       );
       return;
     }
-    if (p7.boundary === 3) {
+    if (p7.boundary === 4) {
       setInstructions(
         'When <code class="tok-name">wolf</code> is assigned to <code class="tok-addr">&amp;deer</code>, <code class="tok-name">wolf</code>&#8217;s value becomes <code class="tok-name">deer</code>&#8217;s address. Also, <code class="tok-name">deer</code> gains an additional name. Use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">deer</code> to reveal this name.<br><br>We say that <code class="tok-name">wolf</code> now "points to" <code class="tok-name">deer</code>.',
         { html: true },
       );
       return;
     }
-    if (p7.boundary === 4) {
+    if (p7.boundary === 5) {
       setInstructions(
         'When <code class="tok-name">wolf</code> is set to <code class="tok-addr">&amp;hare</code>, the <code class="tok-name">*wolf</code> name moves from <code class="tok-name">deer</code> to <code class="tok-name">hare</code>. Use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">hare</code> to reveal it. We say that <code class="tok-name">wolf</code> now "points to" <code class="tok-name">hare</code>.<br><br>In general, if some variable <code class="tok-name">X</code> points to another variable <code class="tok-name">Y</code>, then <code class="tok-name">*X</code> refers to <code class="tok-name">Y</code>. In this case, <code class="tok-name">wolf</code> points to <code class="tok-name">hare</code>, so <code class="tok-name">*wolf</code> refers to <code class="tok-name">hare</code>.<br><br>We&#8217;ll see the relevance of this alternate name later in the code.',
         { html: true },
       );
       return;
     }
-    if (p7.boundary === 5) {
+    if (p7.boundary === 6) {
       setInstructions(
         '<code class="tok-line">bear = &amp;wolf;</code> adds the <code class="tok-name">*bear</code> name to <code class="tok-name">wolf</code>, and also adds a name to <code class="tok-name">hare</code>. Use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">hare</code> to reveal it.<br><br>To understand why, recall that <code class="tok-name">*bear</code> (aka <code class="tok-name">wolf</code>) points to <code class="tok-name">hare</code>. So we can add another asterisk to <code class="tok-name">*bear</code> to get the alternate name for <code class="tok-name">hare</code>: <code class="tok-name">**bear</code>.',
         { html: true },
@@ -406,7 +407,7 @@
     const filledInt = ["deer", "hare"]
       .map((name) => byName(name))
       .find((box) => box && !isEmptyVal(box.value || ""));
-    if (filledInt && p7.boundary < 7)
+    if (filledInt && p7.boundary < 8)
       return {
         html: `<code class="tok-name">${filledInt.name}</code> hasn't stored a value—leave it empty.`,
       };
@@ -415,7 +416,7 @@
     const bear = byName("bear");
     const fox = byName("fox");
 
-    if (p7.boundary === 6) {
+    if (p7.boundary === 7) {
       const normalized = bear ? normalizePtrValue(bear.value || "") : "empty";
       if (normalized === "empty" || normalized !== String(p7.ptrAddr))
         return {
@@ -431,7 +432,7 @@
         return {
           html: '<code class="tok-name">fox</code>\'s value should be set to <code class="tok-name">wolf</code>\'s value (the address of <code class="tok-name">hare</code>).',
         };
-    } else if (p7.boundary === 8) {
+    } else if (p7.boundary === 9) {
       const wolfVal = wolf ? normalizePtrValue(wolf.value || "") : "empty";
       const hareBox = byName("hare");
       if (wolfVal === "11" && hareBox?.value !== "11")
@@ -443,7 +444,7 @@
         return {
           html: '<code class="tok-name">*wolf</code> and <code class="tok-name">hare</code> are both names for the same variable, so <code class="tok-line">*wolf = 11;</code> would be equivalent to <code class="tok-line">hare = 11;</code>.',
         };
-    } else if (p7.boundary === 9) {
+    } else if (p7.boundary === 10) {
       const deerAddr = String(p7.aAddr);
       const bearVal = bear ? normalizePtrValue(bear.value || "") : "empty";
       const wolfVal = wolf ? normalizePtrValue(wolf.value || "") : "empty";
@@ -460,7 +461,7 @@
         return {
           html: '<code class="tok-line">*bear = &amp;deer;</code> sets <code class="tok-name">wolf</code> to <code class="tok-addr">&amp;deer</code>.',
         };
-    } else if (p7.boundary === 10) {
+    } else if (p7.boundary === 11) {
       const elk = byName("elk");
       const bBox = byName("deer");
       const bVal = bBox?.value || "";

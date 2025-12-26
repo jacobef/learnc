@@ -142,8 +142,8 @@
     const actual = applyUserProgram();
     const group = document.createElement("div");
     group.className = "state-group two-col";
-    group.appendChild(renderState("Expected final state", expected));
     group.appendChild(renderState("Your final state", actual));
+    group.appendChild(renderState("Expected final state", expected));
     stage.appendChild(group);
   }
 

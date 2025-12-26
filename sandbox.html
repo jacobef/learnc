@@ -18,6 +18,7 @@
                 <a href="program6.html">6. Assignment II</a>
                 <a href="program7a.html">7A. Pointers</a>
                 <a href="program7b.html">7B. Dereferencing</a>
+                <a href="reference.html">Reference</a>
                 <a href="sandbox.html" class="active">Sandbox</a>
             </nav>
             <div class="main">
@@ -54,9 +55,25 @@
                                 class="hint-inline hidden"
                             ></div>
                         </div>
-                        <div class="panel program-state-panel">
+                        <div class="panel program-state-panel sandbox-state-panel">
                             <div class="panel-title">Final program state</div>
                             <div id="sandbox-stage"></div>
+                            <div class="expr-panel">
+                                <label for="sandbox-expr" class="expr-title">
+                                    Evaluate expression
+                                </label>
+                                <input
+                                    id="sandbox-expr"
+                                    class="expr-input"
+                                    type="text"
+                                    spellcheck="false"
+                                />
+                                <div id="sandbox-expr-result" class="grid"></div>
+                                <div
+                                    id="sandbox-expr-error"
+                                    class="hint-inline hidden"
+                                ></div>
+                            </div>
                         </div>
                     </div>
                 </section>

@@ -20,7 +20,8 @@
     lines: [
       "int deer;",
       "int hare;",
-      "int* wolf = &deer;",
+      "int* wolf;",
+      "wolf = &deer;",
       "wolf = &hare;",
       "int** bear = &wolf;",
       "int* fox = wolf;",
@@ -31,21 +32,21 @@
     ptrAddr: randAddr("int*"),
     pptrAddr: randAddr("int**"),
     spareAddr: randAddr("int*"),
-    ws: Array(7).fill(null),
-    passes: Array(7).fill(false),
-    baseline: Array(7).fill(null),
+    ws: Array(8).fill(null),
+    passes: Array(8).fill(false),
+    baseline: Array(8).fill(null),
   };
 
-  const editableSteps = new Set([4, 5, 6]);
+  const editableSteps = new Set([5, 6, 7]);
 
   function ptrTarget(boundary) {
-    if (boundary < 3) return "empty";
-    if (boundary < 4) return String(p7a.aAddr);
+    if (boundary < 4) return "empty";
+    if (boundary < 5) return String(p7a.aAddr);
     return String(p7a.bAddr);
   }
 
   function pptrTarget(boundary) {
-    if (boundary < 5) return "empty";
+    if (boundary < 6) return "empty";
     return String(p7a.ptrAddr);
   }
 
@@ -78,7 +79,7 @@
         address: String(p7a.ptrAddr),
       });
     }
-    if (boundary >= 5) {
+    if (boundary >= 6) {
       state.push({
         name: "bear",
         names: ["bear"],
@@ -87,7 +88,7 @@
         address: String(p7a.pptrAddr),
       });
     }
-    if (boundary >= 6) {
+    if (boundary >= 7) {
       state.push({
         name: "fox",
         names: ["fox"],
@@ -206,7 +207,7 @@
       return {
         html: 'You still need <code class="tok-name">deer</code>, <code class="tok-name">hare</code>, and <code class="tok-name">wolf</code> in the program state.',
       };
-    if (p7a.boundary >= 5 && !by.bear)
+    if (p7a.boundary >= 6 && !by.bear)
       return {
         html: 'You need <code class="tok-name">bear</code> in the program state.',
       };
@@ -218,25 +219,35 @@
       return {
         html: '<code class="tok-name">wolf</code>\'s type should be <code class="tok-type">int*</code>.',
       };
-    if (p7a.boundary >= 5 && by.bear && by.bear.type !== "int**")
+    if (p7a.boundary >= 6 && by.bear && by.bear.type !== "int**")
       return {
         html: '<code class="tok-name">bear</code>\'s type should be <code class="tok-type">int**</code>.',
       };
-    if (p7a.boundary >= 6 && by.fox && by.fox.type !== "int*")
+    if (p7a.boundary >= 7 && by.fox && by.fox.type !== "int*")
       return {
         html: '<code class="tok-name">fox</code>\'s type should be <code class="tok-type">int*</code>.',
       };
     // Skip address validation; addresses are generated for the user.
     const ptrVal = (by.wolf.value || "").trim();
-    if (!ptrVal)
-      return {
-        html: '<code class="tok-name">wolf</code>\'s value should not be empty.',
-      };
-    if (ptrVal !== String(p7a.bAddr))
-      return {
-        html: 'This line sets <code class="tok-name">wolf</code>\'s value to <code class="tok-name">hare</code>\'s address.',
-      };
-    if (p7a.boundary === 5) {
+    if (p7a.boundary < 4) {
+      if (!isEmptyVal(ptrVal))
+        return {
+          html: '<code class="tok-name">wolf</code> was just declared, so its value should be empty.',
+        };
+    } else {
+      if (!ptrVal)
+        return {
+          html: '<code class="tok-name">wolf</code>\'s value should not be empty.',
+        };
+      if (ptrVal !== String(ptrTarget(p7a.boundary))) {
+        const target =
+          p7a.boundary < 5 ? "deer" : "hare";
+        return {
+          html: `This line sets <code class="tok-name">wolf</code>'s value to <code class="tok-name">${target}</code>'s address.`,
+        };
+      }
+    }
+    if (p7a.boundary === 6) {
       const pptrVal = (by.bear?.value || "").trim();
       if (!pptrVal)
         return {
@@ -247,7 +258,7 @@
           html: '<code class="tok-name">bear</code> should hold <code class="tok-name">wolf</code>\'s address.',
         };
     }
-    if (p7a.boundary === 6) {
+    if (p7a.boundary === 7) {
       if (!by.fox)
         return {
           html: 'You need <code class="tok-name">fox</code> in the program state.',
@@ -388,12 +399,12 @@
     if (!isEmptyVal(by.deer.value || "") || !isEmptyVal(by.hare.value || ""))
       return false;
     if ((wolf.value || "").trim() !== String(p7a.bAddr)) return false;
-    if (p7a.boundary >= 5) {
+    if (p7a.boundary >= 6) {
       if (!bear || bear.type !== "int**") return false;
       const pval = (bear.value || "").trim();
       if (pval !== String(p7a.ptrAddr)) return false;
     }
-    if (p7a.boundary >= 6) {
+    if (p7a.boundary >= 7) {
       if (!fox || fox.type !== "int*") return false;
       const sval = (fox.value || "").trim();
       if (sval !== String(p7a.bAddr)) return false;

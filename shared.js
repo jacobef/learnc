@@ -38,6 +38,12 @@
     return s.trim() === "" || /^empty$/i.test(s.trim());
   }
 
+  function normalizeZeroDisplay(value) {
+    const trimmed = String(value ?? "").trim();
+    if (trimmed === "-0") return "0";
+    return trimmed;
+  }
+
   function txt(n) {
     return (n?.textContent || "").trim();
   }
@@ -313,6 +319,33 @@
       return depth === 0 ? "int" : `int${"*".repeat(depth)}`;
     }
 
+    const INT32_MIN = -2147483648n;
+    const INT32_MAX = 2147483647n;
+    const INT64_MIN = -9223372036854775808n;
+    const INT64_MAX = 9223372036854775807n;
+
+    function classifyNumericLiteral(value) {
+      try {
+        const n = BigInt(String(value));
+        if (n < INT64_MIN || n > INT64_MAX) return "compile";
+        if (n < INT32_MIN || n > INT32_MAX) return "ub";
+        return "ok";
+      } catch {
+        return "compile";
+      }
+    }
+
+    function numericLiteralError(kind) {
+      if (kind === "compile")
+        return {
+          error: "That number is too large to represent.",
+          kind: "compile",
+        };
+      if (kind === "ub")
+        return { error: "That number is too large for int.", kind: "ub" };
+      return null;
+    }
+
     function isRefCompatible(targetType, refType) {
       const targetDepth = pointerDepth(targetType);
       const refDepth = pointerDepth(refType);
@@ -413,6 +446,52 @@
       return false;
     }
 
+    function isUnaryAssignPrefix(tokens, declaredNames) {
+      if (!allowPointers) return false;
+      if (!tokens.length) return false;
+      let idx = 0;
+      while (
+        idx < tokens.length &&
+        tokens[idx].type === "sym" &&
+        (tokens[idx].value === "*" || tokens[idx].value === "&")
+      )
+        idx++;
+      if (idx === 0) return false;
+      if (idx === tokens.length) return true;
+      if (tokens[idx].type !== "ident") return false;
+      const name = tokens[idx].value;
+      if (idx === tokens.length - 1)
+        return hasDeclaredPrefix(name, declaredNames);
+      idx++;
+      if (tokens[idx].type !== "sym" || tokens[idx].value !== "=") return false;
+      idx++;
+      if (idx >= tokens.length) return true;
+      const rhs = tokens[idx];
+      if (rhs.type === "number") return idx === tokens.length - 1;
+      if (rhs.type === "ident" && allowVarAssign) {
+        return (
+          idx === tokens.length - 1 &&
+          hasDeclaredPrefix(rhs.value, declaredNames)
+        );
+      }
+      if (rhs.type === "sym" && rhs.value === "&" && allowPointers) {
+        if (idx === tokens.length - 1) return true;
+        return idx === tokens.length - 2 && tokens[idx + 1].type === "ident";
+      }
+      if (rhs.type === "sym" && rhs.value === "*" && allowPointers) {
+        let j = idx;
+        while (
+          j < tokens.length &&
+          tokens[j].type === "sym" &&
+          tokens[j].value === "*"
+        )
+          j++;
+        if (j === tokens.length) return true;
+        return tokens[j].type === "ident" && j === tokens.length - 1;
+      }
+      return false;
+    }
+
     function isDerefPrefix(tokens, declaredNames) {
       if (!allowPointers) return false;
       if (!tokens.length) return false;
@@ -471,8 +550,61 @@
       return (
         isDeclPrefix(tokens) ||
         isAssignPrefix(tokens, declaredNames) ||
-        isDerefPrefix(tokens, declaredNames)
+        isDerefPrefix(tokens, declaredNames) ||
+        isUnaryAssignPrefix(tokens, declaredNames)
       );
+    }
+
+    function parseAssignRhs(tokens, idx) {
+      if (idx >= tokens.length) return null;
+      const rhs = tokens[idx];
+      if (rhs.type === "number" && idx === tokens.length - 1) {
+        return { kind: "num", value: rhs.value };
+      }
+      if (rhs.type === "ident" && allowVarAssign && idx === tokens.length - 1) {
+        return { kind: "var", name: rhs.value };
+      }
+      if (rhs.type === "sym" && rhs.value === "&" && allowPointers) {
+        const next = tokens[idx + 1];
+        if (next?.type === "ident" && idx + 2 === tokens.length) {
+          return { kind: "ref", name: next.value };
+        }
+      }
+      if (rhs.type === "sym" && rhs.value === "*" && allowPointers) {
+        let j = idx;
+        let depth = 0;
+        while (
+          j < tokens.length &&
+          tokens[j].type === "sym" &&
+          tokens[j].value === "*"
+        ) {
+          depth++;
+          j++;
+        }
+        if (depth > 0 && tokens[j]?.type === "ident" && j + 1 === tokens.length) {
+          return { kind: "deref", name: tokens[j].value, depth };
+        }
+      }
+      return null;
+    }
+
+    function parseUnaryLhs(tokens) {
+      if (!allowPointers) return null;
+      if (!tokens.length) return null;
+      let idx = 0;
+      const ops = [];
+      while (
+        idx < tokens.length &&
+        tokens[idx].type === "sym" &&
+        (tokens[idx].value === "*" || tokens[idx].value === "&")
+      ) {
+        ops.push(tokens[idx].value);
+        idx++;
+      }
+      if (!ops.length) return null;
+      if (idx >= tokens.length || tokens[idx].type !== "ident") return null;
+      const name = tokens[idx].value;
+      return { ops, name, idx: idx + 1 };
     }
 
     function parseStatementTokens(tokens) {
@@ -559,24 +691,9 @@
         }
         return null;
       }
-      if (
-        allowPointers &&
-        tokens[0].type === "sym" &&
-        tokens[0].value === "*"
-      ) {
-        let idx = 0;
-        let depth = 0;
-        while (
-          idx < tokens.length &&
-          tokens[idx].type === "sym" &&
-          tokens[idx].value === "*"
-        ) {
-          depth++;
-          idx++;
-        }
-        if (idx >= tokens.length || tokens[idx].type !== "ident") return null;
-        const name = tokens[idx].value;
-        idx++;
+      const unary = parseUnaryLhs(tokens);
+      if (unary) {
+        let idx = unary.idx;
         if (
           idx >= tokens.length ||
           tokens[idx].type !== "sym" ||
@@ -584,24 +701,9 @@
         )
           return null;
         idx++;
-        if (idx >= tokens.length) return null;
-        const rhs = tokens[idx];
-        if (rhs.type === "number" && idx === tokens.length - 1) {
-          return { kind: "assignDeref", name, value: rhs.value, depth };
-        }
-        if (
-          rhs.type === "ident" &&
-          allowVarAssign &&
-          idx === tokens.length - 1
-        ) {
-          return { kind: "assignDerefVar", name, src: rhs.value, depth };
-        }
-        if (rhs.type === "sym" && rhs.value === "&" && allowPointers) {
-          const next = tokens[idx + 1];
-          if (next?.type === "ident" && idx + 2 === tokens.length) {
-            return { kind: "assignDerefRef", name, ref: next.value, depth };
-          }
-        }
+        const rhs = parseAssignRhs(tokens, idx);
+        if (!rhs) return null;
+        return { kind: "assignUnary", name: unary.name, ops: unary.ops, rhs };
       }
       if (
         tokens.length === 4 &&
@@ -810,6 +912,124 @@
       return applyAssignDeref(state, stmt);
     }
 
+    function resolveUnaryLvalue(state, ops, name) {
+      const by = Object.fromEntries(state.map((b) => [b.name, b]));
+      const base = by[name];
+      if (!base) return { error: "missing", name };
+      let current = {
+        kind: "lvalue",
+        type: base.type,
+        value: base.value,
+        address: base.address ?? "",
+        box: base,
+      };
+      let label = name;
+      for (let i = ops.length - 1; i >= 0; i--) {
+        const op = ops[i];
+        if (op === "&") {
+          const nextLabel = `&${label}`;
+          if (current.kind !== "lvalue" || !current.address) {
+            return { error: "not_lvalue", label: nextLabel };
+          }
+          const depth = pointerDepth(current.type);
+          const nextDepth = Number.isFinite(depth) ? depth + 1 : 1;
+          current = {
+            kind: "rvalue",
+            type: makePointerType(nextDepth) || "int*",
+            value: String(current.address),
+            address: "",
+            box: null,
+          };
+          label = nextLabel;
+          continue;
+        }
+        if (op === "*") {
+          const nextLabel = `*${label}`;
+          const depth = pointerDepth(current.type);
+          if (!Number.isFinite(depth) || depth < 1) {
+            return { error: "not_deref", label: nextLabel };
+          }
+          const ptrVal = String(current.value ?? "").trim();
+          if (!ptrVal || /^empty$/i.test(ptrVal)) {
+            return { error: "empty", label };
+          }
+          const target = state.find(
+            (b) => String(b.address ?? "") === String(ptrVal),
+          );
+          if (!target) return { error: "unknown", label: nextLabel };
+          current = {
+            kind: "lvalue",
+            type: makePointerType(depth - 1) || "int",
+            value: target.value,
+            address: target.address ?? "",
+            box: target,
+          };
+          label = nextLabel;
+        }
+      }
+      if (current.kind !== "lvalue" || !current.box) {
+        return { error: "not_lvalue", label };
+      }
+      return { target: current.box, label, type: current.type };
+    }
+
+    function minBaseDepthForOps(ops) {
+      let delta = 0;
+      let required = 0;
+      for (let i = ops.length - 1; i >= 0; i--) {
+        const op = ops[i];
+        if (op === "&") {
+          delta += 1;
+        } else if (op === "*") {
+          required = Math.max(required, 1 - delta);
+          delta -= 1;
+        }
+      }
+      return Math.max(0, required);
+    }
+
+    function applyAssignUnary(state, stmt) {
+      const boxes = cloneBoxes(state);
+      const resolved = resolveUnaryLvalue(boxes, stmt.ops, stmt.name);
+      if (!resolved?.target) return null;
+      const targetName = resolved.target.name;
+      if (stmt.rhs.kind === "num") {
+        return applyStatement(
+          boxes,
+          {
+            kind: "assign",
+            name: targetName,
+            value: stmt.rhs.value,
+            valueKind: "num",
+          },
+          {},
+        );
+      }
+      if (stmt.rhs.kind === "var") {
+        return applyAssignVar(boxes, {
+          kind: "assignVar",
+          name: targetName,
+          src: stmt.rhs.name,
+        });
+      }
+      if (stmt.rhs.kind === "ref") {
+        return applyAssignRef(boxes, {
+          kind: "assignRef",
+          name: targetName,
+          ref: stmt.rhs.name,
+        });
+      }
+      if (stmt.rhs.kind === "deref") {
+        return applyAssignFromDeref(boxes, {
+          kind: "assignFromDeref",
+          name: targetName,
+          ptr: stmt.rhs.name,
+          depth: stmt.rhs.depth,
+        });
+      }
+      return null;
+    }
+
     function applyAssignFromDeref(state, stmt) {
       const boxes = cloneBoxes(state);
       const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
@@ -897,6 +1117,9 @@
       }
       if (stmt.kind === "assignRef") {
         return applyAssignRef(state, stmt);
+      }
+      if (stmt.kind === "assignUnary") {
+        return applyAssignUnary(state, stmt);
       }
       if (stmt.kind === "assignFromDeref") {
         return applyAssignFromDeref(state, stmt);
@@ -1077,6 +1300,11 @@
             };
           }
         }
+        if (parsed.kind === "declAssign" && parsed.valueKind === "num") {
+          const status = classifyNumericLiteral(parsed.value);
+          const err = numericLiteralError(status);
+          if (err) return err;
+        }
         if (parsed.kind === "declAssignDeref") {
           const by = Object.fromEntries(state.map((b) => [b.name, b]));
           const ptr = by[parsed.ptr];
@@ -1138,6 +1366,12 @@
         if (!seenDecl.has(parsed.name)) {
           return missingDeclError(parsed.name, "int");
         }
+        const by = Object.fromEntries(state.map((b) => [b.name, b]));
+        if (by[parsed.name]?.type === "int") {
+          const status = classifyNumericLiteral(parsed.value);
+          const err = numericLiteralError(status);
+          if (err) return err;
+        }
       } else if (parsed.kind === "assignVar") {
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
         if (!by[parsed.name]) {
@@ -1155,6 +1389,150 @@
             error: `${parsed.src} doesn't have a value yet.`,
             kind: "ub",
           };
+        }
+      } else if (parsed.kind === "assignUnary") {
+        const by = Object.fromEntries(state.map((b) => [b.name, b]));
+        const base = by[parsed.name];
+        const minDepth = minBaseDepthForOps(parsed.ops || []);
+        const requiredBaseType =
+          makePointerType(minDepth) || `int${"*".repeat(minDepth)}`;
+        if (!base) {
+          return missingDeclError(parsed.name, requiredBaseType);
+        }
+        const baseDepth = pointerDepth(base.type);
+        if (!Number.isFinite(baseDepth) || baseDepth < minDepth) {
+          return typeMismatchError(parsed.name, requiredBaseType);
+        }
+        const resolved = resolveUnaryLvalue(state, parsed.ops, parsed.name);
+        if (resolved?.error === "empty") {
+          return {
+            error: `${resolved.label} doesn't have a value yet, so it can't be dereferenced.`,
+            kind: "ub",
+          };
+        }
+        if (resolved?.error === "unknown") {
+          return {
+            error: `${resolved.label} doesn't point to a known variable.`,
+            kind: "ub",
+          };
+        }
+        if (resolved?.error === "not_deref") {
+          return {
+            error: `${resolved.label} is not a valid dereference.`,
+            kind: "compile",
+          };
+        }
+        if (resolved?.error === "not_lvalue") {
+          return { error: "That assignment is not valid here.", kind: "compile" };
+        }
+        const target = resolved?.target;
+        if (!target) {
+          return { error: "That assignment is not valid here.", kind: "compile" };
+        }
+        if (parsed.rhs.kind === "num") {
+          if (target.type !== "int") {
+            return typeMismatchError(target.name, "int");
+          }
+          const status = classifyNumericLiteral(parsed.rhs.value);
+          const err = numericLiteralError(status);
+          if (err) return err;
+        } else if (parsed.rhs.kind === "var") {
+          const source = by[parsed.rhs.name];
+          if (!source) {
+            return {
+              error: `You can't use ${parsed.rhs.name} before declaring it.`,
+              kind: "compile",
+            };
+          }
+          if (requireSourceValue && isEmptyVal(source.value ?? "")) {
+            return {
+              error: `${parsed.rhs.name} doesn't have a value yet.`,
+              kind: "ub",
+            };
+          }
+          const sameType = target.type === source.type;
+          const isInt = target.type === "int" && source.type === "int";
+          const isPtr = sameType && isPointerType(target.type);
+          if (!isInt && !isPtr) {
+            return typeMismatchError(target.name, source.type);
+          }
+        } else if (parsed.rhs.kind === "ref") {
+          const refBox = by[parsed.rhs.name];
+          if (!refBox) {
+            return {
+              error: `You can't use ${parsed.rhs.name} before declaring it.`,
+              kind: "compile",
+            };
+          }
+          if (!isPointerType(target.type)) {
+            const expected = expectedPointerTypeForRef(refBox.type) || "int*";
+            return typeMismatchError(target.name, expected);
+          }
+          if (!isRefCompatible(target.type, refBox.type)) {
+            const expected = expectedPointerTypeForRef(refBox.type);
+            if (expected) return typeMismatchError(target.name, expected);
+            return {
+              error: "That assignment is not valid here.",
+              kind: "compile",
+            };
+          }
+        } else if (parsed.rhs.kind === "deref") {
+          const ptr = by[parsed.rhs.name];
+          if (!ptr) {
+            return {
+              error: `You can't use ${parsed.rhs.name} before declaring it.`,
+              kind: "compile",
+            };
+          }
+          const depth = parsed.rhs.depth || 1;
+          const ptrDepth = pointerDepth(ptr.type);
+          if (!Number.isFinite(ptrDepth) || ptrDepth < depth) {
+            return typeMismatchError(
+              parsed.rhs.name,
+              makePointerType(depth) || `int${"*".repeat(depth)}`,
+            );
+          }
+          const resultDepth = ptrDepth - depth;
+          const targetDepth = pointerDepth(target.type);
+          if (targetDepth !== resultDepth) {
+            return typeMismatchError(
+              target.name,
+              makePointerType(resultDepth) ||
+                `int${"*".repeat(resultDepth)}`,
+            );
+          }
+          let current = ptr;
+          const derefLabel = `${"*".repeat(depth)}${parsed.rhs.name}`;
+          for (let i = 0; i < depth; i++) {
+            if (!isPointerType(current.type)) {
+              return typeMismatchError(
+                parsed.rhs.name,
+                makePointerType(depth) || `int${"*".repeat(depth)}`,
+              );
+            }
+            if (!current.value || current.value === "empty") {
+              return {
+                error: `${derefLabel} doesn't have a value yet.`,
+                kind: "ub",
+              };
+            }
+            const next = state.find(
+              (b) => b.address === String(current.value),
+            );
+            if (!next) {
+              return {
+                error: `${parsed.rhs.name} doesn't point to a known variable.`,
+                kind: "ub",
+              };
+            }
+            current = next;
+          }
+          if (requireSourceValue && isEmptyVal(current.value ?? "")) {
+            return {
+              error: `${derefLabel} doesn't have a value yet.`,
+              kind: "ub",
+            };
+          }
         }
       } else if (parsed.kind === "assignRef") {
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
@@ -1265,6 +1643,11 @@
               kind: "ub",
             };
           }
+        }
+        if (parsed.kind === "assignDeref") {
+          const status = classifyNumericLiteral(parsed.value);
+          const err = numericLiteralError(status);
+          if (err) return err;
         }
       } else if (parsed.kind === "assignFromDeref") {
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
@@ -1623,7 +2006,7 @@
     allowNameToggle = false,
   } = {}) {
     const emptyDisplay = isEmptyVal(String(value || ""));
-    const displayValue = emptyDisplay ? "" : value;
+    const displayValue = emptyDisplay ? "" : normalizeZeroDisplay(value);
     const resolvedNames =
       Array.isArray(names) && names.length
         ? names
@@ -1783,7 +2166,7 @@
     const value =
       valEl?.classList?.contains("placeholder") && valText === ""
         ? "empty"
-        : valText;
+        : normalizeZeroDisplay(valText);
     return {
       addr: txt(root.querySelector(".addr")),
       type: txt(root.querySelector(".type")),
@@ -2223,6 +2606,7 @@
   });
 
   function initScrollHint() {
+    if (document.body?.classList?.contains("no-scroll-hint")) return;
     const btn = el(
       '<button class="scroll-down-btn hidden" aria-label="Scroll to bottom">↓</button>',
     );

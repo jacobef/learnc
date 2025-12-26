@@ -22,10 +22,10 @@
   const p3 = {
     lines: [
       "int north;",
-      "int south;",
+      "int south = -5;",
       "north = 5;",
       "int east = 9;",
-      "int west = 15;",
+      "int west = -9;",
     ],
     boundary: 0,
     aAddr: randAddr("int"),
@@ -179,35 +179,35 @@
         return {
           html: 'Line 3 assigns <code class="tok-line">north = 5;</code>.',
         };
-      if (!isEmptyVal(by.south.value || ""))
+      if (by.south.value !== "-5")
         return {
-          html: '<code class="tok-name">south</code> has not been assigned yet—leave its value empty.',
+          html: 'Line 2 assigns <code class="tok-line">south = -5;</code>.',
         };
     } else if (p3.boundary === 4) {
       if (by.north.value !== "5")
         return {
           html: '<code class="tok-name">north</code> keeps the value <code class="tok-value">5</code>.',
         };
-      if (!isEmptyVal(by.south.value || ""))
+      if (by.south.value !== "-5")
         return {
-          html: '<code class="tok-name">south</code> is still empty at this point.',
+          html: '<code class="tok-name">south</code> keeps the value <code class="tok-value">-5</code>.',
         };
       if (by.east.value !== "9")
         return {
           html: 'Line 4 declares <code class="tok-name">east</code> and assigns <code class="tok-value">9</code>.',
         };
     } else if (p3.boundary === 5) {
-      if (by.west?.value !== "15")
+      if (by.west?.value !== "-9")
         return {
-          html: 'Line 5 declares <code class="tok-name">west</code> and assigns <code class="tok-value">15</code>.',
+          html: 'Line 5 declares <code class="tok-name">west</code> and assigns <code class="tok-value">-9</code>.',
         };
       if (by.east.value !== "9")
         return {
           html: '<code class="tok-name">east</code>\'s value should stay <code class="tok-value">9</code>.',
         };
-      if (!isEmptyVal(by.south.value || ""))
+      if (by.south.value !== "-5")
         return {
-          html: '<code class="tok-name">south</code>\'s value should still be empty.',
+          html: '<code class="tok-name">south</code>\'s value should stay <code class="tok-value">-5</code>.',
         };
       if (by.north.value !== "5")
         return {
@@ -227,7 +227,7 @@
         by.north &&
         by.south &&
         by.north.value === "5" &&
-        isEmptyVal(by.south.value || "")) ||
+        by.south.value === "-5") ||
       (p3.boundary === 4 &&
         boxes.length === 3 &&
         allTypesOk &&
@@ -235,7 +235,7 @@
         by.south &&
         by.east &&
         by.north.value === "5" &&
-        isEmptyVal(by.south.value || "") &&
+        by.south.value === "-5" &&
         by.east.value === "9") ||
       (p3.boundary === 5 &&
         boxes.length === 4 &&
@@ -245,9 +245,9 @@
         by.east &&
         by.west &&
         by.north.value === "5" &&
-        isEmptyVal(by.south.value || "") &&
+        by.south.value === "-5" &&
         by.east.value === "9" &&
-        by.west.value === "15");
+        by.west.value === "-9");
     if (ok)
       return { html: 'Looks good. Press <span class="btn-ref">Check</span>.' };
     const hasReset = !!document.getElementById("p3-reset");
@@ -332,12 +332,11 @@
       const b = vbox({
         addr: String(p3.bAddr),
         type: "int",
-        value: "empty",
+        value: "-5",
         name: "south",
         editable: false,
       });
       a.querySelector(".value").classList.add("placeholder", "muted");
-      b.querySelector(".value").classList.add("placeholder", "muted");
       wrap.appendChild(a);
       wrap.appendChild(b);
       stage.appendChild(wrap);
@@ -355,7 +354,7 @@
           {
             name: "south",
             type: "int",
-            value: "empty",
+            value: "-5",
             address: String(p3.bAddr),
           },
         ],
@@ -379,7 +378,7 @@
           {
             name: "south",
             type: "int",
-            value: "empty",
+            value: "-5",
             address: String(p3.bAddr),
           },
         ]);
@@ -397,7 +396,7 @@
       const south = vbox({
         addr: String(p3.bAddr),
         type: "int",
-        value: "empty",
+        value: "-5",
         name: "south",
         editable: false,
       });
@@ -408,7 +407,6 @@
         name: "east",
         editable: false,
       });
-      south.querySelector(".value").classList.add("placeholder", "muted");
       wrap.appendChild(north);
       wrap.appendChild(south);
       wrap.appendChild(east);
@@ -427,7 +425,7 @@
             {
               name: "south",
               type: "int",
-              value: "empty",
+              value: "-5",
               address: String(p3.bAddr),
             },
             {
@@ -441,11 +439,13 @@
         ensureBox(base, {
           name: "north",
           type: "int",
+          value: "5",
           address: String(p3.aAddr),
         });
         ensureBox(base, {
           name: "south",
           type: "int",
+          value: "-5",
           address: String(p3.bAddr),
         });
         ensureBox(base, {
@@ -533,7 +533,7 @@
         by.north &&
         by.south &&
         by.north.value === "5" &&
-        isEmptyVal(by.south.value || "");
+        by.south.value === "-5";
       $("#p3-status").textContent = ok ? "correct" : "incorrect";
       $("#p3-status").className = ok ? "ok" : "err";
       MB.flashStatus($("#p3-status"));
@@ -562,9 +562,9 @@
         by.east &&
         by.west &&
         by.north.value === "5" &&
-        isEmptyVal(by.south.value || "") &&
+        by.south.value === "-5" &&
         by.east.value === "9" &&
-        by.west.value === "15";
+        by.west.value === "-9";
       $("#p3-status").textContent = ok ? "correct" : "incorrect";
       $("#p3-status").className = ok ? "ok" : "err";
       MB.flashStatus($("#p3-status"));
