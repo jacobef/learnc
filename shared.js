@@ -2784,7 +2784,11 @@
   function serializeWorkspace(id) {
     const ws = document.getElementById(id);
     if (!ws) return null;
-    return [...ws.querySelectorAll(".vbox")].map((v) => readBoxState(v));
+    let boxes = [...ws.querySelectorAll(".vbox")];
+    if (!boxes.length && ws.dataset.inline === "true") {
+      boxes = [...document.querySelectorAll(`.vbox[data-workspace="${id}"]`)];
+    }
+    return boxes.map((v) => readBoxState(v));
   }
 
   function restoreWorkspace(state, defaults, workspaceId, opts = {}) {
@@ -2837,6 +2841,48 @@
       });
     }
     return wrap;
+  }
+
+  function setupInlineWorkspace(workspace, container, opts = {}) {
+    if (!workspace || !container) return;
+    const { useContents = false } = opts;
+    workspace.dataset.inline = "true";
+    const supportsContents =
+      useContents &&
+      typeof CSS !== "undefined" &&
+      typeof CSS.supports === "function" &&
+      CSS.supports("display", "contents");
+    if (supportsContents) {
+      workspace.classList.add("workspace-inline");
+      workspace.style.display = "";
+      return;
+    }
+    workspace.classList.remove("workspace-inline");
+    workspace.style.display = "none";
+    const id = workspace.id || "";
+    const placeBox = (box) => {
+      if (!box || !box.classList?.contains("vbox")) return;
+      if (id) box.dataset.workspace = id;
+      if (container.contains(workspace)) {
+        container.insertBefore(box, workspace);
+      } else {
+        container.appendChild(box);
+      }
+    };
+    workspace.querySelectorAll(".vbox").forEach((box) => placeBox(box));
+    const observer = new MutationObserver((mutations) => {
+      mutations.forEach((m) => {
+        m.addedNodes.forEach((node) => {
+          if (!(node instanceof Element)) return;
+          if (node.classList?.contains("vbox")) {
+            placeBox(node);
+          } else {
+            node.querySelectorAll?.(".vbox").forEach((box) => placeBox(box));
+          }
+        });
+      });
+    });
+    observer.observe(workspace, { childList: true });
   }
 
   function setHintContent(panel, message) {
@@ -3279,6 +3325,7 @@
     firstNonEmptyClone,
     serializeWorkspace,
     restoreWorkspace,
+    setupInlineWorkspace,
     setHintContent,
     createHintController,
     createStepper,

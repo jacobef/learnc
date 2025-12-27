@@ -232,13 +232,11 @@
         allowNameEdit: true,
         allowTypeEdit: true,
       });
-      workspace.classList.add("workspace-inline");
+      MB.setupInlineWorkspace?.(workspace, wrap);
       wrap.appendChild(workspace);
       stage.appendChild(wrap);
       if (!editable) {
-        workspace
-          .querySelectorAll(".vbox")
-          .forEach((v) => disableBoxEditing(v));
+        wrap.querySelectorAll(".vbox").forEach((v) => disableBoxEditing(v));
       }
       if (editable) {
         $("#p2-check").classList.remove("hidden");

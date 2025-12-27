@@ -464,7 +464,7 @@ h2 {
 .panel-title + .codepane {
     margin-top: 12px;
 }
-.workspace-inline {
+.grid.workspace-inline {
     display: contents;
 }
 
@@ -1108,7 +1108,7 @@ button:hover:not([disabled]) {
 .grid {
     display: flex;
     flex-wrap: wrap;
-    gap: 24px 56px;
+    gap: 24px 32px;
 }
 
 .vbox .delete {
@@ -1368,7 +1368,7 @@ nav.tabs a.active:hover {
     .grid > * {
         min-width: 0;
     }
-    .workspace-inline {
+    .grid.workspace-inline {
         display: block;
         width: 100%;
         flex: 1 1 100%;
