@@ -58,6 +58,23 @@
     return (n?.textContent || "").trim();
   }
 
+  function disableAutoText(el) {
+    if (!el || el.nodeType !== 1) return;
+    el.setAttribute("autocapitalize", "off");
+    el.setAttribute("autocorrect", "off");
+    el.setAttribute("autocomplete", "off");
+    el.setAttribute("spellcheck", "false");
+  }
+
+  function applyAutoTextDefaults(root = document) {
+    if (!root) return;
+    root
+      .querySelectorAll(
+        'input[type="text"], input:not([type]), textarea, [contenteditable="true"]',
+      )
+      .forEach((el) => disableAutoText(el));
+  }
+
   function renderCodePane(root, lines, boundary, opts = {}) {
     root.innerHTML = "";
     const code = el('<div class="codecol"></div>');
@@ -98,6 +115,7 @@
         src.contentEditable = "true";
         src.classList.add("code-editable");
         src.dataset.index = String(i);
+        disableAutoText(src);
         const placeholder = line.placeholder ?? "";
         if (!text.trim()) {
           src.textContent = placeholder;
@@ -2522,11 +2540,14 @@
       requestAnimationFrame(() => updateNameStackSpacing(node));
 
     if (editable) {
-      node.querySelector(".value").setAttribute("contenteditable", "true");
+      const valueEl = node.querySelector(".value");
+      valueEl.setAttribute("contenteditable", "true");
+      disableAutoText(valueEl);
       if (allowTypeEdit) {
         const typeEl = node.querySelector(".type");
         typeEl.setAttribute("contenteditable", "true");
         typeEl.classList.add("editable");
+        disableAutoText(typeEl);
       }
       // Names remain read-only for existing boxes; add only for new via allowNameAdd.
       const addBtn = node.querySelector(".name-add");
@@ -2542,6 +2563,7 @@
             if (allowNameEdit) {
               textEl.setAttribute("contenteditable", "true");
               textEl.classList.add("editable");
+              disableAutoText(textEl);
             }
             textEl.focus();
           }
@@ -2559,6 +2581,7 @@
         if (allowNameEdit) {
           el.setAttribute("contenteditable", "true");
           el.classList.add("editable");
+          disableAutoText(el);
         }
       });
     }
@@ -3006,6 +3029,7 @@
 
   document.addEventListener("focusin", (e) => {
     const t = e.target;
+    disableAutoText(t);
     if (
       t.classList?.contains("code-editable") &&
       t.classList.contains("placeholder")
@@ -3099,18 +3123,43 @@
     initScrollHint();
   }
 
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => {
+      applyAutoTextDefaults(document);
+    });
+  } else {
+    applyAutoTextDefaults(document);
+  }
+
   function initInstructionWatcher() {
     const seen = new Map();
+    const normalizeInstruction = (text = "") =>
+      String(text)
+        .replace(/Run line\s+\d+/gi, "Run line #")
+        .replace(/\s+/g, " ")
+        .trim();
     document.querySelectorAll(".intro").forEach((el) => {
-      seen.set(el, el.innerHTML);
+      const initialText = (el.textContent || "").trim();
+      seen.set(el, {
+        html: el.innerHTML,
+        norm: normalizeInstruction(initialText),
+      });
       const obs = new MutationObserver(() => {
-        const prev = seen.get(el) || "";
-        const curr = el.innerHTML;
-        if (curr === prev) return;
-        seen.set(el, curr);
+        const prev = seen.get(el) || { html: "", norm: "" };
+        const currHtml = el.innerHTML;
+        if (currHtml === prev.html) return;
+        const currText = (el.textContent || "").trim();
+        const currNorm = normalizeInstruction(currText);
+        seen.set(el, { html: currHtml, norm: currNorm });
         const text = (el.textContent || "").trim();
         if (text) {
-          window.scrollTo({ top: 0, behavior: "smooth" });
+          if (prev.norm === currNorm) return;
+          requestAnimationFrame(() => {
+            const rect = el.getBoundingClientRect();
+            const offset = 24;
+            const top = Math.max(0, rect.top + window.scrollY - offset);
+            window.scrollTo({ top, behavior: "smooth" });
+          });
         }
       });
       obs.observe(el, { childList: true, characterData: true, subtree: true });
@@ -3130,6 +3179,12 @@
     const state = params.get("sidebar");
     if (state === "0") document.body.classList.add("sidebar-collapsed");
     if (state === "1") document.body.classList.remove("sidebar-collapsed");
+    if (state == null) {
+      const prefersCollapsed =
+        window.matchMedia &&
+        window.matchMedia("(max-width: 900px)").matches;
+      if (prefersCollapsed) document.body.classList.add("sidebar-collapsed");
+    }
   }
 
   applySidebarStateFromUrl();
@@ -3139,6 +3194,13 @@
     const nav = wrap?.querySelector("nav");
     if (!wrap || !nav) return;
     if (!nav.id) nav.id = "sidebar";
+    let sidebarWrap = wrap.querySelector(".sidebar-wrap");
+    if (!sidebarWrap) {
+      sidebarWrap = document.createElement("div");
+      sidebarWrap.className = "sidebar-wrap";
+      wrap.insertBefore(sidebarWrap, nav);
+      sidebarWrap.appendChild(nav);
+    }
     let btn = document.querySelector(".sidebar-toggle");
     if (!btn) {
       btn = el(
@@ -3147,6 +3209,11 @@
       document.body.appendChild(btn);
     }
     btn.setAttribute("aria-controls", nav.id);
+    const placeToggle = () => {
+      if (btn.parentElement !== sidebarWrap) {
+        sidebarWrap.insertBefore(btn, sidebarWrap.firstChild);
+      }
+    };
     const updateLabel = () => {
       const hidden = document.body.classList.contains("sidebar-collapsed");
       const label = hidden ? "Show sidebar" : "Hide sidebar";
@@ -3167,9 +3234,11 @@
     btn.addEventListener("click", () => {
       document.body.classList.toggle("sidebar-collapsed");
       updateLabel();
+      placeToggle();
       updateUrl();
     });
     updateLabel();
+    placeToggle();
   }
 
   if (document.readyState === "loading") {
@@ -3194,6 +3263,7 @@
     randAddr,
     isEmptyVal,
     txt,
+    disableAutoText,
     renderCodePane,
     renderCodePaneEditable,
     readEditableCodeLines,

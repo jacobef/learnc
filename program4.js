@@ -44,8 +44,8 @@
       instructions.textContent = "Program solved!";
       return;
     }
-    instructions.textContent =
-      'Until now, you have been editing the program state to match the code. Now you will be editing the code to match the program state. Edit the line so that "Expected final state" and "Your final state" match.';
+    instructions.innerHTML =
+      'Until now, you have been editing the program state to match the code. Now you will be editing the code to match the program state. Edit the line so that "Expected final state" and "Your final state" match, then press <span class="btn-ref">Check</span>.';
   }
 
   function normalizedLines() {

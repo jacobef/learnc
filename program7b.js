@@ -11,6 +11,7 @@
     makeAnswerBox,
     createHintController,
     createStepper,
+    disableAutoText,
   } = MB;
 
   const instructions = $("#p7b-instructions");
@@ -231,6 +232,7 @@
       inner.querySelectorAll(".name-text").forEach((el) => {
         el.setAttribute("contenteditable", "true");
         el.classList.add("editable");
+        disableAutoText?.(el);
       });
     }
     label.textContent = namesList.length > 1 ? "name(s)" : "name";
