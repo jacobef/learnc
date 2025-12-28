@@ -144,7 +144,11 @@
         'What does <code class="tok-line">toaster = 28;</code> do?';
     } else {
       const runLabel = `Run line ${p2.boundary + 1} ▶`;
-      instructions.innerHTML = `Use <span class="btn-ref">Back ◀</span> and <span class="btn-ref">${runLabel}</span> to step through the code.`;
+      if (p2.boundary <= 0) {
+        instructions.innerHTML = `Use <span class="btn-ref">${runLabel}</span> to step through the code.`;
+      } else {
+        instructions.innerHTML = `Use <span class="btn-ref">Back ◀</span> and <span class="btn-ref">${runLabel}</span> to step through the code.`;
+      }
     }
   }
 

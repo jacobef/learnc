@@ -2329,9 +2329,14 @@
                 const startLine = currentTokens[0]?.line;
                 const startCol = currentTokens[0]?.col;
                 if (Number.isFinite(startLine) && tok.line > startLine) {
-                  const text =
-                    "This statement spans multiple lines. In C, a line break acts like a space, so it still compiles.";
-                  info.set(tok.line, { text, html: text });
+                  const snippet = toStatementSnippet(
+                    startLine,
+                    startCol,
+                    tok.line,
+                  );
+                  const text = `This statement spans multiple lines. In C, a line break acts like a space, so this statement is ${snippet}.`;
+                  const html = `This statement spans multiple lines. In C, a line break acts like a space, so this statement is <code class="tok-line">${escapeHtml(snippet)}</code>.`;
+                  info.set(tok.line, { text, html });
                 }
                 if (
                   result.parsed?.kind === "decl" ||
@@ -3111,6 +3116,25 @@
       e.preventDefault();
       t.blur();
     }
+  });
+
+  function isTextInputActive(el) {
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    if (isTextInputActive(document.activeElement) || isTextInputActive(e.target))
+      return;
+    const selector =
+      e.key === "ArrowLeft" ? 'button[id$="-prev"]' : 'button[id$="-next"]';
+    const btn = document.querySelector(selector);
+    if (!btn || btn.disabled) return;
+    e.preventDefault();
+    btn.click();
   });
 
   document.addEventListener("focusout", (e) => {

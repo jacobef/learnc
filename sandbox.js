@@ -9,6 +9,26 @@
   const exprInput = $("#sandbox-expr");
   const exprResult = $("#sandbox-expr-result");
   const exprError = $("#sandbox-expr-error");
+  const prevBtn = $("#sandbox-prev");
+  const nextBtn = $("#sandbox-next");
+  const highlightEl = (() => {
+    if (!editor || !editor.parentElement) return null;
+    const el = document.createElement("pre");
+    el.className = "code-textarea-highlight";
+    el.setAttribute("aria-hidden", "true");
+    editor.parentElement.insertBefore(el, editor);
+    return el;
+  })();
+  const boundaryLine = (() => {
+    if (!editor) return null;
+    const row = editor.closest(".codepane-row");
+    if (!row) return null;
+    const el = document.createElement("div");
+    el.className = "code-boundary-line";
+    el.setAttribute("aria-hidden", "true");
+    row.appendChild(el);
+    return el;
+  })();
   const measureEl = (() => {
     if (!editor || !editor.parentElement) return null;
     const el = document.createElement("div");
@@ -25,6 +45,8 @@
     errorDetailMessage: "",
     errorDetailHtml: "",
     errorDetailKind: "",
+    boundary: null,
+    lineCount: 0,
   };
 
   const simulator = createSimpleSimulator({
@@ -242,13 +264,33 @@
 
   function updateInstructions() {
     if (!instructions) return;
+    const lines = getRawLines();
+    const total = lines.length;
+    const boundary = Number.isFinite(sandbox.boundary) ? sandbox.boundary : total;
+    const hasCode = lines.some((line) => line.trim() !== "");
+    const atEnd = boundary >= total;
     const base =
       "This is the sandbox. The program state will update as you write code.";
+    let suffix = "";
+    if (hasCode) {
+      if (atEnd) {
+        suffix = ' Use <span class="btn-ref">Back ◀</span> to step through your program.';
+      } else if (boundary <= 0) {
+        const runLabel = `Run line ${boundary + 1} ▶`;
+        suffix = ` Use <span class="btn-ref">${runLabel}</span> to step through your program.`;
+      } else {
+        const runLabel = `Run line ${boundary + 1} ▶`;
+        suffix = ` Use <span class="btn-ref">Back ◀</span> and <span class="btn-ref">${runLabel}</span> to step through your program.`;
+      }
+    }
+    const message = `${base}${suffix}`;
     const params = new URLSearchParams(window.location.search);
-    if (params.get("finished") === "1") {
-      instructions.innerHTML = `You finished the tutorial as it currently exists, congrats! Many more problems will be coming later.<br><br>${base}`;
+    const finished = params.get("finished") === "1";
+    instructions.classList.toggle("sandbox-finished", finished);
+    if (finished) {
+      instructions.innerHTML = `You finished the tutorial as it currently exists, congrats! Many more problems will be coming later.<br><br>${message}`;
     } else {
-      instructions.textContent = base;
+      instructions.innerHTML = message;
     }
   }
 
@@ -331,19 +373,164 @@
     return getEditorText().split(/\r?\n/);
   }
 
+  function clampBoundary(value, total) {
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(total, value));
+  }
+
+  function isMultiLineStatement(range) {
+    return (
+      range &&
+      Number.isFinite(range.startLine) &&
+      Number.isFinite(range.endLine) &&
+      range.endLine > range.startLine
+    );
+  }
+
+  function formatLineRange(range) {
+    if (!range) return "";
+    const start = (range.startLine ?? 0) + 1;
+    const end = (range.endLine ?? 0) + 1;
+    if (start === end) return `line ${start}`;
+    return `lines ${start}-${end}`;
+  }
+
+  function countNewlines(value) {
+    let count = 0;
+    for (let i = 0; i < value.length; i++) {
+      if (value[i] === "\n") count++;
+    }
+    return count;
+  }
+
+  function diffSegments(prev, next) {
+    let start = 0;
+    const prevLen = prev.length;
+    const nextLen = next.length;
+    while (start < prevLen && start < nextLen && prev[start] === next[start])
+      start++;
+    let endPrev = prevLen;
+    let endNext = nextLen;
+    while (
+      endPrev > start &&
+      endNext > start &&
+      prev[endPrev - 1] === next[endNext - 1]
+    ) {
+      endPrev--;
+      endNext--;
+    }
+    return {
+      start,
+      oldSegment: prev.slice(start, endPrev),
+      newSegment: next.slice(start, endNext),
+    };
+  }
+
+  function adjustBoundaryForEdit(prevText, nextText) {
+    if (prevText === nextText) return;
+    const prevLines = prevText.split(/\r?\n/).length;
+    const nextLines = nextText.split(/\r?\n/).length;
+    const boundary = Number.isFinite(sandbox.boundary)
+      ? sandbox.boundary
+      : prevLines;
+    if (!Number.isFinite(boundary)) return;
+    const { start, oldSegment, newSegment } = diffSegments(prevText, nextText);
+    const beforeChange = prevText.slice(0, start);
+    const changeLine = countNewlines(beforeChange);
+    const lastBreak = beforeChange.lastIndexOf("\n");
+    const changeCol = start - (lastBreak + 1);
+    if (changeLine > boundary) return;
+    const delta = countNewlines(newSegment) - countNewlines(oldSegment);
+    if (!delta) return;
+    if (changeLine === boundary) {
+      if (changeCol !== 0 || delta < 0) return;
+    }
+    sandbox.boundary = clampBoundary(boundary + delta, nextLines);
+  }
+
+  function buildStatementMap(lines) {
+    const text = lines.join("\n");
+    const tokens = simulator.tokenizeProgram(text);
+    const parts = simulator.splitStatements(tokens);
+    const byLine = new Array(lines.length).fill(null);
+    parts.forEach((part) => {
+      if (!Number.isFinite(part.startLine) || !Number.isFinite(part.endLine))
+        return;
+      const range = {
+        startLine: part.startLine,
+        endLine: part.endLine,
+        hasSemicolon: !!part.hasSemicolon,
+      };
+      for (let i = range.startLine; i <= range.endLine; i++) {
+        if (i >= 0 && i < byLine.length && !byLine[i]) byLine[i] = range;
+      }
+    });
+    return { parts, byLine };
+  }
+
+  function statementRangeForLine(statementMap, lineIndex) {
+    if (!statementMap || !Array.isArray(statementMap.byLine)) return null;
+    if (!Number.isFinite(lineIndex)) return null;
+    if (lineIndex < 0 || lineIndex >= statementMap.byLine.length) return null;
+    return statementMap.byLine[lineIndex];
+  }
+
+  function getStatementContext(lines, boundary) {
+    const statementMap = buildStatementMap(lines);
+    const currentRange = statementRangeForLine(statementMap, boundary);
+    const prevRange = statementRangeForLine(statementMap, boundary - 1);
+    const currentIsMulti = isMultiLineStatement(currentRange);
+    const midStatement =
+      currentIsMulti &&
+      boundary > currentRange.startLine &&
+      boundary <= currentRange.endLine;
+    const atStatementStart =
+      currentIsMulti && boundary === currentRange.startLine;
+    return {
+      statementMap,
+      currentRange,
+      prevRange,
+      midStatement,
+      atStatementStart,
+    };
+  }
+
+  function syncBoundaryWithLines(lines) {
+    const total = lines.length;
+    const prevTotal = Number.isFinite(sandbox.lineCount)
+      ? sandbox.lineCount
+      : total;
+    const hasBoundary = Number.isFinite(sandbox.boundary);
+    const wasAtEnd = !hasBoundary || sandbox.boundary >= prevTotal;
+    sandbox.lineCount = total;
+    if (wasAtEnd) {
+      sandbox.boundary = total;
+    } else {
+      sandbox.boundary = clampBoundary(sandbox.boundary, total);
+    }
+    return { boundary: sandbox.boundary, total };
+  }
+
   function classifyLineStatuses(lines) {
     return simulator.classifyLineStatuses(lines, { alloc: allocFactory() });
   }
 
-  function applyUserProgram() {
-    const text = getEditorText();
-    sandbox.text = text;
+  function applyUserProgram(lines) {
+    const text = lines.join("\n");
     return simulator.applyProgram(text, { alloc: allocFactory() });
   }
 
-  function getProgramOutcome() {
-    const lines = getRawLines();
-    const status = classifyLineStatuses(lines);
+  function getProgramOutcome(linesOverride, boundaryOverride) {
+    const lines = linesOverride || getRawLines();
+    const total = lines.length;
+    const boundary = Number.isFinite(boundaryOverride)
+      ? boundaryOverride
+      : Number.isFinite(sandbox.boundary)
+        ? sandbox.boundary
+        : total;
+    const safeBoundary = clampBoundary(boundary, total);
+    const activeLines = lines.slice(0, safeBoundary);
+    const status = classifyLineStatuses(activeLines);
     let hasCompile = status.incomplete.size > 0;
     let hasUb = false;
     if (status.errorKinds) {
@@ -352,19 +539,27 @@
         else hasCompile = true;
       }
     }
-    if (hasCompile) return { kind: "compile", state: null };
-    if (hasUb) return { kind: "ub", state: null };
-    const state = applyUserProgram();
-    if (!state) return { kind: "compile", state: null };
-    return { kind: "ok", state };
+    if (hasCompile) return { kind: "compile", state: null, boundary: safeBoundary, total };
+    if (hasUb) return { kind: "ub", state: null, boundary: safeBoundary, total };
+    const state = applyUserProgram(activeLines);
+    if (!state) return { kind: "compile", state: null, boundary: safeBoundary, total };
+    return { kind: "ok", state, boundary: safeBoundary, total };
   }
 
   function renderStage() {
     const stage = $("#sandbox-stage");
     stage.innerHTML = "";
-    const outcome = getProgramOutcome();
-    stage.appendChild(renderState("", outcome.state, outcome.kind));
-    renderExpression(outcome);
+    const lines = getRawLines();
+    const { boundary, total } = syncBoundaryWithLines(lines);
+    const statementInfo = getStatementContext(lines, boundary);
+    const outcome = getProgramOutcome(lines, boundary);
+    const displayOutcome = statementInfo.midStatement
+      ? { kind: "mid", state: null }
+      : outcome;
+    stage.appendChild(renderState("", displayOutcome.state, displayOutcome.kind));
+    renderExpression(displayOutcome);
+    updateStepperControls(boundary, total, statementInfo);
+    updateInstructions();
   }
 
   function renderExpression(outcome) {
@@ -395,6 +590,48 @@
     exprResult.appendChild(node);
   }
 
+  function updateStepperControls(
+    boundaryOverride,
+    totalOverride,
+    statementInfo,
+  ) {
+    if (!prevBtn && !nextBtn) return;
+    const total = Number.isFinite(totalOverride)
+      ? totalOverride
+      : Number.isFinite(sandbox.lineCount)
+        ? sandbox.lineCount
+        : getRawLines().length;
+    const boundary = Number.isFinite(boundaryOverride)
+      ? boundaryOverride
+      : Number.isFinite(sandbox.boundary)
+        ? sandbox.boundary
+        : total;
+    if (prevBtn) prevBtn.disabled = boundary <= 0;
+    if (nextBtn) {
+      const atEnd = boundary >= total;
+      if (atEnd) {
+        nextBtn.textContent = "At end ▶";
+      } else if (
+        statementInfo?.midStatement &&
+        isMultiLineStatement(statementInfo.currentRange)
+      ) {
+        nextBtn.textContent = `Finish running ${formatLineRange(
+          statementInfo.currentRange,
+        )} ▶`;
+      } else if (
+        statementInfo?.atStatementStart &&
+        isMultiLineStatement(statementInfo.currentRange)
+      ) {
+        nextBtn.textContent = `Run ${formatLineRange(
+          statementInfo.currentRange,
+        )} ▶`;
+      } else {
+        nextBtn.textContent = `Run line ${boundary + 1} ▶`;
+      }
+      nextBtn.disabled = atEnd;
+    }
+  }
+
   function renderState(title, boxes, status = "ok") {
     const wrap = document.createElement("div");
     wrap.className = "state-panel";
@@ -406,7 +643,13 @@
     }
     const grid = document.createElement("div");
     grid.className = "grid";
-    if (status === "compile") {
+    if (status === "mid") {
+      const msg = document.createElement("div");
+      msg.className = "muted state-status";
+      msg.style.padding = "8px";
+      msg.textContent = "(the program is in the middle of executing a statement)";
+      grid.appendChild(msg);
+    } else if (status === "compile") {
       const msg = document.createElement("div");
       msg.className = "muted state-status";
       msg.style.padding = "8px";
@@ -503,12 +746,36 @@
     });
   }
 
-  function updateLineGutters() {
+  function updateLineGutters(linesOverride) {
     autoSizeEditor();
-    const lines = getRawLines();
+    const lines = linesOverride || getRawLines();
     const count = Math.max(lines.length, 1);
+    const safeBoundary = clampBoundary(sandbox.boundary ?? 0, count);
     const lineHeight = getLineHeightPx();
     const wraps = measureWrapCounts(lines);
+    if (highlightEl) {
+      highlightEl.innerHTML = "";
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < lines.length; i++) {
+        const span = document.createElement("span");
+        span.className = "code-highlight-line";
+        if (i < safeBoundary) span.classList.add("is-done");
+        span.textContent = lines[i] === "" ? " " : lines[i];
+        frag.appendChild(span);
+        if (i < lines.length - 1) frag.appendChild(document.createTextNode("\n"));
+      }
+      highlightEl.appendChild(frag);
+    }
+    if (boundaryLine && editor) {
+      const style = window.getComputedStyle(editor);
+      const paddingTop = parseFloat(style.paddingTop) || 0;
+      let rows = 0;
+      for (let i = 0; i < safeBoundary; i++) {
+        rows += wraps[i] || 1;
+      }
+      const top = Math.max(0, paddingTop + rows * lineHeight - 1);
+      boundaryLine.style.top = `${top}px`;
+    }
     if (lineNumbers) {
       const frag = document.createDocumentFragment();
       for (let i = 1; i <= count; i++) {
@@ -635,10 +902,12 @@
 
   if (editor) {
     editor.addEventListener("input", () => {
-      sandbox.text = editor.value;
+      const nextText = editor.value;
+      adjustBoundaryForEdit(sandbox.text || "", nextText);
+      sandbox.text = nextText;
       hideErrorDetail();
-      updateLineGutters();
       renderStage();
+      updateLineGutters();
     });
     if (lineNumbers) {
       editor.addEventListener("scroll", () => {
@@ -656,6 +925,49 @@
       const ro = new ResizeObserver(() => updateLineGutters());
       ro.observe(editor);
     }
+  }
+
+  if (prevBtn) {
+    prevBtn.addEventListener("click", () => {
+      const lines = getRawLines();
+      const total = lines.length;
+      const current = Number.isFinite(sandbox.boundary)
+        ? sandbox.boundary
+        : total;
+      if (current <= 0) return;
+      const boundary = clampBoundary(current, total);
+      const statementInfo = getStatementContext(lines, boundary);
+      const prevRange = statementInfo.prevRange;
+      const target = isMultiLineStatement(prevRange)
+        ? prevRange.startLine
+        : boundary - 1;
+      sandbox.boundary = clampBoundary(target, total);
+      renderStage();
+      updateLineGutters();
+    });
+  }
+
+  if (nextBtn) {
+    nextBtn.addEventListener("click", () => {
+      const lines = getRawLines();
+      const total = lines.length;
+      const current = Number.isFinite(sandbox.boundary)
+        ? sandbox.boundary
+        : total;
+      if (current >= total) return;
+      const boundary = clampBoundary(current, total);
+      const statementInfo = getStatementContext(lines, boundary);
+      let target = boundary + 1;
+      if (
+        (statementInfo.midStatement || statementInfo.atStatementStart) &&
+        statementInfo.currentRange
+      ) {
+        target = statementInfo.currentRange.endLine + 1;
+      }
+      sandbox.boundary = clampBoundary(target, total);
+      renderStage();
+      updateLineGutters();
+    });
   }
 
   updateInstructions();

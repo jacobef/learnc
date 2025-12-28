@@ -224,6 +224,12 @@ h2 {
 .intro code {
     font-size: calc(1em - 2px);
 }
+#sandbox-instructions {
+    min-height: 120px;
+}
+#sandbox-instructions.sandbox-finished {
+    min-height: 180px;
+}
 .mobile-note {
     margin: 0 0 16px;
     display: none;
@@ -542,6 +548,7 @@ button:hover:not([disabled]) {
     --code-line-height: 48px;
     display: flex;
     align-items: flex-start;
+    position: relative;
 }
 .codepane-row .code-gutter {
     padding: 8px 0;
@@ -563,6 +570,47 @@ button:hover:not([disabled]) {
     display: block;
     line-height: var(--code-line-height);
     text-align: right;
+}
+.codepane-row .code-boundary-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(
+        90deg,
+        transparent 0,
+        var(--focus) 40%,
+        var(--focus) 60%,
+        transparent 100%
+    );
+    opacity: 0.9;
+    pointer-events: none;
+}
+#sandbox-code .code-textarea {
+    color: transparent;
+    caret-color: var(--ink);
+    position: relative;
+    z-index: 1;
+}
+#sandbox-code .code-textarea-highlight {
+    position: absolute;
+    inset: 0;
+    padding: 8px 10px;
+    margin: 0;
+    font: inherit;
+    font-family: inherit;
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: var(--code-line-height);
+    letter-spacing: inherit;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: var(--ink);
+    pointer-events: none;
+    z-index: 0;
+}
+#sandbox-code .code-textarea-highlight .code-highlight-line.is-done {
+    color: var(--done);
 }
 .codepane-row .code-editor-wrap {
     flex: 1;

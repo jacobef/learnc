@@ -54,6 +54,9 @@
     if (p1.boundary === 3) {
       instructions.innerHTML =
         'Edit the program state to what it should be after line 3 is run, then press <span class="btn-ref">Check</span>.';
+    } else if (p1.boundary <= 0) {
+      const runLabel = `Run line ${p1.boundary + 1} ▶`;
+      instructions.innerHTML = `Use the <span class="btn-ref">${runLabel}</span> button to see how the code changes the program state.`;
     } else {
       const runLabel = `Run line ${p1.boundary + 1} ▶`;
       instructions.innerHTML = `Use the <span class="btn-ref">Back ◀</span> and <span class="btn-ref">${runLabel}</span> buttons to see how the code changes the program state.`;
