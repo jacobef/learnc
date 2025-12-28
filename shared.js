@@ -18,6 +18,72 @@
     return { base, depth };
   }
 
+  function getPointerDepth(type = "int") {
+    const { depth } = parseType(type);
+    return depth;
+  }
+
+  function normalizeNamesList(box) {
+    if (!box) return [];
+    const baseName =
+      box.name !== undefined && box.name !== null ? String(box.name) : "";
+    let names = Array.isArray(box.names) ? [...box.names] : [];
+    names = names.filter((n) => n !== undefined && n !== null);
+    if (baseName) {
+      names = names.filter((n) => n !== baseName);
+      names.unshift(baseName);
+    }
+    return names;
+  }
+
+  function walkPointerAliasChain(boxes, startAddr, depth, cb) {
+    if (!Array.isArray(boxes) || !boxes.length) return;
+    if (!Number.isFinite(depth) || depth < 1) return;
+    if (startAddr == null || isEmptyVal(String(startAddr))) return;
+    let current = boxes.find(
+      (b) => String(b.address ?? "") === String(startAddr),
+    );
+    for (let level = 1; level <= depth; level++) {
+      if (!current) break;
+      cb(current, level);
+      if (level === depth) break;
+      const nextAddr = current.value;
+      if (nextAddr == null || isEmptyVal(String(nextAddr))) break;
+      current = boxes.find(
+        (b) => String(b.address ?? "") === String(nextAddr),
+      );
+    }
+  }
+
+  function removePointerAliasesFromValue(boxes, ptrName, ptrType, ptrValue) {
+    if (!ptrName) return;
+    const depth = getPointerDepth(ptrType);
+    walkPointerAliasChain(boxes, ptrValue, depth, (box, level) => {
+      const alias = `${"*".repeat(level)}${ptrName}`;
+      const names = normalizeNamesList(box).filter((n) => n !== alias);
+      box.names = names;
+    });
+  }
+
+  function addPointerAliasesFromValue(boxes, ptrName, ptrType, ptrValue) {
+    if (!ptrName) return;
+    const depth = getPointerDepth(ptrType);
+    walkPointerAliasChain(boxes, ptrValue, depth, (box, level) => {
+      const alias = `${"*".repeat(level)}${ptrName}`;
+      const names = normalizeNamesList(box);
+      if (!names.includes(alias)) names.push(alias);
+      box.names = names;
+    });
+  }
+
+  function refreshPointerAliases(boxes, target, oldValue) {
+    if (!target) return;
+    const depth = getPointerDepth(target.type);
+    if (!Number.isFinite(depth) || depth < 1) return;
+    removePointerAliasesFromValue(boxes, target.name, target.type, oldValue);
+    addPointerAliasesFromValue(boxes, target.name, target.type, target.value);
+  }
+
   function typeInfo(type = "int") {
     const { base, depth } = parseType(type);
     if (!base) return { size: 4, align: 4 };
@@ -208,21 +274,9 @@
       const refBox = by[stmt.ref];
       if (!refBox || !refBox.address) return null;
       if (!isRefCompatible(target.type, refBox.type)) return null;
+      const oldValue = target.value;
       target.value = String(refBox.address);
-      const depth = (target.type.match(/\*/g) || []).length;
-      let current = refBox;
-      for (let level = 1; level <= depth; level++) {
-        const alias = `${"*".repeat(level)}${stmt.name}`;
-        const names = current.names || [current.name].filter(Boolean);
-        if (!names.includes(alias)) names.push(alias);
-        current.names = names;
-        if (level === depth) break;
-        const nextAddr = current.value;
-        if (!nextAddr || nextAddr === "empty") break;
-        const nextBox = boxes.find((b) => b.address === String(nextAddr));
-        if (!nextBox) break;
-        current = nextBox;
-      }
+      refreshPointerAliases(boxes, target, oldValue);
       return boxes;
     }
     if (stmt.kind === "assignDeref") {
@@ -975,17 +1029,10 @@
         sourceDepth === 0;
       const isPtr = sameType && isPointerType(target.type);
       if (!isScalar && !isPtr) return null;
+      const oldValue = target.value;
       target.value = String(source.value ?? "empty");
-      if (isPtr && target.value && target.value !== "empty") {
-        const aliasTarget = boxes.find(
-          (b) => b.address === String(target.value),
-        );
-        if (aliasTarget) {
-          const alias = `*${stmt.name}`;
-          const names = aliasTarget.names || [aliasTarget.name].filter(Boolean);
-          if (!names.includes(alias)) names.push(alias);
-          aliasTarget.names = names;
-        }
+      if (isPtr) {
+        refreshPointerAliases(boxes, target, oldValue);
       }
       return boxes;
     }
@@ -997,21 +1044,9 @@
       const refBox = by[stmt.ref];
       if (!target || !refBox || !refBox.address) return null;
       if (!isRefCompatible(target.type, refBox.type)) return null;
-      const targetDepth = pointerDepth(target.type);
+      const oldValue = target.value;
       target.value = String(refBox.address);
-      let current = refBox;
-      for (let level = 1; level <= targetDepth; level++) {
-        const alias = `${"*".repeat(level)}${stmt.name}`;
-        const names = current.names || [current.name].filter(Boolean);
-        if (!names.includes(alias)) names.push(alias);
-        current.names = names;
-        if (level === targetDepth) break;
-        const nextAddr = current.value;
-        if (!nextAddr || nextAddr === "empty") break;
-        const nextBox = boxes.find((b) => b.address === String(nextAddr));
-        if (!nextBox) break;
-        current = nextBox;
-      }
+      refreshPointerAliases(boxes, target, oldValue);
       return boxes;
     }
 
@@ -1037,6 +1072,7 @@
       if (!target) return null;
       const { base: targetBase, depth: targetDepth } = parseType(target.type);
       if (!Number.isFinite(targetDepth)) return null;
+      const oldValue = target.value;
       if (stmt.kind === "assignDeref") {
         if (targetDepth !== 0) return null;
         target.value = String(stmt.value);
@@ -1061,16 +1097,8 @@
         if (!isRefCompatible(target.type, refBox.type)) return null;
         target.value = String(refBox.address);
       }
-      if (targetDepth > 0 && target.value && target.value !== "empty") {
-        const aliasTarget = boxes.find(
-          (b) => b.address === String(target.value),
-        );
-        if (aliasTarget) {
-          const alias = `${"*".repeat(stmt.depth || 1)}${stmt.name}`;
-          const names = aliasTarget.names || [aliasTarget.name].filter(Boolean);
-          if (!names.includes(alias)) names.push(alias);
-          aliasTarget.names = names;
-        }
+      if (targetDepth > 0) {
+        refreshPointerAliases(boxes, target, oldValue);
       }
       return boxes;
     }
@@ -1359,35 +1387,10 @@
       const value =
         result.kind === "lvalue" ? result.box?.value : result.value;
       if (requireSourceValue && isEmptyVal(value ?? "")) return null;
+      const oldValue = target.value;
       target.value = String(value ?? "empty");
-      if (targetDepth > 0 && target.value && target.value !== "empty") {
-        if (result.kind === "rvalue" && result.refBox) {
-          let current = result.refBox;
-          for (let level = 1; level <= targetDepth; level++) {
-            const alias = `${"*".repeat(level)}${stmt.name}`;
-            const names = current.names || [current.name].filter(Boolean);
-            if (!names.includes(alias)) names.push(alias);
-            current.names = names;
-            if (level === targetDepth) break;
-            const nextAddr = current.value;
-            if (!nextAddr || nextAddr === "empty") break;
-            const nextBox = boxes.find(
-              (b) => b.address === String(nextAddr),
-            );
-            if (!nextBox) break;
-            current = nextBox;
-          }
-        } else {
-          const aliasTarget = boxes.find(
-            (b) => b.address === String(target.value),
-          );
-          if (aliasTarget) {
-            const alias = `*${stmt.name}`;
-            const names = aliasTarget.names || [aliasTarget.name].filter(Boolean);
-            if (!names.includes(alias)) names.push(alias);
-            aliasTarget.names = names;
-          }
-        }
+      if (targetDepth > 0) {
+        refreshPointerAliases(boxes, target, oldValue);
       }
       return boxes;
     }
@@ -1414,17 +1417,10 @@
         return null;
       if (targetBase !== sourceBase || targetDepth !== sourceDepth) return null;
       if (requireSourceValue && isEmptyVal(source.value ?? "")) return null;
+      const oldValue = target.value;
       target.value = String(source.value ?? "empty");
-      if (targetDepth > 0 && target.value && target.value !== "empty") {
-        const aliasTarget = boxes.find(
-          (b) => b.address === String(target.value),
-        );
-        if (aliasTarget) {
-          const alias = `*${stmt.name}`;
-          const names = aliasTarget.names || [aliasTarget.name].filter(Boolean);
-          if (!names.includes(alias)) names.push(alias);
-          aliasTarget.names = names;
-        }
+      if (targetDepth > 0) {
+        refreshPointerAliases(boxes, target, oldValue);
       }
       return boxes;
     }
