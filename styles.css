@@ -523,6 +523,10 @@ button:hover:not([disabled]) {
     align-items: center;
     margin-top: 18px;
 }
+.controls [id$="-status"] {
+    flex-basis: 100%;
+    margin-top: 6px;
+}
 .controls-top {
     margin-top: 12px;
     margin-bottom: 20px;

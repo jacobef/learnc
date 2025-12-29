@@ -542,6 +542,19 @@
     return simulator.classifyLineStatuses(lines, { alloc: allocFactory() });
   }
 
+  function summarizeStatus(lines) {
+    const status = classifyLineStatuses(lines);
+    let hasCompile = status.incomplete.size > 0;
+    let hasUb = false;
+    if (status.errorKinds) {
+      for (const kind of status.errorKinds.values()) {
+        if (kind === "ub") hasUb = true;
+        else hasCompile = true;
+      }
+    }
+    return { hasCompile, hasUb };
+  }
+
   function applyUserProgram(lines) {
     const text = lines.join("\n");
     return simulator.applyProgram(text, { alloc: allocFactory() });
@@ -557,20 +570,31 @@
         : total;
     const safeBoundary = clampBoundary(boundary, total);
     const activeLines = lines.slice(0, safeBoundary);
-    const status = classifyLineStatuses(activeLines);
-    let hasCompile = status.incomplete.size > 0;
-    let hasUb = false;
-    if (status.errorKinds) {
-      for (const kind of status.errorKinds.values()) {
-        if (kind === "ub") hasUb = true;
-        else hasCompile = true;
-      }
-    }
-    if (hasCompile) return { kind: "compile", state: null, boundary: safeBoundary, total };
-    if (hasUb) return { kind: "ub", state: null, boundary: safeBoundary, total };
+    const activeSummary = summarizeStatus(activeLines);
+    const fullSummary = summarizeStatus(lines);
+    let globalKind = "ok";
+    if (fullSummary.hasCompile) globalKind = "compile";
+    else if (fullSummary.hasUb) globalKind = "ub";
+    if (activeSummary.hasCompile)
+      return {
+        kind: "compile",
+        globalKind,
+        state: null,
+        boundary: safeBoundary,
+        total,
+      };
+    if (activeSummary.hasUb)
+      return { kind: "ub", globalKind, state: null, boundary: safeBoundary, total };
     const state = applyUserProgram(activeLines);
-    if (!state) return { kind: "compile", state: null, boundary: safeBoundary, total };
-    return { kind: "ok", state, boundary: safeBoundary, total };
+    if (!state)
+      return {
+        kind: "compile",
+        globalKind,
+        state: null,
+        boundary: safeBoundary,
+        total,
+      };
+    return { kind: "ok", globalKind, state, boundary: safeBoundary, total };
   }
 
   function renderStage() {
@@ -580,9 +604,12 @@
     const { boundary, total } = syncBoundaryWithLines(lines);
     const statementInfo = getStatementContext(lines, boundary);
     const outcome = getProgramOutcome(lines, boundary);
-    const displayOutcome = statementInfo.midStatement
-      ? { kind: "mid", state: null }
-      : outcome;
+    let displayOutcome = outcome;
+    if (outcome.globalKind && outcome.globalKind !== "ok") {
+      displayOutcome = { kind: outcome.globalKind, state: null };
+    } else if (statementInfo.midStatement) {
+      displayOutcome = { kind: "mid", state: null };
+    }
     stage.appendChild(renderState("", displayOutcome.state, displayOutcome.kind));
     renderExpression(displayOutcome);
     updateStepperControls(boundary, total, statementInfo);

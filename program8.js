@@ -345,6 +345,13 @@
             },
           };
         }
+      } else if (isEmptyVal(box.value || "")) {
+        return {
+          ok: false,
+          message: {
+            html: `${need.name}'s value shouldn't be blank.`,
+          },
+        };
       } else if (box.value !== need.value) {
         return {
           ok: false,
@@ -372,6 +379,44 @@
     const boxes = [...ws.querySelectorAll(".vbox")].map((v) =>
       readBoxState(v),
     );
+    const escapeHint = (value) =>
+      String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    if (
+      p8.boundary === 4 &&
+      boxes.some((box) => (box?.name || "").trim() === "e")
+    ) {
+      return { html: "<code class=\"tok-line\">// int e;</code> is a comment." };
+    }
+    if (p8.boundary === 16) {
+      const h = boxes.find((box) => (box?.name || "").trim() === "h");
+      const value = String(h?.value ?? "").trim();
+      if (h && isEmptyVal(value)) {
+        return { html: "h's value shouldn't be blank." };
+      }
+      if (value && !isEmptyVal(value) && value !== "12") {
+        if (value === "9") {
+          return {
+            html: "<code class=\"tok-line\">// = 9;</code> is a comment.",
+          };
+        }
+        if (value === "10" || value === "11") {
+          return {
+            html: "<code class=\"tok-line\">/* = 10;<br>= 11;<br>*/</code> is a comment.",
+          };
+        }
+        if (value === "13") {
+          return {
+            html: "<code class=\"tok-line\">// = 13;</code> is a comment.",
+          };
+        }
+        return `I'm not sure where you're getting ${escapeHint(value)} from.`;
+      }
+    }
     const verdict = validateWorkspace(p8.boundary, boxes);
     if (verdict.ok)
       return { html: 'Looks good. Press <span class="btn-ref">Check</span>.' };
