@@ -141,26 +141,150 @@
       .forEach((el) => disableAutoText(el));
   }
 
+  const stepperTopState = new Map();
+
+  function findStepperControls(panel) {
+    if (!panel) return null;
+    const controls = [...panel.querySelectorAll(".controls")].find((el) => {
+      return (
+        el.querySelector('button[id$="-prev"]') &&
+        el.querySelector('button[id$="-next"]')
+      );
+    });
+    if (!controls) return null;
+    const prev = controls.querySelector('button[id$="-prev"]');
+    const next = controls.querySelector('button[id$="-next"]');
+    if (!prev || !next) return null;
+    const prefix = prev.id.replace(/-prev$/, "");
+    if (!prefix || next.id !== `${prefix}-next`) return null;
+    return { prefix, prev, next };
+  }
+
+  function ensureStepperTopControls(codepane) {
+    if (!codepane) return null;
+    if (stepperTopState.has(codepane)) return stepperTopState.get(codepane);
+    const panel = codepane.closest(".panel");
+    if (!panel) return null;
+    const info = findStepperControls(panel);
+    if (!info) return null;
+    let top = panel.querySelector(
+      `.controls-top[data-prefix="${info.prefix}"]`,
+    );
+    if (!top) {
+      top = document.createElement("div");
+      top.className = "controls controls-top hidden";
+      top.dataset.prefix = info.prefix;
+      const prevBtn = document.createElement("button");
+      prevBtn.dataset.stepper = "prev";
+      prevBtn.dataset.prefix = info.prefix;
+      prevBtn.textContent = info.prev.textContent || "Back ◀";
+      const nextBtn = document.createElement("button");
+      nextBtn.dataset.stepper = "next";
+      nextBtn.dataset.prefix = info.prefix;
+      nextBtn.textContent = info.next.textContent || "Run line 1 ▶";
+      top.appendChild(prevBtn);
+      top.appendChild(nextBtn);
+      panel.insertBefore(top, codepane);
+    }
+    const update = () => {
+      if (!document.body.contains(codepane)) return;
+      const rect = codepane.getBoundingClientRect();
+      const viewHeight =
+        window.innerHeight || document.documentElement.clientHeight || 0;
+      const height = Math.max(codepane.scrollHeight || 0, rect.height || 0);
+      const needsTop =
+        height > viewHeight || rect.bottom > viewHeight || rect.top < 0;
+      top.classList.toggle("hidden", !needsTop);
+    };
+    const entry = { top, update };
+    stepperTopState.set(codepane, entry);
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(() => update());
+      ro.observe(codepane);
+      entry.ro = ro;
+    }
+    update();
+    return entry;
+  }
+
+  function updateStepperTopControls(codepane) {
+    const entry = ensureStepperTopControls(codepane);
+    entry?.update();
+  }
+
+  function initStepperTopControls() {
+    document.querySelectorAll(".codepane").forEach((pane) => {
+      updateStepperTopControls(pane);
+    });
+    window.addEventListener("resize", () => {
+      stepperTopState.forEach((entry) => entry.update());
+    });
+    window.addEventListener("scroll", () => {
+      stepperTopState.forEach((entry) => entry.update());
+    });
+  }
+
   function renderCodePane(root, lines, boundary, opts = {}) {
     root.innerHTML = "";
     const code = el('<div class="codecol"></div>');
+    if (opts.progress) code.classList.add("has-progress");
     root.appendChild(code);
     const addBoundary = () =>
       code.appendChild(el('<div class="boundary"></div>'));
     const progress = !!opts.progress;
-    const progressIndex = progress && boundary > 0 ? boundary - 1 : -1;
-    if (boundary === 0) addBoundary();
+    let progressIndex = -1;
+    let progressRangeStart = null;
+    let progressRangeEnd = null;
+    let doneBoundary = boundary;
+    if (Number.isFinite(opts.doneBoundary)) {
+      doneBoundary = Math.max(0, Math.min(lines.length, opts.doneBoundary));
+    }
+    if (progress) {
+      const range = opts.progressRange;
+      let rangeStart = null;
+      let rangeEnd = null;
+      if (Array.isArray(range) && range.length >= 2) {
+        rangeStart = Number(range[0]);
+        rangeEnd = Number(range[1]);
+      } else if (range && typeof range === "object") {
+        rangeStart = Number(range.start);
+        rangeEnd = Number(range.end);
+      }
+      if (Number.isFinite(rangeStart) && Number.isFinite(rangeEnd)) {
+        const start = Math.min(rangeStart, rangeEnd);
+        const end = Math.max(rangeStart, rangeEnd);
+        const maxIndex = Math.max(0, lines.length - 1);
+        progressRangeStart = Math.max(0, Math.min(maxIndex, start));
+        progressRangeEnd = Math.max(0, Math.min(maxIndex, end));
+        if (progressIndex < 0) progressIndex = progressRangeStart;
+      } else if (Number.isFinite(opts.progressIndex)) {
+        progressIndex = Math.max(
+          0,
+          Math.min(lines.length - 1, opts.progressIndex),
+        );
+      } else if (boundary > 0) {
+        progressIndex = boundary - 1;
+      }
+    }
+    if (doneBoundary === 0) addBoundary();
     for (let i = 0; i < lines.length; i++) {
       const lr = el('<div class="line"></div>');
       const ln = el(`<div class="ln">${i + 1}</div>`);
       const src = el(`<div class="src">${lines[i]}</div>`);
-      if (i < boundary) lr.classList.add("done");
+      if (i < doneBoundary) lr.classList.add("done");
+      const inProgressRange =
+        progressRangeStart !== null &&
+        progressRangeEnd !== null &&
+        i >= progressRangeStart &&
+        i <= progressRangeEnd;
+      if (inProgressRange) lr.classList.add("progress-range");
       if (i === progressIndex) lr.classList.add("progress-mid");
       lr.appendChild(ln);
       lr.appendChild(src);
       code.appendChild(lr);
-      if (i + 1 === boundary && i !== progressIndex) addBoundary();
+      if (i + 1 === doneBoundary && i !== progressIndex) addBoundary();
     }
+    updateStepperTopControls(root);
   }
 
   function renderCodePaneEditable(root, lines, boundary = null) {
@@ -195,6 +319,7 @@
       code.appendChild(lr);
       if (boundary != null && i + 1 === boundary) addBoundary();
     }
+    updateStepperTopControls(root);
   }
 
   function readEditableCodeLines(root) {
@@ -210,8 +335,70 @@
     return map;
   }
 
+  function stripLineComments(src = "") {
+    let out = "";
+    let i = 0;
+    let inBlock = false;
+    while (i < src.length) {
+      const ch = src[i];
+      const next = src[i + 1];
+      if (inBlock) {
+        if (ch === "*" && next === "/") {
+          inBlock = false;
+          i += 2;
+          continue;
+        }
+        i += 1;
+        continue;
+      }
+      if (ch === "/" && next === "/") break;
+      if (ch === "/" && next === "*") {
+        inBlock = true;
+        i += 2;
+        continue;
+      }
+      out += ch;
+      i += 1;
+    }
+    return { text: out, unterminated: inBlock };
+  }
+
+  function stripAllComments(src = "") {
+    let out = "";
+    let i = 0;
+    let inBlock = false;
+    while (i < src.length) {
+      const ch = src[i];
+      const next = src[i + 1];
+      if (inBlock) {
+        if (ch === "*" && next === "/") {
+          inBlock = false;
+          i += 2;
+          continue;
+        }
+        i += 1;
+        continue;
+      }
+      if (ch === "/" && next === "/") {
+        i += 2;
+        while (i < src.length && src[i] !== "\n" && src[i] !== "\r") i++;
+        continue;
+      }
+      if (ch === "/" && next === "*") {
+        inBlock = true;
+        i += 2;
+        continue;
+      }
+      out += ch;
+      i += 1;
+    }
+    return out;
+  }
+
   function parseSimpleStatement(src = "") {
-    const raw = (src || "").replace(/\u00a0/g, " ");
+    const cleaned = stripLineComments(src || "");
+    if (!cleaned || cleaned.unterminated) return null;
+    const raw = cleaned.text.replace(/\u00a0/g, " ");
     const s = raw.replace(/\s+/g, " ").trim();
     if (!s) return null;
     let m = s.match(
@@ -329,6 +516,55 @@
           i++;
           line++;
           col = 0;
+          continue;
+        }
+        if (ch === "/" && src[i + 1] === "/") {
+          i += 2;
+          col += 2;
+          while (i < src.length && src[i] !== "\n" && src[i] !== "\r") {
+            i++;
+            col++;
+          }
+          continue;
+        }
+        if (ch === "/" && src[i + 1] === "*") {
+          const startLine = line;
+          const startCol = col;
+          i += 2;
+          col += 2;
+          let closed = false;
+          while (i < src.length) {
+            const c = src[i];
+            if (c === "\r") {
+              i++;
+              if (src[i] === "\n") i++;
+              line++;
+              col = 0;
+              continue;
+            }
+            if (c === "\n") {
+              i++;
+              line++;
+              col = 0;
+              continue;
+            }
+            if (c === "*" && src[i + 1] === "/") {
+              i += 2;
+              col += 2;
+              closed = true;
+              break;
+            }
+            i++;
+            col++;
+          }
+          if (!closed) {
+            tokens.push({
+              type: "unknown",
+              value: "/*",
+              line: startLine,
+              col: startCol,
+            });
+          }
           continue;
         }
         if (/\s/.test(ch)) {
@@ -1530,6 +1766,8 @@
 
     function describeTokensError(tokens, seenDecl) {
       if (!tokens.length) return "Line has an error.";
+      if (tokens.some((t) => t.type === "unknown" && t.value === "/*"))
+        return "Block comment is not closed.";
       if (tokens.some((t) => t.type === "unknown"))
         return "That line has a character that does not belong in a declaration or assignment.";
       if (
@@ -2286,7 +2524,9 @@
             parts.push(lines[i] || "");
           }
         }
-        return parts.join("\n").replace(/\n/g, " ").trim();
+        const joined = parts.join("\n");
+        const stripped = stripAllComments(joined);
+        return stripped.replace(/\n/g, " ").trim();
       };
       for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
         let status = "";
@@ -2365,24 +2605,7 @@
               seenDecl,
               allowIntPrefix,
             );
-            if (isPrefix) {
-              const hasMoreTokens = tokenIndex < tokens.length;
-              if (!hasMoreTokens) {
-                status = "incomplete";
-                const startLine = currentTokens[0]?.line;
-                const startCol = currentTokens[0]?.col;
-                if (Number.isFinite(startLine) && lineIndex > startLine) {
-                  const snippet = toStatementSnippet(
-                    startLine,
-                    startCol,
-                    lineIndex,
-                  );
-                  const text = `This statement spans multiple lines and is incomplete. In C, a line break acts like a space, so your statement so far is ${snippet}.`;
-                  const html = `This statement spans multiple lines and is incomplete. In C, a line break acts like a space, so your statement so far is <code class="tok-line">${escapeHtml(snippet)}</code>.`;
-                  info.set(lineIndex, { text, html });
-                }
-              }
-            } else {
+            if (!isPrefix) {
               status = "invalid";
               errors.set(
                 lineIndex,
@@ -2393,8 +2616,27 @@
           }
         }
         if (status === "invalid") invalid.add(lineIndex);
-        else if (status === "incomplete") incomplete.add(lineIndex);
       }
+      incomplete.clear();
+      const parts = splitStatements(tokens);
+      parts.forEach((part) => {
+        if (!part?.tokens?.length) return;
+        if (part.hasSemicolon) return;
+        if (!Number.isFinite(part.endLine)) return;
+        incomplete.add(part.endLine);
+        const start = Number.isFinite(part.startLine) ? part.startLine : part.endLine;
+        for (let i = start; i <= part.endLine; i++) {
+          if (invalid.has(i)) invalid.delete(i);
+          if (errors.has(i)) errors.delete(i);
+          if (errorKinds.has(i)) errorKinds.delete(i);
+          if (info.has(i)) info.delete(i);
+        }
+      });
+      incomplete.forEach((idx) => {
+        if (invalid.has(idx)) invalid.delete(idx);
+        if (errors.has(idx)) errors.delete(idx);
+        if (errorKinds.has(idx)) errorKinds.delete(idx);
+      });
       return { invalid, incomplete, errors, errorKinds, info };
     }
 
@@ -2951,6 +3193,18 @@
     };
   }
 
+  function stepperButtons(prefix, dir) {
+    const list = [];
+    const main = document.getElementById(`${prefix}-${dir}`);
+    if (main) list.push(main);
+    document
+      .querySelectorAll(`[data-stepper="${dir}"][data-prefix="${prefix}"]`)
+      .forEach((btn) => {
+        if (!list.includes(btn)) list.push(btn);
+      });
+    return list;
+  }
+
   function createStepper({
     prefix,
     lines = [],
@@ -2961,18 +3215,23 @@
     onAfterChange,
     isStepLocked,
     getStepBadge,
+    getNextLabel,
+    getNextBoundary,
+    getPrevBoundary,
     endLabel,
   } = {}) {
     if (!prefix)
       throw new Error('createStepper requires a prefix (e.g., "p1").');
-    const prevBtn = document.getElementById(`${prefix}-prev`);
-    const nextBtn = document.getElementById(`${prefix}-next`);
+    const prevButtons = stepperButtons(prefix, "prev");
+    const nextButtons = stepperButtons(prefix, "next");
+    const prevBtn = prevButtons[0] || null;
+    const nextBtn = nextButtons[0] || null;
     const total = Array.isArray(lines)
       ? lines.length
       : Math.max(0, Number(lines) || 0);
 
     function clearPulse() {
-      nextBtn?.classList.remove("pulse-success");
+      nextButtons.forEach((btn) => btn.classList.remove("pulse-success"));
     }
 
     function boundary() {
@@ -2991,8 +3250,10 @@
 
     function update() {
       const current = boundary();
-      if (prevBtn) prevBtn.disabled = current === 0;
-      if (nextBtn) {
+      prevButtons.forEach((btn) => {
+        btn.disabled = current === 0;
+      });
+      if (nextButtons.length) {
         const atEnd = current === total;
         const badge =
           !atEnd && typeof getStepBadge === "function"
@@ -3003,13 +3264,24 @@
         const isLocked = locked(current);
         const lockTag = isLocked ? " 🔒" : "";
         const labelPrefix = badgeTag ? `${badgeTag} ` : "";
+        const customLabel =
+          typeof getNextLabel === "function"
+            ? getNextLabel(current, total, atEnd)
+            : "";
         if (atEnd) {
-          const label = endLabel || "Next Program";
-          nextBtn.textContent = `${labelPrefix}${label}${lockTag} ▶▶`;
+          const label = customLabel || endLabel || "Next Program";
+          nextButtons.forEach((btn) => {
+            btn.textContent = `${labelPrefix}${label}${lockTag} ▶▶`;
+          });
         } else {
-          nextBtn.textContent = `${labelPrefix}Run line ${current + 1}${lockTag} ▶`;
+          const label = customLabel || `Run line ${current + 1}`;
+          nextButtons.forEach((btn) => {
+            btn.textContent = `${labelPrefix}${label}${lockTag} ▶`;
+          });
         }
-        nextBtn.disabled = isLocked;
+        nextButtons.forEach((btn) => {
+          btn.disabled = isLocked;
+        });
       }
     }
 
@@ -3040,22 +3312,35 @@
       update();
     }
 
-    prevBtn?.addEventListener("click", () => {
-      if (boundary() === 0) return;
-      clearPulse();
-      goTo(boundary() - 1);
+    prevButtons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (boundary() === 0) return;
+        clearPulse();
+        const current = boundary();
+        const target =
+          typeof getPrevBoundary === "function"
+            ? getPrevBoundary(current, total)
+            : current - 1;
+        goTo(Number.isFinite(target) ? target : current - 1);
+      });
     });
 
-    nextBtn?.addEventListener("click", () => {
-      const current = boundary();
-      clearPulse();
-      if (current === total) {
-        if (!nextBtn?.disabled && nextPage)
-          window.location.href = withSidebarParam(nextPage);
-        return;
-      }
-      if (locked(current)) return;
-      goTo(current + 1);
+    nextButtons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const current = boundary();
+        clearPulse();
+        if (current === total) {
+          if (!btn.disabled && nextPage)
+            window.location.href = withSidebarParam(nextPage);
+          return;
+        }
+        if (locked(current)) return;
+        const target =
+          typeof getNextBoundary === "function"
+            ? getNextBoundary(current, total)
+            : current + 1;
+        goTo(Number.isFinite(target) ? target : current + 1);
+      });
     });
 
     update();
@@ -3069,9 +3354,9 @@
   }
 
   function pulseNextButton(prefix) {
-    const btn = document.getElementById(`${prefix}-next`);
-    if (!btn) return;
-    btn.classList.add("pulse-success");
+    const buttons = stepperButtons(prefix, "next");
+    if (!buttons.length) return;
+    buttons.forEach((btn) => btn.classList.add("pulse-success"));
   }
 
   document.addEventListener("focusin", (e) => {
@@ -3195,6 +3480,13 @@
     });
   } else {
     applyAutoTextDefaults(document);
+  }
+
+  initStepperTopControls();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initStepperTopControls, {
+      once: true,
+    });
   }
 
   function initInstructionWatcher() {
@@ -3333,6 +3625,8 @@
     renderCodePane,
     renderCodePaneEditable,
     readEditableCodeLines,
+    stripLineComments,
+    stripAllComments,
     parseSimpleStatement,
     applySimpleStatement,
     createSimpleSimulator,

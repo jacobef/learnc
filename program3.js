@@ -106,10 +106,6 @@
         html: 'Use <span class="btn-ref">+ New variable</span> to add the variables you need to the program state.',
       };
     const boxes = [...ws.querySelectorAll(".vbox")].map((v) => readBoxState(v));
-    if (!boxes.length)
-      return "Add the variables to the program state before checking.";
-
-    const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
     const required =
       p3.boundary === 1
         ? ["north"]
@@ -118,6 +114,14 @@
           : p3.boundary === 5
             ? ["north", "south", "east", "west"]
             : ["north", "south", "east"];
+    if (!boxes.length)
+      return {
+        html: `You still need <code class="tok-name">${required.join(
+          '</code>, <code class="tok-name">',
+        )}</code> in the program state.`,
+      };
+
+    const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
     const coreRequired = p3.boundary >= 4 ? ["north", "south"] : required;
     const missingCore = coreRequired.filter((name) => !by[name]);
     if (missingCore.length)
@@ -161,9 +165,10 @@
       const label = wrongType.name
         ? `<code class="tok-name">${wrongType.name}</code>`
         : "This variable";
-      const typeLabel = wrongType.type
-        ? `<code class="tok-type">${wrongType.type}</code>`
-        : '<code class="tok-type">unknown</code>';
+      const rawType = String(wrongType.type || "").trim();
+      const typeLabel = rawType
+        ? `<code class="tok-type">${rawType}</code>`
+        : "blank";
       return {
         html: `${label}\'s type should be <code class="tok-type">int</code>, not ${typeLabel}.`,
       };

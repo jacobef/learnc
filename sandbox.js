@@ -11,6 +11,18 @@
   const exprError = $("#sandbox-expr-error");
   const prevBtn = $("#sandbox-prev");
   const nextBtn = $("#sandbox-next");
+  const prevButtons = [
+    prevBtn,
+    ...document.querySelectorAll(
+      '[data-stepper="prev"][data-prefix="sandbox"]',
+    ),
+  ].filter(Boolean);
+  const nextButtons = [
+    nextBtn,
+    ...document.querySelectorAll(
+      '[data-stepper="next"][data-prefix="sandbox"]',
+    ),
+  ].filter(Boolean);
   const highlightEl = (() => {
     if (!editor || !editor.parentElement) return null;
     const el = document.createElement("pre");
@@ -267,19 +279,34 @@
     const lines = getRawLines();
     const total = lines.length;
     const boundary = Number.isFinite(sandbox.boundary) ? sandbox.boundary : total;
+    const statementInfo = getStatementContext(lines, boundary);
     const hasCode = lines.some((line) => line.trim() !== "");
     const atEnd = boundary >= total;
     const base =
       "This is the sandbox. The program state will update as you write code.";
     let suffix = "";
     if (hasCode) {
+      let runLabel = "";
+      if (
+        statementInfo?.midStatement &&
+        isMultiLineStatement(statementInfo.currentRange)
+      ) {
+        runLabel = `Finish running ${formatLineRange(
+          statementInfo.currentRange,
+        )} ▶`;
+      } else if (
+        statementInfo?.atStatementStart &&
+        isMultiLineStatement(statementInfo.currentRange)
+      ) {
+        runLabel = `Run ${formatLineRange(statementInfo.currentRange)} ▶`;
+      } else {
+        runLabel = `Run line ${boundary + 1} ▶`;
+      }
       if (atEnd) {
         suffix = ' Use <span class="btn-ref">Back ◀</span> to step through your program.';
       } else if (boundary <= 0) {
-        const runLabel = `Run line ${boundary + 1} ▶`;
         suffix = ` Use <span class="btn-ref">${runLabel}</span> to step through your program.`;
       } else {
-        const runLabel = `Run line ${boundary + 1} ▶`;
         suffix = ` Use <span class="btn-ref">Back ◀</span> and <span class="btn-ref">${runLabel}</span> to step through your program.`;
       }
     }
@@ -595,7 +622,7 @@
     totalOverride,
     statementInfo,
   ) {
-    if (!prevBtn && !nextBtn) return;
+    if (!prevButtons.length && !nextButtons.length) return;
     const total = Number.isFinite(totalOverride)
       ? totalOverride
       : Number.isFinite(sandbox.lineCount)
@@ -606,29 +633,33 @@
       : Number.isFinite(sandbox.boundary)
         ? sandbox.boundary
         : total;
-    if (prevBtn) prevBtn.disabled = boundary <= 0;
-    if (nextBtn) {
+    prevButtons.forEach((btn) => {
+      btn.disabled = boundary <= 0;
+    });
+    if (nextButtons.length) {
       const atEnd = boundary >= total;
-      if (atEnd) {
-        nextBtn.textContent = "At end ▶";
-      } else if (
-        statementInfo?.midStatement &&
-        isMultiLineStatement(statementInfo.currentRange)
-      ) {
-        nextBtn.textContent = `Finish running ${formatLineRange(
-          statementInfo.currentRange,
-        )} ▶`;
-      } else if (
-        statementInfo?.atStatementStart &&
-        isMultiLineStatement(statementInfo.currentRange)
-      ) {
-        nextBtn.textContent = `Run ${formatLineRange(
-          statementInfo.currentRange,
-        )} ▶`;
-      } else {
-        nextBtn.textContent = `Run line ${boundary + 1} ▶`;
+      let label = "At end ▶";
+      if (!atEnd) {
+        if (
+          statementInfo?.midStatement &&
+          isMultiLineStatement(statementInfo.currentRange)
+        ) {
+          label = `Finish running ${formatLineRange(
+            statementInfo.currentRange,
+          )} ▶`;
+        } else if (
+          statementInfo?.atStatementStart &&
+          isMultiLineStatement(statementInfo.currentRange)
+        ) {
+          label = `Run ${formatLineRange(statementInfo.currentRange)} ▶`;
+        } else {
+          label = `Run line ${boundary + 1} ▶`;
+        }
       }
-      nextBtn.disabled = atEnd;
+      nextButtons.forEach((btn) => {
+        btn.textContent = label;
+        btn.disabled = atEnd;
+      });
     }
   }
 
@@ -927,8 +958,8 @@
     }
   }
 
-  if (prevBtn) {
-    prevBtn.addEventListener("click", () => {
+  prevButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
       const lines = getRawLines();
       const total = lines.length;
       const current = Number.isFinite(sandbox.boundary)
@@ -945,10 +976,10 @@
       renderStage();
       updateLineGutters();
     });
-  }
+  });
 
-  if (nextBtn) {
-    nextBtn.addEventListener("click", () => {
+  nextButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
       const lines = getRawLines();
       const total = lines.length;
       const current = Number.isFinite(sandbox.boundary)
@@ -968,7 +999,7 @@
       renderStage();
       updateLineGutters();
     });
-  }
+  });
 
   updateInstructions();
   renderStage();

@@ -523,6 +523,10 @@ button:hover:not([disabled]) {
     align-items: center;
     margin-top: 18px;
 }
+.controls-top {
+    margin-top: 12px;
+    margin-bottom: 20px;
+}
 .controls .gap-wide {
     margin-left: 24px;
 }
@@ -714,6 +718,12 @@ button:hover:not([disabled]) {
 }
 .line.progress-mid {
     position: relative;
+}
+.line.progress-range .src {
+    color: var(--edit-line);
+}
+.line.progress-range .ln {
+    color: #999;
 }
 .line.progress-mid::after {
     content: "";
@@ -998,6 +1008,9 @@ button:hover:not([disabled]) {
         transparent 100%
     );
     opacity: 0.9;
+}
+.codecol.has-progress .boundary {
+    display: none;
 }
 
 .vbox {

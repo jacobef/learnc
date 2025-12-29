@@ -13,6 +13,7 @@
     applySimpleStatement,
     flashStatus,
     el,
+    stripLineComments,
   } = MB;
 
   const instructions = $("#p4-instructions");
@@ -76,7 +77,8 @@
       return { html: 'Looks good. Press <span class="btn-ref">Check</span>.' };
 
     const lines = normalizedLines()
-      .map((l) => l.text.trim())
+      .map((l) => stripLineComments(l.text || ""))
+      .map((res) => (res.text || "").trim())
       .filter((t) => t && t !== ";");
     if (!lines.length)
       return {
@@ -122,8 +124,10 @@
     let state = [];
     const alloc = allocFactory();
     for (const line of lines) {
-      const parsed = parseSimpleStatement(line.text);
-      const trimmed = (line.text || "").trim();
+      const cleaned = stripLineComments(line.text || "");
+      if (cleaned.unterminated) return null;
+      const parsed = parseSimpleStatement(cleaned.text);
+      const trimmed = (cleaned.text || "").trim();
       if (!parsed) {
         if (!trimmed || trimmed === ";") continue;
         return null;
@@ -202,9 +206,14 @@
     const alloc = allocFactory();
     for (let i = 0; i < p4.lines.length; i++) {
       const text = (map[i] != null ? map[i] : p4.lines[i].text) || "";
-      const trimmed = text.trim();
+      const cleaned = stripLineComments(text);
+      if (cleaned.unterminated) {
+        set.add(i);
+        continue;
+      }
+      const trimmed = (cleaned.text || "").trim();
       if (!trimmed || trimmed === ";") continue;
-      const parsed = parseSimpleStatement(text);
+      const parsed = parseSimpleStatement(cleaned.text);
       if (!parsed) {
         set.add(i);
         continue;
