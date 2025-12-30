@@ -271,6 +271,23 @@
     renderCodePane($("#p3-code"), p3.lines, p3.boundary, { progress });
   }
 
+  function updateInstructions() {
+    const instructions = $("#p3-instructions");
+    if (!instructions) return;
+    if (p3.boundary === p3.lines.length && p3.pass5) {
+      instructions.textContent = "Program solved!";
+      instructions.classList.remove("hidden");
+      return;
+    }
+    if (p3.boundary === 0) {
+      instructions.textContent = "No instructions for this one. Good luck!";
+      instructions.classList.remove("hidden");
+      return;
+    }
+    instructions.textContent = "";
+    instructions.classList.add("hidden");
+  }
+
   function restoreDefaults(state, defaults) {
     return restoreWorkspace(state, defaults, "p3workspace");
   }
@@ -279,7 +296,6 @@
     renderCodePane3();
     const stage = $("#p3-stage");
     stage.innerHTML = "";
-    const instructions = $("#p3-instructions");
     const solved =
       (p3.boundary === 1 && p3.pass1) ||
       (p3.boundary === 3 && p3.pass3) ||
@@ -296,15 +312,7 @@
     $("#p3-reset").classList.add("hidden");
 
     resetHint();
-    if (instructions) {
-      if (p3.boundary === 0) {
-        instructions.textContent = "No instructions for this one. Good luck!";
-        instructions.classList.remove("hidden");
-      } else {
-        instructions.textContent = "";
-        instructions.classList.add("hidden");
-      }
-    }
+    updateInstructions();
     hint.setButtonHidden(true);
 
     if (p3.boundary === 0) {
@@ -583,6 +591,7 @@
         $("#p3-hint-btn")?.classList.add("hidden");
         p3.pass5 = true;
         renderCodePane3();
+        updateInstructions();
         MB.pulseNextButton("p3");
         pager.update();
       }

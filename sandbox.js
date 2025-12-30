@@ -115,7 +115,20 @@
         i++;
         continue;
       }
-      if (ch === "*" || ch === "&") {
+      if (ch === "=" && src[i + 1] === "=") {
+        tokens.push({ type: "sym", value: "==" });
+        i += 2;
+        continue;
+      }
+      if (
+        ch === "+" ||
+        ch === "-" ||
+        ch === "*" ||
+        ch === "/" ||
+        ch === "(" ||
+        ch === ")" ||
+        ch === "&"
+      ) {
         tokens.push({ type: "sym", value: ch });
         i++;
         continue;
@@ -127,14 +140,8 @@
         i = j;
         continue;
       }
-      if (ch === "-" || /[0-9]/.test(ch)) {
-        let j = i;
-        if (src[j] === "-") {
-          if (!/[0-9]/.test(src[j + 1] || "")) {
-            return { error: "That line has a character that does not belong in an expression." };
-          }
-          j++;
-        }
+      if (/[0-9]/.test(ch)) {
+        let j = i + 1;
         while (j < src.length && /[0-9]/.test(src[j])) j++;
         tokens.push({ type: "number", value: src.slice(i, j) });
         i = j;
@@ -149,24 +156,98 @@
     const { tokens, error } = parseExpressionTokens(src);
     if (error) return { error };
     if (!tokens.length) return { error: "Enter an expression to evaluate." };
-    const ops = [];
     let idx = 0;
-    while (
-      idx < tokens.length &&
-      tokens[idx].type === "sym" &&
-      (tokens[idx].value === "*" || tokens[idx].value === "&")
-    ) {
-      ops.push(tokens[idx].value);
-      idx++;
+    const next = () => tokens[idx];
+
+    function parsePrimary() {
+      const tok = next();
+      if (!tok) return null;
+      if (tok.type === "number") {
+        idx++;
+        return { kind: "num", value: tok.value };
+      }
+      if (tok.type === "ident") {
+        idx++;
+        return { kind: "var", name: tok.value };
+      }
+      if (tok.type === "sym" && tok.value === "(") {
+        idx++;
+        const expr = parseEquality();
+        if (!expr) return null;
+        const close = next();
+        if (!close || close.type !== "sym" || close.value !== ")") return null;
+        idx++;
+        return expr;
+      }
+      return null;
     }
-    if (idx >= tokens.length) return { error: "Expression needs a value." };
-    const primary = tokens[idx];
-    idx++;
-    if (idx < tokens.length)
-      return { error: "Only unary * and & are supported in this sandbox." };
-    if (primary.type !== "ident" && primary.type !== "number")
-      return { error: "Expression needs a variable name or number." };
-    return { ops, primary };
+
+    function parseUnary() {
+      const tok = next();
+      if (
+        tok &&
+        tok.type === "sym" &&
+        (tok.value === "+" ||
+          tok.value === "-" ||
+          tok.value === "*" ||
+          tok.value === "&")
+      ) {
+        idx++;
+        const expr = parseUnary();
+        if (!expr) return null;
+        return { kind: "unary", op: tok.value, expr };
+      }
+      return parsePrimary();
+    }
+
+    function parseMulDiv() {
+      let left = parseUnary();
+      if (!left) return null;
+      while (true) {
+        const tok = next();
+        if (!tok || tok.type !== "sym" || (tok.value !== "*" && tok.value !== "/"))
+          break;
+        idx++;
+        const right = parseUnary();
+        if (!right) return null;
+        left = { kind: "binary", op: tok.value, left, right };
+      }
+      return left;
+    }
+
+    function parseAddSub() {
+      let left = parseMulDiv();
+      if (!left) return null;
+      while (true) {
+        const tok = next();
+        if (!tok || tok.type !== "sym" || (tok.value !== "+" && tok.value !== "-"))
+          break;
+        idx++;
+        const right = parseMulDiv();
+        if (!right) return null;
+        left = { kind: "binary", op: tok.value, left, right };
+      }
+      return left;
+    }
+
+    function parseEquality() {
+      let left = parseAddSub();
+      if (!left) return null;
+      while (true) {
+        const tok = next();
+        if (!tok || tok.type !== "sym" || tok.value !== "==") break;
+        idx++;
+        const right = parseAddSub();
+        if (!right) return null;
+        left = { kind: "binary", op: tok.value, left, right };
+      }
+      return left;
+    }
+
+    const expr = parseEquality();
+    if (!expr) return { error: "Expression needs a value." };
+    if (idx < tokens.length) return { error: "That expression is not valid here." };
+    return { expr };
   }
 
   function showExprError(message) {
@@ -178,7 +259,7 @@
   function evaluateExpression(expr, state) {
     const parsed = parseExpression(expr);
     if (parsed.error) return { error: parsed.error, kind: "compile" };
-    const { ops, primary } = parsed;
+    const { expr: ast } = parsed;
     const byName = new Map();
     state.forEach((b) => {
       if (b.name) byName.set(b.name, b);
@@ -188,80 +269,163 @@
         });
       }
     });
-    let current;
-    let label = primary.value;
-    if (primary.type === "ident") {
-      const box = byName.get(primary.value);
-      if (!box)
-        return { error: `Unknown variable ${primary.value}.`, kind: "compile" };
-      current = {
+    function makeLvalue(box, label) {
+      const { base, depth } = typeInfo(box.type);
+      if (!base || !Number.isFinite(depth)) {
+        return {
+          error: "That expression is not valid here.",
+          kind: "compile",
+        };
+      }
+      return {
         kind: "lvalue",
-        type: box.type,
+        base,
+        depth,
         value: box.value,
         address: box.address ?? box.addr ?? "",
-      };
-    } else {
-      const status = literalTypeFor(primary.value);
-      if (status.error) return { error: status.error, kind: status.kind };
-      current = {
-        kind: "rvalue",
-        type: status.type || "int",
-        value: primary.value,
-        address: "",
+        label: label || box.name,
       };
     }
 
-    for (let i = ops.length - 1; i >= 0; i--) {
-      const op = ops[i];
-      if (op === "&") {
-        const nextLabel = `&${label}`;
-        if (current.kind !== "lvalue" || !current.address) {
-          return { error: `${nextLabel} is not valid here.`, kind: "compile" };
+    function makeRvalue(value, base, depth = 0, label = "") {
+      return { kind: "rvalue", base, depth, value, address: "", label };
+    }
+
+    function coerceScalar(result) {
+      if (!result)
+        return { error: "That expression is not valid here.", kind: "compile" };
+      if (!Number.isFinite(result.depth) || result.depth !== 0)
+        return { error: "Pointer arithmetic is not supported here.", kind: "compile" };
+      const raw = result.value;
+      if (result.kind === "lvalue") {
+        if (isEmptyVal(String(raw ?? ""))) {
+          const label = result.label || "That value";
+          return { error: `${label} doesn't have a value yet.`, kind: "ub" };
         }
-        const { base, depth } = typeInfo(current.type);
-        current = {
-          kind: "rvalue",
-          type: makePointerType(base || "int", depth + 1),
-          value: String(current.address),
-          address: "",
-        };
-        label = nextLabel;
-      } else if (op === "*") {
-        const nextLabel = `*${label}`;
-        const { base, depth } = typeInfo(current.type);
-        if (!Number.isFinite(depth) || depth < 1) {
-          return {
-            error: `${nextLabel} is not a valid dereference.`,
-            kind: "compile",
-          };
-        }
-        const ptrVal = String(current.value ?? "").trim();
-        if (!ptrVal || /^empty$/i.test(ptrVal)) {
-          return {
-            error: `${label} doesn't have a value yet, so it can't be dereferenced.`,
-            kind: "ub",
-          };
-        }
-        const target = state.find(
-          (b) => String(b.address ?? b.addr ?? "") === String(ptrVal),
-        );
-        if (!target) {
-          return {
-            error: `${nextLabel} doesn't point to a known variable.`,
-            kind: "ub",
-          };
-        }
-        current = {
-          kind: "lvalue",
-          type: makePointerType(base || "int", depth - 1),
-          value: target.value,
-          address: target.address ?? target.addr ?? "",
-        };
-        label = nextLabel;
+      }
+      try {
+        const value = typeof raw === "bigint" ? raw : BigInt(String(raw));
+        return { value, base: result.base || "int" };
+      } catch {
+        const label = result.label || "That value";
+        return { error: `${label} isn't a number.`, kind: "compile" };
       }
     }
 
-    return { result: current, label };
+    function evalNode(node) {
+      if (!node) return { error: "That expression is not valid here.", kind: "compile" };
+      if (node.kind === "num") {
+        const status = literalTypeFor(node.value);
+        if (status.error) return { error: status.error, kind: status.kind };
+        try {
+          return makeRvalue(BigInt(String(node.value)), status.type || "int");
+        } catch {
+          return { error: "That number is too large to represent.", kind: "compile" };
+        }
+      }
+      if (node.kind === "var") {
+        const box = byName.get(node.name);
+        if (!box)
+          return { error: `Unknown variable ${node.name}.`, kind: "compile" };
+        return makeLvalue(box, node.name);
+      }
+      if (node.kind === "unary") {
+        const rhs = evalNode(node.expr);
+        if (rhs.error) return rhs;
+        if (node.op === "&") {
+          const label = `&${rhs.label || ""}`;
+          if (rhs.kind !== "lvalue" || !rhs.address) {
+            return { error: `${label} is not valid here.`, kind: "compile" };
+          }
+          const nextDepth = Number.isFinite(rhs.depth) ? rhs.depth + 1 : 1;
+          const nextBase = rhs.base || "int";
+          return makeRvalue(String(rhs.address), nextBase, nextDepth, label);
+        }
+        if (node.op === "*") {
+          const label = `*${rhs.label || ""}`;
+          if (!Number.isFinite(rhs.depth) || rhs.depth < 1) {
+            return {
+              error: `${label} is not a valid dereference.`,
+              kind: "compile",
+            };
+          }
+          const ptrRaw = rhs.value;
+          if (isEmptyVal(String(ptrRaw ?? ""))) {
+            const sourceLabel = rhs.label || "That pointer";
+            return {
+              error: `${sourceLabel} doesn't have a value yet, so it can't be dereferenced.`,
+              kind: "ub",
+            };
+          }
+          const ptrVal = String(ptrRaw ?? "").trim();
+          if (!ptrVal || /^empty$/i.test(ptrVal)) {
+            const sourceLabel = rhs.label || "That pointer";
+            return {
+              error: `${sourceLabel} doesn't have a value yet, so it can't be dereferenced.`,
+              kind: "ub",
+            };
+          }
+          const target = state.find(
+            (b) => String(b.address ?? b.addr ?? "") === String(ptrVal),
+          );
+          if (!target) {
+            return {
+              error: `${label} doesn't point to a known variable.`,
+              kind: "ub",
+            };
+          }
+          return makeLvalue(target, label);
+        }
+        const scalar = coerceScalar(rhs);
+        if (scalar.error) return scalar;
+        if (node.op === "+") return makeRvalue(scalar.value, scalar.base);
+        if (node.op === "-") return makeRvalue(-scalar.value, scalar.base);
+        return { error: "That expression is not valid here.", kind: "compile" };
+      }
+      if (node.kind === "binary") {
+        const left = evalNode(node.left);
+        if (left.error) return left;
+        const right = evalNode(node.right);
+        if (right.error) return right;
+        const leftScalar = coerceScalar(left);
+        if (leftScalar.error) return leftScalar;
+        const rightScalar = coerceScalar(right);
+        if (rightScalar.error) return rightScalar;
+        if (node.op === "==") {
+          return makeRvalue(
+            leftScalar.value === rightScalar.value ? 1n : 0n,
+            "int",
+          );
+        }
+        if (node.op === "/" && rightScalar.value === 0n)
+          return { error: "Division by 0 is undefined.", kind: "ub" };
+        let value = 0n;
+        if (node.op === "+") value = leftScalar.value + rightScalar.value;
+        else if (node.op === "-") value = leftScalar.value - rightScalar.value;
+        else if (node.op === "*") value = leftScalar.value * rightScalar.value;
+        else if (node.op === "/") value = leftScalar.value / rightScalar.value;
+        else return { error: "That expression is not valid here.", kind: "compile" };
+        const base =
+          leftScalar.base === "long" || rightScalar.base === "long" ? "long" : "int";
+        return makeRvalue(value, base);
+      }
+      return { error: "That expression is not valid here.", kind: "compile" };
+    }
+
+    const evaluated = evalNode(ast);
+    if (evaluated.error) return evaluated;
+    const resultType = makePointerType(
+      evaluated.base || "int",
+      Number.isFinite(evaluated.depth) ? evaluated.depth : 0,
+    );
+    return {
+      result: {
+        kind: evaluated.kind || "rvalue",
+        type: resultType || "int",
+        value: evaluated.value,
+        address: evaluated.kind === "lvalue" ? evaluated.address : "",
+      },
+    };
   }
 
   function allocFactory() {
@@ -339,6 +503,21 @@
     const htmlParts = [p.html || p.text, s.html || s.text].filter(Boolean);
     const html = htmlParts.join(" ");
     return { text, html };
+  }
+
+  const GENERIC_COMPILE_ERRORS = new Set([
+    "Line has an error.",
+    'Declarations should look like "int name;" or "long name;" or "int name = value;".',
+    'Declarations should look like "int name;" or "long name;".',
+    'Assignments should look like "name = value;".',
+    "Line should be a declaration or assignment.",
+  ]);
+
+  function isGenericCompileMessage(message) {
+    const parsed = parseErrorMessage(message);
+    const text = (parsed.text || "").trim();
+    if (!text) return true;
+    return GENERIC_COMPILE_ERRORS.has(text);
   }
 
   function showErrorDetail(message, kind) {
@@ -866,32 +1045,37 @@
               : "Line does not compile";
           cell.appendChild(icon);
           const baseMessage = errors.get(i) || "Line has an error.";
-          const message =
-            (errorKinds?.get(i) || "compile") === "compile" && info?.has(i)
-              ? combineMessages(baseMessage, info.get(i))
-              : baseMessage;
-          const infoBtn = document.createElement("button");
-          infoBtn.type = "button";
-          infoBtn.className = "error-info-btn";
-          infoBtn.textContent = "i";
-          infoBtn.setAttribute("aria-label", "Explain error");
-          infoBtn.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const parsed = parseErrorMessage(message);
-            if (
-              sandbox.errorDetailLine === i &&
-              sandbox.errorDetailMessage === parsed.text &&
-              sandbox.errorDetailHtml === parsed.html &&
-              sandbox.errorDetailKind === kind
-            ) {
-              hideErrorDetail();
-            } else {
-              sandbox.errorDetailLine = i;
-              showErrorDetail(message, kind);
-            }
-          });
-          cell.appendChild(infoBtn);
+          const hasInfo = info?.has(i);
+          const showInfo =
+            kind === "ub" || hasInfo || !isGenericCompileMessage(baseMessage);
+          if (showInfo) {
+            const message =
+              (errorKinds?.get(i) || "compile") === "compile" && hasInfo
+                ? combineMessages(baseMessage, info.get(i))
+                : baseMessage;
+            const infoBtn = document.createElement("button");
+            infoBtn.type = "button";
+            infoBtn.className = "error-info-btn";
+            infoBtn.textContent = "i";
+            infoBtn.setAttribute("aria-label", "Explain error");
+            infoBtn.addEventListener("click", (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const parsed = parseErrorMessage(message);
+              if (
+                sandbox.errorDetailLine === i &&
+                sandbox.errorDetailMessage === parsed.text &&
+                sandbox.errorDetailHtml === parsed.html &&
+                sandbox.errorDetailKind === kind
+              ) {
+                hideErrorDetail();
+              } else {
+                sandbox.errorDetailLine = i;
+                showErrorDetail(message, kind);
+              }
+            });
+            cell.appendChild(infoBtn);
+          }
         } else if (incomplete.has(i)) {
           cell.classList.add("is-incomplete");
           cell.textContent = "...";

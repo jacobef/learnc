@@ -298,6 +298,10 @@
   }
 
   function updateStatus() {
+    if (p7.boundary === p7.lines.length && p7.passes[p7.lines.length]) {
+      setInstructions("Program solved!");
+      return;
+    }
     if (p7.boundary === 0) {
       setInstructions(
         'Let’s revisit 7A, but with some lines added at the end. To understand these new lines, we need a better understanding of what was going on in 7A. Click <span class="btn-ref">Run line 1 ▶</span> to continue.',

@@ -136,6 +136,10 @@
 
   function updateInstructions() {
     if (!instructions) return;
+    if (p2.boundary === p2.lines.length && p2.passAssign) {
+      instructions.textContent = "Program solved!";
+      return;
+    }
     if (p2.boundary === 2) {
       instructions.innerHTML =
         '<code class="tok-line">int fridge;</code> creates a new variable. Click <span class="btn-ref">+ New variable</span> and enter its attributes.';
@@ -376,6 +380,7 @@
         hint.hide();
         $("#p2-hint-btn")?.classList.add("hidden");
         pulseNextButton("p2");
+        updateInstructions();
         pager.update();
       }
     }

@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8" />
-        <title>C Boxes — Program 6</title>
+        <title>C Boxes — Program 9</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <link rel="stylesheet" href="styles.css" />
     </head>
@@ -15,52 +15,51 @@
                 <a href="program3.html">3. Initialization</a>
                 <a href="program4.html">4. Code Editing I</a>
                 <a href="program5.html">5. Code Editing II</a>
-                <a href="program6.html" class="active">6. Assignment II</a>
+                <a href="program6.html">6. Assignment II</a>
                 <a href="program7a.html">7A. Pointers</a>
                 <a href="program7b.html">7B. Dereferencing</a>
                 <a href="program8.html">8. Whitespace &amp; Comments</a>
-                <a href="program9.html">9. Integer Arithmetic</a>
+                <a href="program9.html" class="active">9. Integer Arithmetic</a>
                 <a href="sandbox.html">Sandbox</a>
                 <a href="reference.html">Reference</a>
             </nav>
             <div class="main">
-                <h1 class="page-title">6. Assignment II</h1>
-                <p id="p5-instructions" class="intro hidden"></p>
-                <p id="p5-complete" class="intro hidden"></p>
+                <h1 class="page-title">9. Integer Arithmetic</h1>
+                <p id="p9-instructions" class="intro"></p>
 
                 <section>
                     <div class="row">
                         <div class="panel">
                             <div class="panel-title code-title">Code</div>
-                            <div id="p5-code" class="codepane"></div>
+                            <div id="p9-code" class="codepane"></div>
                             <div class="controls">
-                                <button id="p5-prev">Back ◀</button>
-                                <button id="p5-next">Run line 1 ▶</button>
+                                <button id="p9-prev">Back ◀</button>
+                                <button id="p9-next">Run line 1 ▶</button>
                             </div>
                         </div>
                         <div class="panel program-state-panel">
                             <div class="panel-title">Program state</div>
-                            <div id="p5-stage"></div>
+                            <div id="p9-stage"></div>
                             <div class="controls">
-                                <button id="p5-check" class="hidden">
+                                <button id="p9-check" class="hidden">
                                     Check
                                 </button>
                                 <button
-                                    id="p5-hint-btn"
+                                    id="p9-hint-btn"
                                     type="button"
                                     class="hint-link hidden"
                                 >
                                     Hint
                                 </button>
-                                <button id="p5-add" class="hidden gap-wide">
+                                <button id="p9-add" class="hidden gap-wide">
                                     + New variable
                                 </button>
-                                <button id="p5-reset" class="hidden">
+                                <button id="p9-reset" class="hidden">
                                     Reset
                                 </button>
-                                <span id="p5-status" class="muted"></span>
+                                <span id="p9-status" class="muted"></span>
                             </div>
-                            <div id="p5-hint" class="hint-inline hidden"></div>
+                            <div id="p9-hint" class="hint-inline hidden"></div>
                         </div>
                     </div>
                 </section>
@@ -68,6 +67,6 @@
         </div>
 
         <script src="shared.js"></script>
-        <script src="program6.js"></script>
+        <script src="program9.js"></script>
     </body>
 </html>

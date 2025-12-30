@@ -104,7 +104,9 @@
   }
 
   function updateInstructions() {
-    if (p5.boundary === 0) {
+    if (p5.boundary === p5.lines.length && p5.passes[p5.lines.length]) {
+      setInstructions("Program solved!");
+    } else if (p5.boundary === 0) {
       setInstructions("No instructions for this one. Good luck!");
     } else {
       setInstructions("");
@@ -115,40 +117,6 @@
     const ws = document.getElementById("p5workspace");
     const boxes = [...ws.querySelectorAll(".vbox")].map((v) => readBoxState(v));
     const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    if (p5.boundary === 4) {
-      if (!by.hammer)
-        return {
-          html: 'You still need <code class="tok-name">hammer</code> in the program state.',
-        };
-      if (!by.drill)
-        return {
-          html: 'You still need <code class="tok-name">drill</code> in the program state.',
-        };
-      if (isEmptyVal(by.hammer.value || ""))
-        return {
-          html: 'After <code class="tok-line">hammer = drill;</code>, <code class="tok-name">hammer</code> should no longer be empty.',
-        };
-      if (isEmptyVal(by.drill.value || ""))
-        return {
-          html: 'Set <code class="tok-name">drill</code>\'s value to <code class="tok-value">2</code>.',
-        };
-      if (by.drill.value !== "2")
-        return {
-          html: 'Line 4 stores <code class="tok-value">2</code> in <code class="tok-name">drill</code>.',
-        };
-      const ok =
-        boxes.length === 2 &&
-        by.hammer &&
-        by.drill &&
-        by.hammer.type === "int" &&
-        by.drill.type === "int" &&
-        by.hammer.value === "1" &&
-        by.drill.value === "2";
-      if (ok)
-        return {
-          html: 'Looks good. Press <span class="btn-ref">Check</span>.',
-        };
-    }
     if (p5.boundary === 5) {
       if (!by.hammer || !by.drill)
         return {
@@ -200,9 +168,7 @@
   }
 
   function renderCodePane5() {
-    const progress =
-      (p5.boundary === 4 && !p5.passes[4]) ||
-      (p5.boundary === 5 && !p5.passes[5]);
+    const progress = p5.boundary === 5 && !p5.passes[5];
     renderCodePane($("#p5-code"), p5.lines, p5.boundary, { progress });
   }
 
@@ -235,10 +201,6 @@
     if (boundary <= 0) return [];
     const stored = firstNonEmptyClone(p5.ws[boundary], p5.snaps[boundary]);
     if (stored.length) return cloneBoxes(stored);
-    if (boundary === 4 && !p5.passes[4]) {
-      const prev = firstNonEmptyClone(p5.ws[3], p5.snaps[3]);
-      if (prev.length) return cloneBoxes(prev);
-    }
     if (boundary === 5) {
       const prev = firstNonEmptyClone(p5.ws[4], p5.snaps[4]);
       if (prev.length) return cloneBoxes(prev);
@@ -252,8 +214,7 @@
     const stage = $("#p5-stage");
     stage.innerHTML = "";
     const boundary = p5.boundary;
-    const atSolved =
-      (boundary === 4 && p5.passes[4]) || (boundary === 5 && p5.passes[5]);
+    const atSolved = boundary === 5 && p5.passes[5];
     if (atSolved) {
       $("#p5-status").textContent = "correct";
       $("#p5-status").className = "ok";
@@ -266,16 +227,13 @@
     $("#p5-add").classList.add("hidden");
 
     resetHint();
-    hint.setButtonHidden(
-      !((boundary === 4 && !p5.passes[4]) || (boundary === 5 && !p5.passes[5])),
-    );
+    hint.setButtonHidden(!(boundary === 5 && !p5.passes[5]));
     if (boundary > 0) {
-      const editable =
-        (boundary === 4 && !p5.passes[4]) || (boundary === 5 && !p5.passes[5]);
+      const editable = boundary === 5 && !p5.passes[5];
       const state = stateFor(boundary);
       const wrap = restoreWorkspace(p5.ws[boundary], state, "p5workspace", {
         editable,
-        deletable: editable && boundary === 4,
+        deletable: false,
       });
       stage.appendChild(wrap);
       if (editable) {
@@ -298,13 +256,6 @@
   }
 
   $("#p5-reset").onclick = () => {
-    if (p5.boundary === 4) {
-      p5.ws[4] = null;
-      p5.snaps[4] = null;
-      p5.passes[4] = false;
-      render();
-      return;
-    }
     if (p5.boundary === 5) {
       p5.ws[5] = null;
       p5.snaps[5] = null;
@@ -322,7 +273,7 @@
 
   $("#p5-check").onclick = () => {
     resetHint();
-    if (p5.boundary !== 4 && p5.boundary !== 5) return;
+    if (p5.boundary !== 5) return;
     const ws = document.getElementById("p5workspace");
     if (!ws) return;
     const boxes = [...ws.querySelectorAll(".vbox")].map((v) => readBoxState(v));
@@ -330,24 +281,13 @@
     const hammer = by.hammer;
     const drill = by.drill;
     const allTypesOk = boxes.every((b) => b.type === "int");
-    let ok = false;
-    if (p5.boundary === 4) {
-      ok =
-        boxes.length === 2 &&
-        hammer &&
-        drill &&
-        allTypesOk &&
-        hammer.value === "1" &&
-        drill.value === "2";
-    } else {
-      ok =
-        boxes.length === 2 &&
-        hammer &&
-        drill &&
-        allTypesOk &&
-        hammer.value === "1" &&
-        drill.value === "1";
-    }
+    const ok =
+      boxes.length === 2 &&
+      hammer &&
+      drill &&
+      allTypesOk &&
+      hammer.value === "1" &&
+      drill.value === "1";
 
     $("#p5-status").textContent = ok ? "correct" : "incorrect";
     $("#p5-status").className = ok ? "ok" : "err";
@@ -371,6 +311,7 @@
       hint.hide();
       $("#p5-hint-btn")?.classList.add("hidden");
       MB.pulseNextButton("p5");
+      updateInstructions();
       pager.update();
     }
   };
@@ -385,12 +326,10 @@
     onBeforeChange: save,
     onAfterChange: render,
     isStepLocked: (boundary) => {
-      if (boundary === 4) return !p5.passes[4];
       if (boundary === 5) return !p5.passes[5];
       return false;
     },
     getStepBadge: (step) => {
-      if (step === 4) return p5.passes[4] ? "check" : "note";
       if (step === 5) return p5.passes[5] ? "check" : "note";
       return "";
     },

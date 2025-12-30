@@ -56,16 +56,16 @@
         'Edit the program state to what it should be after line 3 is run, then press <span class="btn-ref">Check</span>.';
     } else if (p1.boundary <= 0) {
       const runLabel = `Run line ${p1.boundary + 1} ▶`;
-      instructions.innerHTML = `Use the <span class="btn-ref">${runLabel}</span> button to see how the code changes the program state.`;
+      instructions.innerHTML = `Use the <span class="btn-ref">${runLabel}</span> button, or the right arrow key, to see how the code changes the program state.`;
     } else {
       const runLabel = `Run line ${p1.boundary + 1} ▶`;
-      instructions.innerHTML = `Use the <span class="btn-ref">Back ◀</span> and <span class="btn-ref">${runLabel}</span> buttons to see how the code changes the program state.`;
+      instructions.innerHTML = `Use the <span class="btn-ref">Back ◀</span> and <span class="btn-ref">${runLabel}</span> buttons, or the left and right arrow keys, to see how the code changes the program state.`;
     }
   }
 
   function updateStatus() {
     if (!instructions) return;
-    if (p1.passed) {
+    if (p1.passed && p1.boundary === p1.lines.length) {
       instructions.textContent = "Program solved!";
     } else {
       updateInstructions();

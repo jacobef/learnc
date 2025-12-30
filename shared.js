@@ -186,17 +186,29 @@
       top.appendChild(nextBtn);
       panel.insertBefore(top, codepane);
     }
-    const update = () => {
+    const entry = { top, update: null, locked: false, scheduled: false };
+    const measure = () => {
+      if (entry.locked) return;
       if (!document.body.contains(codepane)) return;
       const rect = codepane.getBoundingClientRect();
       const viewHeight =
         window.innerHeight || document.documentElement.clientHeight || 0;
       const height = Math.max(codepane.scrollHeight || 0, rect.height || 0);
+      if (height === 0 || viewHeight === 0) return;
       const needsTop =
         height > viewHeight || rect.bottom > viewHeight || rect.top < 0;
       top.classList.toggle("hidden", !needsTop);
+      entry.locked = true;
     };
-    const entry = { top, update };
+    const update = () => {
+      if (entry.locked || entry.scheduled) return;
+      entry.scheduled = true;
+      requestAnimationFrame(() => {
+        entry.scheduled = false;
+        measure();
+      });
+    };
+    entry.update = update;
     stepperTopState.set(codepane, entry);
     if (typeof ResizeObserver !== "undefined") {
       const ro = new ResizeObserver(() => update());
@@ -572,7 +584,28 @@
           col++;
           continue;
         }
-        if (ch === "*" || ch === "&" || ch === "=" || ch === ";") {
+        if (ch === "=") {
+          if (src[i + 1] === "=") {
+            tokens.push({ type: "sym", value: "==", line, col });
+            i += 2;
+            col += 2;
+          } else {
+            tokens.push({ type: "sym", value: ch, line, col });
+            i++;
+            col++;
+          }
+          continue;
+        }
+        if (
+          ch === "+" ||
+          ch === "-" ||
+          ch === "*" ||
+          ch === "/" ||
+          ch === "&" ||
+          ch === ";" ||
+          ch === "(" ||
+          ch === ")"
+        ) {
           tokens.push({ type: "sym", value: ch, line, col });
           i++;
           col++;
@@ -593,18 +626,9 @@
           i = j;
           continue;
         }
-        if (ch === "-" || /[0-9]/.test(ch)) {
+        if (/[0-9]/.test(ch)) {
           const startCol = col;
           let j = i;
-          if (src[j] === "-") {
-            if (!/[0-9]/.test(src[j + 1] || "")) {
-              tokens.push({ type: "unknown", value: ch, line, col });
-              i++;
-              col++;
-              continue;
-            }
-            j++;
-          }
           while (j < src.length && /[0-9]/.test(src[j])) j++;
           tokens.push({
             type: "number",
@@ -712,6 +736,59 @@
       return makePointerType(depth + 1, base);
     }
 
+    function isExpressionPrefix(tokens, { allowVars = true } = {}) {
+      if (!tokens.length) return true;
+      let expectingOperand = true;
+      let depth = 0;
+      for (const tok of tokens) {
+        if (tok.type === "unknown") return false;
+        if (expectingOperand) {
+          if (tok.type === "number") {
+            expectingOperand = false;
+            continue;
+          }
+          if (tok.type === "ident") {
+            if (!allowVars) return false;
+            expectingOperand = false;
+            continue;
+          }
+          if (tok.type === "sym") {
+            if (tok.value === "(") {
+              depth++;
+              continue;
+            }
+            if (tok.value === "+" || tok.value === "-") {
+              continue;
+            }
+            if (allowPointers && (tok.value === "*" || tok.value === "&")) {
+              continue;
+            }
+          }
+          return false;
+        } else {
+          if (tok.type === "sym") {
+            if (tok.value === ")") {
+              if (depth <= 0) return false;
+              depth--;
+              continue;
+            }
+            if (
+              tok.value === "+" ||
+              tok.value === "-" ||
+              tok.value === "*" ||
+              tok.value === "/" ||
+              tok.value === "=="
+            ) {
+              expectingOperand = true;
+              continue;
+            }
+          }
+          return false;
+        }
+      }
+      return true;
+    }
+
     function isDeclPrefix(tokens) {
       if (!tokens.length) return false;
       if (tokens[0].type !== "kw") return false;
@@ -738,12 +815,6 @@
       idx++;
       if (idx === tokens.length) return true;
       const rhs = tokens[idx];
-      if (rhs.type === "number") {
-        return idx === tokens.length - 1 && allowDeclAssign && stars === 0;
-      }
-      if (rhs.type === "ident") {
-        return idx === tokens.length - 1 && allowDeclAssignVar;
-      }
       if (rhs.type === "sym" && rhs.value === "&") {
         if (!allowPointers || !allowDeclAssignVar) return false;
         if (!isPointerType(resolveDeclType(stars, baseType))) return false;
@@ -766,7 +837,10 @@
         if (j === tokens.length) return true;
         return tokens[j].type === "ident" && j === tokens.length - 1;
       }
-      return false;
+      if (!allowDeclAssign && !allowDeclAssignVar) return false;
+      if (stars !== 0) return false;
+      const allowVars = allowDeclAssignVar;
+      return isExpressionPrefix(tokens.slice(idx), { allowVars });
     }
 
     function isAssignPrefix(tokens, declaredNames) {
@@ -778,14 +852,6 @@
       if (!declaredNames?.has(name)) return false;
       if (tokens.length === 2) return true;
       const t2 = tokens[2];
-      if (t2.type === "number") {
-        return tokens.length === 3;
-      }
-      if (t2.type === "ident" && allowVarAssign) {
-        return (
-          tokens.length === 3 && hasDeclaredPrefix(t2.value, declaredNames)
-        );
-      }
       if (
         t2.type === "sym" &&
         (t2.value === "&" || t2.value === "*") &&
@@ -805,7 +871,7 @@
           hasDeclaredPrefix(tokens[j].value, declaredNames)
         );
       }
-      return false;
+      return isExpressionPrefix(tokens.slice(2), { allowVars: allowVarAssign });
     }
 
     function isUnaryAssignPrefix(tokens, declaredNames) {
@@ -829,13 +895,6 @@
       idx++;
       if (idx >= tokens.length) return true;
       const rhs = tokens[idx];
-      if (rhs.type === "number") return idx === tokens.length - 1;
-      if (rhs.type === "ident" && allowVarAssign) {
-        return (
-          idx === tokens.length - 1 &&
-          hasDeclaredPrefix(rhs.value, declaredNames)
-        );
-      }
       if (
         rhs.type === "sym" &&
         (rhs.value === "&" || rhs.value === "*") &&
@@ -855,7 +914,7 @@
           hasDeclaredPrefix(tokens[j].value, declaredNames)
         );
       }
-      return false;
+      return isExpressionPrefix(tokens.slice(idx), { allowVars: allowVarAssign });
     }
 
     function isDerefPrefix(tokens, declaredNames) {
@@ -880,18 +939,11 @@
       idx++;
       if (idx >= tokens.length) return true;
       const rhs = tokens[idx];
-      if (rhs.type === "number") return idx === tokens.length - 1;
-      if (rhs.type === "ident" && allowVarAssign) {
-        return (
-          idx === tokens.length - 1 &&
-          hasDeclaredPrefix(rhs.value, declaredNames)
-        );
-      }
       if (rhs.type === "sym" && rhs.value === "&" && allowPointers) {
         if (idx === tokens.length - 1) return true;
         return idx === tokens.length - 2 && tokens[idx + 1].type === "ident";
       }
-      return false;
+      return isExpressionPrefix(tokens.slice(idx), { allowVars: allowVarAssign });
     }
 
     function isStatementPrefix(tokens, declaredNames, allowIntPrefix) {
@@ -926,13 +978,286 @@
       );
     }
 
-    function parseAssignRhs(tokens, idx) {
+    function exprHasVar(node) {
+      if (!node) return false;
+      if (node.kind === "var") return true;
+      if (node.kind === "unary") return exprHasVar(node.expr);
+      if (node.kind === "binary")
+        return exprHasVar(node.left) || exprHasVar(node.right);
+      return false;
+    }
+
+    function parseExpressionTokens(tokens, start, { allowVars = true } = {}) {
+      let idx = start;
+      const next = () => tokens[idx];
+
+      function parsePrimary() {
+        const tok = next();
+        if (!tok) return null;
+        if (tok.type === "number") {
+          idx++;
+          return { kind: "num", value: tok.value };
+        }
+        if (tok.type === "ident") {
+          if (!allowVars) return null;
+          idx++;
+          return { kind: "var", name: tok.value };
+        }
+        if (tok.type === "sym" && tok.value === "(") {
+          idx++;
+          const expr = parseEquality();
+          if (!expr) return null;
+          const close = next();
+          if (!close || close.type !== "sym" || close.value !== ")") return null;
+          idx++;
+          return expr;
+        }
+        return null;
+      }
+
+      function parseUnary() {
+        const tok = next();
+        if (
+          tok &&
+          tok.type === "sym" &&
+          (tok.value === "+" ||
+            tok.value === "-" ||
+            (allowPointers && (tok.value === "*" || tok.value === "&")))
+        ) {
+          idx++;
+          const expr = parseUnary();
+          if (!expr) return null;
+          return { kind: "unary", op: tok.value, expr };
+        }
+        return parsePrimary();
+      }
+
+      function parseMulDiv() {
+        let left = parseUnary();
+        if (!left) return null;
+        while (true) {
+          const tok = next();
+          if (!tok || tok.type !== "sym" || (tok.value !== "*" && tok.value !== "/"))
+            break;
+          idx++;
+          const right = parseUnary();
+          if (!right) return null;
+          left = { kind: "binary", op: tok.value, left, right };
+        }
+        return left;
+      }
+
+      function parseAddSub() {
+        let left = parseMulDiv();
+        if (!left) return null;
+        while (true) {
+          const tok = next();
+          if (!tok || tok.type !== "sym" || (tok.value !== "+" && tok.value !== "-"))
+            break;
+          idx++;
+          const right = parseMulDiv();
+          if (!right) return null;
+          left = { kind: "binary", op: tok.value, left, right };
+        }
+        return left;
+      }
+
+      function parseEquality() {
+        let left = parseAddSub();
+        if (!left) return null;
+        while (true) {
+          const tok = next();
+          if (!tok || tok.type !== "sym" || tok.value !== "==") break;
+          idx++;
+          const right = parseAddSub();
+          if (!right) return null;
+          left = { kind: "binary", op: tok.value, left, right };
+        }
+        return left;
+      }
+
+      const expr = parseEquality();
+      if (!expr) return null;
+      return { expr, nextIndex: idx, hasVar: exprHasVar(expr) };
+    }
+
+    function evaluateExpression(expr, state, opts = {}) {
+      const {
+        allowVars = true,
+        targetType = "int",
+        requireValue = requireSourceValue,
+      } = opts;
+      const by = Object.fromEntries(state.map((b) => [b.name, b]));
+      const targetBase = parseType(targetType).base || "int";
+
+      function makeLvalue(box, label) {
+        const { base, depth } = parseType(box.type);
+        if (!base || !Number.isFinite(depth)) {
+          return {
+            error: "That expression is not valid here.",
+            kind: "compile",
+          };
+        }
+        return {
+          kind: "lvalue",
+          base,
+          depth,
+          value: box.value,
+          address: box.address ?? "",
+          label: label || box.name,
+        };
+      }
+
+      function makeRvalue(value, base, depth = 0, label = "") {
+        return { kind: "rvalue", base, depth, value, address: "", label };
+      }
+
+      function coerceScalar(result) {
+        if (!result)
+          return { error: "That expression is not valid here.", kind: "compile" };
+        if (!Number.isFinite(result.depth) || result.depth !== 0)
+          return { error: "Pointer arithmetic is not supported here.", kind: "compile" };
+        const raw = result.value;
+        if (result.kind === "lvalue") {
+          if (requireValue && isEmptyVal(String(raw ?? ""))) {
+            const label = result.label || "That value";
+            return { error: `${label} doesn't have a value yet.`, kind: "ub" };
+          }
+        }
+        try {
+          const value = typeof raw === "bigint" ? raw : BigInt(String(raw));
+          return { value, base: result.base || "int" };
+        } catch {
+          const label = result.label || "That value";
+          return { error: `${label} isn't a number.`, kind: "compile" };
+        }
+      }
+
+      function evalNode(node) {
+        if (!node)
+          return { error: "That expression is not valid here.", kind: "compile" };
+        if (node.kind === "num") {
+          const err = numericLiteralErrorForType(node.value, targetType);
+          if (err) return err;
+          try {
+            return makeRvalue(BigInt(String(node.value)), targetBase);
+          } catch {
+            return { error: "That number is too large to represent.", kind: "compile" };
+          }
+        }
+        if (node.kind === "var") {
+          if (!allowVars)
+            return { error: "Assignments should use a number.", kind: "compile" };
+          const box = by[node.name];
+          if (!box)
+            return {
+              error: `You can't use ${node.name} before declaring it.`,
+              kind: "compile",
+            };
+          return makeLvalue(box, node.name);
+        }
+        if (node.kind === "unary") {
+          const rhs = evalNode(node.expr);
+          if (rhs.error) return rhs;
+          if (node.op === "&") {
+            const label = `&${rhs.label || ""}`;
+            if (rhs.kind !== "lvalue" || !rhs.address) {
+              return { error: `${label} is not valid here.`, kind: "compile" };
+            }
+            const nextDepth = Number.isFinite(rhs.depth) ? rhs.depth + 1 : 1;
+            const nextBase = rhs.base || "int";
+            return makeRvalue(String(rhs.address), nextBase, nextDepth, label);
+          }
+          if (node.op === "*") {
+            const label = `*${rhs.label || ""}`;
+            if (!Number.isFinite(rhs.depth) || rhs.depth < 1) {
+              return {
+                error: `${label} is not a valid dereference.`,
+                kind: "compile",
+              };
+            }
+            const ptrRaw = rhs.value;
+            if (requireValue && isEmptyVal(String(ptrRaw ?? ""))) {
+              const sourceLabel = rhs.label || "That pointer";
+              return {
+                error: `${sourceLabel} doesn't have a value yet, so it can't be dereferenced.`,
+                kind: "ub",
+              };
+            }
+            const ptrVal = String(ptrRaw ?? "").trim();
+            if (!ptrVal || /^empty$/i.test(ptrVal)) {
+              const sourceLabel = rhs.label || "That pointer";
+              return {
+                error: `${sourceLabel} doesn't have a value yet, so it can't be dereferenced.`,
+                kind: "ub",
+              };
+            }
+            const target = state.find(
+              (b) => String(b.address ?? "") === String(ptrVal),
+            );
+            if (!target) {
+              return {
+                error: `${label} doesn't point to a known variable.`,
+                kind: "ub",
+              };
+            }
+            return makeLvalue(target, label);
+          }
+          const scalar = coerceScalar(rhs);
+          if (scalar.error) return scalar;
+          if (node.op === "+") return makeRvalue(scalar.value, scalar.base);
+          if (node.op === "-")
+            return makeRvalue(-scalar.value, scalar.base);
+          return { error: "That expression is not valid here.", kind: "compile" };
+        }
+        if (node.kind === "binary") {
+          const left = evalNode(node.left);
+          if (left.error) return left;
+          const right = evalNode(node.right);
+          if (right.error) return right;
+          const leftScalar = coerceScalar(left);
+          if (leftScalar.error) return leftScalar;
+          const rightScalar = coerceScalar(right);
+          if (rightScalar.error) return rightScalar;
+          if (node.op === "==") {
+            return makeRvalue(
+              leftScalar.value === rightScalar.value ? 1n : 0n,
+              "int",
+            );
+          }
+          if (node.op === "/" && rightScalar.value === 0n)
+            return { error: "Division by 0 is undefined.", kind: "ub" };
+          let value = 0n;
+          if (node.op === "+") value = leftScalar.value + rightScalar.value;
+          else if (node.op === "-") value = leftScalar.value - rightScalar.value;
+          else if (node.op === "*") value = leftScalar.value * rightScalar.value;
+          else if (node.op === "/") value = leftScalar.value / rightScalar.value;
+          else
+            return { error: "That expression is not valid here.", kind: "compile" };
+          const base =
+            leftScalar.base === "long" || rightScalar.base === "long"
+              ? "long"
+              : "int";
+          return makeRvalue(value, base);
+        }
+        return { error: "That expression is not valid here.", kind: "compile" };
+      }
+
+      const evaluated = evalNode(expr);
+      if (evaluated?.error) return evaluated;
+      const scalar = coerceScalar(evaluated);
+      if (scalar.error) return scalar;
+      return scalar;
+    }
+
+    function parseAssignRhs(tokens, idx, { allowVar } = {}) {
       if (idx >= tokens.length) return null;
+      const allowVars = allowVar ?? allowVarAssign;
       const rhs = tokens[idx];
       if (rhs.type === "number" && idx === tokens.length - 1) {
         return { kind: "num", value: rhs.value };
       }
-      if (rhs.type === "ident" && allowVarAssign && idx === tokens.length - 1) {
+      if (rhs.type === "ident" && allowVars && idx === tokens.length - 1) {
         return { kind: "var", name: rhs.value };
       }
       if (rhs.type === "sym" && rhs.value === "&" && allowPointers) {
@@ -967,6 +1292,10 @@
           }
           return { kind: "unary", name: tokens[j].value, ops };
         }
+      }
+      const parsed = parseExpressionTokens(tokens, idx, { allowVars });
+      if (parsed && parsed.nextIndex === tokens.length) {
+        return { kind: "expr", expr: parsed.expr, hasVar: parsed.hasVar };
       }
       return null;
     }
@@ -1019,13 +1348,12 @@
           return null;
         idx++;
         if (idx >= tokens.length) return null;
-        const rhs = tokens[idx];
-        if (
-          rhs.type === "number" &&
-          allowDeclAssign &&
-          stars === 0 &&
-          idx === tokens.length - 1
-        ) {
+        const rhs = parseAssignRhs(tokens, idx, {
+          allowVar: allowDeclAssignVar,
+        });
+        if (!rhs) return null;
+        if (rhs.kind === "num") {
+          if (!allowDeclAssign || stars !== 0) return null;
           return {
             kind: "declAssign",
             name,
@@ -1034,71 +1362,48 @@
             declType,
           };
         }
-        if (
-          rhs.type === "ident" &&
-          allowDeclAssignVar &&
-          idx === tokens.length - 1
-        ) {
-          return { kind: "declAssignVar", name, src: rhs.value, declType };
+        if (rhs.kind === "var") {
+          if (!allowDeclAssignVar) return null;
+          return { kind: "declAssignVar", name, src: rhs.name, declType };
         }
-        if (
-          allowPointers &&
-          allowDeclAssignVar &&
-          rhs.type === "sym" &&
-          rhs.value === "&" &&
-          isPointerType(declType)
-        ) {
-          const next = tokens[idx + 1];
-          if (next?.type === "ident" && idx + 2 === tokens.length) {
-            return { kind: "declAssignRef", name, ref: next.value, declType };
-          }
+        if (rhs.kind === "expr") {
+          if (!allowDeclAssign && !allowDeclAssignVar) return null;
+          if (rhs.hasVar && !allowDeclAssignVar) return null;
+          if (!rhs.hasVar && !allowDeclAssign) return null;
+          if (stars !== 0) return null;
+          return {
+            kind: "declAssign",
+            name,
+            valueKind: "expr",
+            expr: rhs.expr,
+            hasVar: rhs.hasVar,
+            declType,
+          };
         }
-        if (allowPointers && allowDeclAssignVar && rhs.type === "sym") {
-          let j = idx;
-          let depth = 0;
-          while (
-            j < tokens.length &&
-            tokens[j].type === "sym" &&
-            tokens[j].value === "*"
-          ) {
-            depth++;
-            j++;
-          }
-          if (depth > 0 && tokens[j]?.type === "ident" && j + 1 === tokens.length) {
-            return {
-              kind: "declAssignDeref",
-              name,
-              ptr: tokens[j].value,
-              depth,
-              declType,
-            };
-          }
+        if (rhs.kind === "ref") {
+          if (!allowPointers || !allowDeclAssignVar) return null;
+          if (!isPointerType(declType)) return null;
+          return { kind: "declAssignRef", name, ref: rhs.name, declType };
         }
-        if (allowPointers && allowDeclAssignVar && rhs.type === "sym") {
-          let j = idx;
-          const ops = [];
-          while (
-            j < tokens.length &&
-            tokens[j].type === "sym" &&
-            (tokens[j].value === "*" || tokens[j].value === "&")
-          ) {
-            ops.push(tokens[j].value);
-            j++;
-          }
-          if (
-            ops.length > 0 &&
-            ops.includes("&") &&
-            tokens[j]?.type === "ident" &&
-            j + 1 === tokens.length
-          ) {
-            return {
-              kind: "declAssignUnary",
-              name,
-              src: tokens[j].value,
-              ops,
-              declType,
-            };
-          }
+        if (rhs.kind === "deref") {
+          if (!allowPointers || !allowDeclAssignVar) return null;
+          return {
+            kind: "declAssignDeref",
+            name,
+            ptr: rhs.name,
+            depth: rhs.depth,
+            declType,
+          };
+        }
+        if (rhs.kind === "unary") {
+          if (!allowPointers || !allowDeclAssignVar) return null;
+          return {
+            kind: "declAssignUnary",
+            name,
+            src: rhs.name,
+            ops: rhs.ops,
+            declType,
+          };
         }
         return null;
       }
@@ -1112,108 +1417,58 @@
         )
           return null;
         idx++;
-        const rhs = parseAssignRhs(tokens, idx);
+        const rhs = parseAssignRhs(tokens, idx, { allowVar: allowVarAssign });
         if (!rhs) return null;
         return { kind: "assignUnary", name: unary.name, ops: unary.ops, rhs };
       }
       if (
-        tokens.length === 4 &&
-        tokens[0].type === "ident" &&
-        tokens[1].type === "sym" &&
-        tokens[1].value === "=" &&
-        tokens[2].type === "sym" &&
-        tokens[2].value === "&" &&
-        tokens[3].type === "ident" &&
-        allowPointers
-      ) {
-        return {
-          kind: "assignRef",
-          name: tokens[0].value,
-          ref: tokens[3].value,
-        };
-      }
-      if (
-        tokens.length === 3 &&
+        tokens.length >= 3 &&
         tokens[0].type === "ident" &&
         tokens[1].type === "sym" &&
         tokens[1].value === "="
       ) {
-        if (tokens[2].type === "number") {
+        const rhs = parseAssignRhs(tokens, 2, { allowVar: allowVarAssign });
+        if (!rhs) return null;
+        if (rhs.kind === "num") {
           return {
             kind: "assign",
             name: tokens[0].value,
-            value: tokens[2].value,
+            value: rhs.value,
             valueKind: "num",
           };
         }
-        if (tokens[2].type === "ident" && allowVarAssign) {
+        if (rhs.kind === "var") {
+          return { kind: "assignVar", name: tokens[0].value, src: rhs.name };
+        }
+        if (rhs.kind === "expr") {
           return {
-            kind: "assignVar",
+            kind: "assign",
             name: tokens[0].value,
-            src: tokens[2].value,
+            valueKind: "expr",
+            expr: rhs.expr,
+            hasVar: rhs.hasVar,
           };
         }
-      }
-      if (
-        tokens.length >= 4 &&
-        tokens[0].type === "ident" &&
-        tokens[1].type === "sym" &&
-        tokens[1].value === "=" &&
-        tokens[2].type === "sym" &&
-        tokens[2].value === "*" &&
-        allowPointers
-      ) {
-        let j = 2;
-        let depth = 0;
-        while (
-          j < tokens.length &&
-          tokens[j].type === "sym" &&
-          tokens[j].value === "*"
-        ) {
-          depth++;
-          j++;
+        if (rhs.kind === "ref") {
+          return { kind: "assignRef", name: tokens[0].value, ref: rhs.name };
         }
-        if (depth > 0 && tokens[j]?.type === "ident" && j + 1 === tokens.length) {
+        if (rhs.kind === "deref") {
           return {
             kind: "assignFromDeref",
             name: tokens[0].value,
-            ptr: tokens[j].value,
-            depth,
+            ptr: rhs.name,
+            depth: rhs.depth,
           };
         }
-      }
-      if (
-        allowPointers &&
-        tokens.length >= 4 &&
-        tokens[0].type === "ident" &&
-        tokens[1].type === "sym" &&
-        tokens[1].value === "=" &&
-        tokens[2].type === "sym" &&
-        (tokens[2].value === "*" || tokens[2].value === "&")
-      ) {
-        let j = 2;
-        const ops = [];
-        while (
-          j < tokens.length &&
-          tokens[j].type === "sym" &&
-          (tokens[j].value === "*" || tokens[j].value === "&")
-        ) {
-          ops.push(tokens[j].value);
-          j++;
-        }
-        if (
-          ops.length > 0 &&
-          ops.includes("&") &&
-          tokens[j]?.type === "ident" &&
-          j + 1 === tokens.length
-        ) {
+        if (rhs.kind === "unary") {
           return {
             kind: "assignUnaryRhs",
             name: tokens[0].value,
-            src: tokens[j].value,
-            ops,
+            src: rhs.name,
+            ops: rhs.ops,
           };
         }
+        return null;
       }
       return null;
     }
@@ -1268,6 +1523,26 @@
       const oldValue = target.value;
       target.value = String(source.value ?? "empty");
       if (isPtr) {
+        refreshPointerAliases(boxes, target, oldValue);
+      }
+      return boxes;
+    }
+
+    function applyAssignExpr(state, stmt, { allowVars = allowVarAssign } = {}) {
+      const boxes = cloneBoxes(state);
+      const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
+      const target = by[stmt.name];
+      if (!target) return null;
+      const { depth } = parseType(target.type);
+      if (Number.isFinite(depth) && depth > 0) return null;
+      const evaluated = evaluateExpression(stmt.expr, boxes, {
+        allowVars,
+        targetType: target.type,
+      });
+      if (evaluated.error) return null;
+      const oldValue = target.value;
+      target.value = String(evaluated.value);
+      if (depth > 0) {
         refreshPointerAliases(boxes, target, oldValue);
       }
       return boxes;
@@ -1599,6 +1874,25 @@
           ops: stmt.rhs.ops,
         });
       }
+      if (stmt.rhs.kind === "expr") {
+        const { depth } = parseType(resolved.target?.type || "int");
+        if (Number.isFinite(depth) && depth > 0) return null;
+        const evaluated = evaluateExpression(stmt.rhs.expr, boxes, {
+          allowVars: allowVarAssign,
+          targetType: resolved.target?.type || "int",
+        });
+        if (evaluated.error) return null;
+        return applyStatement(
+          boxes,
+          {
+            kind: "assign",
+            name: targetName,
+            value: String(evaluated.value),
+            valueKind: "num",
+          },
+          {},
+        );
+      }
       return null;
     }
 
@@ -1671,6 +1965,11 @@
         };
         const afterDecl = applySimpleStatement(state, decl, opts);
         if (!afterDecl) return null;
+        if (stmt.valueKind === "expr") {
+          return applyAssignExpr(afterDecl, stmt, {
+            allowVars: allowDeclAssignVar,
+          });
+        }
         const assign = {
           kind: "assign",
           name: stmt.name,
@@ -1729,6 +2028,9 @@
       }
       if (stmt.kind === "assignVar") {
         return applyAssignVar(state, stmt);
+      }
+      if (stmt.kind === "assign" && stmt.valueKind === "expr") {
+        return applyAssignExpr(state, stmt, { allowVars: allowVarAssign });
       }
       if (stmt.kind === "assignRef") {
         return applyAssignRef(state, stmt);
@@ -1821,6 +2123,9 @@
       }
       if (tokens[0].type === "ident") {
         const name = tokens[0].value;
+        if (tokens[1]?.type === "ident") {
+          return `${name} isn't a valid type name.`;
+        }
         if (!hasDeclaredPrefix(name, seenDecl))
           return `You can't use ${name} before declaring it.`;
         if (tokens.length === 1)
@@ -1931,6 +2236,20 @@
           );
           if (err) return err;
         }
+        if (parsed.kind === "declAssign" && parsed.valueKind === "expr") {
+          const { depth } = parseType(parsed.declType || "int");
+          if (Number.isFinite(depth) && depth > 0) {
+            return {
+              error: "Pointer arithmetic is not supported here.",
+              kind: "compile",
+            };
+          }
+          const evaluated = evaluateExpression(parsed.expr, state, {
+            allowVars: allowDeclAssignVar,
+            targetType: parsed.declType || "int",
+          });
+          if (evaluated.error) return evaluated;
+        }
         if (parsed.kind === "declAssignDeref") {
           const by = Object.fromEntries(state.map((b) => [b.name, b]));
           const ptr = by[parsed.ptr];
@@ -2011,11 +2330,27 @@
           return missingDeclError(parsed.name, "int");
         }
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
-        const err = numericLiteralErrorForType(
-          parsed.value,
-          by[parsed.name]?.type || "int",
-        );
-        if (err) return err;
+        if (parsed.valueKind === "expr") {
+          const target = by[parsed.name];
+          const { depth } = parseType(target?.type || "int");
+          if (Number.isFinite(depth) && depth > 0) {
+            return {
+              error: "Pointer arithmetic is not supported here.",
+              kind: "compile",
+            };
+          }
+          const evaluated = evaluateExpression(parsed.expr, state, {
+            allowVars: allowVarAssign,
+            targetType: target?.type || "int",
+          });
+          if (evaluated.error) return evaluated;
+        } else {
+          const err = numericLiteralErrorForType(
+            parsed.value,
+            by[parsed.name]?.type || "int",
+          );
+          if (err) return err;
+        }
       } else if (parsed.kind === "assignVar") {
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
         if (!by[parsed.name]) {
@@ -2200,6 +2535,19 @@
             parsed.rhs.name,
           );
           if (err) return err;
+        } else if (parsed.rhs.kind === "expr") {
+          const { depth } = parseType(target.type);
+          if (Number.isFinite(depth) && depth > 0) {
+            return {
+              error: "Pointer arithmetic is not supported here.",
+              kind: "compile",
+            };
+          }
+          const evaluated = evaluateExpression(parsed.rhs.expr, state, {
+            allowVars: allowVarAssign,
+            targetType: target.type,
+          });
+          if (evaluated.error) return evaluated;
         }
       } else if (parsed.kind === "assignUnaryRhs") {
         const by = Object.fromEntries(state.map((b) => [b.name, b]));

@@ -18,7 +18,7 @@
   } = MB;
 
   const instructions = $("#p8-instructions");
-  const NEXT_PAGE = "sandbox.html";
+  const NEXT_PAGE = "program9.html";
 
   const p8 = {
     lines: [
@@ -61,6 +61,18 @@
 
   function resetHint() {
     hint.hide();
+  }
+
+  function setInstructions(message, { html = false } = {}) {
+    if (!instructions) return;
+    if (message) {
+      if (html) instructions.innerHTML = message;
+      else instructions.textContent = message;
+      instructions.classList.remove("hidden");
+    } else {
+      instructions.textContent = "";
+      instructions.classList.add("hidden");
+    }
   }
 
   function rangeStartingAt(boundary) {
@@ -175,24 +187,29 @@
   }
 
   function updateInstructions() {
-    if (!instructions) return;
     const runLabel = runLabelForBoundary(p8.boundary);
+    if (p8.boundary === p8.lines.length && p8.passes[p8.lines.length]) {
+      setInstructions("Program solved!");
+      return;
+    }
     if (p8.boundary === 0) {
-      instructions.innerHTML = `Click <span class="btn-ref">${runLabel}</span> to step through the program.`;
+      setInstructions(
+        `Click <span class="btn-ref">${runLabel}</span> to step through the program.`,
+        { html: true },
+      );
     } else if (p8.boundary === 1) {
-      instructions.innerHTML =
-        'Anything after <code class="tok-line">//</code> on a line is ignored. This is called a comment.';
+      setInstructions(
+        'Anything after <code class="tok-line">//</code> on a line is ignored. This is called a comment.',
+        { html: true },
+      );
     } else if (p8.boundary === 2) {
-      instructions.innerHTML =
-        "Comments can appear on their own lines as well.";
+      setInstructions("Comments can appear on their own lines as well.");
     } else if (p8.boundary === 3) {
-      instructions.innerHTML =
-        "Multiple statements can appear on one line.";
+      setInstructions("Multiple statements can appear on one line.");
     } else if (p8.boundary === 4 || p8.boundary === 16) {
-      instructions.innerHTML = "&nbsp;";
+      setInstructions("");
     } else if (p8.boundary === 7) {
-      instructions.innerHTML =
-        "A statement can be split across multiple lines.";
+      setInstructions("A statement can be split across multiple lines.");
     } else if (
       p8.boundary === 8 ||
       p8.boundary === 9 ||
@@ -200,10 +217,12 @@
       p8.boundary === 13 ||
       p8.boundary === 14
     ) {
-      instructions.innerHTML =
-        "A comment can appear on multiple lines, or within a line, beginning with <code class=\"tok-line\">/*</code> and ending with <code class=\"tok-line\">*/</code>.";
+      setInstructions(
+        "A comment can appear on multiple lines, or within a line, beginning with <code class=\"tok-line\">/*</code> and ending with <code class=\"tok-line\">*/</code>.",
+        { html: true },
+      );
     } else {
-      instructions.innerHTML = "&nbsp;";
+      setInstructions("");
     }
   }
 
@@ -536,7 +555,7 @@
     prefix: "p8",
     lines: p8.lines,
     nextPage: NEXT_PAGE,
-    endLabel: "Finish",
+    endLabel: "Next Program",
     getBoundary: () => p8.boundary,
     setBoundary: (val) => {
       p8.boundary = val;

@@ -129,7 +129,9 @@
   }
 
   function updateStatus() {
-    if (p7a.boundary === 0) {
+    if (p7a.boundary === p7a.lines.length && p7a.passes[p7a.lines.length]) {
+      setInstructions("Program solved!");
+    } else if (p7a.boundary === 0) {
       setInstructions("No instructions for this one. Good luck!");
     } else {
       setInstructions("");
@@ -377,6 +379,7 @@
       hint.hide();
       $("#p7a-hint-btn")?.classList.add("hidden");
       MB.pulseNextButton("p7a");
+      updateStatus();
       renderCode();
       pager.update();
     }
