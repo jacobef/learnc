@@ -24,16 +24,16 @@
 
   const p10 = {
     lines: [
-      "int x = 2;",
-      "int y = 5;",
-      "x = y + x;",
-      "y = y + 1;",
-      "x = x;",
-      "y = y-y * 2;",
+      "int yin = 2;",
+      "int yang = 5;",
+      "yin = yang + yin;",
+      "yang = yang + 1;",
+      "yin = yin;",
+      "yang = yang-yang * 2;",
     ],
     boundary: 0,
-    xAddr: randAddr("int"),
-    yAddr: randAddr("int"),
+    yinAddr: randAddr("int"),
+    yangAddr: randAddr("int"),
     ws: Array(7).fill(null),
     passes: Array(7).fill(false),
     baseline: Array(7).fill(null),
@@ -137,29 +137,29 @@
   }
 
   function canonical(boundary) {
-    const xAddr = String(p10.xAddr);
-    const yAddr = String(p10.yAddr);
+    const yinAddr = String(p10.yinAddr);
+    const yangAddr = String(p10.yangAddr);
     const states = {
-      1: [{ name: "x", type: "int", value: "2", address: xAddr }],
+      1: [{ name: "yin", type: "int", value: "2", address: yinAddr }],
       2: [
-        { name: "x", type: "int", value: "2", address: xAddr },
-        { name: "y", type: "int", value: "5", address: yAddr },
+        { name: "yin", type: "int", value: "2", address: yinAddr },
+        { name: "yang", type: "int", value: "5", address: yangAddr },
       ],
       3: [
-        { name: "x", type: "int", value: "7", address: xAddr },
-        { name: "y", type: "int", value: "5", address: yAddr },
+        { name: "yin", type: "int", value: "7", address: yinAddr },
+        { name: "yang", type: "int", value: "5", address: yangAddr },
       ],
       4: [
-        { name: "x", type: "int", value: "7", address: xAddr },
-        { name: "y", type: "int", value: "6", address: yAddr },
+        { name: "yin", type: "int", value: "7", address: yinAddr },
+        { name: "yang", type: "int", value: "6", address: yangAddr },
       ],
       5: [
-        { name: "x", type: "int", value: "7", address: xAddr },
-        { name: "y", type: "int", value: "6", address: yAddr },
+        { name: "yin", type: "int", value: "7", address: yinAddr },
+        { name: "yang", type: "int", value: "6", address: yangAddr },
       ],
       6: [
-        { name: "x", type: "int", value: "7", address: xAddr },
-        { name: "y", type: "int", value: "-6", address: yAddr },
+        { name: "yin", type: "int", value: "7", address: yinAddr },
+        { name: "yang", type: "int", value: "-6", address: yangAddr },
       ],
     };
     return cloneBoxes(states[boundary] || []);
@@ -211,6 +211,9 @@
         hint.setButtonHidden(false);
         ensureBaseline(p10.boundary, defaults);
         attachResetWatcher(wrap, p10.boundary);
+        wrap.addEventListener("input", () => {
+          $("#p10-hint-btn")?.classList.remove("pulse-success");
+        });
       } else {
         p10.ws[p10.boundary] = cloneBoxes(defaults);
         hint.setButtonHidden(true);
@@ -257,7 +260,7 @@
     $("#p10-status").textContent = verdict.ok ? "correct" : "incorrect";
     $("#p10-status").className = verdict.ok ? "ok" : "err";
     flashStatus($("#p10-status"));
-    if (!verdict.ok && p10.boundary === 6 && by.y?.value === "0") {
+    if (!verdict.ok && p10.boundary === 6 && by.yang?.value === "0") {
       const hintBtn = $("#p10-hint-btn");
       if (hintBtn) {
         hintBtn.classList.remove("pulse-success");
@@ -289,20 +292,20 @@
   function expectedFor(boundary) {
     if (boundary === 4) {
       return [
-        { name: "x", type: "int", value: "7" },
-        { name: "y", type: "int", value: "6" },
+        { name: "yin", type: "int", value: "7" },
+        { name: "yang", type: "int", value: "6" },
       ];
     }
     if (boundary === 5) {
       return [
-        { name: "x", type: "int", value: "7" },
-        { name: "y", type: "int", value: "6" },
+        { name: "yin", type: "int", value: "7" },
+        { name: "yang", type: "int", value: "6" },
       ];
     }
     if (boundary === 6) {
       return [
-        { name: "x", type: "int", value: "7" },
-        { name: "y", type: "int", value: "-6" },
+        { name: "yin", type: "int", value: "7" },
+        { name: "yang", type: "int", value: "-6" },
       ];
     }
     return [];
@@ -403,15 +406,15 @@
         html: 'Use <span class="btn-ref">+ New variable</span> to add the variables you need.',
       };
     const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    if (!by.x || !by.y)
+    if (!by.yin || !by.yang)
       return {
-        html: 'You need <code class="tok-name">x</code> and <code class="tok-name">y</code> in the program state.',
+        html: 'You need <code class="tok-name">yin</code> and <code class="tok-name">yang</code> in the program state.',
       };
-    if (by.x.type !== "int" || by.y.type !== "int")
+    if (by.yin.type !== "int" || by.yang.type !== "int")
       return {
-        html: 'Both <code class="tok-name">x</code> and <code class="tok-name">y</code> should be <code class="tok-type">int</code>.',
+        html: 'Both <code class="tok-name">yin</code> and <code class="tok-name">yang</code> should be <code class="tok-type">int</code>.',
       };
-    if (p10.boundary === 6 && by.y.value === "0")
+    if (p10.boundary === 6 && by.yang.value === "0")
       return {
         html: "Haha, gotcha. Always remember order of operations.",
       };
@@ -419,23 +422,23 @@
     if (verdict.ok)
       return { html: 'Looks good. Press <span class="btn-ref">Check</span>.' };
     if (p10.boundary === 4) {
-      if (by.x.value !== "7") {
+      if (by.yin.value !== "7") {
         return {
-          html: '<code class="tok-name">x</code> should stay as it was after line 3.',
+          html: '<code class="tok-name">yin</code> should stay as it was after line 3.',
         };
       }
       return {
-        html: 'Line 4 increments <code class="tok-name">y</code>.',
+        html: 'Line 4 increments <code class="tok-name">yang</code>.',
       };
     }
     if (p10.boundary === 5) {
       return {
-        html: 'Line 5 assigns <code class="tok-name">x</code> to itself, so nothing changes.',
+        html: 'Line 5 assigns <code class="tok-name">yin</code> to itself, so nothing changes.',
       };
     }
     if (p10.boundary === 6) {
       return {
-        html: 'Multiply before subtracting, and update <code class="tok-name">y</code> accordingly.',
+        html: 'Multiply before subtracting, and update <code class="tok-name">yang</code> accordingly.',
       };
     }
     return "Your program has a problem that isn't covered by a hint. Sorry.";

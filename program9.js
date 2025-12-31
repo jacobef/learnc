@@ -30,24 +30,25 @@
       "int b = 9 / 3;",
       "a = 5 / 3;",
       "a = -7 / 2;",
+      "a = 1/2 + 1/2;",
       "a = 8 / -(2 + 1);",
       "int c = b+1 == 4;",
       "int d = b == 58;",
       "int e = 11/3 == 3;",
       "int f = 9 / 2+1 == 3;",
-      "int g = ((-1 / 2==0) == 1) - 3;",
+      "int g = ((-2 / 3==0) == 1) - 3;",
     ],
     boundary: 0,
     addrs: {},
     ws: {},
-    passes: { 2: false, 3: false, 7: false, 10: false, 11: false, 12: false },
+    passes: { 2: false, 3: false, 8: false, 11: false, 12: false, 13: false },
     baseline: {},
     instructionsEnabled: true,
   };
 
   const statementRanges = [];
 
-  const editableSteps = new Set([2, 3, 7, 10, 11, 12]);
+  const editableSteps = new Set([2, 3, 8, 11, 12, 13]);
 
   const hint = createHintController({
     button: "#p9-hint-btn",
@@ -100,7 +101,8 @@
   }
 
   function valueForA(boundary) {
-    if (boundary >= 7) return "-2";
+    if (boundary >= 8) return "-2";
+    if (boundary >= 7) return "0";
     if (boundary >= 6) return "-3";
     if (boundary >= 5) return "1";
     if (boundary >= 3) return "-8";
@@ -130,7 +132,7 @@
         name: "b",
       });
     }
-    if (boundary >= 8) {
+    if (boundary >= 9) {
       boxes.push({
         address: String(addr("c")),
         type: "int",
@@ -138,7 +140,7 @@
         name: "c",
       });
     }
-    if (boundary >= 9) {
+    if (boundary >= 10) {
       boxes.push({
         address: String(addr("d")),
         type: "int",
@@ -146,7 +148,7 @@
         name: "d",
       });
     }
-    if (boundary >= 10) {
+    if (boundary >= 11) {
       boxes.push({
         address: String(addr("e")),
         type: "int",
@@ -154,7 +156,7 @@
         name: "e",
       });
     }
-    if (boundary >= 11) {
+    if (boundary >= 12) {
       boxes.push({
         address: String(addr("f")),
         type: "int",
@@ -162,7 +164,7 @@
         name: "f",
       });
     }
-    if (boundary >= 12) {
+    if (boundary >= 13) {
       boxes.push({
         address: String(addr("g")),
         type: "int",
@@ -225,19 +227,19 @@
       );
       return;
     }
-    if (p9.boundary >= 5 && p9.boundary <= 7) {
+    if (p9.boundary >= 5 && p9.boundary <= 8) {
       setInstructions(
         "Integer division drops the remainder, i.e. it rounds towards 0.",
       );
       return;
     }
-    if (p9.boundary >= 8 && p9.boundary <= 10) {
+    if (p9.boundary >= 9 && p9.boundary <= 11) {
       setInstructions(
         "x == y evaluates to 1 if x and y have equal values, and 0 if they don't. == has lower precedence than addition and subtraction.",
       );
       return;
     }
-    if (p9.boundary >= 11 && p9.boundary <= 12) {
+    if (p9.boundary >= 12 && p9.boundary <= 13) {
       setInstructions("Remember that spacing doesn't affect order of operations.");
       return;
     }
@@ -304,19 +306,10 @@
         { name: "a", type: "int", value: "-8" },
       ];
     }
-    if (boundary === 7) {
+    if (boundary === 8) {
       return [
         { name: "a", type: "int", value: "-2" },
         { name: "b", type: "int", value: "3" },
-      ];
-    }
-    if (boundary === 10) {
-      return [
-        { name: "a", type: "int", value: "-2" },
-        { name: "b", type: "int", value: "3" },
-        { name: "c", type: "int", value: "1" },
-        { name: "d", type: "int", value: "0" },
-        { name: "e", type: "int", value: "1" },
       ];
     }
     if (boundary === 11) {
@@ -326,10 +319,19 @@
         { name: "c", type: "int", value: "1" },
         { name: "d", type: "int", value: "0" },
         { name: "e", type: "int", value: "1" },
-        { name: "f", type: "int", value: "0" },
       ];
     }
     if (boundary === 12) {
+      return [
+        { name: "a", type: "int", value: "-2" },
+        { name: "b", type: "int", value: "3" },
+        { name: "c", type: "int", value: "1" },
+        { name: "d", type: "int", value: "0" },
+        { name: "e", type: "int", value: "1" },
+        { name: "f", type: "int", value: "0" },
+      ];
+    }
+    if (boundary === 13) {
       return [
         { name: "a", type: "int", value: "-2" },
         { name: "b", type: "int", value: "3" },
@@ -476,7 +478,7 @@
           html: 'Evaluate the parentheses first, then multiply, then update <code class="tok-name">a</code>.',
         };
     }
-    if (p9.boundary === 7) {
+    if (p9.boundary === 8) {
       if (!by.a)
         return {
           html: 'Keep <code class="tok-name">a</code> in the program state.',
@@ -487,17 +489,17 @@
         };
       if (isEmptyVal(by.a.value || ""))
         return {
-          html: 'Line 7 is <code class="tok-line">8 / (2 + 1)</code>.',
+          html: 'Line 8 is <code class="tok-line">8 / -(2 + 1)</code>.',
         };
-      if (by.a.value !== "2")
+      if (by.a.value !== "-2")
         return {
           html: 'Compute the parentheses first, then divide, then update <code class="tok-name">a</code>.',
         };
     }
-    if (p9.boundary === 10) {
+    if (p9.boundary === 11) {
       if (!by.e)
         return {
-          html: 'Add <code class="tok-name">e</code> for line 10.',
+          html: 'Add <code class="tok-name">e</code> for line 11.',
         };
       if (by.e.type !== "int")
         return {
@@ -505,31 +507,31 @@
         };
       if (isEmptyVal(by.e.value || ""))
         return {
-          html: 'Line 10 is <code class="tok-line">11 / 3 == 3</code>.',
+          html: 'Line 11 is <code class="tok-line">11 / 3 == 3</code>.',
         };
       if (by.e.value !== "1")
         return {
           html: 'Do the division first, then decide whether the comparison is true or false.',
         };
     }
-    if (p9.boundary === 11) {
+    if (p9.boundary === 12) {
       if (!by.f)
         return {
-          html: 'Add <code class="tok-name">f</code> for line 11.',
+          html: 'Add <code class="tok-name">f</code> for line 12.',
         };
       if (isEmptyVal(by.f.value || ""))
         return {
-          html: 'Line 11 is <code class="tok-line">9 / 2 + 1 == 3</code>.',
+          html: 'Line 12 is <code class="tok-line">9 / 2 + 1 == 3</code>.',
         };
       if (by.f.value !== "0")
         return {
           html: 'Evaluate division and addition first, then decide whether the comparison is true or false.',
         };
     }
-    if (p9.boundary === 12) {
+    if (p9.boundary === 13) {
       if (!by.g)
         return {
-          html: 'Add <code class="tok-name">g</code> for line 12.',
+          html: 'Add <code class="tok-name">g</code> for line 13.',
         };
       if (isEmptyVal(by.g.value || ""))
         return {
@@ -660,7 +662,7 @@
     prefix: "p9",
     lines: p9.lines,
     nextPage: NEXT_PAGE,
-    endLabel: "Finish",
+    endLabel: "Next Program",
     getBoundary: () => p9.boundary,
     setBoundary: (val) => {
       p9.boundary = val;

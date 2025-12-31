@@ -3093,7 +3093,7 @@
     allowTypeEdit = false,
     allowNameToggle = false,
   } = {}) {
-    const emptyDisplay = isEmptyVal(String(value || ""));
+    const emptyDisplay = isEmptyVal(String(value ?? ""));
     const displayValue = emptyDisplay ? "" : normalizeZeroDisplay(value);
     const resolvedNames =
       Array.isArray(names) && names.length
