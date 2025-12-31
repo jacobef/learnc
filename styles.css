@@ -773,6 +773,8 @@ button:hover:not([disabled]) {
     min-width: 32px;
     padding-right: 8px;
     color: #999;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 .src {

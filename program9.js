@@ -69,12 +69,6 @@
     return statementRanges.find((range) => range.end === boundary) || null;
   }
 
-  function runLabelForBoundary(boundary) {
-    const range = rangeStartingAt(boundary);
-    if (range) return `${range.label} ▶`;
-    return `Run line ${boundary + 1} ▶`;
-  }
-
   function addr(name) {
     if (!p9.addrs[name]) p9.addrs[name] = randAddr("int");
     return p9.addrs[name];
@@ -217,8 +211,6 @@
       return;
     }
 
-    const editable = editableSteps.has(p9.boundary) && !p9.passes[p9.boundary];
-    const runLabel = runLabelForBoundary(p9.boundary);
     if (p9.boundary === 0) {
       setInstructions(
         prependTopStepperNotice(

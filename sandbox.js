@@ -1,7 +1,15 @@
 (function (MB) {
-  const { $, randAddr, vbox, isEmptyVal, createSimpleSimulator } = MB;
+  const {
+    $,
+    randAddr,
+    vbox,
+    isEmptyVal,
+    createSimpleSimulator,
+    updateStepperTopControls,
+  } = MB;
 
   const instructions = $("#sandbox-instructions");
+  const codepane = $("#sandbox-code");
   const editor = $("#sandbox-editor");
   const lineNumbers = $("#sandbox-line-numbers");
   const errorGutter = $("#sandbox-error-gutter");
@@ -701,6 +709,31 @@
     };
   }
 
+  function isBoundaryInsideBlockComment(lines, boundary) {
+    if (!Array.isArray(lines) || boundary <= 0) return false;
+    let inComment = false;
+    const limit = Math.min(boundary, lines.length);
+    for (let lineIndex = 0; lineIndex < limit; lineIndex++) {
+      const line = lines[lineIndex] || "";
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        const next = line[i + 1];
+        if (!inComment && ch === "/" && next === "/") break;
+        if (!inComment && ch === "/" && next === "*") {
+          inComment = true;
+          i++;
+          continue;
+        }
+        if (inComment && ch === "*" && next === "/") {
+          inComment = false;
+          i++;
+          continue;
+        }
+      }
+    }
+    return inComment;
+  }
+
   function syncBoundaryWithLines(lines) {
     const total = lines.length;
     const prevTotal = Number.isFinite(sandbox.lineCount)
@@ -782,11 +815,27 @@
     const lines = getRawLines();
     const { boundary, total } = syncBoundaryWithLines(lines);
     const statementInfo = getStatementContext(lines, boundary);
-    const outcome = getProgramOutcome(lines, boundary);
+    const inBlockComment = isBoundaryInsideBlockComment(lines, boundary);
+    let outcome = getProgramOutcome(lines, boundary);
+    if (inBlockComment && outcome.kind === "compile") {
+      // Close the open comment at the boundary so comments don't look invalid.
+      const activeLines = lines.slice(0, boundary);
+      if (activeLines.length) activeLines[activeLines.length - 1] += " */";
+      const safeState = applyUserProgram(activeLines);
+      if (safeState) {
+        outcome = {
+          kind: "ok",
+          globalKind: outcome.globalKind,
+          state: safeState,
+          boundary,
+          total,
+        };
+      }
+    }
     let displayOutcome = outcome;
     if (outcome.globalKind && outcome.globalKind !== "ok") {
       displayOutcome = { kind: outcome.globalKind, state: null };
-    } else if (statementInfo.midStatement) {
+    } else if (statementInfo.midStatement && !inBlockComment) {
       displayOutcome = { kind: "mid", state: null };
     }
     stage.appendChild(renderState("", displayOutcome.state, displayOutcome.kind));
@@ -1140,6 +1189,7 @@
       if (lineNumbers) lineNumbers.scrollTop = editor.scrollTop;
       if (errorGutter) errorGutter.scrollTop = editor.scrollTop;
     }
+    if (codepane) updateStepperTopControls(codepane);
   }
 
   if (editor) {

@@ -189,13 +189,11 @@
     const entry = {
       top,
       update: null,
-      locked: false,
       scheduled: false,
       needsTop: null,
       measure: null,
     };
     const measure = () => {
-      if (entry.locked) return;
       if (!document.body.contains(codepane)) return;
       const rect = codepane.getBoundingClientRect();
       const panelRect = panel.getBoundingClientRect();
@@ -216,10 +214,9 @@
         rect.top <= 0;
       entry.needsTop = needsTop;
       top.classList.toggle("hidden", !needsTop);
-      entry.locked = true;
     };
     const update = () => {
-      if (entry.locked || entry.scheduled) return;
+      if (entry.scheduled) return;
       entry.scheduled = true;
       requestAnimationFrame(() => {
         entry.scheduled = false;
@@ -246,8 +243,10 @@
   const TOP_STEPPER_NOTICE =
     'This one is long, so I\'ve placed the <span class="btn-ref">Back ◀</span> and <span class="btn-ref">Run line 1 ▶</span> buttons on the top as well as the bottom.';
 
+  const MOBILE_MEDIA_QUERY = "(max-width: 900px)";
+
   function isMobileViewport() {
-    return window.matchMedia && window.matchMedia("(max-width: 900px)").matches;
+    return window.matchMedia && window.matchMedia(MOBILE_MEDIA_QUERY).matches;
   }
 
   function isStepperTopVisible(prefix) {
@@ -256,7 +255,7 @@
     if (!codepane) return false;
     const entry = ensureStepperTopControls(codepane);
     if (!entry) return false;
-    if (!entry.locked && typeof entry.measure === "function") entry.measure();
+    if (typeof entry.measure === "function") entry.measure();
     return !!entry.needsTop;
   }
 
@@ -3616,8 +3615,6 @@
       throw new Error('createStepper requires a prefix (e.g., "p1").');
     const prevButtons = stepperButtons(prefix, "prev");
     const nextButtons = stepperButtons(prefix, "next");
-    const prevBtn = prevButtons[0] || null;
-    const nextBtn = nextButtons[0] || null;
     const total = Array.isArray(lines)
       ? lines.length
       : Math.max(0, Number(lines) || 0);
@@ -3930,9 +3927,7 @@
     if (state === "0") document.body.classList.add("sidebar-collapsed");
     if (state === "1") document.body.classList.remove("sidebar-collapsed");
     if (state == null) {
-      const prefersCollapsed =
-        window.matchMedia &&
-        window.matchMedia("(max-width: 900px)").matches;
+      const prefersCollapsed = isMobileViewport();
       if (prefersCollapsed) document.body.classList.add("sidebar-collapsed");
     }
   }
@@ -4016,6 +4011,7 @@
     disableAutoText,
     renderCodePane,
     renderCodePaneEditable,
+    updateStepperTopControls,
     readEditableCodeLines,
     stripLineComments,
     stripAllComments,
