@@ -569,6 +569,11 @@
     onAfterChange: p8Render,
     isStepLocked: (boundary) =>
       editableSteps.has(boundary) && !p8.passes[boundary],
+    getStepBadge: (step) => {
+      if (step === 11) return p8.passes[16] ? "check" : "note";
+      if (!editableSteps.has(step)) return "";
+      return p8.passes[step] ? "check" : "note";
+    },
     getNextLabel: (current) => {
       const range = rangeStartingAt(current);
       return range ? range.label : "";

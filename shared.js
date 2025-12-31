@@ -186,17 +186,35 @@
       top.appendChild(nextBtn);
       panel.insertBefore(top, codepane);
     }
-    const entry = { top, update: null, locked: false, scheduled: false };
+    const entry = {
+      top,
+      update: null,
+      locked: false,
+      scheduled: false,
+      needsTop: null,
+      measure: null,
+    };
     const measure = () => {
       if (entry.locked) return;
       if (!document.body.contains(codepane)) return;
       const rect = codepane.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
       const viewHeight =
         window.innerHeight || document.documentElement.clientHeight || 0;
-      const height = Math.max(codepane.scrollHeight || 0, rect.height || 0);
+      const height = Math.max(
+        panel.scrollHeight || 0,
+        panelRect.height || 0,
+        codepane.scrollHeight || 0,
+        rect.height || 0,
+      );
       if (height === 0 || viewHeight === 0) return;
       const needsTop =
-        height > viewHeight || rect.bottom > viewHeight || rect.top < 0;
+        height >= viewHeight ||
+        panelRect.bottom >= viewHeight ||
+        panelRect.top <= 0 ||
+        rect.bottom >= viewHeight ||
+        rect.top <= 0;
+      entry.needsTop = needsTop;
       top.classList.toggle("hidden", !needsTop);
       entry.locked = true;
     };
@@ -209,6 +227,7 @@
       });
     };
     entry.update = update;
+    entry.measure = measure;
     stepperTopState.set(codepane, entry);
     if (typeof ResizeObserver !== "undefined") {
       const ro = new ResizeObserver(() => update());
@@ -227,20 +246,23 @@
   const TOP_STEPPER_NOTICE =
     'This one is long, so I\'ve placed the <span class="btn-ref">Back ◀</span> and <span class="btn-ref">Run line 1 ▶</span> buttons on the top as well as the bottom.';
 
+  function isMobileViewport() {
+    return window.matchMedia && window.matchMedia("(max-width: 900px)").matches;
+  }
+
   function isStepperTopVisible(prefix) {
     if (!prefix) return false;
     const codepane = document.getElementById(`${prefix}-code`);
     if (!codepane) return false;
-    const rect = codepane.getBoundingClientRect();
-    const viewHeight =
-      window.innerHeight || document.documentElement.clientHeight || 0;
-    const height = Math.max(codepane.scrollHeight || 0, rect.height || 0);
-    if (height === 0 || viewHeight === 0) return false;
-    return height > viewHeight || rect.bottom > viewHeight || rect.top < 0;
+    const entry = ensureStepperTopControls(codepane);
+    if (!entry) return false;
+    if (!entry.locked && typeof entry.measure === "function") entry.measure();
+    return !!entry.needsTop;
   }
 
   function prependTopStepperNotice(prefix, message, { html = false } = {}) {
     if (!message) return message;
+    if (isMobileViewport()) return message;
     if (!isStepperTopVisible(prefix)) return message;
     if (html) return `${TOP_STEPPER_NOTICE}<br>${message}`;
     return `${TOP_STEPPER_NOTICE}\n${message}`;

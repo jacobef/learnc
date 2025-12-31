@@ -36,19 +36,20 @@
       "int d = b == 58;",
       "int e = 11/3 == 3;",
       "int f = 9 / 2+1 == 3;",
-      "int g = ((-2 / 3==0) == 1) - 3;",
+      "int g = 0 == 1 == 2;",
+      "int h = (-2 / 3==1-1==1) - 3;",
     ],
     boundary: 0,
     addrs: {},
     ws: {},
-    passes: { 2: false, 3: false, 8: false, 11: false, 12: false, 13: false },
+    passes: { 2: false, 3: false, 8: false, 11: false, 12: false, 14: false },
     baseline: {},
     instructionsEnabled: true,
   };
 
   const statementRanges = [];
 
-  const editableSteps = new Set([2, 3, 8, 11, 12, 13]);
+  const editableSteps = new Set([2, 3, 8, 11, 12, 14]);
 
   const hint = createHintController({
     button: "#p9-hint-btn",
@@ -168,8 +169,16 @@
       boxes.push({
         address: String(addr("g")),
         type: "int",
-        value: "-2",
+        value: "0",
         name: "g",
+      });
+    }
+    if (boundary >= 14) {
+      boxes.push({
+        address: String(addr("h")),
+        type: "int",
+        value: "-2",
+        name: "h",
       });
     }
     return cloneBoxes(boxes);
@@ -233,13 +242,17 @@
       );
       return;
     }
-    if (p9.boundary >= 9 && p9.boundary <= 11) {
+    if (p9.boundary >= 9 && p9.boundary <= 12) {
       setInstructions(
         "x == y evaluates to 1 if x and y have equal values, and 0 if they don't. == has lower precedence than addition and subtraction.",
       );
       return;
     }
-    if (p9.boundary >= 12 && p9.boundary <= 13) {
+    if (p9.boundary === 13) {
+      setInstructions("== is left-associative, so this is parsed as (0 == 1) == 2.");
+      return;
+    }
+    if (p9.boundary === 14) {
       setInstructions("Remember that spacing doesn't affect order of operations.");
       return;
     }
@@ -331,7 +344,7 @@
         { name: "f", type: "int", value: "0" },
       ];
     }
-    if (boundary === 13) {
+    if (boundary === 14) {
       return [
         { name: "a", type: "int", value: "-2" },
         { name: "b", type: "int", value: "3" },
@@ -339,7 +352,8 @@
         { name: "d", type: "int", value: "0" },
         { name: "e", type: "int", value: "1" },
         { name: "f", type: "int", value: "0" },
-        { name: "g", type: "int", value: "-2" },
+        { name: "g", type: "int", value: "0" },
+        { name: "h", type: "int", value: "-2" },
       ];
     }
     return [];
@@ -528,16 +542,20 @@
           html: 'Evaluate division and addition first, then decide whether the comparison is true or false.',
         };
     }
-    if (p9.boundary === 13) {
+    if (p9.boundary === 14) {
       if (!by.g)
         return {
-          html: 'Add <code class="tok-name">g</code> for line 13.',
+          html: 'Keep <code class="tok-name">g</code> from line 13 in the program state.',
         };
-      if (isEmptyVal(by.g.value || ""))
+      if (!by.h)
         return {
-          html: 'Work inside the parentheses from left to right.',
+          html: 'Add <code class="tok-name">h</code> for line 14.',
         };
-      if (by.g.value !== "-2")
+      if (isEmptyVal(by.h.value || ""))
+        return {
+          html: 'This line should be parsed as <code class="tok-line">((( -2 / 3 ) == (1 - 1)) == 1) - 3</code>.',
+        };
+      if (by.h.value !== "-2")
         return {
           html: 'Work from the innermost parentheses outward, and remember comparisons yield 0 or 1.',
         };
@@ -671,6 +689,10 @@
     onAfterChange: p9Render,
     isStepLocked: (boundary) =>
       editableSteps.has(boundary) && !p9.passes[boundary],
+    getStepBadge: (step) => {
+      if (!editableSteps.has(step)) return "";
+      return p9.passes[step] ? "check" : "note";
+    },
     getNextLabel: (current) => {
       const range = rangeStartingAt(current);
       return range ? range.label : "";
