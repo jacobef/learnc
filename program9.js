@@ -15,10 +15,11 @@
     removeBoxDeleteButtons,
     flashStatus,
     pulseNextButton,
+    prependTopStepperNotice,
   } = MB;
 
   const instructions = $("#p9-instructions");
-  const NEXT_PAGE = "sandbox.html";
+  const NEXT_PAGE = "program10.html";
   const FINISH_PARAM = "finished";
 
   const p9 = {
@@ -209,7 +210,11 @@
     const runLabel = runLabelForBoundary(p9.boundary);
     if (p9.boundary === 0) {
       setInstructions(
-        'For a challenge, you can try this one without instructions. [<button type="button" class="ub-explain-link" data-action="disable-instructions">Click here</button>] if you\'d like to disable them. Otherwise, click <span class="btn-ref">Run line 1 ▶</span> to continue.',
+        prependTopStepperNotice(
+          "p9",
+          'For a challenge, you can try this one without instructions. <button type="button" class="ub-explain-link" data-action="disable-instructions">Click here</button> if you\'d like to disable them. Otherwise, click <span class="btn-ref">Run line 1 ▶</span> to continue.',
+          { html: true },
+        ),
         { html: true },
       );
       return;
@@ -220,7 +225,7 @@
       );
       return;
     }
-    if (p9.boundary >= 4 && p9.boundary <= 7) {
+    if (p9.boundary >= 5 && p9.boundary <= 7) {
       setInstructions(
         "Integer division drops the remainder, i.e. it rounds towards 0.",
       );

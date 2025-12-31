@@ -46,7 +46,7 @@
       return;
     }
     instructions.innerHTML =
-      'Until now, you have been editing the program state to match the code. Now you will be editing the code to match the program state. Edit the line so that "Expected final state" and "Your final state" match, then press <span class="btn-ref">Check</span>.';
+      'Until now, you have been editing the program state to match the code. Now you will be editing the code to match the program state. Edit the line so that "Your code\'s final state" matches the "Target final state", then press <span class="btn-ref">Check</span>.';
   }
 
   function normalizedLines() {
@@ -146,8 +146,8 @@
     const actual = applyUserProgram();
     const group = document.createElement("div");
     group.className = "state-group two-col";
-    group.appendChild(renderState("Your final state", actual));
-    group.appendChild(renderState("Expected final state", expected));
+    group.appendChild(renderState("Your code's final state", actual));
+    group.appendChild(renderState("Target final state", expected));
     stage.appendChild(group);
   }
 

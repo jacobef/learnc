@@ -11,6 +11,7 @@
     makeAnswerBox,
     createHintController,
     createStepper,
+    prependTopStepperNotice,
   } = MB;
 
   const instructions = $("#p5-instructions");
@@ -92,10 +93,11 @@
     refresh();
   }
 
-  function setInstructions(message) {
+  function setInstructions(message, { html = false } = {}) {
     if (!instructions) return;
     if (message && message.trim()) {
-      instructions.textContent = message;
+      if (html) instructions.innerHTML = message;
+      else instructions.textContent = message;
       instructions.classList.remove("hidden");
     } else {
       instructions.textContent = "";
@@ -107,7 +109,14 @@
     if (p5.boundary === p5.lines.length && p5.passes[p5.lines.length]) {
       setInstructions("Program solved!");
     } else if (p5.boundary === 0) {
-      setInstructions("No instructions for this one. Good luck!");
+      setInstructions(
+        prependTopStepperNotice(
+          "p5",
+          "No instructions for this one. Good luck!",
+          { html: true },
+        ),
+        { html: true },
+      );
     } else {
       setInstructions("");
     }

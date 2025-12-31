@@ -224,6 +224,28 @@
     entry?.update();
   }
 
+  const TOP_STEPPER_NOTICE =
+    'This one is long, so I\'ve placed the <span class="btn-ref">Back ◀</span> and <span class="btn-ref">Run line 1 ▶</span> buttons on the top as well as the bottom.';
+
+  function isStepperTopVisible(prefix) {
+    if (!prefix) return false;
+    const codepane = document.getElementById(`${prefix}-code`);
+    if (!codepane) return false;
+    const rect = codepane.getBoundingClientRect();
+    const viewHeight =
+      window.innerHeight || document.documentElement.clientHeight || 0;
+    const height = Math.max(codepane.scrollHeight || 0, rect.height || 0);
+    if (height === 0 || viewHeight === 0) return false;
+    return height > viewHeight || rect.bottom > viewHeight || rect.top < 0;
+  }
+
+  function prependTopStepperNotice(prefix, message, { html = false } = {}) {
+    if (!message) return message;
+    if (!isStepperTopVisible(prefix)) return message;
+    if (html) return `${TOP_STEPPER_NOTICE}<br>${message}`;
+    return `${TOP_STEPPER_NOTICE}\n${message}`;
+  }
+
   function initStepperTopControls() {
     document.querySelectorAll(".codepane").forEach((pane) => {
       updateStepperTopControls(pane);
@@ -3992,6 +4014,7 @@
     createHintController,
     createStepper,
     pulseNextButton,
+    prependTopStepperNotice,
     flashStatus,
     disableBoxEditing,
     removeBoxDeleteButtons,

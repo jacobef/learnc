@@ -12,6 +12,7 @@
     createHintController,
     createStepper,
     disableAutoText,
+    prependTopStepperNotice,
   } = MB;
 
   const instructions = $("#p7b-instructions");
@@ -304,7 +305,11 @@
     }
     if (p7.boundary === 0) {
       setInstructions(
-        'Let’s revisit 7A, but with some lines added at the end. To understand these new lines, we need a better understanding of what was going on in 7A. Click <span class="btn-ref">Run line 1 ▶</span> to continue.',
+        prependTopStepperNotice(
+          "p7b",
+          'Let’s revisit 7A, but with some lines added at the end. To understand these new lines, we need a better understanding of what was going on in 7A. Click <span class="btn-ref">Run line 1 ▶</span> to continue.',
+          { html: true },
+        ),
         { html: true },
       );
       return;
@@ -318,14 +323,14 @@
     }
     if (p7.boundary === 5) {
       setInstructions(
-        'When <code class="tok-name">wolf</code> is set to <code class="tok-addr">&amp;hare</code>, the <code class="tok-name">*wolf</code> name moves from <code class="tok-name">deer</code> to <code class="tok-name">hare</code>. Use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">hare</code> to reveal it. We say that <code class="tok-name">wolf</code> now "points to" <code class="tok-name">hare</code>.<br><br>In general, if some variable <code class="tok-name">X</code> points to another variable <code class="tok-name">Y</code>, then <code class="tok-name">*X</code> refers to <code class="tok-name">Y</code>. In this case, <code class="tok-name">wolf</code> points to <code class="tok-name">hare</code>, so <code class="tok-name">*wolf</code> refers to <code class="tok-name">hare</code>.<br><br>We&#8217;ll see the relevance of this alternate name later in the code.',
+        'When <code class="tok-name">wolf</code> is assigned to <code class="tok-addr">&amp;hare</code>, the <code class="tok-name">*wolf</code> name moves from <code class="tok-name">deer</code> to <code class="tok-name">hare</code>. Use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">hare</code> to reveal it. We say that <code class="tok-name">wolf</code> now "points to" <code class="tok-name">hare</code>.<br><br>In general, if some variable <code class="tok-name">X</code> points to another variable <code class="tok-name">Y</code>, then <code class="tok-name">*X</code> refers to <code class="tok-name">Y</code>. In this case, <code class="tok-name">wolf</code> points to <code class="tok-name">hare</code>, so <code class="tok-name">*wolf</code> refers to <code class="tok-name">hare</code>.<br><br>We&#8217;ll see the relevance of this alternate name later in the code.',
         { html: true },
       );
       return;
     }
     if (p7.boundary === 6) {
       setInstructions(
-        '<code class="tok-line">bear = &amp;wolf;</code> adds the <code class="tok-name">*bear</code> name to <code class="tok-name">wolf</code>, and also adds a name to <code class="tok-name">hare</code>. Use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">hare</code> to reveal it.<br><br>To understand why, recall that <code class="tok-name">*bear</code> (aka <code class="tok-name">wolf</code>) points to <code class="tok-name">hare</code>. So we can add another asterisk to <code class="tok-name">*bear</code> to get the alternate name for <code class="tok-name">hare</code>: <code class="tok-name">**bear</code>.',
+        '<code class="tok-line">bear = &amp;wolf;</code> adds the <code class="tok-name">*bear</code> name to <code class="tok-name">wolf</code>. It also adds a name to <code class="tok-name">hare</code>; use the <span class="btn-ref">Other names</span> toggle under <code class="tok-name">hare</code> to reveal it.<br><br>To understand why: as we just established, <code class="tok-name">*bear</code> now refers to <code class="tok-name">wolf</code>. <code class="tok-name">wolf</code> points to <code class="tok-name">hare</code>. So, <code class="tok-name">*bear</code> points to <code class="tok-name">hare</code>. Therefore, we can refer to <code class="tok-name">hare</code> by adding another asterisk to <code class="tok-name">*bear</code>, to get <code class="tok-name">**bear</code>.',
         { html: true },
       );
       return;
@@ -526,8 +531,8 @@
           deletable: editable,
           allowNameAdd: false,
           allowNameToggle: true,
-          allowNameEdit: false,
-          allowTypeEdit: false,
+          allowNameEdit: null,
+          allowTypeEdit: null,
         },
       );
       stage.appendChild(wrap);

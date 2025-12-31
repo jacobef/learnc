@@ -11,6 +11,7 @@
     createHintController,
     createStepper,
     makeAnswerBox,
+    prependTopStepperNotice,
   } = MB;
 
   const instructions = $("#p7a-instructions");
@@ -117,10 +118,11 @@
     return base;
   }
 
-  function setInstructions(message) {
+  function setInstructions(message, { html = false } = {}) {
     if (!instructions) return;
     if (message && message.trim()) {
-      instructions.textContent = message;
+      if (html) instructions.innerHTML = message;
+      else instructions.textContent = message;
       instructions.classList.remove("hidden");
     } else {
       instructions.textContent = "";
@@ -132,7 +134,14 @@
     if (p7a.boundary === p7a.lines.length && p7a.passes[p7a.lines.length]) {
       setInstructions("Program solved!");
     } else if (p7a.boundary === 0) {
-      setInstructions("No instructions for this one. Good luck!");
+      setInstructions(
+        prependTopStepperNotice(
+          "p7a",
+          "No instructions for this one. Good luck!",
+          { html: true },
+        ),
+        { html: true },
+      );
     } else {
       setInstructions("");
     }
@@ -321,8 +330,8 @@
           editable,
           deletable: editable,
           allowNameAdd: false,
-          allowNameEdit: false,
-          allowTypeEdit: false,
+          allowNameEdit: null,
+          allowTypeEdit: null,
         },
       );
       stage.appendChild(wrap);

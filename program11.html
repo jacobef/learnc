@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8" />
-        <title>C Boxes — Program 2</title>
+        <title>C Boxes — Program 11</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <link rel="stylesheet" href="styles.css" />
     </head>
@@ -11,7 +11,7 @@
             <nav class="tabs">
                 <a href="index.html">Home</a>
                 <a href="program1.html">1. Assignment I</a>
-                <a href="program2.html" class="active">2. Declaration</a>
+                <a href="program2.html">2. Declaration</a>
                 <a href="program3.html">3. Initialization</a>
                 <a href="program4.html">4. Code Editing I</a>
                 <a href="program5.html">5. Code Editing II</a>
@@ -21,42 +21,46 @@
                 <a href="program8.html">8. Whitespace &amp; Comments</a>
                 <a href="program9.html">9. Integer Arithmetic</a>
                 <a href="program10.html">10. Assignment III</a>
+                <a href="program11.html" class="active">11. Review</a>
                 <a href="sandbox.html">Sandbox</a>
             </nav>
             <div class="main">
-                <h1 class="page-title">2. Declaration</h1>
-                <p id="p2-instructions" class="intro"></p>
+                <h1 class="page-title">11. Review</h1>
+                <p id="p11-instructions" class="intro"></p>
 
                 <section>
                     <div class="row">
                         <div class="panel">
                             <div class="panel-title code-title">Code</div>
-                            <div id="p2-code" class="codepane"></div>
+                            <div id="p11-code" class="codepane"></div>
                             <div class="controls">
-                                <button id="p2-prev">Back ◀</button>
-                                <button id="p2-next">Run line 1 ▶</button>
+                                <button id="p11-prev">Back ◀</button>
+                                <button id="p11-next">Run line 1 ▶</button>
                             </div>
                         </div>
                         <div class="panel program-state-panel">
                             <div class="panel-title">Program state</div>
-                            <div id="p2-stage"></div>
+                            <div id="p11-stage"></div>
                             <div class="controls">
-                                <button id="p2-check" class="hidden">
+                                <button id="p11-check" class="hidden">
                                     Check
                                 </button>
                                 <button
-                                    id="p2-hint-btn"
+                                    id="p11-hint-btn"
                                     type="button"
                                     class="hint-link hidden"
                                 >
                                     Hint
                                 </button>
-                                <button id="p2-add" class="hidden gap-wide">
+                                <button id="p11-add" class="hidden gap-wide">
                                     + New variable
                                 </button>
-                                <span id="p2-status" class="muted"></span>
+                                <button id="p11-reset" class="hidden">
+                                    Reset
+                                </button>
+                                <span id="p11-status" class="muted"></span>
                             </div>
-                            <div id="p2-hint" class="hint-inline hidden"></div>
+                            <div id="p11-hint" class="hint-inline hidden"></div>
                         </div>
                     </div>
                 </section>
@@ -64,6 +68,6 @@
         </div>
 
         <script src="shared.js"></script>
-        <script src="program2.js"></script>
+        <script src="program11.js"></script>
     </body>
 </html>

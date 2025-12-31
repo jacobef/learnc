@@ -15,6 +15,7 @@
     removeBoxDeleteButtons,
     flashStatus,
     pulseNextButton,
+    prependTopStepperNotice,
   } = MB;
 
   const instructions = $("#p8-instructions");
@@ -194,7 +195,11 @@
     }
     if (p8.boundary === 0) {
       setInstructions(
-        `Click <span class="btn-ref">${runLabel}</span> to step through the program.`,
+        prependTopStepperNotice(
+          "p8",
+          `Click <span class="btn-ref">${runLabel}</span> to step through the program.`,
+          { html: true },
+        ),
         { html: true },
       );
     } else if (p8.boundary === 1) {

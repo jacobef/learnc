@@ -331,9 +331,9 @@
     const group = document.createElement("div");
     group.className = "state-group two-col";
     group.appendChild(
-      renderState("Your final state", outcome.state, outcome.kind),
+      renderState("Your code's final state", outcome.state, outcome.kind),
     );
-    group.appendChild(renderState("Expected final state", expected));
+    group.appendChild(renderState("Target final state", expected));
     stage.appendChild(group);
   }
 

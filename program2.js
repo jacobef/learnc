@@ -15,6 +15,7 @@
     restoreWorkspace,
     serializeWorkspace,
     makeAnswerBox,
+    prependTopStepperNotice,
   } = MB;
 
   const instructions = $("#p2-instructions");
@@ -149,7 +150,11 @@
     } else {
       const runLabel = `Run line ${p2.boundary + 1} ▶`;
       if (p2.boundary <= 0) {
-        instructions.innerHTML = `Use <span class="btn-ref">${runLabel}</span> to step through the code.`;
+        instructions.innerHTML = prependTopStepperNotice(
+          "p2",
+          `Use <span class="btn-ref">${runLabel}</span> to step through the code.`,
+          { html: true },
+        );
       } else {
         instructions.innerHTML = `Use <span class="btn-ref">Back ◀</span> and <span class="btn-ref">${runLabel}</span> to step through the code.`;
       }

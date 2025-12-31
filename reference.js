@@ -108,6 +108,27 @@
     heading.textContent = title;
     copy.appendChild(heading);
 
+    if (syntax) {
+      const code = document.createElement("div");
+      code.className = "ref-code";
+      code.textContent = syntax;
+      copy.appendChild(code);
+    }
+
+    if (text) {
+      const body = document.createElement("p");
+      body.className = "ref-text";
+      body.textContent = text;
+      copy.appendChild(body);
+    }
+
+    if (note) {
+      const noteEl = document.createElement("p");
+      noteEl.className = "ref-note";
+      noteEl.textContent = note;
+      copy.appendChild(noteEl);
+    }
+
     const visual = document.createElement("div");
     visual.className = "ref-visual";
     buildVisual(visual);
@@ -269,6 +290,244 @@
       visual.appendChild(ptr);
       visual.appendChild(arrow("evaluates to"));
       visual.appendChild(target);
+    },
+  });
+
+  addSection("Operators");
+
+  card({
+    title: "Parentheses",
+    syntax: "(E)",
+    text: "Evaluates E first. Use parentheses to override precedence.",
+    buildVisual: (visual) => {
+      const before = makeBox(
+        { addr: OPTIONAL, type: "int", value: "E", name: OPTIONAL },
+      );
+      const after = makeBox(
+        { addr: OPTIONAL, type: "int", value: "E", name: OPTIONAL },
+      );
+      visual.appendChild(op("("));
+      visual.appendChild(before);
+      visual.appendChild(op(")"));
+      visual.appendChild(arrow("same value as"));
+      visual.appendChild(after);
+      visual.appendChild(document.createElement("div")).className = "ref-break";
+      visual.appendChild(expr("(1 + 2) * 3"));
+      visual.appendChild(arrow("evaluates as"));
+      visual.appendChild(expr("3 * 3"));
+    },
+  });
+
+  card({
+    title: "Unary Plus / Minus",
+    syntax: "+E, -E",
+    text: "Evaluates E, then keeps it (+) or negates it (-).",
+    note: "Unary operators have higher precedence than * or /.",
+    buildVisual: (visual) => {
+      const lhs = makeBox(
+        { addr: OPTIONAL, type: "int", value: "E", name: OPTIONAL },
+      );
+      const rhs = makeBox(
+        { addr: "", type: "int", value: "R", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      visual.appendChild(op("+/-"));
+      visual.appendChild(lhs);
+      visual.appendChild(arrow("evaluates to"));
+      visual.appendChild(rhs);
+      visual.appendChild(document.createElement("div")).className = "ref-break";
+      const exLeft = makeBox(
+        { addr: "", type: "int", value: "5", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      const exRight = makeBox(
+        { addr: "", type: "int", value: "-5", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      visual.appendChild(op("-"));
+      visual.appendChild(exLeft);
+      visual.appendChild(arrow("evaluates to"));
+      visual.appendChild(exRight);
+    },
+  });
+
+  card({
+    title: "Multiplication",
+    syntax: "A * B",
+    text: "Evaluates to the product of A and B.",
+    note: "Binary * has higher precedence than +, -, and ==.",
+    buildVisual: (visual) => {
+      const left = makeBox(
+        { addr: OPTIONAL, type: "int", value: "A", name: OPTIONAL },
+      );
+      const right = makeBox(
+        { addr: OPTIONAL, type: "int", value: "B", name: OPTIONAL },
+      );
+      const result = makeBox(
+        { addr: "", type: "int", value: "R", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      visual.appendChild(left);
+      visual.appendChild(op("*"));
+      visual.appendChild(right);
+      visual.appendChild(arrow("evaluates to"));
+      visual.appendChild(result);
+      visual.appendChild(document.createElement("div")).className = "ref-break";
+      const exLeft = makeBox(
+        { addr: "", type: "int", value: "2", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      const exRight = makeBox(
+        { addr: "", type: "int", value: "3", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      const exResult = makeBox(
+        { addr: "", type: "int", value: "6", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      visual.appendChild(exLeft);
+      visual.appendChild(op("*"));
+      visual.appendChild(exRight);
+      visual.appendChild(arrow("evaluates to"));
+      visual.appendChild(exResult);
+    },
+  });
+
+  card({
+    title: "Division",
+    syntax: "A / B",
+    text: "Evaluates to the integer quotient of A divided by B.",
+    note: "Binary / has the same precedence as *.",
+    buildVisual: (visual) => {
+      const left = makeBox(
+        { addr: OPTIONAL, type: "int", value: "A", name: OPTIONAL },
+      );
+      const right = makeBox(
+        { addr: OPTIONAL, type: "int", value: "B", name: OPTIONAL },
+      );
+      const result = makeBox(
+        { addr: "", type: "int", value: "R", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      visual.appendChild(left);
+      visual.appendChild(op("/"));
+      visual.appendChild(right);
+      visual.appendChild(arrow("evaluates to"));
+      visual.appendChild(result);
+      visual.appendChild(document.createElement("div")).className = "ref-break";
+      const exLeft = makeBox(
+        { addr: "", type: "int", value: "7", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      const exRight = makeBox(
+        { addr: "", type: "int", value: "2", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      const exResult = makeBox(
+        { addr: "", type: "int", value: "3", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      visual.appendChild(exLeft);
+      visual.appendChild(op("/"));
+      visual.appendChild(exRight);
+      visual.appendChild(arrow("evaluates to"));
+      visual.appendChild(exResult);
+    },
+  });
+
+  card({
+    title: "Addition / Subtraction",
+    syntax: "A + B, A - B",
+    text: "Evaluates to the sum or difference of A and B.",
+    note: "Binary + and - have lower precedence than * and /.",
+    buildVisual: (visual) => {
+      const left = makeBox(
+        { addr: OPTIONAL, type: "int", value: "A", name: OPTIONAL },
+      );
+      const right = makeBox(
+        { addr: OPTIONAL, type: "int", value: "B", name: OPTIONAL },
+      );
+      const result = makeBox(
+        { addr: "", type: "int", value: "R", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      visual.appendChild(left);
+      visual.appendChild(op("+/-"));
+      visual.appendChild(right);
+      visual.appendChild(arrow("evaluates to"));
+      visual.appendChild(result);
+      visual.appendChild(document.createElement("div")).className = "ref-break";
+      const exLeft = makeBox(
+        { addr: "", type: "int", value: "1", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      const exRight = makeBox(
+        { addr: "", type: "int", value: "2", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      const exResult = makeBox(
+        { addr: "", type: "int", value: "3", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      visual.appendChild(exLeft);
+      visual.appendChild(op("+"));
+      visual.appendChild(exRight);
+      visual.appendChild(arrow("evaluates to"));
+      visual.appendChild(exResult);
+    },
+  });
+
+  card({
+    title: "Equality",
+    syntax: "A == B",
+    text: "Evaluates to 1 if A and B are equal, otherwise 0.",
+    note: "== has lower precedence than +, -, * and /.",
+    buildVisual: (visual) => {
+      const left = makeBox(
+        { addr: OPTIONAL, type: "int", value: "A", name: OPTIONAL },
+      );
+      const right = makeBox(
+        { addr: OPTIONAL, type: "int", value: "B", name: OPTIONAL },
+      );
+      const result = makeBox(
+        { addr: "", type: "int", value: "R", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      visual.appendChild(left);
+      visual.appendChild(op("=="));
+      visual.appendChild(right);
+      visual.appendChild(arrow("evaluates to"));
+      visual.appendChild(result);
+      visual.appendChild(document.createElement("div")).className = "ref-break";
+      const exLeft = makeBox(
+        { addr: "", type: "int", value: "3", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      const exRight = makeBox(
+        { addr: "", type: "int", value: "4", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      const exResult = makeBox(
+        { addr: "", type: "int", value: "0", name: UNKNOWN },
+        { hideAddr: true, hideName: true },
+      );
+      visual.appendChild(exLeft);
+      visual.appendChild(op("=="));
+      visual.appendChild(exRight);
+      visual.appendChild(arrow("evaluates to"));
+      visual.appendChild(exResult);
+    },
+  });
+
+  card({
+    title: "Order of Operations",
+    syntax: "Highest to lowest",
+    text: "Parentheses, unary +/-, *, /, binary +/-, ==.",
+    note: "Operators at the same level evaluate left to right.",
+    buildVisual: (visual) => {
+      visual.appendChild(expr("1 + 2 * 3 == 7"));
+      visual.appendChild(arrow("evaluates as"));
+      visual.appendChild(expr("1 + 6 == 7"));
     },
   });
 })(window.MB || {});

@@ -14,6 +14,7 @@
     ensureBox,
     createHintController,
     createStepper,
+    prependTopStepperNotice,
   } = MB;
 
   const solvedMsg = $("#p3-complete");
@@ -280,7 +281,11 @@
       return;
     }
     if (p3.boundary === 0) {
-      instructions.textContent = "No instructions for this one. Good luck!";
+      instructions.innerHTML = prependTopStepperNotice(
+        "p3",
+        "No instructions for this one. Good luck!",
+        { html: true },
+      );
       instructions.classList.remove("hidden");
       return;
     }
