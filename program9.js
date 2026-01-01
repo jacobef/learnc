@@ -20,7 +20,6 @@
 
   const instructions = $("#p9-instructions");
   const NEXT_PAGE = "program10.html";
-  const FINISH_PARAM = "finished";
 
   const p9 = {
     lines: [
@@ -713,20 +712,6 @@
     event.preventDefault();
     p9.instructionsEnabled = false;
     updateInstructions();
-  });
-
-  $("#p9-next")?.addEventListener("click", (event) => {
-    if (pager.boundary() !== p9.lines.length || !p9.passes[p9.lines.length])
-      return;
-    const url = new URL(NEXT_PAGE, window.location.href);
-    const sidebar = document.body.classList.contains("sidebar-collapsed")
-      ? "0"
-      : "1";
-    url.searchParams.set(FINISH_PARAM, "1");
-    url.searchParams.set("sidebar", sidebar);
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    window.location.href = url.toString();
   });
 
   p9Render();

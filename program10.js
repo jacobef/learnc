@@ -20,7 +20,6 @@
 
   const instructions = $("#p10-instructions");
   const NEXT_PAGE = "program11.html";
-  const FINISH_PARAM = "finished";
 
   const p10 = {
     lines: [
@@ -465,20 +464,6 @@
       if (!editableSteps.has(step)) return "";
       return p10.passes[step] ? "check" : "note";
     },
-  });
-
-  $("#p10-next")?.addEventListener("click", (event) => {
-    if (pager.boundary() !== p10.lines.length || !p10.passes[p10.lines.length])
-      return;
-    const url = new URL(NEXT_PAGE, window.location.href);
-    const sidebar = document.body.classList.contains("sidebar-collapsed")
-      ? "0"
-      : "1";
-    url.searchParams.set(FINISH_PARAM, "1");
-    url.searchParams.set("sidebar", sidebar);
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    window.location.href = url.toString();
   });
 
   render();

@@ -19,8 +19,7 @@
   } = MB;
 
   const instructions = $("#p11-instructions");
-  const NEXT_PAGE = "sandbox.html";
-  const FINISH_PARAM = "finished";
+  const NEXT_PAGE = "sandbox.html?finished=1";
 
   const p11 = {
     lines: [
@@ -124,8 +123,15 @@
 
   function canonical(boundary) {
     const boxes = [];
-    if (boundary >= 1) {
+    const pushBox = (spec) => {
       boxes.push({
+        ...spec,
+        allowNameEdit: false,
+        allowTypeEdit: false,
+      });
+    };
+    if (boundary >= 1) {
+      pushBox({
         address: String(addr("spark", "int")),
         type: "int",
         value: valueForSpark(boundary),
@@ -133,7 +139,7 @@
       });
     }
     if (boundary >= 2) {
-      boxes.push({
+      pushBox({
         address: String(addr("ember", "int")),
         type: "int",
         value: valueForEmber(boundary),
@@ -141,7 +147,7 @@
       });
     }
     if (boundary >= 3) {
-      boxes.push({
+      pushBox({
         address: String(addr("cinder", "int")),
         type: "int",
         value: "11",
@@ -149,7 +155,7 @@
       });
     }
     if (boundary >= 4) {
-      boxes.push({
+      pushBox({
         address: String(addr("flame", "int*")),
         type: "int*",
         value: valueForFlame(),
@@ -157,7 +163,7 @@
       });
     }
     if (boundary >= 7) {
-      boxes.push({
+      pushBox({
         address: String(addr("smolder", "int*")),
         type: "int*",
         value: valueForSmolder(boundary),
@@ -165,7 +171,7 @@
       });
     }
     if (boundary >= 8) {
-      boxes.push({
+      pushBox({
         address: String(addr("blaze", "int**")),
         type: "int**",
         value: String(addr("smolder", "int*")),
@@ -173,7 +179,7 @@
       });
     }
     if (boundary >= 9) {
-      boxes.push({
+      pushBox({
         address: String(addr("inferno", "int***")),
         type: "int***",
         value: String(addr("blaze", "int**")),
@@ -181,7 +187,7 @@
       });
     }
     if (boundary >= 11) {
-      boxes.push({
+      pushBox({
         address: String(addr("ash", "int")),
         type: "int",
         value: "-13",
@@ -580,8 +586,8 @@
     const wrap = restoreWorkspace(p11.ws[p11.boundary], defaults, "p11workspace", {
       editable,
       deletable: editable,
-      allowNameEdit: editable,
-      allowTypeEdit: editable,
+      allowNameEdit: null,
+      allowTypeEdit: null,
     });
     stage.appendChild(wrap);
     if (editable) {
@@ -681,20 +687,6 @@
     event.preventDefault();
     p11.instructionsEnabled = false;
     updateInstructions();
-  });
-
-  $("#p11-next")?.addEventListener("click", (event) => {
-    if (pager.boundary() !== p11.lines.length || !p11.passes[p11.lines.length])
-      return;
-    const url = new URL(NEXT_PAGE, window.location.href);
-    const sidebar = document.body.classList.contains("sidebar-collapsed")
-      ? "0"
-      : "1";
-    url.searchParams.set(FINISH_PARAM, "1");
-    url.searchParams.set("sidebar", sidebar);
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    window.location.href = url.toString();
   });
 
   p11Render();
