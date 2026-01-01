@@ -193,7 +193,7 @@
       needsTop: null,
       measure: null,
       locked: false,
-      lockOnMeasure: codepane.dataset.lockTopControls === "1",
+      lockOnMeasure: true,
     };
     const measure = () => {
       if (entry.locked || !document.body.contains(codepane)) return;
