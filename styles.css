@@ -778,7 +778,8 @@ button:hover:not([disabled]) {
 }
 
 .src {
-    white-space: pre;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 .done .src {
     color: var(--done);

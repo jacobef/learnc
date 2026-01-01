@@ -19,7 +19,7 @@
   } = MB;
 
   const instructions = $("#p10-instructions");
-  const NEXT_PAGE = "sandbox.html";
+  const NEXT_PAGE = "program11.html";
   const FINISH_PARAM = "finished";
 
   const p10 = {
@@ -448,7 +448,7 @@
     prefix: "p10",
     lines: p10.lines,
     nextPage: NEXT_PAGE,
-    endLabel: "Finish",
+    endLabel: "Next Program",
     getBoundary: () => p10.boundary,
     setBoundary: (val) => {
       p10.boundary = val;

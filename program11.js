@@ -26,34 +26,32 @@
     lines: [
       "int spark = 6;",
       "int ember; // will be set later",
-      "int cinder = 2 + 3 /* tricky */ * (4 - 1);",
+      "int cinder = 2 + 3 /* 5 */ * (4 - 1);",
       "int* flame = &spark;",
-      "ember = cinder / 3 + -1;",
-      "*flame = ember * 4;",
-      "int** blaze = &flame;",
-      "int ash = **blaze + 5;",
-      "int soot = ash == 13;",
-      "spark = (spark + ember) / 2 /* average */ ;",
-      "/* smoke comes next */",
-      "int smoke = ash + /* tiny */ soot;",
+      "ember = cinder / 3 + - 1;",
+      "*flame = spark * 4;",
+      "int* smolder = &ember;",
+      "int** blaze = &smolder;",
+      "int*** inferno = &blaze;",
+      "**inferno = &cinder;",
+      "int ash = **blaze-*flame * 2/ ember- - (***inferno == 24);",
     ],
     boundary: 0,
     addrs: {},
     ws: {},
     passes: {
+      3: false,
       5: false,
       6: false,
-      8: false,
-      9: false,
       10: false,
-      12: false,
+      11: false,
     },
     baseline: {},
     instructionsEnabled: true,
   };
 
   const statementRanges = [];
-  const editableSteps = new Set([5, 6, 8, 9, 10, 12]);
+  const editableSteps = new Set([3, 5, 6, 10, 11]);
 
   const hint = createHintController({
     button: "#p11-hint-btn",
@@ -106,14 +104,22 @@
   }
 
   function valueForSpark(boundary) {
-    if (boundary >= 10) return "5";
-    if (boundary >= 6) return "8";
+    if (boundary >= 6) return "24";
     return "6";
   }
 
   function valueForEmber(boundary) {
     if (boundary >= 5) return "2";
     return "empty";
+  }
+
+  function valueForFlame() {
+    return String(addr("spark", "int"));
+  }
+
+  function valueForSmolder(boundary) {
+    if (boundary >= 10) return String(addr("cinder", "int"));
+    return String(addr("ember", "int"));
   }
 
   function canonical(boundary) {
@@ -146,40 +152,40 @@
       boxes.push({
         address: String(addr("flame", "int*")),
         type: "int*",
-        value: String(addr("spark", "int")),
+        value: valueForFlame(),
         name: "flame",
       });
     }
     if (boundary >= 7) {
       boxes.push({
-        address: String(addr("blaze", "int**")),
-        type: "int**",
-        value: String(addr("flame", "int*")),
-        name: "blaze",
+        address: String(addr("smolder", "int*")),
+        type: "int*",
+        value: valueForSmolder(boundary),
+        name: "smolder",
       });
     }
     if (boundary >= 8) {
       boxes.push({
-        address: String(addr("ash", "int")),
-        type: "int",
-        value: "13",
-        name: "ash",
+        address: String(addr("blaze", "int**")),
+        type: "int**",
+        value: String(addr("smolder", "int*")),
+        name: "blaze",
       });
     }
     if (boundary >= 9) {
       boxes.push({
-        address: String(addr("soot", "int")),
-        type: "int",
-        value: "1",
-        name: "soot",
+        address: String(addr("inferno", "int***")),
+        type: "int***",
+        value: String(addr("blaze", "int**")),
+        name: "inferno",
       });
     }
-    if (boundary >= 12) {
+    if (boundary >= 11) {
       boxes.push({
-        address: String(addr("smoke", "int")),
+        address: String(addr("ash", "int")),
         type: "int",
-        value: "14",
-        name: "smoke",
+        value: "-13",
+        name: "ash",
       });
     }
     return cloneBoxes(boxes);
@@ -209,57 +215,19 @@
 
   function updateInstructions() {
     if (!instructions) return;
+    if (p11.boundary === 0) {
+      setInstructions("No instructions for this one. Good luck!");
+      return;
+    }
+    if (p11.boundary === 11) {
+      setInstructions("Sorry.");
+      return;
+    }
     if (p11.boundary === p11.lines.length && p11.passes[p11.lines.length]) {
       setInstructions("Program solved!");
       return;
     }
-    if (!p11.instructionsEnabled) {
-      setInstructions("");
-      return;
-    }
-
-    const runLabel = runLabelForBoundary(p11.boundary);
-    if (p11.boundary === 0) {
-      setInstructions(
-        prependTopStepperNotice(
-          "p11",
-          'This review uses every concept so far. <button type="button" class="ub-explain-link" data-action="disable-instructions">Click here</button> to hide instructions, or click <span class="btn-ref">Run line 1 ▶</span> to begin.',
-          { html: true },
-        ),
-        { html: true },
-      );
-      return;
-    }
-    if (p11.boundary >= 1 && p11.boundary <= 4) {
-      setInstructions(
-        "Declarations create boxes; initializations create boxes and fill them immediately.",
-      );
-      return;
-    }
-    if (p11.boundary >= 5 && p11.boundary <= 6) {
-      setInstructions(
-        "Remember operator precedence and that integer division rounds toward 0.",
-      );
-      return;
-    }
-    if (p11.boundary >= 7 && p11.boundary <= 8) {
-      setInstructions(
-        "Pointers store addresses; dereferencing follows those addresses.",
-      );
-      return;
-    }
-    if (p11.boundary === 9) {
-      setInstructions("Equality comparisons evaluate to 1 or 0.");
-      return;
-    }
-    if (p11.boundary >= 10) {
-      setInstructions("Comments can appear inside statements, but they don't affect order of operations.");
-      return;
-    }
-    setInstructions(
-      `Click <span class="btn-ref">${runLabel}</span> to continue.`,
-      { html: true },
-    );
+    setInstructions("");
   }
 
   function normalizeState(list) {
@@ -310,64 +278,61 @@
   }
 
   function expectedFor(boundary) {
+    if (boundary === 3) {
+      return [
+        { name: "spark", type: "int", value: "6" },
+        { name: "ember", type: "int", value: "empty" },
+        { name: "cinder", type: "int", value: "11" },
+      ];
+    }
     if (boundary === 5) {
       return [
         { name: "spark", type: "int", value: "6" },
         { name: "ember", type: "int", value: "2" },
         { name: "cinder", type: "int", value: "11" },
-        { name: "flame", type: "int*", value: String(addr("spark", "int")) },
+        { name: "flame", type: "int*", value: valueForFlame() },
       ];
     }
     if (boundary === 6) {
       return [
-        { name: "spark", type: "int", value: "8" },
+        { name: "spark", type: "int", value: "24" },
         { name: "ember", type: "int", value: "2" },
         { name: "cinder", type: "int", value: "11" },
-        { name: "flame", type: "int*", value: String(addr("spark", "int")) },
-      ];
-    }
-    if (boundary === 8) {
-      return [
-        { name: "spark", type: "int", value: "8" },
-        { name: "ember", type: "int", value: "2" },
-        { name: "cinder", type: "int", value: "11" },
-        { name: "flame", type: "int*", value: String(addr("spark", "int")) },
-        { name: "blaze", type: "int**", value: String(addr("flame", "int*")) },
-        { name: "ash", type: "int", value: "13" },
+        { name: "flame", type: "int*", value: valueForFlame() },
       ];
     }
     if (boundary === 9) {
       return [
-        { name: "spark", type: "int", value: "8" },
+        { name: "spark", type: "int", value: "24" },
         { name: "ember", type: "int", value: "2" },
         { name: "cinder", type: "int", value: "11" },
-        { name: "flame", type: "int*", value: String(addr("spark", "int")) },
-        { name: "blaze", type: "int**", value: String(addr("flame", "int*")) },
-        { name: "ash", type: "int", value: "13" },
-        { name: "soot", type: "int", value: "1" },
+        { name: "flame", type: "int*", value: valueForFlame() },
+        { name: "smolder", type: "int*", value: valueForSmolder(boundary) },
+        { name: "blaze", type: "int**", value: String(addr("smolder", "int*")) },
+        { name: "inferno", type: "int***", value: String(addr("blaze", "int**")) },
       ];
     }
     if (boundary === 10) {
       return [
-        { name: "spark", type: "int", value: "5" },
+        { name: "spark", type: "int", value: "24" },
         { name: "ember", type: "int", value: "2" },
         { name: "cinder", type: "int", value: "11" },
-        { name: "flame", type: "int*", value: String(addr("spark", "int")) },
-        { name: "blaze", type: "int**", value: String(addr("flame", "int*")) },
-        { name: "ash", type: "int", value: "13" },
-        { name: "soot", type: "int", value: "1" },
+        { name: "flame", type: "int*", value: valueForFlame() },
+        { name: "smolder", type: "int*", value: valueForSmolder(boundary) },
+        { name: "blaze", type: "int**", value: String(addr("smolder", "int*")) },
+        { name: "inferno", type: "int***", value: String(addr("blaze", "int**")) },
       ];
     }
-    if (boundary === 12) {
+    if (boundary === 11) {
       return [
-        { name: "spark", type: "int", value: "5" },
+        { name: "spark", type: "int", value: "24" },
         { name: "ember", type: "int", value: "2" },
         { name: "cinder", type: "int", value: "11" },
-        { name: "flame", type: "int*", value: String(addr("spark", "int")) },
-        { name: "blaze", type: "int**", value: String(addr("flame", "int*")) },
-        { name: "ash", type: "int", value: "13" },
-        { name: "soot", type: "int", value: "1" },
-        { name: "smoke", type: "int", value: "14" },
+        { name: "flame", type: "int*", value: valueForFlame() },
+        { name: "smolder", type: "int*", value: valueForSmolder(boundary) },
+        { name: "blaze", type: "int**", value: String(addr("smolder", "int*")) },
+        { name: "inferno", type: "int***", value: String(addr("blaze", "int**")) },
+        { name: "ash", type: "int", value: "-13" },
       ];
     }
     return [];
@@ -381,6 +346,9 @@
       type: (b.type || "").trim(),
       value: String(b.value ?? "").trim(),
     }));
+    const byName = Object.fromEntries(
+      boxes.map((b) => [(b.name || "").trim(), b]),
+    );
     const blank = cleaned.find((b) => !b.name);
     if (blank) {
       return {
@@ -430,6 +398,17 @@
           },
         };
       }
+      if (need.value === "empty") {
+        if (!isEmptyVal(box.value || "")) {
+          return {
+            ok: false,
+            message: {
+              html: `<code class="tok-name">${need.name}</code> should be <code class="tok-value">empty</code>.`,
+            },
+          };
+        }
+        continue;
+      }
       if (isEmptyVal(box.value || "")) {
         return {
           ok: false,
@@ -438,11 +417,16 @@
           },
         };
       }
-      if (box.value !== need.value) {
+      let expectedValue = need.value;
+      if (boundary === 5 && need.name === "flame") {
+        const sparkAddr = byName.spark?.addr ?? byName.spark?.address;
+        if (sparkAddr != null) expectedValue = String(sparkAddr);
+      }
+      if (box.value !== expectedValue) {
         return {
           ok: false,
           message: {
-            html: `<code class="tok-name">${need.name}</code> should be <code class="tok-value">${need.value}</code>.`,
+            html: `<code class="tok-name">${need.name}</code> should be <code class="tok-value">${expectedValue}</code>.`,
           },
         };
       }
@@ -465,6 +449,16 @@
       readBoxState(v),
     );
     const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
+    if (p11.boundary === 3) {
+      if (!by.spark || !by.ember || !by.cinder)
+        return {
+          html: "Keep <code class=\"tok-name\">spark</code> and <code class=\"tok-name\">ember</code>, and add <code class=\"tok-name\">cinder</code>.",
+        };
+      if (by.cinder.value !== "11")
+        return {
+          html: "Compute <code class=\"tok-name\">cinder</code> using multiplication before addition.",
+        };
+    }
     if (p11.boundary === 5) {
       if (!by.spark || !by.ember || !by.cinder || !by.flame)
         return {
@@ -476,9 +470,10 @@
         };
       if (by.ember.value !== "2")
         return {
-          html: "Line 5 is <code class=\"tok-line\">ember = cinder / 3 + -1</code>.",
+          html: "Line 5 is <code class=\"tok-line\">ember = cinder / 3 + - 1</code>.",
         };
-      if (by.flame.value !== String(addr("spark", "int")))
+      const sparkAddr = by.spark?.addr ?? by.spark?.address ?? String(addr("spark", "int"));
+      if (by.flame.value !== String(sparkAddr))
         return {
           html: "<code class=\"tok-name\">flame</code> should store <code class=\"tok-name\">spark</code>'s address.",
         };
@@ -488,53 +483,41 @@
         return {
           html: "Make sure <code class=\"tok-name\">spark</code>, <code class=\"tok-name\">ember</code>, and <code class=\"tok-name\">flame</code> are present.",
         };
-      if (by.spark.value !== "8")
+      if (by.spark.value !== "24")
         return {
-          html: "<code class=\"tok-line\">*flame = ember * 4</code> updates <code class=\"tok-name\">spark</code>.",
-        };
-    }
-    if (p11.boundary === 8) {
-      if (!by.blaze)
-        return {
-          html: "Add <code class=\"tok-name\">blaze</code> as an <code class=\"tok-type\">int**</code> pointing at <code class=\"tok-name\">flame</code>.",
-        };
-      if (!by.ash)
-        return {
-          html: "Add <code class=\"tok-name\">ash</code> from <code class=\"tok-line\">int ash = **blaze + 5</code>.",
-        };
-      if (by.ash.value !== "13")
-        return {
-          html: "<code class=\"tok-name\">**blaze</code> is the same value as <code class=\"tok-name\">spark</code> here.",
-        };
-    }
-    if (p11.boundary === 9) {
-      if (!by.soot)
-        return {
-          html: "Add <code class=\"tok-name\">soot</code> from <code class=\"tok-line\">ash == 13</code>.",
-        };
-      if (by.soot.value !== "1")
-        return {
-          html: "Comparisons evaluate to 1 (true) or 0 (false).",
+          html: "<code class=\"tok-line\">*flame = spark * 4</code> updates <code class=\"tok-name\">spark</code>.",
         };
     }
     if (p11.boundary === 10) {
-      if (!by.spark || !by.ember)
+      if (!by.smolder)
         return {
-          html: "Keep <code class=\"tok-name\">spark</code> and <code class=\"tok-name\">ember</code> in the program state.",
+          html: "Add <code class=\"tok-name\">smolder</code> as an <code class=\"tok-type\">int*</code> pointing at <code class=\"tok-name\">ember</code>.",
         };
-      if (by.spark.value !== "5")
+      if (!by.blaze)
         return {
-          html: "Line 10 averages <code class=\"tok-name\">spark</code> and <code class=\"tok-name\">ember</code> using parentheses.",
+          html: "Keep <code class=\"tok-name\">blaze</code> as an <code class=\"tok-type\">int**</code> pointing at <code class=\"tok-name\">smolder</code>.",
+        };
+      if (!by.inferno)
+        return {
+          html: "Add <code class=\"tok-name\">inferno</code> as an <code class=\"tok-type\">int***</code> pointing at <code class=\"tok-name\">blaze</code>.",
+        };
+      if (!by.flame)
+        return {
+          html: "Keep <code class=\"tok-name\">flame</code> in the program state.",
+        };
+      if (by.smolder.value !== String(addr("cinder", "int")))
+        return {
+          html: "<code class=\"tok-line\">**inferno = &cinder</code> updates <code class=\"tok-name\">smolder</code> to hold <code class=\"tok-name\">cinder</code>'s address.",
         };
     }
-    if (p11.boundary === 12) {
-      if (!by.smoke)
+    if (p11.boundary === 11) {
+      if (!by.ash)
         return {
-          html: "Add <code class=\"tok-name\">smoke</code> from <code class=\"tok-line\">ash + soot</code>.",
+          html: "Add <code class=\"tok-name\">ash</code> from <code class=\"tok-line\">int ash = **blaze-*flame * 2/ ember- - (***inferno == 24)</code>.",
         };
-      if (by.smoke.value !== "14")
+      if (by.ash.value !== "-13")
         return {
-          html: "<code class=\"tok-name\">ash</code> is 13 and <code class=\"tok-name\">soot</code> is 1.",
+          html: "Mind precedence and spacing, then update <code class=\"tok-name\">ash</code>.",
         };
     }
     const verdict = validateWorkspace(p11.boundary, boxes);
@@ -666,6 +649,10 @@
     onAfterChange: p11Render,
     isStepLocked: (boundary) =>
       editableSteps.has(boundary) && !p11.passes[boundary],
+    getStepBadge: (step) => {
+      if (!editableSteps.has(step)) return "";
+      return p11.passes[step] ? "check" : "note";
+    },
     getNextLabel: (current) => {
       const range = rangeStartingAt(current);
       return range ? range.label : "";

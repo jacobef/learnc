@@ -192,9 +192,11 @@
       scheduled: false,
       needsTop: null,
       measure: null,
+      locked: false,
+      lockOnMeasure: codepane.dataset.lockTopControls === "1",
     };
     const measure = () => {
-      if (!document.body.contains(codepane)) return;
+      if (entry.locked || !document.body.contains(codepane)) return;
       const rect = codepane.getBoundingClientRect();
       const panelRect = panel.getBoundingClientRect();
       const viewHeight =
@@ -214,9 +216,10 @@
         rect.top <= 0;
       entry.needsTop = needsTop;
       top.classList.toggle("hidden", !needsTop);
+      if (entry.lockOnMeasure) entry.locked = true;
     };
     const update = () => {
-      if (entry.scheduled) return;
+      if (entry.locked || entry.scheduled) return;
       entry.scheduled = true;
       requestAnimationFrame(() => {
         entry.scheduled = false;
@@ -255,7 +258,7 @@
     if (!codepane) return false;
     const entry = ensureStepperTopControls(codepane);
     if (!entry) return false;
-    if (typeof entry.measure === "function") entry.measure();
+    if (!entry.locked && typeof entry.measure === "function") entry.measure();
     return !!entry.needsTop;
   }
 
