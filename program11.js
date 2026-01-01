@@ -587,7 +587,7 @@
       editable,
       deletable: editable,
       allowNameEdit: null,
-      allowTypeEdit: null,
+      allowTypeEdit: editable ? null : false,
     });
     stage.appendChild(wrap);
     if (editable) {
