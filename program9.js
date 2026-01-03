@@ -3,10 +3,10 @@
     $,
     randAddr,
     renderCodePane,
-    restoreWorkspace,
-    serializeWorkspace,
     readBoxState,
     isEmptyVal,
+    restoreWorkspace,
+    serializeWorkspace,
     makeAnswerBox,
     cloneBoxes,
     createHintController,
@@ -23,32 +23,36 @@
 
   const p9 = {
     lines: [
-      "int a = 5 + 2 * (3 - 1);",
-      "a = 1-3 * 4;",
-      "a = (1 - 3) * 4;",
-      "int b = 9 / 3;",
-      "a = 5 / 3;",
-      "a = -7 / 2;",
-      "a = 1/2 + 1/2;",
-      "a = 8 / -(2 + 1);",
-      "int c = b+1 == 4;",
-      "int d = b == 58;",
-      "int e = 11/3 == 3;",
-      "int f = 9 / 2+1 == 3;",
-      "int g = 0 == 1 == 2;",
-      "int h = (-2 / 3==1-1==1) - 3;",
+      "int a; // mary had a",
+      "// little lamb",
+      "int b; int c;",
+      "int d; // int e;",
+      "int f",
+      "= 5",
+      ";",
+      "/* whose fleece",
+      "was white as snow */",
+      "int g /* hi */ = 3;",
+      "int",
+      "h // = 9;",
+      "/* = 10;",
+      "= 11;",
+      "*/ = 12;",
+      "// = 13;",
     ],
     boundary: 0,
     addrs: {},
     ws: {},
-    passes: { 2: false, 3: false, 8: false, 11: false, 12: false, 14: false },
+    passes: { 4: false, 16: false },
     baseline: {},
-    instructionsEnabled: true,
   };
 
-  const statementRanges = [];
+  const statementRanges = [
+    { start: 4, end: 7, label: "Run lines 5-7" },
+    { start: 10, end: 16, label: "Run lines ?-?" },
+  ];
 
-  const editableSteps = new Set([2, 3, 8, 11, 12, 14]);
+  const editableSteps = new Set([4, 16]);
 
   const hint = createHintController({
     button: "#p9-hint-btn",
@@ -60,12 +64,30 @@
     hint.hide();
   }
 
+  function setInstructions(message, { html = false } = {}) {
+    if (!instructions) return;
+    if (message) {
+      if (html) instructions.innerHTML = message;
+      else instructions.textContent = message;
+      instructions.classList.remove("hidden");
+    } else {
+      instructions.textContent = "";
+      instructions.classList.add("hidden");
+    }
+  }
+
   function rangeStartingAt(boundary) {
     return statementRanges.find((range) => range.start === boundary) || null;
   }
 
   function rangeEndingAt(boundary) {
     return statementRanges.find((range) => range.end === boundary) || null;
+  }
+
+  function runLabelForBoundary(boundary) {
+    const range = rangeStartingAt(boundary);
+    if (range) return `${range.label} ▶`;
+    return `Run line ${boundary + 1} ▶`;
   }
 
   function addr(name) {
@@ -94,83 +116,61 @@
     }
   }
 
-  function valueForA(boundary) {
-    if (boundary >= 8) return "-2";
-    if (boundary >= 7) return "0";
-    if (boundary >= 6) return "-3";
-    if (boundary >= 5) return "1";
-    if (boundary >= 3) return "-8";
-    if (boundary >= 2) return "-11";
-    return "9";
-  }
-
-  function valueForC(boundary) {
-    return "1";
-  }
-
   function canonical(boundary) {
     const boxes = [];
     if (boundary >= 1) {
       boxes.push({
         address: String(addr("a")),
         type: "int",
-        value: valueForA(boundary),
+        value: "empty",
         name: "a",
       });
     }
+    if (boundary >= 3) {
+      boxes.push(
+        {
+          address: String(addr("b")),
+          type: "int",
+          value: "empty",
+          name: "b",
+        },
+        {
+          address: String(addr("c")),
+          type: "int",
+          value: "empty",
+          name: "c",
+        },
+      );
+    }
     if (boundary >= 4) {
       boxes.push({
-        address: String(addr("b")),
+        address: String(addr("d")),
         type: "int",
-        value: "3",
-        name: "b",
+        value: "empty",
+        name: "d",
       });
     }
-    if (boundary >= 9) {
+    if (boundary >= 7) {
       boxes.push({
-        address: String(addr("c")),
+        address: String(addr("f")),
         type: "int",
-        value: valueForC(boundary),
-        name: "c",
+        value: "5",
+        name: "f",
       });
     }
     if (boundary >= 10) {
       boxes.push({
-        address: String(addr("d")),
-        type: "int",
-        value: "0",
-        name: "d",
-      });
-    }
-    if (boundary >= 11) {
-      boxes.push({
-        address: String(addr("e")),
-        type: "int",
-        value: "1",
-        name: "e",
-      });
-    }
-    if (boundary >= 12) {
-      boxes.push({
-        address: String(addr("f")),
-        type: "int",
-        value: "0",
-        name: "f",
-      });
-    }
-    if (boundary >= 13) {
-      boxes.push({
         address: String(addr("g")),
         type: "int",
-        value: "0",
+        value: "3",
         name: "g",
       });
     }
-    if (boundary >= 14) {
+    if (boundary >= 16) {
       boxes.push({
         address: String(addr("h")),
         type: "int",
-        value: "-2",
+        value: "12",
         name: "h",
       });
     }
@@ -187,67 +187,48 @@
     return canonical(boundary);
   }
 
-  function setInstructions(message, { html = false } = {}) {
-    if (!instructions) return;
-    if (message) {
-      if (html) instructions.innerHTML = message;
-      else instructions.textContent = message;
-      instructions.classList.remove("hidden");
-    } else {
-      instructions.textContent = "";
-      instructions.classList.add("hidden");
-    }
-  }
-
   function updateInstructions() {
-    if (!instructions) return;
+    const runLabel = runLabelForBoundary(p9.boundary);
     if (p9.boundary === p9.lines.length && p9.passes[p9.lines.length]) {
       setInstructions("Program solved!");
       return;
     }
-    if (!p9.instructionsEnabled) {
-      setInstructions("");
-      return;
-    }
-
     if (p9.boundary === 0) {
       setInstructions(
         prependTopStepperNotice(
           "p9",
-          'For a challenge, you can try this one without instructions. <button type="button" class="ub-explain-link" data-action="disable-instructions">Click here</button> if you\'d like to disable them. Otherwise, click <span class="btn-ref">Run line 1 ▶</span> to continue.',
+          `Click <span class="btn-ref">${runLabel}</span> to step through the program.`,
           { html: true },
         ),
         { html: true },
       );
-      return;
-    }
-    if (p9.boundary >= 1 && p9.boundary <= 3) {
+    } else if (p9.boundary === 1) {
       setInstructions(
-        "PEMDAS order of operations applies, and isn't affected by spacing.",
+        'Anything after <code class="tok-line">//</code> on a line is ignored. This is called a comment.',
+        { html: true },
       );
-      return;
-    }
-    if (p9.boundary >= 5 && p9.boundary <= 8) {
+    } else if (p9.boundary === 2) {
+      setInstructions("Comments can appear on their own lines as well.");
+    } else if (p9.boundary === 3) {
+      setInstructions("Multiple statements can appear on one line.");
+    } else if (p9.boundary === 4 || p9.boundary === 16) {
+      setInstructions("");
+    } else if (p9.boundary === 7) {
+      setInstructions("A statement can be split across multiple lines.");
+    } else if (
+      p9.boundary === 8 ||
+      p9.boundary === 9 ||
+      p9.boundary === 10 ||
+      p9.boundary === 13 ||
+      p9.boundary === 14
+    ) {
       setInstructions(
-        "Integer division drops the remainder, i.e. it rounds towards 0.",
+        "A comment can appear on multiple lines, or within a line, beginning with <code class=\"tok-line\">/*</code> and ending with <code class=\"tok-line\">*/</code>.",
+        { html: true },
       );
-      return;
+    } else {
+      setInstructions("");
     }
-    if (p9.boundary >= 9 && p9.boundary <= 12) {
-      setInstructions(
-        "x == y evaluates to 1 if x and y have equal values, and 0 if they don't. == has lower precedence than addition and subtraction.",
-      );
-      return;
-    }
-    if (p9.boundary === 13) {
-      setInstructions("== is left-associative, so this is parsed as (0 == 1) == 2.");
-      return;
-    }
-    if (p9.boundary === 14) {
-      setInstructions("Remember that spacing doesn't affect order of operations.");
-      return;
-    }
-    setInstructions("");
   }
 
   function normalizeState(list) {
@@ -300,51 +281,23 @@
   }
 
   function expectedFor(boundary) {
-    if (boundary === 2) {
+    if (boundary === 4) {
       return [
-        { name: "a", type: "int", value: "-11" },
+        { name: "a", type: "int", value: "empty" },
+        { name: "b", type: "int", value: "empty" },
+        { name: "c", type: "int", value: "empty" },
+        { name: "d", type: "int", value: "empty" },
       ];
     }
-    if (boundary === 3) {
+    if (boundary === 16) {
       return [
-        { name: "a", type: "int", value: "-8" },
-      ];
-    }
-    if (boundary === 8) {
-      return [
-        { name: "a", type: "int", value: "-2" },
-        { name: "b", type: "int", value: "3" },
-      ];
-    }
-    if (boundary === 11) {
-      return [
-        { name: "a", type: "int", value: "-2" },
-        { name: "b", type: "int", value: "3" },
-        { name: "c", type: "int", value: "1" },
-        { name: "d", type: "int", value: "0" },
-        { name: "e", type: "int", value: "1" },
-      ];
-    }
-    if (boundary === 12) {
-      return [
-        { name: "a", type: "int", value: "-2" },
-        { name: "b", type: "int", value: "3" },
-        { name: "c", type: "int", value: "1" },
-        { name: "d", type: "int", value: "0" },
-        { name: "e", type: "int", value: "1" },
-        { name: "f", type: "int", value: "0" },
-      ];
-    }
-    if (boundary === 14) {
-      return [
-        { name: "a", type: "int", value: "-2" },
-        { name: "b", type: "int", value: "3" },
-        { name: "c", type: "int", value: "1" },
-        { name: "d", type: "int", value: "0" },
-        { name: "e", type: "int", value: "1" },
-        { name: "f", type: "int", value: "0" },
-        { name: "g", type: "int", value: "0" },
-        { name: "h", type: "int", value: "-2" },
+        { name: "a", type: "int", value: "empty" },
+        { name: "b", type: "int", value: "empty" },
+        { name: "c", type: "int", value: "empty" },
+        { name: "d", type: "int", value: "empty" },
+        { name: "f", type: "int", value: "5" },
+        { name: "g", type: "int", value: "3" },
+        { name: "h", type: "int", value: "12" },
       ];
     }
     return [];
@@ -407,15 +360,23 @@
           },
         };
       }
-      if (isEmptyVal(box.value || "")) {
+      if (need.value === "empty") {
+        if (!isEmptyVal(box.value || "")) {
+          return {
+            ok: false,
+            message: {
+              html: `<code class="tok-name">${need.name}</code> should be blank.`,
+            },
+          };
+        }
+      } else if (isEmptyVal(box.value || "")) {
         return {
           ok: false,
           message: {
             html: `${need.name}'s value shouldn't be blank.`,
           },
         };
-      }
-      if (box.value !== need.value) {
+      } else if (box.value !== need.value) {
         return {
           ok: false,
           message: {
@@ -430,137 +391,65 @@
   function buildHint() {
     if (!editableSteps.has(p9.boundary)) {
       return {
-        html: 'Use <span class="btn-ref">Run line 1 ▶</span> to reach the editable lines.',
+        html: 'Use <span class="btn-ref">Run line 1 ▶</span> to reach the editable line.',
       };
     }
     if (p9.passes[p9.boundary]) return { html: "Looks good." };
     const ws = document.getElementById("p9workspace");
     if (!ws)
       return {
-        html: 'Use <span class="btn-ref">Run line 1 ▶</span> to reach the editable lines.',
+        html: 'Use <span class="btn-ref">Run line 1 ▶</span> to reach the editable line.',
       };
     const boxes = [...ws.querySelectorAll(".vbox")].map((v) =>
       readBoxState(v),
     );
-    if (!boxes.length)
-      return {
-        html: 'Use <span class="btn-ref">+ New variable</span> to add the variables you need.',
-      };
-    const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    if (p9.boundary === 2) {
-      if (!by.a)
-        return {
-          html: 'Keep <code class="tok-name">a</code> from line 1 in the program state.',
-        };
-      if (by.a.type !== "int")
-        return {
-          html: '<code class="tok-name">a</code>\'s type should be <code class="tok-type">int</code>.',
-        };
-      if (isEmptyVal(by.a.value || ""))
-        return {
-          html: 'Line 2 is <code class="tok-line">1 - (3 * 4)</code>.',
-        };
-      if (by.a.value !== "-11")
-        return {
-          html: 'Multiply before subtracting, then update <code class="tok-name">a</code>.',
-        };
+    const escapeHint = (value) =>
+      String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    if (
+      p9.boundary === 4 &&
+      boxes.some((box) => (box?.name || "").trim() === "e")
+    ) {
+      return { html: "<code class=\"tok-line\">// int e;</code> is a comment." };
     }
-    if (p9.boundary === 3) {
-      if (!by.a)
-        return {
-          html: 'Keep <code class="tok-name">a</code> in the program state.',
-        };
-      if (by.a.type !== "int")
-        return {
-          html: '<code class="tok-name">a</code>\'s type should be <code class="tok-type">int</code>.',
-        };
-      if (isEmptyVal(by.a.value || ""))
-        return {
-          html: 'Line 3 is <code class="tok-line">(1 - 3) * 4</code>.',
-        };
-      if (by.a.value !== "-8")
-        return {
-          html: 'Evaluate the parentheses first, then multiply, then update <code class="tok-name">a</code>.',
-        };
-    }
-    if (p9.boundary === 8) {
-      if (!by.a)
-        return {
-          html: 'Keep <code class="tok-name">a</code> in the program state.',
-        };
-      if (by.a.type !== "int")
-        return {
-          html: '<code class="tok-name">a</code>\'s type should be <code class="tok-type">int</code>.',
-        };
-      if (isEmptyVal(by.a.value || ""))
-        return {
-          html: 'Line 8 is <code class="tok-line">8 / -(2 + 1)</code>.',
-        };
-      if (by.a.value !== "-2")
-        return {
-          html: 'Compute the parentheses first, then divide, then update <code class="tok-name">a</code>.',
-        };
-    }
-    if (p9.boundary === 11) {
-      if (!by.e)
-        return {
-          html: 'Add <code class="tok-name">e</code> for line 11.',
-        };
-      if (by.e.type !== "int")
-        return {
-          html: '<code class="tok-name">e</code>\'s type should be <code class="tok-type">int</code>.',
-        };
-      if (isEmptyVal(by.e.value || ""))
-        return {
-          html: 'Line 11 is <code class="tok-line">11 / 3 == 3</code>.',
-        };
-      if (by.e.value !== "1")
-        return {
-          html: 'Do the division first, then decide whether the comparison is true or false.',
-        };
-    }
-    if (p9.boundary === 12) {
-      if (!by.f)
-        return {
-          html: 'Add <code class="tok-name">f</code> for line 12.',
-        };
-      if (isEmptyVal(by.f.value || ""))
-        return {
-          html: 'Line 12 is <code class="tok-line">9 / 2 + 1 == 3</code>.',
-        };
-      if (by.f.value !== "0")
-        return {
-          html: 'Evaluate division and addition first, then decide whether the comparison is true or false.',
-        };
-    }
-    if (p9.boundary === 14) {
-      if (!by.g)
-        return {
-          html: 'Keep <code class="tok-name">g</code> from line 13 in the program state.',
-        };
-      if (!by.h)
-        return {
-          html: 'Add <code class="tok-name">h</code> for line 14.',
-        };
-      if (isEmptyVal(by.h.value || ""))
-        return {
-          html: 'This line should be parsed as <code class="tok-line">((( -2 / 3 ) == (1 - 1)) == 1) - 3</code>.',
-        };
-      if (by.h.value !== "-2")
-        return {
-          html: 'Work from the innermost parentheses outward, and remember comparisons yield 0 or 1.',
-        };
+    if (p9.boundary === 16) {
+      const h = boxes.find((box) => (box?.name || "").trim() === "h");
+      const value = String(h?.value ?? "").trim();
+      if (h && isEmptyVal(value)) {
+        return { html: "h's value shouldn't be blank." };
+      }
+      if (value && !isEmptyVal(value) && value !== "12") {
+        if (value === "9") {
+          return {
+            html: "<code class=\"tok-line\">// = 9;</code> is a comment.",
+          };
+        }
+        if (value === "10" || value === "11") {
+          return {
+            html: "<code class=\"tok-line\">/* = 10;<br>= 11;<br>*/</code> is a comment.",
+          };
+        }
+        if (value === "13") {
+          return {
+            html: "<code class=\"tok-line\">// = 13;</code> is a comment.",
+          };
+        }
+        return `I'm not sure where you're getting ${escapeHint(value)} from.`;
+      }
     }
     const verdict = validateWorkspace(p9.boundary, boxes);
     if (verdict.ok)
       return { html: 'Looks good. Press <span class="btn-ref">Check</span>.' };
-    return {
-      html: "Something is off. Double-check variable names, types, and order of operations.",
-    };
+    return verdict.message || "Keep going.";
   }
 
-  function renderCodePane9() {
-    const progress = editableSteps.has(p9.boundary) && !p9.passes[p9.boundary];
+  function renderCodePane8() {
+    const progress =
+      editableSteps.has(p9.boundary) && !p9.passes[p9.boundary];
     let progressIndex;
     let progressRange;
     let doneBoundary;
@@ -569,7 +458,7 @@
       if (range) {
         doneBoundary = range.start;
         progressIndex = range.start;
-        progressRange = [range.start, range.end - 1];
+        progressRange = [range.start, p9.lines.length - 1];
       }
     }
     renderCodePane($("#p9-code"), p9.lines, p9.boundary, {
@@ -581,7 +470,7 @@
   }
 
   function p9Render() {
-    renderCodePane9();
+    renderCodePane8();
     updateInstructions();
     const stage = $("#p9-stage");
     stage.innerHTML = "";
@@ -681,6 +570,7 @@
     isStepLocked: (boundary) =>
       editableSteps.has(boundary) && !p9.passes[boundary],
     getStepBadge: (step) => {
+      if (step === 11) return p9.passes[16] ? "check" : "note";
       if (!editableSteps.has(step)) return "";
       return p9.passes[step] ? "check" : "note";
     },
@@ -704,15 +594,6 @@
     ws.appendChild(makeAnswerBox({}));
     updateResetVisibility(p9.boundary);
   };
-
-  instructions?.addEventListener("click", (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) return;
-    if (!target.matches("[data-action='disable-instructions']")) return;
-    event.preventDefault();
-    p9.instructionsEnabled = false;
-    updateInstructions();
-  });
 
   p9Render();
   pager.update();

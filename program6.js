@@ -16,7 +16,7 @@
 
   const instructions = $("#p5-instructions");
   const solvedMsg = $("#p5-complete");
-  const NEXT_PAGE = "program7a.html";
+  const NEXT_PAGE = "program7.html";
 
   const p5 = {
     lines: [

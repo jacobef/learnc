@@ -2,13 +2,13 @@
 <html lang="en">
     <head>
         <meta charset="utf-8" />
-        <title>C Boxes — Program 7A</title>
+        <title>C Boxes — Program 12</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <link rel="stylesheet" href="styles.css" />
     </head>
     <body>
         <div class="wrap">
-            <nav class="tabs">
+                                                <nav class="tabs">
                 <a href="index.html">Home</a>
                 <a href="program1.html">1. Assignment I</a>
                 <a href="program2.html">2. Declaration</a>
@@ -16,51 +16,56 @@
                 <a href="program4.html">4. Code Editing I</a>
                 <a href="program5.html">5. Code Editing II</a>
                 <a href="program6.html">6. Assignment II</a>
-                <a href="program7a.html" class="active">7A. Pointers</a>
-                <a href="program7b.html">7B. Dereferencing</a>
-                <a href="program8.html">8. Whitespace &amp; Comments</a>
-                <a href="program9.html">9. Integer Arithmetic</a>
-                <a href="program10.html">10. Assignment III</a>
-                <a href="program11.html">11. Review</a>
+                <a href="program7.html">7. Pointers</a>
+                <a href="program8.html">8. Dereferencing</a>
+                <a href="dereferencing-quiz.html">Dereferencing Quiz</a>
+                <a href="program9.html">9. Whitespace &amp; Comments</a>
+                <a href="program10.html">10. Integer Arithmetic</a>
+                <a href="program11.html">11. Assignment III</a>
+                <a href="program12.html" class="active">12. Review</a>
                 <a href="sandbox.html">Sandbox</a>
             </nav>
             <div class="main">
-                <h1 class="page-title">7A. Pointers</h1>
-                <p id="p7a-instructions" class="intro"></p>
+                <h1 class="page-title">12. Review</h1>
+                <p id="p12-instructions" class="intro"></p>
 
                 <section>
                     <div class="row">
                         <div class="panel">
                             <div class="panel-title code-title">Code</div>
-                            <div id="p7a-code" class="codepane"></div>
+                            <div
+                                id="p12-code"
+                                class="codepane"
+                                data-lock-top-controls="1"
+                            ></div>
                             <div class="controls">
-                                <button id="p7a-prev">Back ◀</button>
-                                <button id="p7a-next">Run line 1 ▶</button>
+                                <button id="p12-prev">Back ◀</button>
+                                <button id="p12-next">Run line 1 ▶</button>
                             </div>
                         </div>
                         <div class="panel program-state-panel">
                             <div class="panel-title">Program state</div>
-                            <div id="p7a-stage"></div>
+                            <div id="p12-stage"></div>
                             <div class="controls">
-                                <button id="p7a-check" class="hidden">
+                                <button id="p12-check" class="hidden">
                                     Check
                                 </button>
                                 <button
-                                    id="p7a-hint-btn"
+                                    id="p12-hint-btn"
                                     type="button"
                                     class="hint-link hidden"
                                 >
                                     Hint
                                 </button>
-                                <button id="p7a-add" class="hidden gap-wide">
+                                <button id="p12-add" class="hidden gap-wide">
                                     + New variable
                                 </button>
-                                <button id="p7a-reset" class="hidden">
+                                <button id="p12-reset" class="hidden">
                                     Reset
                                 </button>
-                                <span id="p7a-status" class="muted"></span>
+                                <span id="p12-status" class="muted"></span>
                             </div>
-                            <div id="p7a-hint" class="hint-inline hidden"></div>
+                            <div id="p12-hint" class="hint-inline hidden"></div>
                         </div>
                     </div>
                 </section>
@@ -68,6 +73,6 @@
         </div>
 
         <script src="shared.js"></script>
-        <script src="program7a.js"></script>
+        <script src="program12.js"></script>
     </body>
 </html>

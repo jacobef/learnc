@@ -14,10 +14,10 @@
     prependTopStepperNotice,
   } = MB;
 
-  const instructions = $("#p7a-instructions");
-  const NEXT_PAGE = "program7b.html";
+  const instructions = $("#p7-instructions");
+  const NEXT_PAGE = "program8.html";
 
-  const p7a = {
+  const p7 = {
     lines: [
       "int deer;",
       "int hare;",
@@ -42,13 +42,13 @@
 
   function ptrTarget(boundary) {
     if (boundary < 4) return "empty";
-    if (boundary < 5) return String(p7a.aAddr);
-    return String(p7a.bAddr);
+    if (boundary < 5) return String(p7.aAddr);
+    return String(p7.bAddr);
   }
 
   function pptrTarget(boundary) {
     if (boundary < 6) return "empty";
-    return String(p7a.ptrAddr);
+    return String(p7.ptrAddr);
   }
 
   function canonical(boundary) {
@@ -59,7 +59,7 @@
         names: ["deer"],
         type: "int",
         value: "empty",
-        address: String(p7a.aAddr),
+        address: String(p7.aAddr),
       });
     }
     if (boundary >= 2) {
@@ -68,7 +68,7 @@
         names: ["hare"],
         type: "int",
         value: "empty",
-        address: String(p7a.bAddr),
+        address: String(p7.bAddr),
       });
     }
     if (boundary >= 3) {
@@ -77,7 +77,7 @@
         names: ["wolf"],
         type: "int*",
         value: ptrTarget(boundary),
-        address: String(p7a.ptrAddr),
+        address: String(p7.ptrAddr),
       });
     }
     if (boundary >= 6) {
@@ -86,7 +86,7 @@
         names: ["bear"],
         type: "int**",
         value: pptrTarget(boundary),
-        address: String(p7a.pptrAddr),
+        address: String(p7.pptrAddr),
       });
     }
     if (boundary >= 7) {
@@ -94,8 +94,8 @@
         name: "fox",
         names: ["fox"],
         type: "int*",
-        value: String(p7a.bAddr),
-        address: String(p7a.spareAddr),
+        value: String(p7.bAddr),
+        address: String(p7.spareAddr),
       });
     }
     return state;
@@ -103,7 +103,7 @@
 
   function carriedState(boundary) {
     for (let b = boundary - 1; b >= 0; b--) {
-      const st = p7a.ws[b];
+      const st = p7.ws[b];
       if (Array.isArray(st) && st.length) return cloneBoxes(st);
     }
     return null;
@@ -131,12 +131,12 @@
   }
 
   function updateStatus() {
-    if (p7a.boundary === p7a.lines.length && p7a.passes[p7a.lines.length]) {
+    if (p7.boundary === p7.lines.length && p7.passes[p7.lines.length]) {
       setInstructions("Program solved!");
-    } else if (p7a.boundary === 0) {
+    } else if (p7.boundary === 0) {
       setInstructions(
         prependTopStepperNotice(
-          "p7a",
+          "p7",
           "No instructions for this one. Good luck!",
           { html: true },
         ),
@@ -148,8 +148,8 @@
   }
 
   const hint = createHintController({
-    button: "#p7a-hint-btn",
-    panel: "#p7a-hint",
+    button: "#p7-hint-btn",
+    panel: "#p7-hint",
     build: buildHint,
   });
 
@@ -185,15 +185,15 @@
   }
 
   function ensureBaseline(boundary, state) {
-    if (!p7a.baseline[boundary]) p7a.baseline[boundary] = cloneBoxes(state);
-    return p7a.baseline[boundary];
+    if (!p7.baseline[boundary]) p7.baseline[boundary] = cloneBoxes(state);
+    return p7.baseline[boundary];
   }
 
   function updateResetVisibility(boundary) {
-    const resetBtn = $("#p7a-reset");
+    const resetBtn = $("#p7-reset");
     if (!resetBtn) return;
-    const baseline = p7a.baseline[boundary];
-    const current = serializeWorkspace("p7aworkspace") || [];
+    const baseline = p7.baseline[boundary];
+    const current = serializeWorkspace("p7workspace") || [];
     const changed = Array.isArray(baseline) && !statesEqual(current, baseline);
     resetBtn.classList.toggle("hidden", !changed);
   }
@@ -207,7 +207,7 @@
   }
 
   function buildHint() {
-    const ws = document.getElementById("p7aworkspace");
+    const ws = document.getElementById("p7workspace");
     if (!ws)
       return {
         html: 'Use <span class="btn-ref">Run line 1 ▶</span> to reach the editable line.',
@@ -218,7 +218,7 @@
       return {
         html: 'You still need <code class="tok-name">deer</code>, <code class="tok-name">hare</code>, and <code class="tok-name">wolf</code> in the program state.',
       };
-    if (p7a.boundary >= 6 && !by.bear)
+    if (p7.boundary >= 6 && !by.bear)
       return {
         html: 'You need <code class="tok-name">bear</code> in the program state.',
       };
@@ -230,17 +230,17 @@
       return {
         html: '<code class="tok-name">wolf</code>\'s type should be <code class="tok-type">int*</code>.',
       };
-    if (p7a.boundary >= 6 && by.bear && by.bear.type !== "int**")
+    if (p7.boundary >= 6 && by.bear && by.bear.type !== "int**")
       return {
         html: '<code class="tok-name">bear</code>\'s type should be <code class="tok-type">int**</code>.',
       };
-    if (p7a.boundary >= 7 && by.fox && by.fox.type !== "int*")
+    if (p7.boundary >= 7 && by.fox && by.fox.type !== "int*")
       return {
         html: '<code class="tok-name">fox</code>\'s type should be <code class="tok-type">int*</code>.',
       };
     // Skip address validation; addresses are generated for the user.
     const ptrVal = (by.wolf.value || "").trim();
-    if (p7a.boundary < 4) {
+    if (p7.boundary < 4) {
       if (!isEmptyVal(ptrVal))
         return {
           html: '<code class="tok-name">wolf</code> was just declared, so its value should be empty.',
@@ -250,36 +250,36 @@
         return {
           html: '<code class="tok-name">wolf</code>\'s value should not be empty.',
         };
-      if (ptrVal !== String(ptrTarget(p7a.boundary))) {
+      if (ptrVal !== String(ptrTarget(p7.boundary))) {
         const target =
-          p7a.boundary < 5 ? "deer" : "hare";
+          p7.boundary < 5 ? "deer" : "hare";
         return {
           html: `This line sets <code class="tok-name">wolf</code>'s value to <code class="tok-name">${target}</code>'s address.`,
         };
       }
     }
-    if (p7a.boundary === 6) {
+    if (p7.boundary === 6) {
       const pptrVal = (by.bear?.value || "").trim();
       if (!pptrVal)
         return {
           html: 'Set <code class="tok-name">bear</code> to store <code class="tok-name">wolf</code>\'s address.',
         };
-      if (pptrVal !== String(p7a.ptrAddr))
+      if (pptrVal !== String(p7.ptrAddr))
         return {
           html: '<code class="tok-name">bear</code> should hold <code class="tok-name">wolf</code>\'s address.',
         };
     }
-    if (p7a.boundary === 7) {
+    if (p7.boundary === 7) {
       if (!by.fox)
         return {
           html: 'You need <code class="tok-name">fox</code> in the program state.',
         };
       const spareVal = (by.fox.value || "").trim();
-      if (spareVal === String(p7a.ptrAddr))
+      if (spareVal === String(p7.ptrAddr))
         return {
           html: '<code class="tok-name">fox</code> is being assigned to <code class="tok-name">wolf</code>, not <code class="tok-addr">&amp;wolf</code>, so it should be set to <code class="tok-name">wolf</code>\'s value, not <code class="tok-name">wolf</code>\'s address.',
         };
-      if (spareVal !== String(p7a.bAddr))
+      if (spareVal !== String(p7.bAddr))
         return {
           html: '<code class="tok-name">fox</code>\'s value should be set to <code class="tok-name">wolf</code>\'s value.',
         };
@@ -287,7 +287,7 @@
 
     if (isStepCorrect(boxes))
       return { html: 'Looks good. Press <span class="btn-ref">Check</span>.' };
-    const hasReset = !!document.getElementById("p7a-reset");
+    const hasReset = !!document.getElementById("p7-reset");
     return hasReset
       ? {
           html: 'Your program has a problem that isn\'t covered by a hint. Try starting over on this step by clicking <span class="btn-ref">Reset</span>.',
@@ -297,35 +297,35 @@
 
   function renderCode() {
     const progress =
-      editableSteps.has(p7a.boundary) && !p7a.passes[p7a.boundary];
-    renderCodePane($("#p7a-code"), p7a.lines, p7a.boundary, { progress });
+      editableSteps.has(p7.boundary) && !p7.passes[p7.boundary];
+    renderCodePane($("#p7-code"), p7.lines, p7.boundary, { progress });
   }
 
   function render() {
     renderCode();
-    const stage = $("#p7a-stage");
+    const stage = $("#p7-stage");
     stage.innerHTML = "";
-    if (editableSteps.has(p7a.boundary) && p7a.passes[p7a.boundary]) {
-      $("#p7a-status").textContent = "correct";
-      $("#p7a-status").className = "ok";
+    if (editableSteps.has(p7.boundary) && p7.passes[p7.boundary]) {
+      $("#p7-status").textContent = "correct";
+      $("#p7-status").className = "ok";
     } else {
-      $("#p7a-status").textContent = "";
-      $("#p7a-status").className = "muted";
+      $("#p7-status").textContent = "";
+      $("#p7-status").className = "muted";
     }
-    $("#p7a-check").classList.add("hidden");
-    $("#p7a-reset").classList.add("hidden");
-    $("#p7a-add").classList.add("hidden");
+    $("#p7-check").classList.add("hidden");
+    $("#p7-reset").classList.add("hidden");
+    $("#p7-add").classList.add("hidden");
     hint.setButtonHidden(true);
     resetHint();
 
-    if (p7a.boundary > 0) {
+    if (p7.boundary > 0) {
       const editable =
-        editableSteps.has(p7a.boundary) && !p7a.passes[p7a.boundary];
-      const defaults = defaultsFor(p7a.boundary);
+        editableSteps.has(p7.boundary) && !p7.passes[p7.boundary];
+      const defaults = defaultsFor(p7.boundary);
       const wrap = restoreWorkspace(
-        p7a.ws[p7a.boundary],
+        p7.ws[p7.boundary],
         defaults,
-        "p7aworkspace",
+        "p7workspace",
         {
           editable,
           deletable: editable,
@@ -336,58 +336,58 @@
       );
       stage.appendChild(wrap);
       if (editable) {
-        $("#p7a-check").classList.remove("hidden");
-        $("#p7a-add").classList.remove("hidden");
+        $("#p7-check").classList.remove("hidden");
+        $("#p7-add").classList.remove("hidden");
         hint.setButtonHidden(false);
-        ensureBaseline(p7a.boundary, defaults);
-        attachResetWatcher(wrap, p7a.boundary);
+        ensureBaseline(p7.boundary, defaults);
+        attachResetWatcher(wrap, p7.boundary);
       } else {
-        p7a.ws[p7a.boundary] = cloneBoxes(defaults);
-        p7a.passes[p7a.boundary] = true;
+        p7.ws[p7.boundary] = cloneBoxes(defaults);
+        p7.passes[p7.boundary] = true;
       }
     }
   }
 
   function save() {
-    if (p7a.boundary >= 1 && p7a.boundary <= p7a.lines.length) {
-      p7a.ws[p7a.boundary] = serializeWorkspace("p7aworkspace");
+    if (p7.boundary >= 1 && p7.boundary <= p7.lines.length) {
+      p7.ws[p7.boundary] = serializeWorkspace("p7workspace");
     }
   }
 
-  $("#p7a-reset").onclick = () => {
-    if (p7a.boundary >= 1) {
-      p7a.ws[p7a.boundary] = null;
+  $("#p7-reset").onclick = () => {
+    if (p7.boundary >= 1) {
+      p7.ws[p7.boundary] = null;
       render();
     }
   };
 
-  $("#p7a-add").onclick = () => {
-    const ws = document.getElementById("p7aworkspace");
+  $("#p7-add").onclick = () => {
+    const ws = document.getElementById("p7workspace");
     if (ws) ws.appendChild(makeAnswerBox({}));
-    updateResetVisibility(p7a.boundary);
+    updateResetVisibility(p7.boundary);
   };
 
-  $("#p7a-check").onclick = () => {
+  $("#p7-check").onclick = () => {
     resetHint();
-    if (!editableSteps.has(p7a.boundary)) return;
-    const ws = document.getElementById("p7aworkspace");
+    if (!editableSteps.has(p7.boundary)) return;
+    const ws = document.getElementById("p7workspace");
     if (!ws) return;
     const boxes = [...ws.querySelectorAll(".vbox")].map((v) => readBoxState(v));
     const ok = isStepCorrect(boxes);
-    $("#p7a-status").textContent = ok ? "correct" : "incorrect";
-    $("#p7a-status").className = ok ? "ok" : "err";
-    MB.flashStatus($("#p7a-status"));
+    $("#p7-status").textContent = ok ? "correct" : "incorrect";
+    $("#p7-status").className = ok ? "ok" : "err";
+    MB.flashStatus($("#p7-status"));
     if (ok) {
-      p7a.passes[p7a.boundary] = true;
-      p7a.ws[p7a.boundary] = boxes;
+      p7.passes[p7.boundary] = true;
+      p7.ws[p7.boundary] = boxes;
       ws.querySelectorAll(".vbox").forEach((v) => MB.disableBoxEditing(v));
       MB.removeBoxDeleteButtons(ws);
-      $("#p7a-check").classList.add("hidden");
-      $("#p7a-reset").classList.add("hidden");
-      $("#p7a-add").classList.add("hidden");
+      $("#p7-check").classList.add("hidden");
+      $("#p7-reset").classList.add("hidden");
+      $("#p7-add").classList.add("hidden");
       hint.hide();
-      $("#p7a-hint-btn")?.classList.add("hidden");
-      MB.pulseNextButton("p7a");
+      $("#p7-hint-btn")?.classList.add("hidden");
+      MB.pulseNextButton("p7");
       updateStatus();
       renderCode();
       pager.update();
@@ -395,7 +395,7 @@
   };
 
   function isStepCorrect(boxes) {
-    const expected = canonical(p7a.boundary);
+    const expected = canonical(p7.boundary);
     const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
     const wolf = by.wolf;
     const bear = by.bear;
@@ -410,27 +410,27 @@
       return false;
     if (!isEmptyVal(by.deer.value || "") || !isEmptyVal(by.hare.value || ""))
       return false;
-    if ((wolf.value || "").trim() !== String(p7a.bAddr)) return false;
-    if (p7a.boundary >= 6) {
+    if ((wolf.value || "").trim() !== String(p7.bAddr)) return false;
+    if (p7.boundary >= 6) {
       if (!bear || bear.type !== "int**") return false;
       const pval = (bear.value || "").trim();
-      if (pval !== String(p7a.ptrAddr)) return false;
+      if (pval !== String(p7.ptrAddr)) return false;
     }
-    if (p7a.boundary >= 7) {
+    if (p7.boundary >= 7) {
       if (!fox || fox.type !== "int*") return false;
       const sval = (fox.value || "").trim();
-      if (sval !== String(p7a.bAddr)) return false;
+      if (sval !== String(p7.bAddr)) return false;
     }
     return true;
   }
 
   const pager = createStepper({
-    prefix: "p7a",
-    lines: p7a.lines,
+    prefix: "p7",
+    lines: p7.lines,
     nextPage: NEXT_PAGE,
-    getBoundary: () => p7a.boundary,
+    getBoundary: () => p7.boundary,
     setBoundary: (val) => {
-      p7a.boundary = val;
+      p7.boundary = val;
     },
     onBeforeChange: save,
     onAfterChange: () => {
@@ -438,13 +438,13 @@
       updateStatus();
     },
     isStepLocked: (boundary) => {
-      if (editableSteps.has(boundary)) return !p7a.passes[boundary];
-      if (boundary === p7a.lines.length) return !p7a.passes[p7a.lines.length];
+      if (editableSteps.has(boundary)) return !p7.passes[boundary];
+      if (boundary === p7.lines.length) return !p7.passes[p7.lines.length];
       return false;
     },
     getStepBadge: (step) => {
       if (!editableSteps.has(step)) return "";
-      return p7a.passes[step] ? "check" : "note";
+      return p7.passes[step] ? "check" : "note";
     },
   });
 

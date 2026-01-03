@@ -431,6 +431,33 @@ h2 {
     margin-bottom: 10px;
     box-sizing: border-box;
 }
+.quiz-prompt {
+    font-size: 18px;
+    font-weight: 700;
+    color: #234;
+    margin: 8px 0 6px;
+}
+.quiz-sub {
+    font-size: 14px;
+    color: #456;
+    margin: 0 0 8px;
+}
+.quiz-input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font: inherit;
+    background: #fff;
+    margin-bottom: 10px;
+    box-sizing: border-box;
+}
+.quiz-streak {
+    margin-top: 6px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #234;
+}
 .vbox.no-addr .lbl-addr,
 .vbox.no-addr .addr {
     display: none;
@@ -1031,6 +1058,21 @@ button:hover:not([disabled]) {
     margin: 8px 0;
     margin-bottom: calc(8px + var(--name-stack-space));
     padding-right: var(--type-offset);
+}
+.vbox.quiz-selectable {
+    cursor: pointer;
+}
+.vbox.quiz-selectable:not(.quiz-selected):hover .cell {
+    box-shadow: 0 0 0 2px rgba(30, 119, 255, 0.35);
+}
+.vbox.quiz-selected .cell {
+    box-shadow: 0 0 0 3px var(--focus);
+}
+.confetti-canvas {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9999;
 }
 
 .vbox .cell {

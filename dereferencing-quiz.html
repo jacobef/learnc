@@ -2,23 +2,23 @@
 <html lang="en">
     <head>
         <meta charset="utf-8" />
-        <title>C Boxes — Program 4</title>
+        <title>C Boxes — Dereferencing Quiz</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <link rel="stylesheet" href="styles.css" />
     </head>
     <body>
         <div class="wrap">
-                                                            <nav class="tabs">
+                                    <nav class="tabs">
                 <a href="index.html">Home</a>
                 <a href="program1.html">1. Assignment I</a>
                 <a href="program2.html">2. Declaration</a>
                 <a href="program3.html">3. Initialization</a>
-                <a href="program4.html" class="active">4. Code Editing I</a>
+                <a href="program4.html">4. Code Editing I</a>
                 <a href="program5.html">5. Code Editing II</a>
                 <a href="program6.html">6. Assignment II</a>
                 <a href="program7.html">7. Pointers</a>
                 <a href="program8.html">8. Dereferencing</a>
-                <a href="dereferencing-quiz.html">Dereferencing Quiz</a>
+                <a href="dereferencing-quiz.html" class="active">Dereferencing Quiz</a>
                 <a href="program9.html">9. Whitespace &amp; Comments</a>
                 <a href="program10.html">10. Integer Arithmetic</a>
                 <a href="program11.html">11. Assignment III</a>
@@ -26,32 +26,24 @@
                 <a href="sandbox.html">Sandbox</a>
             </nav>
             <div class="main">
-                <h1 class="page-title">4. Code Editing I</h1>
-                <p id="p4-instructions" class="intro"></p>
+                <h1 class="page-title">Dereferencing Quiz</h1>
+                <p id="dq-instructions" class="intro"></p>
 
                 <section>
                     <div class="row">
                         <div class="panel">
-                            <div class="panel-title code-title">Code</div>
-                            <div id="p4-code" class="codepane"></div>
+                            <div class="panel-title">Question</div>
+                            <div id="dq-prompt" class="quiz-prompt"></div>
                             <div class="controls">
-                                <button id="p4-next">Next Program ▶▶</button>
+                                <button id="dq-check">Check</button>
+                                <button id="dq-next">Next Program ▶▶</button>
+                                <span id="dq-status" class="muted"></span>
                             </div>
+                            <div id="dq-streak" class="quiz-streak"></div>
                         </div>
-                        <div class="panel">
-                            <div id="p4-stage"></div>
-                            <div class="controls">
-                                <button id="p4-check">Check</button>
-                                <button
-                                    id="p4-hint-btn"
-                                    type="button"
-                                    class="hint-link"
-                                >
-                                    Hint
-                                </button>
-                                <span id="p4-status" class="muted"></span>
-                            </div>
-                            <div id="p4-hint" class="hint-inline hidden"></div>
+                        <div class="panel program-state-panel">
+                            <div class="panel-title">Program state</div>
+                            <div id="dq-stage" class="grid"></div>
                         </div>
                     </div>
                 </section>
@@ -59,6 +51,7 @@
         </div>
 
         <script src="shared.js"></script>
-        <script src="program4.js"></script>
+        <script src="confetti.js"></script>
+        <script src="dereferencing-quiz.js"></script>
     </body>
 </html>
