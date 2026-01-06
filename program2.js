@@ -62,16 +62,53 @@
     );
   }
 
+  function hasExtraVariables(boxes, expectedNames) {
+    const counts = new Map();
+    for (const box of boxes) {
+      const name = (box?.name || "").trim();
+      counts.set(name, (counts.get(name) || 0) + 1);
+      if (!expectedNames.has(name)) return true;
+      if (counts.get(name) > 1) return true;
+    }
+    return false;
+  }
+
+  function getFridgeCandidate(boxes) {
+    return (
+      boxes.find((b) => b.name === "fridge") ||
+      boxes.find((b) => b.name && b.name !== "toaster") ||
+      boxes.find((b) => b)
+    );
+  }
+
+  function isGhiStepCorrect(boxes) {
+    const expectedNames = new Set(["toaster", "fridge"]);
+    if (hasExtraVariables(boxes, expectedNames)) return false;
+    const fridge = getFridgeCandidate(boxes);
+    return isGhiCorrect(fridge);
+  }
+
+  function isAssignStepCorrect(boxes) {
+    const expectedNames = new Set(["toaster", "fridge"]);
+    if (hasExtraVariables(boxes, expectedNames)) return false;
+    const toaster = boxes.find((b) => b.name === "toaster");
+    const fridge = boxes.find((b) => b.name === "fridge");
+    return isAssignCorrect(toaster, fridge);
+  }
+
   function buildHint() {
     const boxes = [...document.querySelectorAll("#p2-stage .vbox")].map((v) =>
       readBoxState(v),
     );
     if (p2.boundary === 2) {
       if (boxes.length < 2) return { html: "Read the instructions." };
-      const fridge =
-        boxes.find((b) => b.name === "fridge") ||
-        boxes.find((b) => b.name && b.name !== "toaster") ||
-        boxes.find((b) => b);
+      const expectedNames = new Set(["toaster", "fridge"]);
+      if (hasExtraVariables(boxes, expectedNames)) {
+        return {
+          html: "Only keep <code class=\"tok-name\">toaster</code> and <code class=\"tok-name\">fridge</code> in the program state.",
+        };
+      }
+      const fridge = getFridgeCandidate(boxes);
       if (!fridge)
         return "Your program has a problem that isn't covered by a hint. Sorry.";
       if (!fridge.name)
@@ -90,7 +127,7 @@
         return {
           html: "Right after declaration the value should still be empty.",
         };
-      if (isGhiCorrect(fridge))
+      if (isGhiStepCorrect(boxes))
         return {
           html: 'Looks good. Press <span class="btn-ref">Check</span>.',
         };
@@ -98,6 +135,12 @@
     }
     if (p2.boundary === 3) {
       if (boxes.length < 2) return { html: "Read the instructions." };
+      const expectedNames = new Set(["toaster", "fridge"]);
+      if (hasExtraVariables(boxes, expectedNames)) {
+        return {
+          html: "Only keep <code class=\"tok-name\">toaster</code> and <code class=\"tok-name\">fridge</code> in the program state.",
+        };
+      }
       const toaster = boxes.find((b) => b.name === "toaster") || boxes[0];
       const fridge = boxes.find((b) => b.name === "fridge");
       if (!toaster)
@@ -126,7 +169,7 @@
         return {
           html: 'Line 3 assigns <code class="tok-line">toaster = 28;</code>.',
         };
-      if (isAssignCorrect(toaster, fridge))
+      if (isAssignStepCorrect(boxes))
         return {
           html: 'Looks good. Press <span class="btn-ref">Check</span>.',
         };
@@ -341,10 +384,8 @@
     );
 
     if (p2.boundary === 2) {
-      const fridge =
-        boxes.find((b) => b.name === "fridge") ||
-        boxes.find((b) => b.name && b.name !== "toaster");
-      const ok = isGhiCorrect(fridge);
+      const fridge = getFridgeCandidate(boxes);
+      const ok = isGhiStepCorrect(boxes);
       setStatus(ok ? "correct" : "incorrect", ok ? "ok" : "err");
       flashStatus($("#p2-status"));
       if (ok) {
@@ -370,7 +411,7 @@
     if (p2.boundary === 3) {
       const toaster = boxes.find((b) => b.name === "toaster");
       const fridge = boxes.find((b) => b.name === "fridge");
-      const ok = isAssignCorrect(toaster, fridge);
+      const ok = isAssignStepCorrect(boxes);
       setStatus(ok ? "correct" : "incorrect", ok ? "ok" : "err");
       flashStatus($("#p2-status"));
       if (ok) {

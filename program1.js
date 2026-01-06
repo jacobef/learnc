@@ -35,18 +35,19 @@
     hint.hide();
   }
 
+  function isStepCorrect(box) {
+    return (
+      p1.boundary === 3 && box && box.type === "int" && box.value === "5"
+    );
+  }
+
   function buildHint() {
     const box = readBoxState($("#p1-stage .vbox"));
-    if (isEmptyVal(box?.value || ""))
-      return {
-        html: 'Line 3 assigns <code class="tok-line">m = 5;</code>, so the value shouldn\'t be empty.',
-      };
     if (box?.value !== "5")
       return {
         html: 'Line 2 (<code class="tok-line">m = 3;</code>) stored <code class="tok-value">3</code> in <code class="tok-name">m</code>, so what should line 3 (<code class="tok-line">m = 5;</code>) do?',
       };
-    const ok = p1.boundary === 3 && box.type === "int" && box.value === "5";
-    if (ok)
+    if (isStepCorrect(box))
       return { html: 'Looks good. Press <span class="btn-ref">Check</span>.' };
   }
 
@@ -150,7 +151,7 @@
     resetHint();
     if (p1.boundary !== 3) return;
     const st = readBoxState($("#p1-stage .vbox"));
-    const ok = st.type === "int" && st.value === "5";
+    const ok = isStepCorrect(st);
     $("#p1-status").textContent = ok ? "correct" : "incorrect";
     $("#p1-status").className = ok ? "ok" : "err";
     flashStatus($("#p1-status"));

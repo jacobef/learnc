@@ -61,19 +61,23 @@
     return lines;
   }
 
-  function buildHint() {
-    const actual = applyUserProgram();
+  function isProgramCorrect(state) {
     const expected = p4.expected;
-    const match =
-      Array.isArray(actual) &&
-      actual.length === expected.length &&
-      actual.every(
+    return (
+      Array.isArray(state) &&
+      state.length === expected.length &&
+      state.every(
         (b, i) =>
           b.name === expected[i].name &&
           b.type === expected[i].type &&
           String(b.value || "") === String(expected[i].value || ""),
-      );
-    if (match)
+      )
+    );
+  }
+
+  function buildHint() {
+    const actual = applyUserProgram();
+    if (isProgramCorrect(actual))
       return { html: 'Looks good. Press <span class="btn-ref">Check</span>.' };
 
     const lines = normalizedLines()
@@ -347,16 +351,7 @@
 
   $("#p4-check").onclick = () => {
     const state = applyUserProgram();
-    const expected = p4.expected;
-    const match =
-      Array.isArray(state) &&
-      state.length === expected.length &&
-      state.every(
-        (b, i) =>
-          b.name === expected[i].name &&
-          b.type === expected[i].type &&
-          String(b.value || "") === String(expected[i].value || ""),
-      );
+    const match = isProgramCorrect(state);
     $("#p4-status").textContent = match ? "correct" : "incorrect";
     $("#p4-status").className = match ? "ok" : "err";
     flashStatus($("#p4-status"));

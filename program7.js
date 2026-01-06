@@ -254,7 +254,10 @@
         const target =
           p7.boundary < 5 ? "deer" : "hare";
         return {
-          html: `This line sets <code class="tok-name">wolf</code>'s value to <code class="tok-name">${target}</code>'s address.`,
+          html:
+            target === "hare"
+              ? '<code class="tok-line">wolf = &amp;deer</code> set <code class="tok-name">wolf</code>\'s value to <code class="tok-name">deer</code>\'s address. What should <code class="tok-line">wolf = &amp;hare</code> do?'
+              : 'This line sets <code class="tok-name">wolf</code>\'s value to <code class="tok-name">deer</code>\'s address.',
         };
       }
     }

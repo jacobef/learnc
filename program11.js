@@ -427,7 +427,7 @@
         };
       }
       return {
-        html: 'Line 4 increments <code class="tok-name">yang</code>.',
+        html: 'Take the current value of <code class="tok-name">yang</code>, then add 1. That result should be the new value of <code class="tok-name">yang</code>.',
       };
     }
     if (p11.boundary === 5) {

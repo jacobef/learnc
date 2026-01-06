@@ -1241,7 +1241,7 @@ button:hover:not([disabled]) {
     content: "";
     position: absolute;
     top: -14px;
-    bottom: -14px;
+    bottom: calc(-14px - var(--name-stack-space));
     left: -8px;
     right: -8px;
     border: 1px dashed rgba(0, 0, 0, 0.18);

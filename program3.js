@@ -51,6 +51,56 @@
     hint.hide();
   }
 
+  function isStepCorrect(boundary, boxes, by) {
+    const lookup = by || Object.fromEntries(boxes.map((b) => [b.name, b]));
+    const allTypesOk = boxes.every((b) => b.type === "int");
+    if (boundary === 1) {
+      return (
+        boxes.length === 1 &&
+        allTypesOk &&
+        lookup.north &&
+        isEmptyVal(lookup.north.value || "")
+      );
+    }
+    if (boundary === 3) {
+      return (
+        boxes.length === 2 &&
+        allTypesOk &&
+        lookup.north &&
+        lookup.south &&
+        lookup.north.value === "5" &&
+        lookup.south.value === "-5"
+      );
+    }
+    if (boundary === 4) {
+      return (
+        boxes.length === 3 &&
+        allTypesOk &&
+        lookup.north &&
+        lookup.south &&
+        lookup.east &&
+        lookup.north.value === "5" &&
+        lookup.south.value === "-5" &&
+        lookup.east.value === "9"
+      );
+    }
+    if (boundary === 5) {
+      return (
+        boxes.length === 4 &&
+        allTypesOk &&
+        lookup.north &&
+        lookup.south &&
+        lookup.east &&
+        lookup.west &&
+        lookup.north.value === "5" &&
+        lookup.south.value === "-5" &&
+        lookup.east.value === "9" &&
+        lookup.west.value === "-9"
+      );
+    }
+    return false;
+  }
+
   function normalizeState(list) {
     if (!Array.isArray(list)) return [];
     return list
@@ -220,41 +270,7 @@
           html: '<code class="tok-name">north</code>\'s value should remain <code class="tok-value">5</code>.',
         };
     }
-    const allTypesOk = boxes.every((b) => b.type === "int");
-    const ok =
-      (p3.boundary === 1 &&
-        boxes.length === 1 &&
-        allTypesOk &&
-        by.north &&
-        isEmptyVal(by.north.value || "")) ||
-      (p3.boundary === 3 &&
-        boxes.length === 2 &&
-        allTypesOk &&
-        by.north &&
-        by.south &&
-        by.north.value === "5" &&
-        by.south.value === "-5") ||
-      (p3.boundary === 4 &&
-        boxes.length === 3 &&
-        allTypesOk &&
-        by.north &&
-        by.south &&
-        by.east &&
-        by.north.value === "5" &&
-        by.south.value === "-5" &&
-        by.east.value === "9") ||
-      (p3.boundary === 5 &&
-        boxes.length === 4 &&
-        allTypesOk &&
-        by.north &&
-        by.south &&
-        by.east &&
-        by.west &&
-        by.north.value === "5" &&
-        by.south.value === "-5" &&
-        by.east.value === "9" &&
-        by.west.value === "-9");
-    if (ok)
+    if (isStepCorrect(p3.boundary, boxes, by))
       return { html: 'Looks good. Press <span class="btn-ref">Check</span>.' };
     const hasReset = !!document.getElementById("p3-reset");
     return hasReset
@@ -517,14 +533,9 @@
     if (!ws) return;
     const boxes = [...ws.querySelectorAll(".vbox")].map((v) => readBoxState(v));
     const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    const allTypesOk = boxes.every((b) => b.type === "int");
 
     if (p3.boundary === 1) {
-      const ok =
-        boxes.length === 1 &&
-        allTypesOk &&
-        by.north &&
-        isEmptyVal(by.north.value || "");
+      const ok = isStepCorrect(p3.boundary, boxes, by);
       $("#p3-status").textContent = ok ? "correct" : "incorrect";
       $("#p3-status").className = ok ? "ok" : "err";
       MB.flashStatus($("#p3-status"));
@@ -545,13 +556,7 @@
     }
 
     if (p3.boundary === 3) {
-      const ok =
-        boxes.length === 2 &&
-        allTypesOk &&
-        by.north &&
-        by.south &&
-        by.north.value === "5" &&
-        by.south.value === "-5";
+      const ok = isStepCorrect(p3.boundary, boxes, by);
       $("#p3-status").textContent = ok ? "correct" : "incorrect";
       $("#p3-status").className = ok ? "ok" : "err";
       MB.flashStatus($("#p3-status"));
@@ -572,17 +577,7 @@
     }
 
     if (p3.boundary === 5) {
-      const ok =
-        boxes.length === 4 &&
-        allTypesOk &&
-        by.north &&
-        by.south &&
-        by.east &&
-        by.west &&
-        by.north.value === "5" &&
-        by.south.value === "-5" &&
-        by.east.value === "9" &&
-        by.west.value === "-9";
+      const ok = isStepCorrect(p3.boundary, boxes, by);
       $("#p3-status").textContent = ok ? "correct" : "incorrect";
       $("#p3-status").className = ok ? "ok" : "err";
       MB.flashStatus($("#p3-status"));

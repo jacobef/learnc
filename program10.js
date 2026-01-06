@@ -236,7 +236,7 @@
     }
     if (p10.boundary >= 5 && p10.boundary <= 8) {
       setInstructions(
-        "Integer division drops the remainder, i.e. it rounds towards 0.",
+        "Integer division rounds towards 0, i.e. it drops everything after the decimal point.",
       );
       return;
     }
@@ -454,6 +454,19 @@
         html: 'Use <span class="btn-ref">+ New variable</span> to add the variables you need.',
       };
     const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
+    const expected = expectedFor(p10.boundary);
+    if (
+      expected.length &&
+      expected.every((need) => by[need.name]) &&
+      expected.some((need) => by[need.name]?.type !== need.type)
+    ) {
+      const wrong = expected.find(
+        (need) => by[need.name]?.type !== need.type,
+      );
+      return {
+        html: `<code class="tok-name">${wrong.name}</code>'s type should be <code class="tok-type">${wrong.type}</code>.`,
+      };
+    }
     if (p10.boundary === 2) {
       if (!by.a)
         return {
@@ -466,6 +479,10 @@
       if (isEmptyVal(by.a.value || ""))
         return {
           html: 'Line 2 is <code class="tok-line">1 - (3 * 4)</code>.',
+        };
+      if (by.a.value === "-8")
+        return {
+          html: "You're parsing it as <code class=\"tok-line\">(1 - 3) * 4</code>, but it should be <code class=\"tok-line\">1 - (3 * 4)</code>, since multiplication comes before subtraction.",
         };
       if (by.a.value !== "-11")
         return {
@@ -519,7 +536,7 @@
         };
       if (isEmptyVal(by.e.value || ""))
         return {
-          html: 'Line 11 is <code class="tok-line">11 / 3 == 3</code>.',
+          html: "Calculate <code class=\"tok-line\">11 / 3</code>, then drop everything after the decimal point. Does that result in <code class=\"tok-value\">3</code>?",
         };
       if (by.e.value !== "1")
         return {
@@ -533,7 +550,7 @@
         };
       if (isEmptyVal(by.f.value || ""))
         return {
-          html: 'Line 12 is <code class="tok-line">9 / 2 + 1 == 3</code>.',
+          html: 'The order of operations is <code class="tok-line">((9 / 2) + 1) == 3</code>.',
         };
       if (by.f.value !== "0")
         return {

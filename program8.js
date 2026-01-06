@@ -432,6 +432,18 @@
     const wolf = byName("wolf");
     const bear = byName("bear");
     const fox = byName("fox");
+    if (wolf && wolf.type !== "int*")
+      return {
+        html: '<code class="tok-name">wolf</code>\'s type should be <code class="tok-type">int*</code>.',
+      };
+    if (p8.boundary >= 6 && bear && bear.type !== "int**")
+      return {
+        html: '<code class="tok-name">bear</code>\'s type should be <code class="tok-type">int**</code>.',
+      };
+    if (p8.boundary >= 7 && fox && fox.type !== "int*")
+      return {
+        html: '<code class="tok-name">fox</code>\'s type should be <code class="tok-type">int*</code>.',
+      };
 
     if (p8.boundary === 7) {
       const normalized = bear ? normalizePtrValue(bear.value || "") : "empty";
@@ -447,19 +459,19 @@
       const expectedPtr = wolf ? normalizePtrValue(wolf.value || "") : "empty";
       if (fox && spareVal !== expectedPtr)
         return {
-          html: '<code class="tok-name">fox</code>\'s value should be set to <code class="tok-name">wolf</code>\'s value (the address of <code class="tok-name">hare</code>).',
+          html: '<code class="tok-name">fox</code>\'s value should be set to <code class="tok-name">wolf</code>\'s value.',
         };
     } else if (p8.boundary === 9) {
       const wolfVal = wolf ? normalizePtrValue(wolf.value || "") : "empty";
       const hareBox = byName("hare");
       if (wolfVal === "11" && hareBox?.value !== "11")
         return {
-          html: '<code class="tok-line">*wolf = 11;</code> assigns through <code class="tok-name">wolf</code>, so it should change <code class="tok-name">hare</code>, not <code class="tok-name">wolf</code>.',
+          html: '<code class="tok-name">*wolf</code> and <code class="tok-name">wolf</code> are different. The variable named <code class="tok-name">*wolf</code>, not <code class="tok-name">wolf</code>, needs to be changed. <code class="tok-name">*wolf</code> refers to the variable whose address is <code class="tok-name">wolf</code>\'s value.',
         };
       const bBox = byName("hare");
       if (bBox && bBox.value !== "11")
         return {
-          html: '<code class="tok-name">*wolf</code> and <code class="tok-name">hare</code> are both names for the same variable, so <code class="tok-line">*wolf = 11;</code> would be equivalent to <code class="tok-line">hare = 11;</code>.',
+          html: '<code class="tok-name">*wolf</code> and <code class="tok-name">hare</code> are both names for the same variable. What does <code class="tok-line">*wolf = 11;</code> do to that variable?',
         };
     } else if (p8.boundary === 10) {
       const deerAddr = String(p8.aAddr);
@@ -467,16 +479,30 @@
       const wolfVal = wolf ? normalizePtrValue(wolf.value || "") : "empty";
       if (bearVal === deerAddr && wolfVal !== deerAddr)
         return {
-          html: '<code class="tok-line">*bear = &amp;deer;</code> assigns through <code class="tok-name">bear</code>, so it should change <code class="tok-name">wolf</code>, not <code class="tok-name">bear</code>.',
+          html: '<code class="tok-name">*bear</code> and <code class="tok-name">bear</code> are different. The variable named <code class="tok-name">*bear</code>, not <code class="tok-name">bear</code>, needs to be changed. <code class="tok-name">*bear</code> refers to the variable whose address is <code class="tok-name">bear</code>\'s value.',
         };
-      const normalized = wolf ? normalizePtrValue(wolf.value || "") : "empty";
-      if (normalized === "empty")
+      const otherHasDeerAddr = boxes.some((box) => {
+        if (!box?.name || box.name === "wolf" || box.name === "bear") return false;
+        const val = normalizePtrValue(box.value || "");
+        return val === deerAddr;
+      });
+      if (otherHasDeerAddr)
+        return {
+          html: '<code class="tok-name">*bear</code> refers to the variable whose address is <code class="tok-name">bear</code>\'s value.',
+        };
+      if (wolfVal === "empty")
         return {
           html: 'Set <code class="tok-name">wolf</code> to <code class="tok-addr">&amp;deer</code> with <code class="tok-line">*bear = &amp;deer;</code>.',
         };
-      if (normalized !== String(p8.aAddr))
+      const startWolf = String(p8.bAddr);
+      const startBear = String(p8.ptrAddr);
+      if (wolfVal === startWolf && bearVal === startBear)
         return {
-          html: '<code class="tok-line">*bear = &amp;deer;</code> sets <code class="tok-name">wolf</code> to <code class="tok-addr">&amp;deer</code>.',
+          html: '<code class="tok-name">*bear</code> refers to the variable whose address is <code class="tok-name">bear</code>\'s value. <code class="tok-addr">&amp;deer</code> refers to the address of <code class="tok-name">deer</code>.',
+        };
+      if (wolfVal !== String(p8.aAddr) && bearVal === startBear)
+        return {
+          html: '<code class="tok-addr">&amp;deer</code> refers to the address of <code class="tok-name">deer</code>.',
         };
     } else if (p8.boundary === 11) {
       const elk = byName("elk");
@@ -486,9 +512,13 @@
         return {
           html: 'Make sure <code class="tok-name">elk</code> exists for this line.',
         };
+      if (elk.type !== "int")
+        return {
+          html: '<code class="tok-name">elk</code>\'s type should be <code class="tok-type">int</code>.',
+        };
       if (elk.value !== bVal)
         return {
-          html: '<code class="tok-name">elk</code>\'s value should be set to <code class="tok-name">*wolf</code>\'s value.',
+          html: '<code class="tok-name">elk</code>\'s value should be set to <code class="tok-name">*wolf</code>\'s value. <code class="tok-name">*wolf</code> refers to the variable whose address is <code class="tok-name">wolf</code>\'s value.',
         };
     } else if (p8.boundary === 12) {
       const hareBox = byName("hare");
@@ -499,7 +529,7 @@
         };
       if (hareBox.value !== deerBox.value)
         return {
-          html: '<code class="tok-line">*fox = **bear;</code> assigns through <code class="tok-name">fox</code>, so <code class="tok-name">hare</code> should match <code class="tok-name">**bear</code>.',
+          html: '<code class="tok-name">*fox</code> refers to the variable whose address is <code class="tok-name">fox</code>\'s value. <code class="tok-name">**bear</code> refers to the variable whose address is <code class="tok-name">*bear</code>\'s value; and <code class="tok-name">*bear</code> refers to the variable whose address is <code class="tok-name">bear</code>\'s value.',
         };
     }
     const verdict = validateWorkspace(p8.boundary, applyAliasNames(boxes));
@@ -624,6 +654,27 @@
         return names.includes(need.name);
       });
     };
+    const expectedNames = new Set(expected.map((b) => b.name));
+    const counts = new Map();
+    for (const box of boxes) {
+      const name = (box.name || "").trim();
+      if (!name) {
+        return {
+          ok: false,
+          message: "Every box needs a name (delete the blank one if you don't need it).",
+        };
+      }
+      counts.set(name, (counts.get(name) || 0) + 1);
+      if (!expectedNames.has(name)) {
+        return {
+          ok: false,
+          message: `${name} isn't part of the program state yet.`,
+        };
+      }
+      if (counts.get(name) > 1) {
+        return { ok: false, message: `There should only be one ${name} box.` };
+      }
+    }
     for (const need of expected) {
       const box = findBox(need);
       if (!box)

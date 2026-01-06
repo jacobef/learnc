@@ -254,11 +254,11 @@
     );
     if (!hasTokens || !declNames.has("apple"))
       return {
-        html: 'Declare apple: try <code class="tok-line">int apple;</code>.',
+        html: 'You need to declare a variable named <code class="tok-name">apple</code>. Look at how variables were declared in the earlier programs.',
       };
     if (!declNames.has("berry"))
       return {
-        html: 'Declare berry: try <code class="tok-line">int berry;</code>.',
+        html: 'You also need to declare a variable named <code class="tok-name">berry</code>.',
       };
     if (Array.isArray(currentState)) {
       const byName = Object.fromEntries(currentState.map((b) => [b.name, b]));
@@ -282,7 +282,7 @@
     );
     if (!appleAssign)
       return {
-        html: 'Store 10 in apple with <code class="tok-line">apple = 10;</code>.',
+        html: '<code class="tok-name">apple</code> needs to end up with a value. Check the target final state.',
       };
     const berryAssign = parsedStatements.find(
       (s) =>
@@ -292,7 +292,7 @@
     );
     if (!berryAssign)
       return {
-        html: 'Store 5 in berry with <code class="tok-line">berry = 5;</code>.',
+        html: '<code class="tok-name">berry</code> also needs to end up with a value. Check the target final state.',
       };
     return {
       html: "Keep lines to simple declarations or assignments ending with semicolons.",

@@ -122,6 +122,19 @@
     }
   }
 
+  function isStepCorrect(boxes, by) {
+    const lookup = by || Object.fromEntries(boxes.map((b) => [b.name, b]));
+    return (
+      boxes.length === 2 &&
+      lookup.hammer &&
+      lookup.drill &&
+      lookup.hammer.type === "int" &&
+      lookup.drill.type === "int" &&
+      lookup.hammer.value === "1" &&
+      lookup.drill.value === "1"
+    );
+  }
+
   function buildHint() {
     const ws = document.getElementById("p5workspace");
     const boxes = [...ws.querySelectorAll(".vbox")].map((v) => readBoxState(v));
@@ -137,7 +150,7 @@
         };
       if (isEmptyVal(by.hammer.value || ""))
         return {
-          html: '<code class="tok-name">hammer</code> already equals <code class="tok-value">1</code> from the earlier assignments.',
+          html: '<code class="tok-name">hammer</code> was assigned a value in line 3. What was it?',
         };
       if (by.hammer.value !== "1")
         return {
@@ -155,15 +168,7 @@
         return {
           html: '<code class="tok-line">hammer = drill;</code> puts <code class="tok-name">drill</code>\'s value into <code class="tok-name">hammer</code>. What should <code class="tok-line">drill = hammer;</code> do?',
         };
-      const ok =
-        boxes.length === 2 &&
-        by.hammer &&
-        by.drill &&
-        by.hammer.type === "int" &&
-        by.drill.type === "int" &&
-        by.hammer.value === "1" &&
-        by.drill.value === "1";
-      if (ok)
+      if (isStepCorrect(boxes, by))
         return {
           html: 'Looks good. Press <span class="btn-ref">Check</span>.',
         };
@@ -287,16 +292,7 @@
     if (!ws) return;
     const boxes = [...ws.querySelectorAll(".vbox")].map((v) => readBoxState(v));
     const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    const hammer = by.hammer;
-    const drill = by.drill;
-    const allTypesOk = boxes.every((b) => b.type === "int");
-    const ok =
-      boxes.length === 2 &&
-      hammer &&
-      drill &&
-      allTypesOk &&
-      hammer.value === "1" &&
-      drill.value === "1";
+    const ok = isStepCorrect(boxes, by);
 
     $("#p5-status").textContent = ok ? "correct" : "incorrect";
     $("#p5-status").className = ok ? "ok" : "err";

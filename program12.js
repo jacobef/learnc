@@ -455,6 +455,19 @@
       readBoxState(v),
     );
     const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
+    const expected = expectedFor(p12.boundary);
+    if (
+      expected.length &&
+      expected.every((need) => by[need.name]) &&
+      expected.some((need) => by[need.name]?.type !== need.type)
+    ) {
+      const wrong = expected.find(
+        (need) => by[need.name]?.type !== need.type,
+      );
+      return {
+        html: `<code class="tok-name">${wrong.name}</code>'s type should be <code class="tok-type">${wrong.type}</code>.`,
+      };
+    }
     if (p12.boundary === 3) {
       if (!by.spark || !by.ember || !by.cinder)
         return {
@@ -462,7 +475,7 @@
         };
       if (by.cinder.value !== "11")
         return {
-          html: "Compute <code class=\"tok-name\">cinder</code> using multiplication before addition.",
+          html: "Compute <code class=\"tok-name\">cinder</code> using multiplication before addition. <code class=\"tok-line\">/* 5 */</code> is a comment.",
         };
     }
     if (p12.boundary === 5) {
@@ -472,11 +485,11 @@
         };
       if (by.cinder.value !== "11")
         return {
-          html: "Compute <code class=\"tok-name\">cinder</code> using multiplication before addition.",
+          html: "Compute <code class=\"tok-name\">cinder</code> using multiplication before addition. <code class=\"tok-line\">/* 5 */</code> is a comment.",
         };
       if (by.ember.value !== "2")
         return {
-          html: "Line 5 is <code class=\"tok-line\">ember = cinder / 3 + - 1</code>.",
+          html: "The order of operations is <code class=\"tok-line\">(cinder / 3) + (-1)</code>.",
         };
       const sparkAddr = by.spark?.addr ?? by.spark?.address ?? String(addr("spark", "int"));
       if (by.flame.value !== String(sparkAddr))
@@ -489,9 +502,14 @@
         return {
           html: "Make sure <code class=\"tok-name\">spark</code>, <code class=\"tok-name\">ember</code>, and <code class=\"tok-name\">flame</code> are present.",
         };
+      if (by.spark.value === "6" || isEmptyVal(by.spark.value || "")) {
+        return {
+          html: `*<code class="tok-name">flame</code> refers to the box whose address is <code class="tok-name">flame</code>'s value (<code class="tok-value">${by.flame?.value ?? "?"}</code>). So, the box with address <code class="tok-addr">${by.flame?.value ?? "?"}</code> needs to be updated.`,
+        };
+      }
       if (by.spark.value !== "24")
         return {
-          html: "<code class=\"tok-line\">*flame = spark * 4</code> updates <code class=\"tok-name\">spark</code>.",
+          html: "<code class=\"tok-name\">spark</code> should be four times its previous value.",
         };
     }
     if (p12.boundary === 10) {
@@ -511,19 +529,39 @@
         return {
           html: "Keep <code class=\"tok-name\">flame</code> in the program state.",
         };
-      if (by.smolder.value !== String(addr("cinder", "int")))
+      const expectedSmolder = String(addr("cinder", "int"));
+      const expectedBlaze = String(addr("smolder", "int*"));
+      const expectedInferno = String(addr("blaze", "int**"));
+      const defaultSmolder = String(addr("ember", "int"));
+      const infernoAddr = by.inferno?.value ?? "?";
+      if (by.smolder.value !== expectedSmolder) {
+        const smolderUnchanged = by.smolder.value === defaultSmolder;
+        if (smolderUnchanged) {
+          return {
+            html: `<code class="tok-name">*inferno</code> refers to the variable whose address is <code class="tok-name">inferno</code>'s value (<code class="tok-value">${infernoAddr}</code>). That variable is <code class="tok-name">blaze</code>. So, what does <code class="tok-name">**inferno</code> refer to? That variable is the one you need to update.`,
+          };
+        }
+        if (
+          by.blaze.value !== expectedBlaze ||
+          by.inferno.value !== expectedInferno
+        ) {
+          return {
+            html: "<code class=\"tok-line\">**inferno = &cinder</code> should update <code class=\"tok-name\">smolder</code>, not <code class=\"tok-name\">blaze</code> or <code class=\"tok-name\">inferno</code>.",
+          };
+        }
         return {
-          html: "<code class=\"tok-line\">**inferno = &cinder</code> updates <code class=\"tok-name\">smolder</code> to hold <code class=\"tok-name\">cinder</code>'s address.",
+          html: "<code class=\"tok-name\">smolder</code> should store <code class=\"tok-name\">cinder</code>'s address.",
         };
+      }
     }
     if (p12.boundary === 11) {
       if (!by.ash)
         return {
-          html: "Add <code class=\"tok-name\">ash</code> from <code class=\"tok-line\">int ash = **blaze-*flame / ember + (***inferno == 24)</code>.",
+          html: "Make a new variable and name it <code class=\"tok-name\">ash</code>.",
         };
       if (by.ash.value !== "-1")
         return {
-          html: "Mind precedence and spacing, then update <code class=\"tok-name\">ash</code>.",
+          html: "The order of operations is <code class=\"tok-line\">(**blaze - (*flame / ember)) + (***inferno == 24)</code>.",
         };
     }
     const verdict = validateWorkspace(p12.boundary, boxes);
