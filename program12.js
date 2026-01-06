@@ -561,7 +561,7 @@
         };
       if (by.ash.value !== "-1")
         return {
-          html: "The order of operations is <code class=\"tok-line\">(**blaze - (*flame / ember)) + (***inferno == 24)</code>.",
+          html: "The order of operations is <code class=\"tok-line\">(**blaze - (*flame / ember)) + (***inferno == 24)</code>.<br><br>If you're completely lost, you can paste lines 1-10 into the <a href=\"sandbox.html\" target=\"_blank\" rel=\"noopener\" onclick=\"const w = window.open('sandbox.html', '_blank'); if (w) w.focus(); return false;\">Sandbox</a>, and use \"Evaluate expression\" to check, for example, what ***inferno is. Make sure to open it in a new tab, since your progress will not be saved if you switch from this page.",
         };
     }
     const verdict = validateWorkspace(p12.boundary, boxes);
