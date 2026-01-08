@@ -6,6 +6,7 @@
     isEmptyVal,
     createSimpleSimulator,
     updateStepperTopControls,
+    confettiRain,
   } = MB;
 
   const instructions = $("#sandbox-instructions");
@@ -31,6 +32,7 @@
       '[data-stepper="next"][data-prefix="sandbox"]',
     ),
   ].filter(Boolean);
+  let finishedConfettiShown = false;
   const highlightEl = (() => {
     if (!editor || !editor.parentElement) return null;
     const el = document.createElement("pre");
@@ -488,6 +490,10 @@
     instructions.classList.toggle("sandbox-finished", finished);
     if (finished) {
       instructions.innerHTML = `You finished the tutorial as it currently exists, congrats! Many more problems will be coming later.<br><br>${message}`;
+      if (!finishedConfettiShown && typeof confettiRain === "function") {
+        finishedConfettiShown = true;
+        confettiRain();
+      }
     } else {
       instructions.innerHTML = message;
     }

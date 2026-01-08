@@ -6,7 +6,6 @@
     isEmptyVal,
     flashStatus,
     pulseNextButton,
-    confettiRain,
   } = MB;
 
   const instructions = $("#dq-instructions");
@@ -28,7 +27,6 @@
     selected: null,
     awaitingNext: false,
     lastResult: null,
-    confettiShown: false,
   };
 
   function randInt(min, max) {
@@ -364,10 +362,6 @@
         if (checkBtn) checkBtn.disabled = true;
         quiz.awaitingNext = true;
         quiz.lastResult = "correct";
-        if (!quiz.confettiShown && typeof confettiRain === "function") {
-          quiz.confettiShown = true;
-          confettiRain();
-        }
         pulseNext();
         return;
       }
