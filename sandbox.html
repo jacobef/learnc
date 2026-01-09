@@ -8,7 +8,7 @@
     </head>
     <body>
         <div class="wrap">
-                                                            <nav class="tabs">
+            <nav class="tabs">
                 <a href="index.html">Home</a>
                 <a href="program1.html">1. Assignment I</a>
                 <a href="program2.html">2. Declaration</a>
@@ -26,59 +26,68 @@
                 <a href="sandbox.html" class="active">Sandbox</a>
             </nav>
             <div class="main">
-                <p id="sandbox-instructions" class="intro"></p>
+                <p data-role="sandbox-instructions" class="intro"></p>
 
                 <section>
                     <div class="row">
                         <div class="panel">
                             <div class="panel-title code-title">Code</div>
-                            <div id="sandbox-code" class="codepane">
+                            <div data-role="sandbox-code" class="codepane">
                                 <div class="codepane-row">
                                     <div
-                                        id="sandbox-line-numbers"
+                                        data-role="sandbox-line-numbers"
                                         class="code-gutter"
                                         aria-hidden="true"
                                     ></div>
                                     <div class="code-editor-wrap">
                                         <textarea
-                                            id="sandbox-editor"
+                                            data-role="sandbox-editor"
                                             class="code-textarea"
                                             spellcheck="false"
                                             rows="4"
                                         ></textarea>
                                     </div>
                                     <div
-                                        id="sandbox-error-gutter"
+                                        data-role="sandbox-error-gutter"
                                         class="code-error-gutter"
                                         aria-hidden="true"
                                     ></div>
                                 </div>
                             </div>
                             <div
-                                id="sandbox-error-detail"
+                                data-role="sandbox-error-detail"
                                 class="hint-inline hidden"
                             ></div>
                             <div class="controls">
-                                <button id="sandbox-prev">Back ◀</button>
-                                <button id="sandbox-next">Run line 1 ▶</button>
+                                <button data-role="sandbox-prev">
+                                    Back ◀
+                                </button>
+                                <button data-role="sandbox-next">
+                                    Run line 1 ▶
+                                </button>
                             </div>
                         </div>
-                        <div class="panel program-state-panel sandbox-state-panel">
+                        <div
+                            class="panel program-state-panel sandbox-state-panel"
+                        >
                             <div class="panel-title">Program state</div>
-                            <div id="sandbox-stage"></div>
+                            <div data-role="sandbox-stage"></div>
                             <div class="expr-panel">
-                                <label for="sandbox-expr" class="expr-title">
+                                <label class="expr-title">
                                     Evaluate expression
                                 </label>
                                 <input
-                                    id="sandbox-expr"
+                                    data-role="sandbox-expr"
                                     class="expr-input"
                                     type="text"
                                     spellcheck="false"
                                 />
-                                <div id="sandbox-expr-result" class="grid"></div>
                                 <div
-                                    id="sandbox-expr-error"
+                                    data-role="sandbox-expr-result"
+                                    class="grid"
+                                ></div>
+                                <div
+                                    data-role="sandbox-expr-error"
                                     class="hint-inline hidden"
                                 ></div>
                             </div>
@@ -88,7 +97,9 @@
             </div>
         </div>
 
-        <script src="shared.js"></script>
+        <script src="shared-core.js"></script>
+        <script src="shared-program-template.js"></script>
+        <script src="shared-code-editor.js"></script>
         <script src="confetti.js"></script>
         <script src="sandbox.js"></script>
     </body>

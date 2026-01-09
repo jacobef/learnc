@@ -23,67 +23,6 @@
     return depth;
   }
 
-  function normalizeNamesList(box) {
-    if (!box) return [];
-    const baseName =
-      box.name !== undefined && box.name !== null ? String(box.name) : "";
-    let names = Array.isArray(box.names) ? [...box.names] : [];
-    names = names.filter((n) => n !== undefined && n !== null);
-    if (baseName) {
-      names = names.filter((n) => n !== baseName);
-      names.unshift(baseName);
-    }
-    return names;
-  }
-
-  function walkPointerAliasChain(boxes, startAddr, depth, cb) {
-    if (!Array.isArray(boxes) || !boxes.length) return;
-    if (!Number.isFinite(depth) || depth < 1) return;
-    if (startAddr == null || isEmptyVal(String(startAddr))) return;
-    let current = boxes.find(
-      (b) => String(b.address ?? "") === String(startAddr),
-    );
-    for (let level = 1; level <= depth; level++) {
-      if (!current) break;
-      cb(current, level);
-      if (level === depth) break;
-      const nextAddr = current.value;
-      if (nextAddr == null || isEmptyVal(String(nextAddr))) break;
-      current = boxes.find(
-        (b) => String(b.address ?? "") === String(nextAddr),
-      );
-    }
-  }
-
-  function removePointerAliasesFromValue(boxes, ptrName, ptrType, ptrValue) {
-    if (!ptrName) return;
-    const depth = getPointerDepth(ptrType);
-    walkPointerAliasChain(boxes, ptrValue, depth, (box, level) => {
-      const alias = `${"*".repeat(level)}${ptrName}`;
-      const names = normalizeNamesList(box).filter((n) => n !== alias);
-      box.names = names;
-    });
-  }
-
-  function addPointerAliasesFromValue(boxes, ptrName, ptrType, ptrValue) {
-    if (!ptrName) return;
-    const depth = getPointerDepth(ptrType);
-    walkPointerAliasChain(boxes, ptrValue, depth, (box, level) => {
-      const alias = `${"*".repeat(level)}${ptrName}`;
-      const names = normalizeNamesList(box);
-      if (!names.includes(alias)) names.push(alias);
-      box.names = names;
-    });
-  }
-
-  function refreshPointerAliases(boxes, target, oldValue) {
-    if (!target) return;
-    const depth = getPointerDepth(target.type);
-    if (!Number.isFinite(depth) || depth < 1) return;
-    removePointerAliasesFromValue(boxes, target.name, target.type, oldValue);
-    addPointerAliasesFromValue(boxes, target.name, target.type, target.value);
-  }
-
   function typeInfo(type = "int") {
     const { base, depth } = parseType(type);
     if (!base) return { size: 4, align: 4 };
@@ -96,7 +35,7 @@
   function randAddr(type = "int") {
     const { size, align } = typeInfo(type);
     if (nextAddr == null) {
-      const base = 64 + Math.floor(Math.random() * 960);
+      const base = 64 + Math.floor(Math.random() * 837);
       nextAddr = Math.max(align, Math.ceil(base / align) * align);
     }
     if (nextAddr % align !== 0) {
@@ -109,10 +48,6 @@
   randAddr.reset = function (seed = null) {
     nextAddr = seed;
   };
-
-  function isEmptyVal(s) {
-    return s.trim() === "" || /^empty$/i.test(s.trim());
-  }
 
   function normalizeZeroDisplay(value) {
     const trimmed = String(value ?? "").trim();
@@ -147,17 +82,15 @@
     if (!panel) return null;
     const controls = [...panel.querySelectorAll(".controls")].find((el) => {
       return (
-        el.querySelector('button[id$="-prev"]') &&
-        el.querySelector('button[id$="-next"]')
+        el.querySelector('button[data-stepper="prev"]') &&
+        el.querySelector('button[data-stepper="next"]')
       );
     });
     if (!controls) return null;
-    const prev = controls.querySelector('button[id$="-prev"]');
-    const next = controls.querySelector('button[id$="-next"]');
+    const prev = controls.querySelector('button[data-stepper="prev"]');
+    const next = controls.querySelector('button[data-stepper="next"]');
     if (!prev || !next) return null;
-    const prefix = prev.id.replace(/-prev$/, "");
-    if (!prefix || next.id !== `${prefix}-next`) return null;
-    return { prefix, prev, next };
+    return { prev, next };
   }
 
   function ensureStepperTopControls(codepane) {
@@ -167,20 +100,15 @@
     if (!panel) return null;
     const info = findStepperControls(panel);
     if (!info) return null;
-    let top = panel.querySelector(
-      `.controls-top[data-prefix="${info.prefix}"]`,
-    );
+    let top = panel.querySelector(".controls-top");
     if (!top) {
       top = document.createElement("div");
       top.className = "controls controls-top hidden";
-      top.dataset.prefix = info.prefix;
       const prevBtn = document.createElement("button");
       prevBtn.dataset.stepper = "prev";
-      prevBtn.dataset.prefix = info.prefix;
       prevBtn.textContent = info.prev.textContent || "Back ◀";
       const nextBtn = document.createElement("button");
       nextBtn.dataset.stepper = "next";
-      nextBtn.dataset.prefix = info.prefix;
       nextBtn.textContent = info.next.textContent || "Run line 1 ▶";
       top.appendChild(prevBtn);
       top.appendChild(nextBtn);
@@ -243,18 +171,13 @@
     entry?.update();
   }
 
-  const TOP_STEPPER_NOTICE =
-    'This one is long, so I\'ve placed the <span class="btn-ref">Back ◀</span> and <span class="btn-ref">Run line 1 ▶</span> buttons on the top as well as the bottom.';
-
   const MOBILE_MEDIA_QUERY = "(max-width: 900px)";
 
   function isMobileViewport() {
     return window.matchMedia && window.matchMedia(MOBILE_MEDIA_QUERY).matches;
   }
 
-  function isStepperTopVisible(prefix) {
-    if (!prefix) return false;
-    const codepane = document.getElementById(`${prefix}-code`);
+  function isStepperTopVisible(codepane) {
     if (!codepane) return false;
     const entry = ensureStepperTopControls(codepane);
     if (!entry) return false;
@@ -262,12 +185,92 @@
     return !!entry.needsTop;
   }
 
-  function prependTopStepperNotice(prefix, message, { html = false } = {}) {
-    if (!message) return message;
-    if (isMobileViewport()) return message;
-    if (!isStepperTopVisible(prefix)) return message;
-    if (html) return `${TOP_STEPPER_NOTICE}<br>${message}`;
-    return `${TOP_STEPPER_NOTICE}\n${message}`;
+  const DEFAULT_NAV_ITEMS = [
+    { href: "index.html", label: "Home" },
+    { href: "program1.html", label: "1. Assignment I" },
+    { href: "program2.html", label: "2. Declaration" },
+    { href: "program3.html", label: "3. Initialization" },
+    { href: "program4.html", label: "4. Code Editing I" },
+    { href: "program5.html", label: "5. Code Editing II" },
+    { href: "program6.html", label: "6. Assignment II" },
+    { href: "program7.html", label: "7. Pointers" },
+    { href: "program8.html", label: "8. Dereferencing" },
+    { href: "dereferencing-quiz.html", label: "Dereferencing Quiz" },
+    { href: "program9.html", label: "9. Whitespace & Comments" },
+    { href: "program10.html", label: "10. Integer Arithmetic" },
+    { href: "program11.html", label: "11. Assignment III" },
+    { href: "program12.html", label: "12. Review" },
+    { href: "sandbox.html", label: "Sandbox" },
+  ];
+
+  function normalizeNavHref(href = "") {
+    const clean = String(href || "")
+      .split("#")[0]
+      .split("?")[0];
+    const parts = clean.split("/").filter(Boolean);
+    return parts[parts.length - 1] || "index.html";
+  }
+
+  function currentNavHref() {
+    const pathname = window.location?.pathname || "";
+    const cleaned = normalizeNavHref(pathname);
+    return cleaned || "index.html";
+  }
+
+  function resolveActiveNavItem(items = DEFAULT_NAV_ITEMS, activeHref) {
+    const list =
+      Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
+    const current = normalizeNavHref(activeHref || currentNavHref());
+    return list.find((item) => normalizeNavHref(item?.href || "") === current);
+  }
+
+  function buildNav(items = DEFAULT_NAV_ITEMS, { activeHref } = {}) {
+    const list =
+      Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
+    const current = normalizeNavHref(activeHref || currentNavHref());
+    const nav = document.createElement("nav");
+    nav.className = "tabs";
+    list.forEach((item) => {
+      if (!item) return;
+      const link = document.createElement("a");
+      link.href = item.href || "#";
+      link.textContent = item.label || "";
+      if (normalizeNavHref(item.href || "") === current) {
+        link.classList.add("active");
+        link.setAttribute("aria-current", "page");
+      }
+      nav.appendChild(link);
+    });
+    return nav;
+  }
+
+  function ensureBaseLayout({ navItems, activeHref } = {}) {
+    let wrap = document.querySelector(".wrap");
+    let nav =
+      wrap?.querySelector("nav.tabs") || document.querySelector("nav.tabs");
+    let main = wrap?.querySelector(".main") || document.querySelector(".main");
+    if (!wrap) {
+      wrap = document.createElement("div");
+      wrap.className = "wrap";
+    }
+    if (!nav) {
+      nav = buildNav(navItems, { activeHref });
+      wrap.appendChild(nav);
+    }
+    if (!main) {
+      main = document.createElement("div");
+      main.className = "main";
+      wrap.appendChild(main);
+    }
+    if (!wrap.isConnected) {
+      const mount = document.body;
+      const firstScript = mount?.querySelector("script");
+      if (mount) {
+        if (firstScript) mount.insertBefore(wrap, firstScript);
+        else mount.appendChild(wrap);
+      }
+    }
+    return { wrap, nav, main };
   }
 
   function initStepperTopControls() {
@@ -345,54 +348,6 @@
     updateStepperTopControls(root);
   }
 
-  function renderCodePaneEditable(root, lines, boundary = null) {
-    root.innerHTML = "";
-    const code = el('<div class="codecol"></div>');
-    root.appendChild(code);
-    const addBoundary = () =>
-      code.appendChild(el('<div class="boundary"></div>'));
-    if (boundary === 0) addBoundary();
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i] || {};
-      const text = line.text ?? "";
-      const lr = el('<div class="line code-row"></div>');
-      const ln = el(`<div class="ln">${i + 1}</div>`);
-      const src = el('<div class="src"></div>');
-      src.textContent = text;
-      if (line.editable) {
-        src.contentEditable = "true";
-        src.classList.add("code-editable");
-        src.dataset.index = String(i);
-        disableAutoText(src);
-        const placeholder = line.placeholder ?? "";
-        if (!text.trim()) {
-          src.textContent = placeholder;
-          if (placeholder) src.classList.add("placeholder", "muted");
-        }
-        src.dataset.placeholder = placeholder;
-      }
-      if (boundary != null && i < boundary) lr.classList.add("done");
-      lr.appendChild(ln);
-      lr.appendChild(src);
-      code.appendChild(lr);
-      if (boundary != null && i + 1 === boundary) addBoundary();
-    }
-    updateStepperTopControls(root);
-  }
-
-  function readEditableCodeLines(root) {
-    if (!root) return {};
-    const map = {};
-    root.querySelectorAll(".code-editable").forEach((el) => {
-      const idx = Number(el.dataset.index || -1);
-      if (idx >= 0) {
-        const content = txt(el);
-        map[idx] = content;
-      }
-    });
-    return map;
-  }
-
   function stripLineComments(src = "") {
     let out = "";
     let i = 0;
@@ -466,11 +421,7 @@
       const base = m[1];
       const stars = m[2] || "";
       const type =
-        stars === "**"
-          ? `${base}**`
-          : stars === "*"
-            ? `${base}*`
-            : base;
+        stars === "**" ? `${base}**` : stars === "*" ? `${base}*` : base;
       return { kind: "decl", name: m[3], type };
     }
     m = s.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?\d+)\s*;$/);
@@ -499,7 +450,7 @@
         boxes.push({
           name: stmt.name,
           type,
-          value: "empty",
+          value: "",
           address: alloc(type),
         });
       }
@@ -519,29 +470,17 @@
       const refBox = by[stmt.ref];
       if (!refBox || !refBox.address) return null;
       if (!isRefCompatible(target.type, refBox.type)) return null;
-      const oldValue = target.value;
       target.value = String(refBox.address);
-      refreshPointerAliases(boxes, target, oldValue);
       return boxes;
     }
     if (stmt.kind === "assignDeref") {
       const ptr = by[stmt.name];
       const { base, depth } = parseType(ptr?.type);
-      if (
-        !ptr ||
-        !base ||
-        depth !== 1 ||
-        !ptr.value ||
-        ptr.value === "empty"
-      )
+      if (!ptr || !base || depth !== 1 || String(ptr.value ?? "") === "")
         return null;
       const targetBox = boxes.find((b) => b.address === String(ptr.value));
       if (!targetBox) return null;
       targetBox.value = String(stmt.value);
-      const alias = `*${stmt.name}`;
-      const names = targetBox.names || [targetBox.name].filter(Boolean);
-      if (!names.includes(alias)) names.push(alias);
-      targetBox.names = names;
       return boxes;
     }
     return boxes;
@@ -960,7 +899,9 @@
           hasDeclaredPrefix(tokens[j].value, declaredNames)
         );
       }
-      return isExpressionPrefix(tokens.slice(idx), { allowVars: allowVarAssign });
+      return isExpressionPrefix(tokens.slice(idx), {
+        allowVars: allowVarAssign,
+      });
     }
 
     function isDerefPrefix(tokens, declaredNames) {
@@ -989,7 +930,9 @@
         if (idx === tokens.length - 1) return true;
         return idx === tokens.length - 2 && tokens[idx + 1].type === "ident";
       }
-      return isExpressionPrefix(tokens.slice(idx), { allowVars: allowVarAssign });
+      return isExpressionPrefix(tokens.slice(idx), {
+        allowVars: allowVarAssign,
+      });
     }
 
     function isStatementPrefix(tokens, declaredNames, allowIntPrefix) {
@@ -1054,7 +997,8 @@
           const expr = parseEquality();
           if (!expr) return null;
           const close = next();
-          if (!close || close.type !== "sym" || close.value !== ")") return null;
+          if (!close || close.type !== "sym" || close.value !== ")")
+            return null;
           idx++;
           return expr;
         }
@@ -1083,7 +1027,11 @@
         if (!left) return null;
         while (true) {
           const tok = next();
-          if (!tok || tok.type !== "sym" || (tok.value !== "*" && tok.value !== "/"))
+          if (
+            !tok ||
+            tok.type !== "sym" ||
+            (tok.value !== "*" && tok.value !== "/")
+          )
             break;
           idx++;
           const right = parseUnary();
@@ -1098,7 +1046,11 @@
         if (!left) return null;
         while (true) {
           const tok = next();
-          if (!tok || tok.type !== "sym" || (tok.value !== "+" && tok.value !== "-"))
+          if (
+            !tok ||
+            tok.type !== "sym" ||
+            (tok.value !== "+" && tok.value !== "-")
+          )
             break;
           idx++;
           const right = parseMulDiv();
@@ -1160,12 +1112,18 @@
 
       function coerceScalar(result) {
         if (!result)
-          return { error: "That expression is not valid here.", kind: "compile" };
+          return {
+            error: "That expression is not valid here.",
+            kind: "compile",
+          };
         if (!Number.isFinite(result.depth) || result.depth !== 0)
-          return { error: "Pointer arithmetic is not supported here.", kind: "compile" };
+          return {
+            error: "Pointer arithmetic is not supported here.",
+            kind: "compile",
+          };
         const raw = result.value;
         if (result.kind === "lvalue") {
-          if (requireValue && isEmptyVal(String(raw ?? ""))) {
+          if (requireValue && String(raw ?? "") === "") {
             const label = result.label || "That value";
             return { error: `${label} doesn't have a value yet.`, kind: "ub" };
           }
@@ -1181,19 +1139,28 @@
 
       function evalNode(node) {
         if (!node)
-          return { error: "That expression is not valid here.", kind: "compile" };
+          return {
+            error: "That expression is not valid here.",
+            kind: "compile",
+          };
         if (node.kind === "num") {
           const err = numericLiteralErrorForType(node.value, targetType);
           if (err) return err;
           try {
             return makeRvalue(BigInt(String(node.value)), targetBase);
           } catch {
-            return { error: "That number is too large to represent.", kind: "compile" };
+            return {
+              error: "That number is too large to represent.",
+              kind: "compile",
+            };
           }
         }
         if (node.kind === "var") {
           if (!allowVars)
-            return { error: "Assignments should use a number.", kind: "compile" };
+            return {
+              error: "Assignments should use a number.",
+              kind: "compile",
+            };
           const box = by[node.name];
           if (!box)
             return {
@@ -1223,7 +1190,7 @@
               };
             }
             const ptrRaw = rhs.value;
-            if (requireValue && isEmptyVal(String(ptrRaw ?? ""))) {
+            if (requireValue && String(ptrRaw ?? "") === "") {
               const sourceLabel = rhs.label || "That pointer";
               return {
                 error: `${sourceLabel} doesn't have a value yet, so it can't be dereferenced.`,
@@ -1231,7 +1198,7 @@
               };
             }
             const ptrVal = String(ptrRaw ?? "").trim();
-            if (!ptrVal || /^empty$/i.test(ptrVal)) {
+            if (ptrVal === "") {
               const sourceLabel = rhs.label || "That pointer";
               return {
                 error: `${sourceLabel} doesn't have a value yet, so it can't be dereferenced.`,
@@ -1252,9 +1219,11 @@
           const scalar = coerceScalar(rhs);
           if (scalar.error) return scalar;
           if (node.op === "+") return makeRvalue(scalar.value, scalar.base);
-          if (node.op === "-")
-            return makeRvalue(-scalar.value, scalar.base);
-          return { error: "That expression is not valid here.", kind: "compile" };
+          if (node.op === "-") return makeRvalue(-scalar.value, scalar.base);
+          return {
+            error: "That expression is not valid here.",
+            kind: "compile",
+          };
         }
         if (node.kind === "binary") {
           const left = evalNode(node.left);
@@ -1275,11 +1244,17 @@
             return { error: "Division by 0 is undefined.", kind: "ub" };
           let value = 0n;
           if (node.op === "+") value = leftScalar.value + rightScalar.value;
-          else if (node.op === "-") value = leftScalar.value - rightScalar.value;
-          else if (node.op === "*") value = leftScalar.value * rightScalar.value;
-          else if (node.op === "/") value = leftScalar.value / rightScalar.value;
+          else if (node.op === "-")
+            value = leftScalar.value - rightScalar.value;
+          else if (node.op === "*")
+            value = leftScalar.value * rightScalar.value;
+          else if (node.op === "/")
+            value = leftScalar.value / rightScalar.value;
           else
-            return { error: "That expression is not valid here.", kind: "compile" };
+            return {
+              error: "That expression is not valid here.",
+              kind: "compile",
+            };
           const base =
             leftScalar.base === "long" || rightScalar.base === "long"
               ? "long"
@@ -1554,7 +1529,7 @@
       const target = by[stmt.name];
       const source = by[stmt.src];
       if (!target || !source) return null;
-      if (requireSourceValue && isEmptyVal(source.value ?? "")) return null;
+      if (requireSourceValue && String(source.value ?? "") === "") return null;
       const { base: targetBase, depth: targetDepth } = parseType(target.type);
       const { base: sourceBase, depth: sourceDepth } = parseType(source.type);
       const sameType = target.type === source.type;
@@ -1566,11 +1541,7 @@
         sourceDepth === 0;
       const isPtr = sameType && isPointerType(target.type);
       if (!isScalar && !isPtr) return null;
-      const oldValue = target.value;
-      target.value = String(source.value ?? "empty");
-      if (isPtr) {
-        refreshPointerAliases(boxes, target, oldValue);
-      }
+      target.value = String(source.value ?? "");
       return boxes;
     }
 
@@ -1586,11 +1557,7 @@
         targetType: target.type,
       });
       if (evaluated.error) return null;
-      const oldValue = target.value;
       target.value = String(evaluated.value);
-      if (depth > 0) {
-        refreshPointerAliases(boxes, target, oldValue);
-      }
       return boxes;
     }
 
@@ -1601,9 +1568,7 @@
       const refBox = by[stmt.ref];
       if (!target || !refBox || !refBox.address) return null;
       if (!isRefCompatible(target.type, refBox.type)) return null;
-      const oldValue = target.value;
       target.value = String(refBox.address);
-      refreshPointerAliases(boxes, target, oldValue);
       return boxes;
     }
 
@@ -1614,7 +1579,7 @@
       let current = ptr;
       for (let i = 0; i < depth; i++) {
         if (!isPointerType(current.type)) return { error: "type" };
-        if (!current.value || current.value === "empty")
+        if (String(current.value ?? "") === "")
           return { error: "empty" };
         const next = state.find((b) => b.address === String(current.value));
         if (!next) return { error: "unknown" };
@@ -1629,7 +1594,6 @@
       if (!target) return null;
       const { base: targetBase, depth: targetDepth } = parseType(target.type);
       if (!Number.isFinite(targetDepth)) return null;
-      const oldValue = target.value;
       if (stmt.kind === "assignDeref") {
         if (targetDepth !== 0) return null;
         target.value = String(stmt.value);
@@ -1637,7 +1601,7 @@
         const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
         const source = by[stmt.src];
         if (!source) return null;
-        if (requireSourceValue && isEmptyVal(source.value ?? "")) return null;
+        if (requireSourceValue && String(source.value ?? "") === "") return null;
         const { base: sourceBase, depth: sourceDepth } = parseType(source.type);
         if (
           !sourceBase ||
@@ -1646,16 +1610,13 @@
           sourceDepth !== targetDepth
         )
           return null;
-        target.value = String(source.value ?? "empty");
+        target.value = String(source.value ?? "");
       } else if (stmt.kind === "assignDerefRef") {
         const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
         const refBox = by[stmt.ref];
         if (!refBox || !refBox.address) return null;
         if (!isRefCompatible(target.type, refBox.type)) return null;
         target.value = String(refBox.address);
-      }
-      if (targetDepth > 0) {
-        refreshPointerAliases(boxes, target, oldValue);
       }
       return boxes;
     }
@@ -1702,7 +1663,7 @@
             return { error: "not_deref", label: nextLabel };
           }
           const ptrVal = String(current.value ?? "").trim();
-          if (!ptrVal || /^empty$/i.test(ptrVal)) {
+          if (ptrVal === "") {
             return { error: "empty", label };
           }
           const target = state.find(
@@ -1765,7 +1726,7 @@
             return { error: "not_deref", label: nextLabel };
           }
           const ptrVal = String(current.value ?? "").trim();
-          if (!ptrVal || /^empty$/i.test(ptrVal)) {
+          if (ptrVal === "") {
             return { error: "empty", label };
           }
           const target = state.find(
@@ -1863,7 +1824,7 @@
         );
       }
       if (result.kind === "lvalue") {
-        if (requireSourceValue && isEmptyVal(result.value ?? "")) {
+        if (requireSourceValue && String(result.value ?? "") === "") {
           return {
             error: `${resolved.label} doesn't have a value yet.`,
             kind: "ub",
@@ -1960,14 +1921,9 @@
       )
         return null;
       if (targetBase !== resultBase || targetDepth !== resultDepth) return null;
-      const value =
-        result.kind === "lvalue" ? result.box?.value : result.value;
-      if (requireSourceValue && isEmptyVal(value ?? "")) return null;
-      const oldValue = target.value;
-      target.value = String(value ?? "empty");
-      if (targetDepth > 0) {
-        refreshPointerAliases(boxes, target, oldValue);
-      }
+      const value = result.kind === "lvalue" ? result.box?.value : result.value;
+      if (requireSourceValue && String(value ?? "") === "") return null;
+      target.value = String(value ?? "");
       return boxes;
     }
 
@@ -1992,12 +1948,8 @@
       )
         return null;
       if (targetBase !== sourceBase || targetDepth !== sourceDepth) return null;
-      if (requireSourceValue && isEmptyVal(source.value ?? "")) return null;
-      const oldValue = target.value;
-      target.value = String(source.value ?? "empty");
-      if (targetDepth > 0) {
-        refreshPointerAliases(boxes, target, oldValue);
-      }
+      if (requireSourceValue && String(source.value ?? "") === "") return null;
+      target.value = String(source.value ?? "");
       return boxes;
     }
 
@@ -2102,7 +2054,7 @@
 
     function missingDeclError(name, typeLabel = "int") {
       const text = `You can't assign to ${name} before declaring it. You need to first declare it (${typeLabel} ${name};) prior to this line.`;
-      const html = `You can't assign to <code class="tok-name">${name}</code> before declaring it. You need to first declare it (<code class="tok-line">${typeLabel} ${name};</code>) prior to this line.`;
+      const html = `You can't assign to <code class="tok-name">${name}</code> before declaring it. You need to first declare it (<code class="tok-code">${typeLabel} ${name};</code>) prior to this line.`;
       return { error: { text, html }, kind: "compile" };
     }
 
@@ -2250,7 +2202,7 @@
               kind: "compile",
             };
           }
-          if (requireSourceValue && isEmptyVal(by[parsed.src].value ?? "")) {
+          if (requireSourceValue && String(by[parsed.src].value ?? "") === "") {
             return {
               error: `${parsed.src} doesn't have a value yet.`,
               kind: "ub",
@@ -2339,7 +2291,7 @@
                 makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
               );
             }
-            if (!current.value || current.value === "empty") {
+            if (String(current.value ?? "") === "") {
               return {
                 error: `${derefLabel} doesn't have a value yet.`,
                 kind: "ub",
@@ -2354,7 +2306,7 @@
             }
             current = next;
           }
-          if (requireSourceValue && isEmptyVal(current.value ?? "")) {
+          if (requireSourceValue && String(current.value ?? "") === "") {
             return {
               error: `${derefLabel} doesn't have a value yet.`,
               kind: "ub",
@@ -2409,7 +2361,7 @@
             kind: "compile",
           };
         }
-        if (requireSourceValue && isEmptyVal(by[parsed.src].value ?? "")) {
+        if (requireSourceValue && String(by[parsed.src].value ?? "") === "") {
           return {
             error: `${parsed.src} doesn't have a value yet.`,
             kind: "ub",
@@ -2450,17 +2402,20 @@
           };
         }
         if (resolved?.error === "not_lvalue") {
-          return { error: "That assignment is not valid here.", kind: "compile" };
+          return {
+            error: "That assignment is not valid here.",
+            kind: "compile",
+          };
         }
         const target = resolved?.target;
         if (!target) {
-          return { error: "That assignment is not valid here.", kind: "compile" };
+          return {
+            error: "That assignment is not valid here.",
+            kind: "compile",
+          };
         }
         if (parsed.rhs.kind === "num") {
-          const err = numericLiteralErrorForType(
-            parsed.rhs.value,
-            target.type,
-          );
+          const err = numericLiteralErrorForType(parsed.rhs.value, target.type);
           if (err) return err;
         } else if (parsed.rhs.kind === "var") {
           const source = by[parsed.rhs.name];
@@ -2470,14 +2425,18 @@
               kind: "compile",
             };
           }
-          if (requireSourceValue && isEmptyVal(source.value ?? "")) {
+          if (requireSourceValue && String(source.value ?? "") === "") {
             return {
               error: `${parsed.rhs.name} doesn't have a value yet.`,
               kind: "ub",
             };
           }
-          const { base: targetBase, depth: targetDepth } = parseType(target.type);
-          const { base: sourceBase, depth: sourceDepth } = parseType(source.type);
+          const { base: targetBase, depth: targetDepth } = parseType(
+            target.type,
+          );
+          const { base: sourceBase, depth: sourceDepth } = parseType(
+            source.type,
+          );
           const sameType = target.type === source.type;
           const isScalar =
             targetBase &&
@@ -2519,7 +2478,9 @@
           }
           const depth = parsed.rhs.depth || 1;
           const { base: ptrBase, depth: ptrDepth } = parseType(ptr.type);
-          const { base: targetBase, depth: targetDepth } = parseType(target.type);
+          const { base: targetBase, depth: targetDepth } = parseType(
+            target.type,
+          );
           if (!ptrBase || !targetBase) {
             return typeMismatchError(
               parsed.rhs.name,
@@ -2549,15 +2510,13 @@
                 makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
               );
             }
-            if (!current.value || current.value === "empty") {
+            if (String(current.value ?? "") === "") {
               return {
                 error: `${derefLabel} doesn't have a value yet.`,
                 kind: "ub",
               };
             }
-            const next = state.find(
-              (b) => b.address === String(current.value),
-            );
+            const next = state.find((b) => b.address === String(current.value));
             if (!next) {
               return {
                 error: `${parsed.rhs.name} doesn't point to a known variable.`,
@@ -2566,7 +2525,7 @@
             }
             current = next;
           }
-          if (requireSourceValue && isEmptyVal(current.value ?? "")) {
+          if (requireSourceValue && String(current.value ?? "") === "") {
             return {
               error: `${derefLabel} doesn't have a value yet.`,
               kind: "ub",
@@ -2716,7 +2675,7 @@
               makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
             );
           }
-          if (!current.value || current.value === "empty") {
+          if (String(current.value ?? "") === "") {
             return {
               error: `${parsed.name} doesn't have a value yet.`,
               kind: "ub",
@@ -2732,7 +2691,7 @@
           current = next;
         }
         if (parsed.kind === "assignDerefVar") {
-          if (requireSourceValue && isEmptyVal(by[parsed.src].value ?? "")) {
+          if (requireSourceValue && String(by[parsed.src].value ?? "") === "") {
             return {
               error: `${parsed.src} doesn't have a value yet.`,
               kind: "ub",
@@ -2791,7 +2750,7 @@
               makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
             );
           }
-          if (!current.value || current.value === "empty") {
+          if (String(current.value ?? "") === "") {
             return {
               error: `${derefLabel} doesn't have a value yet.`,
               kind: "ub",
@@ -2806,7 +2765,7 @@
           }
           current = next;
         }
-        if (requireSourceValue && isEmptyVal(current.value ?? "")) {
+        if (requireSourceValue && String(current.value ?? "") === "") {
           return {
             error: `${derefLabel} doesn't have a value yet.`,
             kind: "ub",
@@ -2852,26 +2811,63 @@
       return parts;
     }
 
-    function findMissingSemicolonInTokens(tokens) {
-      for (let i = 1; i <= tokens.length; i++) {
-        if (parseStatementTokens(tokens.slice(0, i))) {
-          if (i < tokens.length) return tokens[i - 1].line;
+    function findMissingSemicolonLines(text) {
+      const lines = String(text ?? "").split(/\r?\n/);
+      const missing = [];
+      const patched = [];
+      let inBlock = false;
+      lines.forEach((line, idx) => {
+        const raw = String(line ?? "");
+        let i = 0;
+        let lastCodeIndex = -1;
+        let sawCode = false;
+        while (i < raw.length) {
+          const ch = raw[i];
+          const next = raw[i + 1];
+          if (inBlock) {
+            if (ch === "*" && next === "/") {
+              inBlock = false;
+              i += 2;
+              continue;
+            }
+            i += 1;
+            continue;
+          }
+          if (ch === "/" && next === "/") break;
+          if (ch === "/" && next === "*") {
+            inBlock = true;
+            i += 2;
+            continue;
+          }
+          if (!/\s/.test(ch)) {
+            sawCode = true;
+            lastCodeIndex = i;
+          }
+          i += 1;
         }
-      }
-      return null;
+        if (!sawCode) {
+          patched.push(raw);
+          return;
+        }
+        if (raw[lastCodeIndex] === ";") {
+          patched.push(raw);
+          return;
+        }
+        missing.push(idx + 1);
+        patched.push(
+          `${raw.slice(0, lastCodeIndex + 1)};${raw.slice(lastCodeIndex + 1)}`,
+        );
+      });
+      if (!missing.length) return [];
+      const patchedText = patched.join("\n");
+      const state = applyProgram(patchedText);
+      if (!state) return [];
+      return missing;
     }
 
     function findMissingSemicolonLine(text) {
-      const tokens = tokenizeProgram(text);
-      const parts = splitStatements(tokens);
-      for (const part of parts) {
-        if (!part.tokens.length) continue;
-        const missingInside = findMissingSemicolonInTokens(part.tokens);
-        if (missingInside != null) return missingInside + 1;
-        const parsed = parseStatementTokens(part.tokens);
-        if (parsed && !part.hasSemicolon) return part.endLine + 1;
-      }
-      return null;
+      const missing = findMissingSemicolonLines(text);
+      return missing.length ? missing[0] : null;
     }
 
     function parseStatements(text) {
@@ -2956,7 +2952,7 @@
                     tok.line,
                   );
                   const text = `This statement spans multiple lines and has a compilation error. In C, a line break acts like a space, so your statement is ${snippet}.`;
-                  const html = `This statement spans multiple lines and has a compilation error. In C, a line break acts like a space, so your statement is <code class="tok-line">${escapeHtml(snippet)}</code>.`;
+                  const html = `This statement spans multiple lines and has a compilation error. In C, a line break acts like a space, so your statement is <code class="tok-code">${escapeHtml(snippet)}</code>.`;
                   info.set(tok.line, { text, html });
                 }
               } else {
@@ -2969,13 +2965,16 @@
                     tok.line,
                   );
                   const text = `This statement spans multiple lines. In C, a line break acts like a space, so this statement is ${snippet}.`;
-                  const html = `This statement spans multiple lines. In C, a line break acts like a space, so this statement is <code class="tok-line">${escapeHtml(snippet)}</code>.`;
+                  const html = `This statement spans multiple lines. In C, a line break acts like a space, so this statement is <code class="tok-code">${escapeHtml(snippet)}</code>.`;
                   info.set(tok.line, { text, html });
                 }
                 if (
                   result.parsed?.kind === "decl" ||
                   result.parsed?.kind === "declAssign" ||
-                  result.parsed?.kind === "declAssignVar"
+                  result.parsed?.kind === "declAssignVar" ||
+                  result.parsed?.kind === "declAssignRef" ||
+                  result.parsed?.kind === "declAssignDeref" ||
+                  result.parsed?.kind === "declAssignUnary"
                 ) {
                   seenDecl.add(result.parsed.name);
                 }
@@ -3018,7 +3017,9 @@
         if (part.hasSemicolon) return;
         if (!Number.isFinite(part.endLine)) return;
         incomplete.add(part.endLine);
-        const start = Number.isFinite(part.startLine) ? part.startLine : part.endLine;
+        const start = Number.isFinite(part.startLine)
+          ? part.startLine
+          : part.endLine;
         for (let i = start; i <= part.endLine; i++) {
           if (invalid.has(i)) invalid.delete(i);
           if (errors.has(i)) errors.delete(i);
@@ -3048,7 +3049,10 @@
         if (
           parsed.kind === "decl" ||
           parsed.kind === "declAssign" ||
-          parsed.kind === "declAssignVar"
+          parsed.kind === "declAssignVar" ||
+          parsed.kind === "declAssignRef" ||
+          parsed.kind === "declAssignDeref" ||
+          parsed.kind === "declAssignUnary"
         ) {
           if (seenDecl.has(parsed.name)) return null;
           seenDecl.add(parsed.name);
@@ -3070,6 +3074,7 @@
       parseStatements,
       classifyLineStatuses,
       findMissingSemicolonLine,
+      findMissingSemicolonLines,
       applyProgram,
     };
   }
@@ -3105,59 +3110,36 @@
   }
 
   function vbox({
-    addr = "—",
+    address = "—",
     type = "int",
-    value = "empty",
+    value = "",
     name = "",
-    names = null,
     editable = false,
-    allowNameAdd = false,
-    allowNameDelete = false,
     allowNameEdit = false,
     allowTypeEdit = false,
-    allowNameToggle = false,
   } = {}) {
-    const emptyDisplay = isEmptyVal(String(value ?? ""));
+    const emptyDisplay = String(value ?? "") === "";
     const displayValue = emptyDisplay ? "" : normalizeZeroDisplay(value);
-    const resolvedNames =
-      Array.isArray(names) && names.length
-        ? names
-        : Array.isArray(name)
-          ? name
-          : [name];
-    const namesList = resolvedNames
-      .filter((n) => n !== undefined && n !== null)
-      .map((n) => String(n));
-    const canToggleNames = allowNameToggle && namesList.length > 1;
+    const resolvedName =
+      name !== undefined && name !== null ? String(name) : "";
+    const namesList = resolvedName ? [resolvedName] : [""];
     const valueClasses = `value ${editable ? "editable" : ""} ${emptyDisplay ? "placeholder muted" : ""}`;
     const typeClasses = `type ${allowTypeEdit ? "editable" : ""}`;
     const nameClasses = `name-tag ${editable ? "editable" : ""}`;
-    const listClasses = `name-list${canToggleNames ? " collapsible" : ""}`;
-    const toggleBtn = canToggleNames
-      ? '<button class="name-toggle" type="button" aria-expanded="false">Other names</button>'
-      : "";
-    const addBtn = allowNameAdd
-      ? '<button class="name-add" type="button" title="Add name">+</button>'
-      : "";
+    const listClasses = "name-list";
     const nameTags = namesList
-      .map((n, idx) => {
-        const extraClass = canToggleNames && idx > 0 ? " name-extra" : "";
+      .map((n) => {
         const cls =
-          namesList.length > 1
-            ? `${nameClasses}${extraClass}`
-            : `${nameClasses} single`;
-        const del = allowNameDelete
-          ? `<button class="name-del" data-index="${idx}" type="button" title="Delete name">×</button>`
-          : "";
-        return `<span class="${cls}"><span class="name-text">${n}</span>${del}</span>`;
+          namesList.length > 1 ? `${nameClasses}` : `${nameClasses} single`;
+        return `<span class="${cls}"><span class="name-text">${n}</span></span>`;
       })
       .join("");
-    const namesHtml = `${nameTags}${addBtn}${toggleBtn}`;
+    const namesHtml = nameTags;
 
     const node = el(`
       <div class="vbox ${editable ? "is-editable" : ""}">
         <div class="lbl lbl-addr">address</div>
-        <div class="addr">${addr}</div>
+        <div class="address">${address}</div>
           <div class="cell">
           <div class="lbl lbl-value">value</div>
           <div class="${valueClasses}">${displayValue}</div>
@@ -3173,9 +3155,6 @@
       </div>
     `);
 
-    const scheduleNameStack = () =>
-      requestAnimationFrame(() => updateNameStackSpacing(node));
-
     if (editable) {
       const valueEl = node.querySelector(".value");
       valueEl.setAttribute("contenteditable", "true");
@@ -3186,34 +3165,6 @@
         typeEl.classList.add("editable");
         disableAutoText(typeEl);
       }
-      // Names remain read-only for existing boxes; add only for new via allowNameAdd.
-      const addBtn = node.querySelector(".name-add");
-      if (addBtn) {
-        addBtn.onclick = () => {
-          const extraClass = canToggleNames ? " name-extra" : "";
-          const span = el(
-            `<span class="${nameClasses}${extraClass}"><span class="name-text"></span>${allowNameDelete ? '<button class="name-del" type="button" title="Delete name">×</button>' : ""}</span>`,
-          );
-          addBtn.before(span);
-          const textEl = span.querySelector(".name-text");
-          if (textEl) {
-            if (allowNameEdit) {
-              textEl.setAttribute("contenteditable", "true");
-              textEl.classList.add("editable");
-              disableAutoText(textEl);
-            }
-            textEl.focus();
-          }
-          const delBtn = span.querySelector(".name-del");
-          if (delBtn) {
-            delBtn.onclick = () => {
-              span.remove();
-              scheduleNameStack();
-            };
-          }
-          scheduleNameStack();
-        };
-      }
       node.querySelectorAll(".name-text").forEach((el) => {
         if (allowNameEdit) {
           el.setAttribute("contenteditable", "true");
@@ -3221,34 +3172,6 @@
           disableAutoText(el);
         }
       });
-    }
-    if (canToggleNames) {
-      const list = node.querySelector(".name-list");
-      const inner = node.querySelector(".name-list-inner");
-      const toggle = node.querySelector(".name-toggle");
-      if (list && toggle && inner) {
-        const clampNames = () => {
-          inner.style.transform = "";
-          if (!list.classList.contains("expanded")) return;
-          if (!list.isConnected) return;
-          const listRect = list.getBoundingClientRect();
-          const innerRect = inner.getBoundingClientRect();
-          if (innerRect.left < listRect.left) {
-            const shift = listRect.left - innerRect.left;
-            inner.style.transform = `translateX(${shift}px)`;
-          }
-        };
-        const setExpanded = (expanded) => {
-          list.classList.toggle("expanded", expanded);
-          toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
-          toggle.textContent = expanded ? "Hide other names" : "Other names";
-          requestAnimationFrame(clampNames);
-          scheduleNameStack();
-        };
-        toggle.onclick = () =>
-          setExpanded(!list.classList.contains("expanded"));
-        setExpanded(false);
-      }
     }
     watchNameStack(node);
     return node;
@@ -3262,9 +3185,6 @@
         el.removeAttribute("contenteditable");
         el.classList.remove("editable");
       });
-    root
-      .querySelectorAll(".name-add, .name-del")
-      .forEach((btn) => btn.remove());
     root.classList.remove("is-editable");
   }
 
@@ -3282,17 +3202,224 @@
     const valText = txt(valEl);
     const value =
       valEl?.classList?.contains("placeholder") && valText === ""
-        ? "empty"
+        ? ""
         : normalizeZeroDisplay(valText);
+    const allowDelete =
+      root?.dataset?.allowDelete === "true" || !!root.querySelector(".delete");
     return {
-      addr: txt(root.querySelector(".addr")),
+      address: txt(root.querySelector(".address")),
       type: txt(root.querySelector(".type")),
       value,
       name: names[0] || "",
       names,
       nameEditable: !!root.querySelector(".name-text[contenteditable]"),
       typeEditable: !!root.querySelector(".type[contenteditable]"),
+      allowDelete,
     };
+  }
+
+  function boxAddress(box) {
+    const raw = box?.address ?? "";
+    return String(raw ?? "").trim();
+  }
+
+  function collectStageBoxes(root) {
+    if (!root) return [];
+    return [...root.querySelectorAll(".vbox")]
+      .map((node) => {
+        const box = readBoxState(node);
+        if (!box) return null;
+        box.node = node;
+        return box;
+      })
+      .filter(Boolean);
+  }
+
+  function pointerTargetBox(box, byAddr) {
+    if (!box) return null;
+    const depth = getPointerDepth(box.type);
+    if (!Number.isFinite(depth) || depth < 1) return null;
+    const raw = String(box.value ?? "").trim();
+    if (raw === "") return null;
+    const target = byAddr.get(raw) || null;
+    if (!target) return null;
+    const targetDepth = getPointerDepth(target.type);
+    if (!Number.isFinite(targetDepth)) return null;
+    if (targetDepth !== depth - 1) return null;
+    return target;
+  }
+
+  function buildOtherNamesMap(boxes) {
+    const byAddr = new Map();
+    boxes.forEach((box) => {
+      const addr = boxAddress(box);
+      if (addr) byAddr.set(addr, box);
+    });
+    const otherNamesByAddr = new Map();
+    boxes.forEach((box) => {
+      const baseName = String(box.name || "").trim();
+      const depth = getPointerDepth(box.type);
+      if (!baseName || !Number.isFinite(depth) || depth < 1) return;
+      let current = box;
+      for (let step = 1; step <= depth; step++) {
+        const target = pointerTargetBox(current, byAddr);
+        if (!target) break;
+        const targetAddr = boxAddress(target);
+        if (targetAddr) {
+          if (!otherNamesByAddr.has(targetAddr)) {
+            otherNamesByAddr.set(targetAddr, new Set());
+          }
+          otherNamesByAddr
+            .get(targetAddr)
+            .add(`${"*".repeat(step)}${baseName}`);
+        }
+        current = target;
+        if (getPointerDepth(current.type) < 1) break;
+      }
+    });
+    return otherNamesByAddr;
+  }
+
+  function sortOtherNames(list) {
+    return [...list].sort((a, b) => {
+      const aStars = (a.match(/^\*+/) || [""])[0].length;
+      const bStars = (b.match(/^\*+/) || [""])[0].length;
+      if (aStars !== bStars) return aStars - bStars;
+      return a.localeCompare(b);
+    });
+  }
+
+  function updateOtherNamesList(node, aliases, showAliases) {
+    if (!node) return;
+    const listInner = node.querySelector(".name-list-inner");
+    if (!listInner) return;
+    const tags = listInner.querySelectorAll(".name-tag");
+    let baseTag = tags[0];
+    if (!baseTag) {
+      baseTag = document.createElement("span");
+      baseTag.className = "name-tag single";
+      const text = document.createElement("span");
+      text.className = "name-text";
+      baseTag.appendChild(text);
+      listInner.appendChild(baseTag);
+    }
+    [...listInner.children].slice(1).forEach((child) => child.remove());
+    const hasAliases =
+      showAliases && Array.isArray(aliases) && aliases.length > 0;
+    baseTag.classList.toggle("single", !hasAliases);
+    if (hasAliases) {
+      aliases.forEach((alias) => {
+        const tag = document.createElement("span");
+        tag.className = "name-tag name-tag-derived";
+        const text = document.createElement("span");
+        text.className = "name-text";
+        text.textContent = alias;
+        tag.appendChild(text);
+        listInner.appendChild(tag);
+      });
+    }
+    const label = node.querySelector(".lbl-name");
+    if (label) label.textContent = hasAliases ? "names" : "name";
+  }
+
+  function ensureOtherNamesToggle(node, onToggle) {
+    if (!node) return null;
+    let btn = node.querySelector(".other-names-toggle");
+    if (!btn) {
+      btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "other-names-toggle";
+      btn.textContent = "Show aliases";
+    }
+    if (!btn.dataset.bound) {
+      btn.dataset.bound = "true";
+      btn.addEventListener("click", (event) => {
+        event.preventDefault();
+        onToggle?.(node);
+      });
+    }
+    return btn;
+  }
+
+  function placeOtherNamesToggle(node, btn, showAliases) {
+    if (!node || !btn) return;
+    const listInner = node.querySelector(".name-list-inner");
+    const baseTag = listInner?.querySelector(".name-tag");
+    const label = node.querySelector(".lbl-name");
+    const stack = node.querySelector(".name-stack");
+    if (!listInner || !baseTag || !label || !stack) return;
+    if (showAliases) {
+      btn.classList.add("stacked");
+      if (btn.parentElement !== stack || btn.nextElementSibling !== label) {
+        stack.insertBefore(btn, label);
+      }
+      return;
+    }
+    btn.classList.remove("stacked");
+    if (btn.parentElement !== baseTag) {
+      baseTag.appendChild(btn);
+    }
+  }
+
+  function applyOtherNames(root, opts = {}) {
+    if (!root) return;
+    const { onToggle = null, shownAddrs = null } = opts;
+    const boxes = collectStageBoxes(root);
+    const currentAddrs = new Set(boxes.map((box) => boxAddress(box)));
+    const otherNamesByAddr = buildOtherNamesMap(boxes);
+    const useShownSet = shownAddrs && typeof shownAddrs.has === "function";
+    const getShown = (node, addr) =>
+      useShownSet ? shownAddrs.has(addr) : node.dataset.otherNames === "on";
+    const setShown = (node, addr, value) => {
+      if (useShownSet) {
+        if (value) shownAddrs.add(addr);
+        else shownAddrs.delete(addr);
+      }
+      node.dataset.otherNames = value ? "on" : "off";
+    };
+    boxes.forEach((box) => {
+      const node = box.node;
+      const addr = boxAddress(box);
+      const baseName = String(box.name || "").trim();
+      const otherNames = otherNamesByAddr.get(addr);
+      const aliases = otherNames ? sortOtherNames(otherNames) : [];
+      const filtered = baseName
+        ? aliases.filter((alias) => alias !== baseName)
+        : aliases;
+      node.dataset.otherNamesAddr = addr;
+      if (!filtered.length) {
+        const toggle = node.querySelector(".other-names-toggle");
+        if (toggle) {
+          toggle.textContent = "Show aliases";
+          toggle.classList.add("hidden");
+          toggle.setAttribute("aria-pressed", "false");
+        }
+        setShown(node, addr, false);
+        updateOtherNamesList(node, [], false);
+        return;
+      }
+      const toggle = ensureOtherNamesToggle(node, (targetNode) => {
+        const targetAddr = targetNode.dataset.otherNamesAddr || addr;
+        const next = !getShown(targetNode, targetAddr);
+        setShown(targetNode, targetAddr, next);
+        onToggle?.();
+      });
+      if (toggle) {
+        toggle.classList.remove("hidden");
+      }
+      const showAliases = getShown(node, addr);
+      if (toggle) {
+        toggle.textContent = showAliases ? "Hide aliases" : "Show aliases";
+        toggle.setAttribute("aria-pressed", showAliases ? "true" : "false");
+      }
+      updateOtherNamesList(node, filtered, showAliases);
+      if (toggle) placeOtherNamesToggle(node, toggle, showAliases);
+    });
+    if (useShownSet) {
+      shownAddrs.forEach((addr) => {
+        if (!currentAddrs.has(addr)) shownAddrs.delete(addr);
+      });
+    }
   }
 
   const addrPool = { free: [] };
@@ -3303,14 +3430,11 @@
 
   function makeAnswerBox({
     name = "",
-    names = null,
     type = "",
-    value = "empty",
+    value = "",
     address = null,
     editable = true,
     deletable = editable,
-    allowNameAdd = false,
-    allowNameToggle = false,
     allowNameEdit = null,
     allowTypeEdit = null,
     nameEditable = null,
@@ -3331,23 +3455,21 @@
           ? typeEditable
           : !type;
     const node = vbox({
-      addr: resolvedAddr,
+      address: resolvedAddr,
       type,
       value,
       name,
-      names,
       editable,
-      allowNameAdd,
-      allowNameToggle,
-      allowNameDelete: allowNameAdd,
       allowNameEdit: resolvedNameEdit,
       allowTypeEdit: resolvedTypeEdit,
     });
+    node.dataset.allowNameEdit = resolvedNameEdit ? "true" : "false";
+    node.dataset.allowTypeEdit = resolvedTypeEdit ? "true" : "false";
     if (deletable) {
       const del = el('<button class="delete" title="delete">×</button>');
       node.appendChild(del);
       del.onclick = () => {
-        const addrTxt = txt(node.querySelector(".addr"));
+        const addrTxt = txt(node.querySelector(".address"));
         if (addrTxt) addrPool.free.push(addrTxt);
         node.remove();
       };
@@ -3360,7 +3482,7 @@
     return state
       .filter(Boolean)
       .map((st) => {
-        const addr = st.addr ?? st.address ?? null;
+        const addr = st.address ?? null;
         return {
           name: st.name || "",
           names: Array.isArray(st.names)
@@ -3418,61 +3540,75 @@
     return [];
   }
 
-  function serializeWorkspace(id) {
-    const ws = document.getElementById(id);
+  function serializeWorkspace(target) {
+    if (!target) return null;
+    let ws = null;
+    if (typeof target === "string") {
+      ws = document.getElementById(target);
+      if (!ws) return null;
+    } else if (target.querySelectorAll) {
+      ws = target;
+    }
     if (!ws) return null;
     let boxes = [...ws.querySelectorAll(".vbox")];
     if (!boxes.length && ws.dataset.inline === "true") {
-      boxes = [...document.querySelectorAll(`.vbox[data-workspace="${id}"]`)];
+      const key = ws.dataset.workspaceKey || "";
+      if (key) {
+        boxes = [
+          ...document.querySelectorAll(`.vbox[data-workspace="${key}"]`),
+        ];
+      }
     }
     return boxes.map((v) => readBoxState(v));
   }
 
-  function restoreWorkspace(state, defaults, workspaceId, opts = {}) {
+  function restoreWorkspace(state, defaults, opts = {}) {
     const {
       editable = true,
       deletable = editable,
-      allowNameAdd = false,
-      allowNameToggle = false,
       allowNameEdit = null,
       allowTypeEdit = null,
     } = opts;
-    const wrap = el(`<div class="grid" id="${workspaceId}"></div>`);
+    const wrap = el('<div class="grid" data-role="workspace"></div>');
     if (Array.isArray(state) && state.length) {
       state.forEach((st) => {
+        const allowDelete =
+          st.allowDelete !== null && st.allowDelete !== undefined
+            ? !!st.allowDelete
+            : deletable;
         const node = makeAnswerBox({
           name: st.name,
-          names: st.names,
           type: st.type,
           value: st.value,
-          address: st.addr ?? st.address ?? null,
+          address: st.address ?? null,
           editable,
-          deletable,
-          allowNameAdd,
-          allowNameToggle,
+          deletable: allowDelete,
           allowNameEdit: allowNameEdit ?? st.nameEditable ?? st.allowNameEdit,
           allowTypeEdit: allowTypeEdit ?? st.typeEditable ?? st.allowTypeEdit,
         });
-        if (isEmptyVal(st.value))
+        if (allowDelete) node.dataset.allowDelete = "true";
+        if (String(st.value ?? "") === "")
           node.querySelector(".value").classList.add("placeholder", "muted");
         wrap.appendChild(node);
       });
     } else if (Array.isArray(defaults)) {
       defaults.forEach((d) => {
+        const allowDelete =
+          d.allowDelete !== null && d.allowDelete !== undefined
+            ? !!d.allowDelete
+            : deletable;
         const node = makeAnswerBox({
           name: d.name,
-          names: d.names,
           type: d.type,
           value: d.value,
-          address: d.address ?? d.addr ?? null,
+          address: d.address ?? null,
           editable,
-          deletable,
-          allowNameAdd,
-          allowNameToggle,
+          deletable: allowDelete,
           allowNameEdit: allowNameEdit ?? d.nameEditable ?? d.allowNameEdit,
           allowTypeEdit: allowTypeEdit ?? d.typeEditable ?? d.allowTypeEdit,
         });
-        if (isEmptyVal(d.value))
+        if (allowDelete) node.dataset.allowDelete = "true";
+        if (String(d.value ?? "") === "")
           node.querySelector(".value").classList.add("placeholder", "muted");
         wrap.appendChild(node);
       });
@@ -3484,6 +3620,11 @@
     if (!workspace || !container) return;
     const { useContents = false } = opts;
     workspace.dataset.inline = "true";
+    if (!workspace.dataset.workspaceKey) {
+      const fallbackKey =
+        workspace.id || `ws-${Math.random().toString(36).slice(2, 10)}`;
+      workspace.dataset.workspaceKey = fallbackKey;
+    }
     const supportsContents =
       useContents &&
       typeof CSS !== "undefined" &&
@@ -3496,10 +3637,10 @@
     }
     workspace.classList.remove("workspace-inline");
     workspace.style.display = "none";
-    const id = workspace.id || "";
+    const key = workspace.dataset.workspaceKey || "";
     const placeBox = (box) => {
       if (!box || !box.classList?.contains("vbox")) return;
-      if (id) box.dataset.workspace = id;
+      if (key) box.dataset.workspace = key;
       if (container.contains(workspace)) {
         container.insertBefore(box, workspace);
       } else {
@@ -3522,85 +3663,140 @@
     observer.observe(workspace, { childList: true });
   }
 
-  function setHintContent(panel, message) {
-    if (!panel) return;
-    if (
-      message &&
-      typeof message === "object" &&
-      Object.prototype.hasOwnProperty.call(message, "html")
-    ) {
-      panel.innerHTML = message.html || "";
-    } else {
-      panel.textContent = typeof message === "string" ? message : "";
-    }
-  }
-
-  function resolveElement(ref) {
-    if (!ref) return null;
-    if (typeof ref === "string") {
-      if (ref.startsWith("#") || ref.startsWith(".")) {
-        return document.querySelector(ref);
-      }
-      return document.getElementById(ref);
-    }
-    return ref;
-  }
-
-  function createHintController({ button, panel, build } = {}) {
-    const buttonEl = resolveElement(button);
-    const panelEl = resolveElement(panel);
-
-    function hide() {
-      if (!panelEl) return;
-      panelEl.textContent = "";
-      panelEl.classList.add("hidden");
-    }
-
-    function show(message) {
-      if (!panelEl) return;
-      const content =
-        typeof message === "undefined" && typeof build === "function"
-          ? build()
-          : message;
-      setHintContent(panelEl, content ?? "");
-      panelEl.classList.remove("hidden");
-      flashStatus(panelEl);
-    }
-
-    if (buttonEl) {
-      buttonEl.addEventListener("click", () => {
-        show(typeof build === "function" ? build() : undefined);
-      });
-    }
-
-    function setButtonHidden(hidden) {
-      if (!buttonEl) return;
-      buttonEl.classList.toggle("hidden", !!hidden);
-    }
-
-    return {
-      button: buttonEl,
-      panel: panelEl,
-      show,
-      hide,
-      setButtonHidden,
+  function parseStyledText(text) {
+    const map = {
+      n: "name",
+      t: "type",
+      v: "value",
+      a: "addr",
+      c: "code",
+      b: "btn",
     };
+    const raw = String(text ?? "");
+    const out = [];
+    let i = 0;
+    while (i < raw.length) {
+      const idx = raw.indexOf("$", i);
+      if (idx < 0) {
+        out.push(raw.slice(i));
+        break;
+      }
+      if (idx > i) out.push(raw.slice(i, idx));
+      const key = raw[idx + 1];
+      if (map[key] && raw[idx + 2] === "{") {
+        const end = raw.indexOf("}", idx + 3);
+        if (end > idx + 2) {
+          out.push({ kind: "tok", role: map[key], text: raw.slice(idx + 3, end) });
+          i = end + 1;
+          continue;
+        }
+      }
+      out.push("$");
+      i = idx + 1;
+    }
+    return out;
   }
 
-  function stepperButtons(prefix, dir) {
-    const list = [];
-    const main = document.getElementById(`${prefix}-${dir}`);
-    if (main) list.push(main);
-    document
-      .querySelectorAll(`[data-stepper="${dir}"][data-prefix="${prefix}"]`)
-      .forEach((btn) => {
-        if (!list.includes(btn)) list.push(btn);
+  function renderParts(panel, parts) {
+    if (!panel) return;
+    panel.innerHTML = "";
+    const list = Array.isArray(parts) ? parts : [parts];
+    const appendText = (value) => {
+      const text = String(value);
+      const chunks = text.split("\n");
+      chunks.forEach((chunk, idx) => {
+        if (idx > 0) panel.appendChild(document.createElement("br"));
+        if (chunk) panel.appendChild(document.createTextNode(chunk));
       });
+    };
+    const appendToken = (role, text) => {
+      const chunks = String(text ?? "").split("\n");
+      chunks.forEach((chunk, idx) => {
+        if (idx > 0) panel.appendChild(document.createElement("br"));
+        let node;
+        if (role === "btn") {
+          node = document.createElement("span");
+          node.className = "btn-ref";
+        } else {
+          node = document.createElement("code");
+          node.className = role ? `tok-${role}` : "";
+        }
+        node.textContent = chunk;
+        panel.appendChild(node);
+      });
+    };
+    const appendPart = (part) => {
+      if (part === null || part === undefined) return;
+      if (typeof part === "string" || typeof part === "number") {
+        const parsed = parseStyledText(part);
+        parsed.forEach((segment) => {
+          if (segment && typeof segment === "object" && segment.kind === "tok") {
+            const role = String(segment.role || "").trim();
+            appendToken(role, segment.text);
+          } else {
+            appendText(segment);
+          }
+        });
+        return;
+      }
+      if (part && typeof part === "object") {
+        if (part.kind === "br") {
+          panel.appendChild(document.createElement("br"));
+          return;
+        }
+        if (part.kind === "tok") {
+          const role = String(part.role || "").trim();
+          appendToken(role, part.text);
+          return;
+        }
+      }
+      appendText(part);
+    };
+    list.forEach(appendPart);
+  }
+
+  function setPartsContent(panel, parts) {
+    if (!panel) return;
+    if (!parts || (Array.isArray(parts) && parts.length === 0)) {
+      panel.textContent = "";
+      panel.classList.add("hidden");
+      return;
+    }
+    panel.classList.remove("hidden");
+    renderParts(panel, parts);
+  }
+
+  function stepperInstructionParts(ctx, opts = {}) {
+    if (!ctx) return null;
+    const atStart = !!opts.atStart;
+    const mode = opts.mode === "buttons" ? "buttons" : "default";
+    const rawLabel = opts.runLabel ?? ctx.runLabel ?? "";
+    const runLabel = String(rawLabel).replace(/\s*▶▶?$/, "");
+    if (atStart) {
+      if (mode === "buttons") {
+        return `Use the $b{${runLabel} ▶} button, or the right arrow key, to see how the code changes the program state.`;
+      }
+      return `Use $b{${runLabel} ▶} to see how the code changes the program state.`;
+    }
+    if (mode === "buttons") {
+      return `Use the $b{Back ◀} and $b{${runLabel} ▶} buttons, or the left and right arrow keys, to see how the code changes the program state.`;
+    }
+    return `Use $b{Back ◀} and $b{${runLabel} ▶} to see how the code changes the program state.`;
+  }
+
+  function stepperButtons(root, dir) {
+    const list = [];
+    if (!root) return list;
+    root.querySelectorAll(`[data-stepper="${dir}"]`).forEach((btn) => {
+      if (!list.includes(btn)) list.push(btn);
+    });
     return list;
   }
 
   function createStepper({
-    prefix,
+    root,
+    prevButtons = null,
+    nextButtons = null,
     lines = [],
     nextPage = null,
     getBoundary,
@@ -3614,16 +3810,15 @@
     getPrevBoundary,
     endLabel,
   } = {}) {
-    if (!prefix)
-      throw new Error('createStepper requires a prefix (e.g., "p1").');
-    const prevButtons = stepperButtons(prefix, "prev");
-    const nextButtons = stepperButtons(prefix, "next");
+    const boundButtons = new WeakSet();
+    const getPrevButtons = () => prevButtons || stepperButtons(root, "prev");
+    const getNextButtons = () => nextButtons || stepperButtons(root, "next");
     const total = Array.isArray(lines)
       ? lines.length
       : Math.max(0, Number(lines) || 0);
 
     function clearPulse() {
-      nextButtons.forEach((btn) => btn.classList.remove("pulse-success"));
+      getNextButtons().forEach((btn) => btn.classList.remove("pulse-success"));
     }
 
     function boundary() {
@@ -3641,6 +3836,9 @@
     }
 
     function update() {
+      bindButtons();
+      const prevButtons = getPrevButtons();
+      const nextButtons = getNextButtons();
       const current = boundary();
       prevButtons.forEach((btn) => {
         btn.disabled = current === 0;
@@ -3664,11 +3862,13 @@
           const label = customLabel || endLabel || "Next Program";
           nextButtons.forEach((btn) => {
             btn.textContent = `${labelPrefix}${label}${lockTag} ▶▶`;
+            btn.dataset.stepperEnd = "true";
           });
         } else {
           const label = customLabel || `Run line ${current + 1}`;
           nextButtons.forEach((btn) => {
             btn.textContent = `${labelPrefix}${label}${lockTag} ▶`;
+            btn.dataset.stepperEnd = "false";
           });
         }
         nextButtons.forEach((btn) => {
@@ -3704,37 +3904,44 @@
       update();
     }
 
-    prevButtons.forEach((btn) => {
-      btn.addEventListener("click", () => {
-        if (boundary() === 0) return;
-        clearPulse();
-        const current = boundary();
-        const target =
-          typeof getPrevBoundary === "function"
-            ? getPrevBoundary(current, total)
-            : current - 1;
-        goTo(Number.isFinite(target) ? target : current - 1);
+    function bindButtons() {
+      getPrevButtons().forEach((btn) => {
+        if (boundButtons.has(btn)) return;
+        boundButtons.add(btn);
+        btn.addEventListener("click", () => {
+          if (boundary() === 0) return;
+          clearPulse();
+          const current = boundary();
+          const target =
+            typeof getPrevBoundary === "function"
+              ? getPrevBoundary(current, total)
+              : current - 1;
+          goTo(Number.isFinite(target) ? target : current - 1);
+        });
       });
-    });
 
-    nextButtons.forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const current = boundary();
-        clearPulse();
-        if (current === total) {
-          if (!btn.disabled && nextPage)
-            window.location.href = withSidebarParam(nextPage);
-          return;
-        }
-        if (locked(current)) return;
-        const target =
-          typeof getNextBoundary === "function"
-            ? getNextBoundary(current, total)
-            : current + 1;
-        goTo(Number.isFinite(target) ? target : current + 1);
+      getNextButtons().forEach((btn) => {
+        if (boundButtons.has(btn)) return;
+        boundButtons.add(btn);
+        btn.addEventListener("click", () => {
+          const current = boundary();
+          clearPulse();
+          if (current === total) {
+            if (!btn.disabled && nextPage)
+              window.location.href = withSidebarParam(nextPage);
+            return;
+          }
+          if (locked(current)) return;
+          const target =
+            typeof getNextBoundary === "function"
+              ? getNextBoundary(current, total)
+              : current + 1;
+          goTo(Number.isFinite(target) ? target : current + 1);
+        });
       });
-    });
+    }
 
+    bindButtons();
     update();
 
     return {
@@ -3742,11 +3949,14 @@
       goTo,
       boundary,
       clearPulse,
+      pulseNext: () => {
+        getNextButtons().forEach((btn) => btn.classList.add("pulse-success"));
+      },
     };
   }
 
-  function pulseNextButton(prefix) {
-    const buttons = stepperButtons(prefix, "next");
+  function pulseNextButton(root) {
+    const buttons = stepperButtons(root, "next");
     if (!buttons.length) return;
     buttons.forEach((btn) => btn.classList.add("pulse-success"));
   }
@@ -3804,11 +4014,19 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-    if (isTextInputActive(document.activeElement) || isTextInputActive(e.target))
+    if (e.repeat) return;
+    if (
+      isTextInputActive(document.activeElement) ||
+      isTextInputActive(e.target)
+    )
       return;
     const selector =
-      e.key === "ArrowLeft" ? 'button[id$="-prev"]' : 'button[id$="-next"]';
-    const btn = document.querySelector(selector);
+      e.key === "ArrowLeft"
+        ? 'button[data-stepper="prev"]'
+        : 'button[data-stepper="next"]';
+    const btn = [...document.querySelectorAll(selector)].find(
+      (node) => node && !node.disabled && node.dataset.stepperEnd !== "true",
+    );
     if (!btn || btn.disabled) return;
     e.preventDefault();
     btn.click();
@@ -4009,13 +4227,18 @@
     $,
     el,
     randAddr,
-    isEmptyVal,
+    typeInfo,
+    getPointerDepth,
+    normalizeZeroDisplay,
+    isMobileViewport,
+    isStepperTopVisible,
+    buildNav,
+    resolveActiveNavItem,
+    ensureBaseLayout,
     txt,
     disableAutoText,
     renderCodePane,
-    renderCodePaneEditable,
     updateStepperTopControls,
-    readEditableCodeLines,
     stripLineComments,
     stripAllComments,
     parseSimpleStatement,
@@ -4028,14 +4251,15 @@
     ensureBox,
     cloneBoxes,
     firstNonEmptyClone,
+    applyOtherNames,
     serializeWorkspace,
     restoreWorkspace,
     setupInlineWorkspace,
-    setHintContent,
-    createHintController,
+    renderParts,
+    setPartsContent,
+    stepperInstructionParts,
     createStepper,
     pulseNextButton,
-    prependTopStepperNotice,
     flashStatus,
     disableBoxEditing,
     removeBoxDeleteButtons,

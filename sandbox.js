@@ -1,37 +1,27 @@
-(function (MB) {
+{
   const {
     $,
     randAddr,
     vbox,
-    isEmptyVal,
     createSimpleSimulator,
+    applyOtherNames,
     updateStepperTopControls,
     confettiRain,
-  } = MB;
+  } = window.MB;
 
-  const instructions = $("#sandbox-instructions");
-  const codepane = $("#sandbox-code");
-  const editor = $("#sandbox-editor");
-  const lineNumbers = $("#sandbox-line-numbers");
-  const errorGutter = $("#sandbox-error-gutter");
-  const errorDetail = $("#sandbox-error-detail");
-  const exprInput = $("#sandbox-expr");
-  const exprResult = $("#sandbox-expr-result");
-  const exprError = $("#sandbox-expr-error");
-  const prevBtn = $("#sandbox-prev");
-  const nextBtn = $("#sandbox-next");
-  const prevButtons = [
-    prevBtn,
-    ...document.querySelectorAll(
-      '[data-stepper="prev"][data-prefix="sandbox"]',
-    ),
-  ].filter(Boolean);
-  const nextButtons = [
-    nextBtn,
-    ...document.querySelectorAll(
-      '[data-stepper="next"][data-prefix="sandbox"]',
-    ),
-  ].filter(Boolean);
+  const instructions = $('[data-role="sandbox-instructions"]');
+  const codepane = $('[data-role="sandbox-code"]');
+  const editor = $('[data-role="sandbox-editor"]');
+  const lineNumbers = $('[data-role="sandbox-line-numbers"]');
+  const errorGutter = $('[data-role="sandbox-error-gutter"]');
+  const errorDetail = $('[data-role="sandbox-error-detail"]');
+  const exprInput = $('[data-role="sandbox-expr"]');
+  const exprResult = $('[data-role="sandbox-expr-result"]');
+  const exprError = $('[data-role="sandbox-expr-error"]');
+  const prevBtn = $('[data-role="sandbox-prev"]');
+  const nextBtn = $('[data-role="sandbox-next"]');
+  const prevButtons = [prevBtn].filter(Boolean);
+  const nextButtons = [nextBtn].filter(Boolean);
   let finishedConfettiShown = false;
   const highlightEl = (() => {
     if (!editor || !editor.parentElement) return null;
@@ -69,6 +59,7 @@
     errorDetailKind: "",
     boundary: null,
     lineCount: 0,
+    otherNamesShown: new Set(),
   };
 
   const simulator = createSimpleSimulator({
@@ -292,7 +283,7 @@
         base,
         depth,
         value: box.value,
-        address: box.address ?? box.addr ?? "",
+        address: box.address ?? "",
         label: label || box.name,
       };
     }
@@ -308,7 +299,7 @@
         return { error: "Pointer arithmetic is not supported here.", kind: "compile" };
       const raw = result.value;
       if (result.kind === "lvalue") {
-        if (isEmptyVal(String(raw ?? ""))) {
+        if (String(raw ?? "") === "") {
           const label = result.label || "That value";
           return { error: `${label} doesn't have a value yet.`, kind: "ub" };
         }
@@ -360,7 +351,7 @@
             };
           }
           const ptrRaw = rhs.value;
-          if (isEmptyVal(String(ptrRaw ?? ""))) {
+          if (String(ptrRaw ?? "") === "") {
             const sourceLabel = rhs.label || "That pointer";
             return {
               error: `${sourceLabel} doesn't have a value yet, so it can't be dereferenced.`,
@@ -368,7 +359,7 @@
             };
           }
           const ptrVal = String(ptrRaw ?? "").trim();
-          if (!ptrVal || /^empty$/i.test(ptrVal)) {
+          if (ptrVal === "") {
             const sourceLabel = rhs.label || "That pointer";
             return {
               error: `${sourceLabel} doesn't have a value yet, so it can't be dereferenced.`,
@@ -376,7 +367,7 @@
             };
           }
           const target = state.find(
-            (b) => String(b.address ?? b.addr ?? "") === String(ptrVal),
+            (b) => String(b.address ?? "") === String(ptrVal),
           );
           if (!target) {
             return {
@@ -816,7 +807,7 @@
   }
 
   function renderStage() {
-    const stage = $("#sandbox-stage");
+    const stage = $('[data-role="sandbox-stage"]');
     stage.innerHTML = "";
     const lines = getRawLines();
     const { boundary, total } = syncBoundaryWithLines(lines);
@@ -845,6 +836,10 @@
       displayOutcome = { kind: "mid", state: null };
     }
     stage.appendChild(renderState("", displayOutcome.state, displayOutcome.kind));
+    applyOtherNames(stage, {
+      shownAddrs: sandbox.otherNamesShown,
+      onToggle: refreshOtherNames,
+    });
     renderExpression(displayOutcome);
     updateStepperControls(boundary, total, statementInfo);
     updateInstructions();
@@ -867,9 +862,9 @@
     }
     const { result } = evaluated;
     const node = vbox({
-      addr: result.address ? String(result.address) : "—",
+      address: result.address ? String(result.address) : "—",
       type: result.type || "int",
-      value: result.value ?? "empty",
+      value: result.value ?? "",
       name: null,
       editable: false,
     });
@@ -985,21 +980,28 @@
     } else {
       boxes.forEach((b) => {
         const node = vbox({
-          addr: b.address,
+          address: b.address,
           type: b.type,
           value: b.value,
           name: b.name,
-          names: b.names,
           editable: false,
-          allowNameToggle: true,
         });
-        if (isEmptyVal(b.value || ""))
+        if (String(b.value ?? "") === "")
           node.querySelector(".value").classList.add("placeholder", "muted");
         grid.appendChild(node);
       });
     }
     wrap.appendChild(grid);
     return wrap;
+  }
+
+  function refreshOtherNames() {
+    const stage = $('[data-role="sandbox-stage"]');
+    if (!stage) return;
+    applyOtherNames(stage, {
+      shownAddrs: sandbox.otherNamesShown,
+      onToggle: refreshOtherNames,
+    });
   }
 
   function getLineHeightPx() {
@@ -1040,7 +1042,9 @@
 
   function updateLineGutters(linesOverride) {
     autoSizeEditor();
-    const lines = linesOverride || getRawLines();
+    const lines = Array.isArray(linesOverride)
+      ? linesOverride
+      : getRawLines();
     const count = Math.max(lines.length, 1);
     const safeBoundary = clampBoundary(sandbox.boundary ?? 0, count);
     const lineHeight = getLineHeightPx();
@@ -1277,4 +1281,4 @@
       renderExpression(getProgramOutcome());
     });
   }
-})(window.MB);
+}

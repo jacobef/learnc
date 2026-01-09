@@ -1,20 +1,18 @@
-(function (MB) {
+{
   const {
     $,
     randAddr,
     vbox,
-    isEmptyVal,
     flashStatus,
-    pulseNextButton,
-  } = MB;
+  } = window.MB;
 
-  const instructions = $("#dq-instructions");
-  const stage = $("#dq-stage");
-  const prompt = $("#dq-prompt");
-  const statusEl = $("#dq-status");
-  const streakEl = $("#dq-streak");
-  const checkBtn = $("#dq-check");
-  const nextBtn = $("#dq-next");
+  const instructions = $('[data-role="quiz-instructions"]');
+  const stage = $('[data-role="quiz-stage"]');
+  const prompt = $('[data-role="quiz-prompt"]');
+  const statusEl = $('[data-role="quiz-status"]');
+  const streakEl = $('[data-role="quiz-streak"]');
+  const checkBtn = $('[data-role="quiz-check"]');
+  const nextBtn = $('[data-role="quiz-next"]');
 
   const NEXT_PAGE = "program9.html";
   const PULSE_CLASS = "pulse-success";
@@ -107,7 +105,7 @@
       byDepth[1].push({
         name,
         type: "int*",
-        value: "empty",
+        value: "",
         address: "",
       });
     }
@@ -116,7 +114,7 @@
       byDepth[2].push({
         name,
         type: "int**",
-        value: "empty",
+        value: "",
         address: "",
       });
     }
@@ -125,7 +123,7 @@
       byDepth[3].push({
         name,
         type: "int***",
-        value: "empty",
+        value: "",
         address: "",
       });
     }
@@ -244,15 +242,13 @@
     stage.innerHTML = "";
     boxes.forEach((b) => {
       const node = vbox({
-        addr: b.address,
+        address: b.address,
         type: b.type,
         value: b.value,
         name: b.name,
-        names: [b.name],
         editable: false,
-        allowNameToggle: true,
       });
-      if (isEmptyVal(b.value || ""))
+      if (String(b.value ?? "") === "")
         node.querySelector(".value")?.classList.add("placeholder", "muted");
       node.classList.add("quiz-selectable");
       node.dataset.name = b.name;
@@ -263,9 +259,7 @@
 
   function updateStreak() {
     if (!streakEl) return;
-    streakEl.textContent = quiz.passed
-      ? "Quiz passed."
-      : `Streak: ${quiz.streak}/${TARGET_STREAK}`;
+    streakEl.textContent = `Streak: ${quiz.streak}/${TARGET_STREAK}`;
   }
 
   function setStatus(text, ok) {
@@ -298,10 +292,6 @@
   }
 
   function pulseNext() {
-    if (typeof pulseNextButton === "function") {
-      pulseNextButton("dq");
-      return;
-    }
     if (nextBtn) nextBtn.classList.add(PULSE_CLASS);
   }
 
@@ -326,7 +316,7 @@
 
   function setPrompt(scenario) {
     if (prompt) {
-      prompt.innerHTML = `Click on the box that <code class="tok-line">${scenario.boxExpr}</code> refers to, then press <span class="btn-ref">Check</span>.`;
+      prompt.innerHTML = `Click on the box that <code class="tok-code">${scenario.boxExpr}</code> refers to, then press <span class="btn-ref">Check</span>.`;
     }
   }
 
@@ -405,7 +395,7 @@
     return nextQuery ? `${path}?${nextQuery}${hashPart}` : `${path}${hashPart}`;
   }
 
-  $("#dq-check")?.addEventListener("click", checkAnswer);
+  checkBtn?.addEventListener("click", checkAnswer);
   nextBtn?.addEventListener("click", () => {
     clearNextPulse();
     if (!quiz.awaitingNext) return;
@@ -424,4 +414,4 @@
   newScenario();
   setNextMode("next");
   setNextEnabled(false);
-})(window.MB);
+}
