@@ -56,7 +56,20 @@
 
     const startWrap = document.createElement("div");
     const startLink = document.createElement("a");
-    startLink.href = "program1.html";
+    const updateStartLink = () => {
+      const sidebarState = document.body.classList.contains("sidebar-collapsed")
+        ? "0"
+        : "1";
+      const startUrl = new URL("program1.html", window.location.href);
+      startUrl.searchParams.set("sidebar", sidebarState);
+      startLink.href = startUrl.toString();
+    };
+    updateStartLink();
+    const observer = new MutationObserver(updateStartLink);
+    observer.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
     const startButton = document.createElement("button");
     startButton.className = "start-button";
     startButton.textContent = "Start here!";
