@@ -1,4 +1,6 @@
-(function (global) {
+/// <reference path="./shared-core.ts" />
+
+(function (global: MBGlobal) {
   const COLORS = [
     "#f94144",
     "#f3722c",
@@ -9,7 +11,18 @@
     "#277da1",
   ];
 
-  function makePiece() {
+  type ConfettiPiece = {
+    x: number;
+    y: number;
+    size: number;
+    fall: number;
+    drift: number;
+    rot: number;
+    rotSpeed: number;
+    color: string;
+  };
+
+  function makePiece(): ConfettiPiece {
     return {
       x: Math.random(),
       y: -0.2 - Math.random() * 0.8,
@@ -22,24 +35,27 @@
     };
   }
 
-  function confettiRain({ count = 120, duration = 2000 } = {}) {
+  function confettiRain({
+    count = 120,
+    duration = 2000,
+  }: { count?: number; duration?: number } = {}): void {
     const canvas = document.createElement("canvas");
     canvas.className = "confetti-canvas";
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d")!;
     document.body.appendChild(canvas);
 
     const pieces = Array.from({ length: count }, makePiece);
-    let last = null;
-    let rafId = null;
+    let last: number | null = null;
+    let rafId: number | null = null;
 
-    function resize() {
+    function resize(): void {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
     }
 
-    function tick(ts) {
+    function tick(ts: number): void {
       if (!last) last = ts;
       const dt = Math.min(40, ts - last);
       last = ts;
@@ -68,7 +84,7 @@
       }
     }
 
-    function cleanup() {
+    function cleanup(): void {
       if (rafId) cancelAnimationFrame(rafId);
       window.removeEventListener("resize", resize);
       canvas.remove();
@@ -79,6 +95,7 @@
     rafId = requestAnimationFrame(tick);
   }
 
-  global.MB = global.MB || {};
-  global.MB.confettiRain = confettiRain;
+  const MB = (global.MB || {}) as MBNamespace;
+  MB.confettiRain = confettiRain;
+  global.MB = MB;
 })(window);

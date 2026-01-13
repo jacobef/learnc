@@ -1,8 +1,10 @@
-{
-  const { createCodeEditorTemplate } = window.MB;
+/// <reference path="./shared-code-editor.ts" />
 
-  function firstRedeclaration(statements) {
-    const seen = new Set();
+{
+  const { createCodeEditorTemplate } = window.MB!;
+
+  function firstRedeclaration(statements: MBTypes.Statement[]) {
+    const seen = new Set<string>();
     for (const stmt of statements) {
       if (
         stmt.kind === "decl" ||
@@ -17,9 +19,9 @@
     return null;
   }
 
-  createCodeEditorTemplate({
+  createCodeEditorTemplate!({
     startCode: "",
-    textareaWidth: "100%",
+    textareaMinLines: 4,
     targetState: [
       { name: "apple", type: "int", value: "10", address: "<i>(any)</i>" },
       { name: "berry", type: "int", value: "5", address: "<i>(any)</i>" },
@@ -27,10 +29,18 @@
     next: "program6.html",
     instructions: "Write the code yourself.",
     hints: (ctx) => {
-      const currentState = ctx.applyUserProgram();
-      const expected = ctx.targetState || [];
+      const {
+        applyUserProgram,
+        targetState,
+        findMissingSemicolonLines,
+        text,
+        tokenizeProgram,
+        parseStatements,
+      } = ctx;
+      const currentState = applyUserProgram();
+      const expected = targetState || [];
       if (currentState === null) {
-        const missingLines = ctx.findMissingSemicolonLines(ctx.text || "");
+        const missingLines = findMissingSemicolonLines(text || "");
         if (missingLines.length) {
           const lineList = missingLines.map(String);
           let formatted = lineList[0];
@@ -44,7 +54,7 @@
         return "Your program has a problem that isn't covered by a hint, sorry. You can look at the earlier programs if you forget the syntax.";
       }
 
-      const missingLines = ctx.findMissingSemicolonLines(ctx.text || "");
+      const missingLines = findMissingSemicolonLines(text || "");
       if (missingLines.length) {
         const lineList = missingLines.map(String);
         let formatted = lineList[0];
@@ -56,8 +66,8 @@
         return `You need ${missingLines.length === 1 ? "a semicolon" : "semicolons"} at the end of line${missingLines.length === 1 ? " " : "s "}${formatted}.`;
       }
 
-      const tokens = ctx.tokenizeProgram(ctx.text || "");
-      const parsedStatements = ctx.parseStatements(ctx.text || "");
+      const tokens = tokenizeProgram(text || "");
+      const parsedStatements = parseStatements(text || "");
       const redecl = firstRedeclaration(parsedStatements);
       if (redecl) {
         return `You declared $n{${redecl}} more than once.`;

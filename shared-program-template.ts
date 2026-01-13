@@ -1,5 +1,90 @@
-(function (global) {
-  const MB = global.MB || {};
+/// <reference path="./shared-core.ts" />
+
+type ProgramParts = MBTypes.Parts;
+type ProgramHint = (ctx: ProgramContext) => MBTypes.Part | null;
+
+interface ProgramWorkspaceConfig {
+  showOtherNames?: boolean;
+  allowVariableCreation?: boolean;
+}
+
+interface NormalizedRunGroup {
+  startLine: number;
+  endLine: number;
+}
+
+interface StatementRange {
+  startLine: number;
+  endLine: number;
+  hasSemicolon: boolean;
+}
+
+interface StatementMap {
+  parts: MBTypes.StatementPart[];
+  byLine: Array<StatementRange | null>;
+}
+
+interface ProgramElements {
+  instructionsEl: HTMLElement | null;
+  codeEl: HTMLElement | null;
+  codeRoot: HTMLElement | null;
+  stageEl: HTMLElement | null;
+  statusEl: HTMLElement | null;
+  hintPanel: HTMLElement | null;
+  hintBtn: HTMLButtonElement | null;
+  checkBtn: HTMLButtonElement | null;
+  addBtn: HTMLButtonElement | null;
+  resetBtn: HTMLButtonElement | null;
+}
+
+interface ProgramContext {
+  boxes: MBTypes.BoxState[];
+  getBoxByName: (
+    boxes: MBTypes.BoxState[],
+    name: string,
+  ) => MBTypes.BoxState | undefined;
+  getBoxesByName: (
+    boxes: MBTypes.BoxState[],
+    ...names: string[]
+  ) => Array<MBTypes.BoxState | undefined>;
+}
+
+interface ProgramStep {
+  code: string;
+  instructions?: MBTypes.Part;
+  hints?: ProgramHint;
+  editable: boolean;
+}
+
+interface ProgramTemplateConfig {
+  steps: ProgramStep[];
+  initialInstructions?: string;
+  next: string | null;
+  workspace: ProgramWorkspaceConfig;
+}
+
+interface ProgramTemplateState {
+  boundary: number;
+  passes: Record<number, boolean>;
+  ws: Record<number, MBTypes.BoxState[] | null>;
+  baseline: Record<number, MBTypes.BoxState[] | null>;
+  allocBase: number | null;
+  workspaceEl: HTMLElement | null;
+}
+
+interface ProgramTemplateResult {
+  state: ProgramTemplateState;
+  pager: MBTypes.Stepper;
+}
+
+interface MBNamespace {
+  createProgramTemplate?: (
+    config: ProgramTemplateConfig,
+  ) => ProgramTemplateResult;
+}
+
+(function (global: MBGlobal) {
+  const MB = (global.MB || {}) as MBNamespace;
   const {
     createSimpleSimulator,
     randAddr,
@@ -7,7 +92,6 @@
     getPointerDepth,
     normalizeZeroDisplay,
     cloneBoxes,
-    disableAutoText,
     readBoxState,
     serializeWorkspace,
     restoreWorkspace,
@@ -25,39 +109,72 @@
     isStepperTopVisible,
     ensureBaseLayout,
     resolveActiveNavItem,
-    stepperInstructionParts,
   } = MB;
 
-  function collectProgramElements(root = document) {
+  function collectProgramElements(
+    root: ParentNode = document,
+  ): ProgramElements {
     return {
-      instructionsEl: root.querySelector('[data-role="program-instructions"]'),
-      codeEl: root.querySelector('[data-role="program-code"]'),
-      codeRoot: root.querySelector('[data-role="program-code-panel"]'),
-      stageEl: root.querySelector('[data-role="program-stage"]'),
-      statusEl: root.querySelector('[data-role="program-status"]'),
-      hintPanel: root.querySelector('[data-role="program-hint"]'),
-      hintBtn: root.querySelector('[data-role="program-hint-btn"]'),
-      checkBtn: root.querySelector('[data-role="program-check"]'),
-      addBtn: root.querySelector('[data-role="program-add"]'),
-      resetBtn: root.querySelector('[data-role="program-reset"]'),
+      instructionsEl: root.querySelector(
+        '[data-role="program-instructions"]',
+      ) as HTMLElement | null,
+      codeEl: root.querySelector(
+        '[data-role="program-code"]',
+      ) as HTMLElement | null,
+      codeRoot: root.querySelector(
+        '[data-role="program-code-panel"]',
+      ) as HTMLElement | null,
+      stageEl: root.querySelector(
+        '[data-role="program-stage"]',
+      ) as HTMLElement | null,
+      statusEl: root.querySelector(
+        '[data-role="program-status"]',
+      ) as HTMLElement | null,
+      hintPanel: root.querySelector(
+        '[data-role="program-hint"]',
+      ) as HTMLElement | null,
+      hintBtn: root.querySelector(
+        '[data-role="program-hint-btn"]',
+      ) as HTMLButtonElement | null,
+      checkBtn: root.querySelector(
+        '[data-role="program-check"]',
+      ) as HTMLButtonElement | null,
+      addBtn: root.querySelector(
+        '[data-role="program-add"]',
+      ) as HTMLButtonElement | null,
+      resetBtn: root.querySelector(
+        '[data-role="program-reset"]',
+      ) as HTMLButtonElement | null,
     };
   }
 
-  function ensureProgramLayout({
-    pageTitle,
-    browserTitle,
-    navItems,
-    activeHref,
-  } = {}) {
-    const activeItem = resolveActiveNavItem(navItems, activeHref);
-    const resolvedTitle = pageTitle || activeItem?.label || "";
-    const nextBrowserTitle =
-      browserTitle || (resolvedTitle ? `C Boxes - ${resolvedTitle}` : "");
+  function getBoxByName(
+    boxes: MBTypes.BoxState[],
+    name: string,
+  ): MBTypes.BoxState | undefined {
+    return boxes.find((box) => box.name === name);
+  }
+
+  function getBoxesByName(
+    boxes: MBTypes.BoxState[],
+    ...names: string[]
+  ): Array<MBTypes.BoxState | undefined> {
+    const map = new Map<string, MBTypes.BoxState>();
+    for (const box of boxes) {
+      map.set(box.name, box);
+    }
+    return names.map((name) => map.get(name));
+  }
+
+  function ensureProgramLayout(): ProgramElements {
+    const activeItem = resolveActiveNavItem();
+    const resolvedTitle = activeItem?.label || "";
+    const nextBrowserTitle = resolvedTitle ? `C Boxes - ${resolvedTitle}` : "";
     if (nextBrowserTitle) document.title = nextBrowserTitle;
     const existing = document.querySelector('[data-role="program-code"]');
     if (existing) return collectProgramElements();
 
-    const { main } = ensureBaseLayout({ navItems, activeHref });
+    const { main } = ensureBaseLayout();
     if (resolvedTitle) {
       const heading = document.createElement("h1");
       heading.className = "page-title";
@@ -158,22 +275,23 @@
     };
   }
 
-  function createProgramTemplate(config = {}) {
-    const {
-      lines = [],
-      editableSteps = [],
-      hints = {},
-      instructions = null,
-      next = null,
-      workspace = {},
-      runGroups = null,
-      stepperFallback = false,
-      pageTitle = null,
-      browserTitle = null,
-      navItems = null,
-      activeHref = null,
-    } = config;
+  function createProgramTemplate(
+    config: ProgramTemplateConfig,
+  ): ProgramTemplateResult {
+    const { steps = [], initialInstructions, next = null, workspace = {} } =
+      config;
     const showOtherNames = !!(workspace && workspace.showOtherNames);
+    const failConfig = (message: string): never => {
+      alert(message);
+      throw new Error(message);
+    };
+    const simulator = createSimpleSimulator({
+      allowVarAssign: true,
+      allowDeclAssign: true,
+      allowDeclAssignVar: true,
+      requireSourceValue: true,
+      allowPointers: true,
+    });
 
     const {
       instructionsEl,
@@ -186,20 +304,100 @@
       checkBtn,
       addBtn,
       resetBtn,
-    } = ensureProgramLayout({
-      pageTitle,
-      browserTitle,
-      navItems,
-      activeHref,
+    } = ensureProgramLayout();
+
+    if (
+      initialInstructions !== undefined &&
+      typeof initialInstructions !== "string"
+    ) {
+      failConfig("Program initialInstructions must be a string.");
+    }
+
+    if (!Array.isArray(steps) || steps.length === 0) {
+      failConfig("Program steps must be a non-empty array.");
+    }
+
+    type StepInfo = {
+      index: number;
+      code: string;
+      lines: string[];
+      startLine: number;
+      endLine: number;
+      boundary: number;
+      instructions?: MBTypes.Part;
+      hints?: ProgramHint;
+      editable: boolean;
+    };
+
+    const stepInfos: StepInfo[] = [];
+    const lineList: string[] = [];
+    steps.forEach((step, index) => {
+      if (!step || typeof step !== "object") {
+        failConfig(`Step ${index + 1} must be an object.`);
+      }
+      if (typeof step.code !== "string") {
+        failConfig(`Step ${index + 1} must include a code string.`);
+      }
+      if (!step.code.endsWith("\n")) {
+        failConfig(`Step ${index + 1} code must end with a newline.`);
+      }
+      if (typeof step.editable !== "boolean") {
+        failConfig(`Step ${index + 1} must specify editable as true or false.`);
+      }
+      if (step.hints && typeof step.hints !== "function") {
+        failConfig(`Step ${index + 1} hints must be a function.`);
+      }
+      const rawLines = step.code.split(/\r?\n/);
+      if (rawLines[rawLines.length - 1] === "") rawLines.pop();
+      if (rawLines.length === 0) {
+        failConfig(`Step ${index + 1} code must include at least one line.`);
+      }
+      const tokens = simulator.tokenizeProgram(step.code);
+      const parts = simulator.splitStatements(tokens);
+      for (const part of parts) {
+        if (part?.tokens?.length && !part.hasSemicolon) {
+          failConfig(
+            `Step ${index + 1} contains an incomplete statement. Each step must be runnable on its own.`,
+          );
+        }
+      }
+      const startLine = lineList.length;
+      rawLines.forEach((line) => lineList.push(line));
+      const endLine = lineList.length - 1;
+      stepInfos.push({
+        index,
+        code: step.code,
+        lines: rawLines,
+        startLine,
+        endLine,
+        boundary: endLine + 1,
+        instructions: step.instructions,
+        hints: step.hints,
+        editable: step.editable,
+      });
     });
 
-    const lineList = Array.isArray(lines) ? lines.map((l) => String(l)) : [];
-    const total = lineList.length;
-    const editableStarts = (editableSteps || [])
-      .map((step) => Number(step))
-      .filter((step) => Number.isFinite(step));
+    if (stepInfos.some((step) => step.endLine < step.startLine)) {
+      failConfig("Program steps must each contain at least one line.");
+    }
 
-    const state = {
+    const total = lineList.length;
+    const instructionMap = new Map<number, MBTypes.Part>();
+    const hintMap = new Map<number, ProgramHint>();
+    const editableByBoundary = new Map<number, number>();
+    stepInfos.forEach((step) => {
+      if (step.instructions !== undefined && step.instructions !== null) {
+        instructionMap.set(step.boundary, step.instructions);
+      }
+      if (step.hints) {
+        hintMap.set(step.boundary, step.hints);
+      }
+      if (step.editable) {
+        editableByBoundary.set(step.boundary, step.startLine + 1);
+      }
+    });
+
+    const state: ProgramTemplateState = {
       boundary: 0,
       passes: {},
       ws: {},
@@ -207,15 +405,8 @@
       allocBase: null,
       workspaceEl: null,
     };
-    const simulator = createSimpleSimulator({
-      allowVarAssign: true,
-      allowDeclAssign: true,
-      allowDeclAssignVar: true,
-      requireSourceValue: true,
-      allowPointers: true,
-    });
 
-    function allocFactory() {
+    function allocFactory(): (type?: string) => string {
       if (state.allocBase == null) state.allocBase = randAddr("int");
       let next = Number(state.allocBase);
       return (type = "int") => {
@@ -231,15 +422,17 @@
       };
     }
 
-    function buildStatementMap(linesForMap) {
+    function buildStatementMap(linesForMap: string[]): StatementMap {
       const text = linesForMap.join("\n");
       const tokens = simulator.tokenizeProgram(text);
       const parts = simulator.splitStatements(tokens);
-      const byLine = new Array(linesForMap.length).fill(null);
+      const byLine: Array<StatementRange | null> = new Array(
+        linesForMap.length,
+      ).fill(null);
       parts.forEach((part) => {
         if (!Number.isFinite(part.startLine) || !Number.isFinite(part.endLine))
           return;
-        const range = {
+        const range: StatementRange = {
           startLine: part.startLine,
           endLine: part.endLine,
           hasSemicolon: !!part.hasSemicolon,
@@ -251,126 +444,107 @@
       return { parts, byLine };
     }
 
-    function statementRangeForLine(statementMap, lineIndex) {
+    function statementRangeForLine(
+      statementMap: StatementMap,
+      lineIndex: number,
+    ): StatementRange | null {
       if (!statementMap || !Array.isArray(statementMap.byLine)) return null;
       if (!Number.isFinite(lineIndex)) return null;
       if (lineIndex < 0 || lineIndex >= statementMap.byLine.length) return null;
       return statementMap.byLine[lineIndex];
     }
 
-    function statementRangeEndingAt(statementMap, boundary) {
+    function statementRangeEndingAt(
+      statementMap: StatementMap,
+      boundary: number,
+    ): StatementRange | null {
       const endLine = boundary - 1;
       if (!Number.isFinite(endLine)) return null;
-      return statementMap.parts.find(
-        (part) => part.endLine === endLine && part.hasSemicolon,
+      return (
+        statementMap.parts.find(
+          (part) => part.endLine === endLine && part.hasSemicolon,
+        ) || null
       );
     }
 
-    function isMultiLineStatement(range) {
-      return (
-        range &&
-        Number.isFinite(range.startLine) &&
-        Number.isFinite(range.endLine) &&
-        range.endLine > range.startLine
-      );
+    function isMultiLineStatement(
+      range: { startLine?: number; endLine?: number } | null,
+    ) {
+      const startLine = range?.startLine;
+      const endLine = range?.endLine;
+      if (typeof startLine !== "number" || typeof endLine !== "number")
+        return false;
+      if (!Number.isFinite(startLine) || !Number.isFinite(endLine))
+        return false;
+      return endLine > startLine;
     }
 
     const statementMap = buildStatementMap(lineList);
-    const groupRanges = normalizeRunGroups(runGroups, lineList.length);
-    const editableByBoundary = buildEditableBoundaries(
-      editableStarts,
-      statementMap,
-      groupRanges,
-    );
+    const groupRanges: NormalizedRunGroup[] = stepInfos.map((step) => ({
+      startLine: step.startLine,
+      endLine: step.endLine,
+    }));
     const editableSet = new Set(editableByBoundary.keys());
+    const hasInitialInstructionsContent =
+      typeof initialInstructions === "string" && initialInstructions.length > 0;
+
+    stepInfos.forEach((step) => {
+      const text = lineList.slice(0, step.boundary).join("\n");
+      const result = simulator.applyProgram(text);
+      if (!Array.isArray(result)) {
+        failConfig(
+          `Step ${step.index + 1} cannot be run as-is. Fix the code in this step.`,
+        );
+      }
+    });
 
     editableSet.forEach((step) => {
       if (Number.isFinite(step)) state.passes[step] = false;
     });
 
-    function normalizeRunGroups(groups, totalLines) {
-      if (!Array.isArray(groups)) return [];
-      const normalized = [];
-      groups.forEach((group) => {
-        if (!group) return;
-        const rawStart =
-          group.start ?? group.from ?? group.begin ?? group[0] ?? group.line;
-        const rawEnd =
-          group.end ?? group.to ?? group.finish ?? group[1] ?? rawStart;
-        let start = Number(rawStart);
-        let end = Number(rawEnd);
-        if (!Number.isFinite(start) || !Number.isFinite(end)) return;
-        start = Math.max(1, Math.min(totalLines, Math.round(start)));
-        end = Math.max(1, Math.min(totalLines, Math.round(end)));
-        if (end < start) [start, end] = [end, start];
-        normalized.push({ startLine: start - 1, endLine: end - 1 });
-      });
-      normalized.sort((a, b) => a.startLine - b.startLine);
-      return normalized;
-    }
-
-    function groupForLine(lineIndex) {
+    function groupForLine(lineIndex: number): NormalizedRunGroup | null {
       if (!Number.isFinite(lineIndex)) return null;
-      return groupRanges.find(
-        (group) => lineIndex >= group.startLine && lineIndex <= group.endLine,
+      return (
+        groupRanges.find(
+          (group) => lineIndex >= group.startLine && lineIndex <= group.endLine,
+        ) || null
       );
     }
 
-    function groupRangeEndingAt(boundary) {
+    function groupRangeEndingAt(boundary: number): NormalizedRunGroup | null {
       const endLine = boundary - 1;
       if (!Number.isFinite(endLine)) return null;
-      return groupRanges.find((group) => group.endLine === endLine);
+      return groupRanges.find((group) => group.endLine === endLine) || null;
     }
 
-    function buildEditableBoundaries(starts, stmtMap, groups) {
-      const result = new Map();
-      const totalLines = lineList.length;
-      (starts || []).forEach((start) => {
-        let startLine = Math.round(start) - 1;
-        if (!Number.isFinite(startLine)) return;
-        if (startLine < 0 || startLine >= totalLines) return;
-        let endLine = startLine;
-        const group = groups.find((g) => g.startLine === startLine);
-        if (group) {
-          endLine = group.endLine;
-        } else {
-          const range = statementRangeForLine(stmtMap, startLine);
-          if (range && Number.isFinite(range.endLine)) {
-            endLine = range.endLine;
-          }
-        }
-        const boundary = endLine + 1;
-        if (!result.has(boundary)) result.set(boundary, startLine + 1);
-      });
-      return result;
-    }
-
-    function stepStartForBoundary(boundary) {
-      const mapped = editableByBoundary.get(boundary);
-      if (mapped) return mapped;
-      const group = groupRangeEndingAt(boundary);
-      if (group) return group.startLine + 1;
-      const range = statementRangeEndingAt(statementMap, boundary);
-      if (range && Number.isFinite(range.startLine)) {
-        return range.startLine + 1;
-      }
-      return boundary;
-    }
-
-    function getStatementContext(boundary) {
+    function getStatementContext(boundary: number): {
+      currentRange: StatementRange | null;
+      prevRange: StatementRange | null;
+      midStatement: boolean;
+      atStatementStart: boolean;
+    } {
       const currentRange = statementRangeForLine(statementMap, boundary);
       const prevRange = statementRangeForLine(statementMap, boundary - 1);
       const currentIsMulti = isMultiLineStatement(currentRange);
+      const currentStart = currentRange?.startLine;
+      const currentEnd = currentRange?.endLine;
       const midStatement =
         currentIsMulti &&
-        boundary > currentRange.startLine &&
-        boundary <= currentRange.endLine;
+        typeof currentStart === "number" &&
+        typeof currentEnd === "number" &&
+        Number.isFinite(currentStart) &&
+        Number.isFinite(currentEnd) &&
+        boundary > currentStart &&
+        boundary <= currentEnd;
       const atStatementStart =
-        currentIsMulti && boundary === currentRange.startLine;
+        currentIsMulti &&
+        typeof currentStart === "number" &&
+        Number.isFinite(currentStart) &&
+        boundary === currentStart;
       return { currentRange, prevRange, midStatement, atStatementStart };
     }
 
-    function getExpectedState(boundary) {
+    function getExpectedState(boundary: number): MBTypes.BoxState[] {
       const safeBoundary = Math.max(0, Math.min(total, boundary));
       const text = lineList.slice(0, safeBoundary).join("\n");
       const alloc = allocFactory();
@@ -378,11 +552,13 @@
       return Array.isArray(result) ? result : [];
     }
 
-    function decorateState(boxes) {
+    function decorateState(boxes: MBTypes.BoxState[]): MBTypes.BoxState[] {
       return cloneBoxes(boxes || []);
     }
 
-    function normalizeState(list) {
+    function normalizeState(
+      list: MBTypes.BoxState[],
+    ): Array<{ name: string; type: string; value: string; address: string }> {
       if (!Array.isArray(list)) return [];
       return list
         .map((b) => ({
@@ -397,7 +573,7 @@
         });
     }
 
-    function statesEqual(a, b) {
+    function statesEqual(a: MBTypes.BoxState[], b: MBTypes.BoxState[]) {
       const na = normalizeState(a);
       const nb = normalizeState(b);
       if (na.length !== nb.length) return false;
@@ -412,20 +588,26 @@
       return true;
     }
 
-    function ensureBaseline(boundary, defaults) {
+    function ensureBaseline(
+      boundary: number,
+      defaults: MBTypes.BoxState[],
+    ): MBTypes.BoxState[] {
       if (!state.baseline[boundary]) {
         state.baseline[boundary] = cloneBoxes(defaults || []);
       }
       return state.baseline[boundary];
     }
 
-    function getWorkspaceEl() {
+    function getWorkspaceEl(): HTMLElement | null {
       return (
-        state.workspaceEl || stageEl?.querySelector?.('[data-role="workspace"]')
+        state.workspaceEl ||
+        (stageEl?.querySelector?.(
+          '[data-role="workspace"]',
+        ) as HTMLElement | null)
       );
     }
 
-    function updateResetVisibility(boundary) {
+    function updateResetVisibility(boundary: number) {
       if (!resetBtn) return;
       if (!editableSet.has(boundary) || state.passes[boundary]) {
         resetBtn.classList.add("hidden");
@@ -438,23 +620,25 @@
       resetBtn.classList.toggle("hidden", !changed);
     }
 
-    function attachResetWatcher(wrap, boundary) {
+    function attachResetWatcher(wrap: HTMLElement | null, boundary: number) {
       if (!wrap) return;
       const refresh = () => {
         updateResetVisibility(boundary);
       };
       wrap.addEventListener("input", refresh);
-      wrap.addEventListener("click", (event) => {
-        const target = event?.target;
+      wrap.addEventListener("click", () => {
         setTimeout(refresh, 0);
       });
       refresh();
     }
 
-    function nextWorkspaceAddress(wrap, type = "int") {
+    function nextWorkspaceAddress(
+      wrap: HTMLElement | null,
+      type: string = "int",
+    ): string {
       if (!wrap) return String(randAddr(type || "int"));
-      const used = new Set();
-      let maxAddr = null;
+      const used = new Set<string>();
+      let maxAddr: number | null = null;
       wrap.querySelectorAll(".vbox").forEach((node) => {
         const box = readBoxState(node);
         const raw = box?.address ?? "";
@@ -476,15 +660,16 @@
       return String(next);
     }
 
-    function pointerTargetName(box, boxes) {
+    function pointerTargetName(
+      box: MBTypes.BoxState | null,
+      boxes: MBTypes.BoxState[] | null,
+    ): string {
       if (!box) return "";
       const depth = getPointerDepth(box.type);
-      if (!Number.isFinite(depth) || depth < 1) return "";
+      if (depth == null || !Number.isFinite(depth) || depth < 1) return "";
       const raw = String(box.value ?? "").trim();
       if (raw === "") return "";
-      const target = (boxes || []).find(
-        (b) => String(b.address ?? "") === raw,
-      );
+      const target = (boxes || []).find((b) => String(b.address ?? "") === raw);
       return target?.name || "";
     }
 
@@ -493,7 +678,10 @@
       applyOtherNames(stageEl, { onToggle: refreshOtherNames });
     }
 
-    function boxesEqual(actual, expected) {
+    function boxesEqual(
+      actual: MBTypes.BoxState[],
+      expected: MBTypes.BoxState[],
+    ) {
       if (!Array.isArray(actual) || !Array.isArray(expected)) return false;
       const actualByName = new Map();
       for (const box of actual) {
@@ -514,7 +702,8 @@
         const actType = String(act.type || "").trim();
         const expType = String(exp.type || "").trim();
         if (actType !== expType) return false;
-        const isPtr = getPointerDepth(actType) > 0;
+        const depth = getPointerDepth(actType);
+        const isPtr = depth != null && Number.isFinite(depth) && depth > 0;
         if (isPtr) {
           if (
             pointerTargetName(act, actual) !== pointerTargetName(exp, expected)
@@ -532,7 +721,7 @@
       return true;
     }
 
-    function defaultsForBoundary(boundary) {
+    function defaultsForBoundary(boundary: number): MBTypes.BoxState[] {
       if (!editableSet.has(boundary))
         return decorateState(getExpectedState(boundary));
       const groupRange = groupRangeEndingAt(boundary);
@@ -546,24 +735,20 @@
       return decorateState(getExpectedState(Math.max(0, boundary - 1)));
     }
 
-    function setStatus(text, cls = "muted") {
+    function setStatus(text: string, cls: string = "muted") {
       if (!statusEl) return;
       statusEl.textContent = text;
       statusEl.className = cls;
     }
 
-    function makeToken(role, text) {
-      return { kind: "tok", role, text: String(text ?? "") };
-    }
-
     function topNoticeParts() {
-      return "This one is long, so I've placed the $b{Back ◀} and $b{Run line 1 ▶} buttons on the top as well as the bottom.";
+      return "This one is long, so I've placed the $backButton and $runLineButton buttons on the top as well as the bottom.";
     }
 
-    function withTopNotice(parts, ctx) {
+    function withTopNotice(parts: ProgramParts) {
       if (isMobileViewport()) return parts;
       if (!isStepperTopVisible(codeEl)) return parts;
-      const notice = topNoticeParts(ctx);
+      const notice = topNoticeParts();
       if (typeof parts === "string") {
         return `${notice}\n${parts}`;
       }
@@ -573,91 +758,106 @@
       return [notice, "\n", parts];
     }
 
-    function runLabelForBoundary(boundary) {
+    function replaceButtonTokens(text: string, runLabel: string): string {
+      const resolvedLabel = runLabel || "Run line";
+      const replacements: Array<[string, string]> = [
+        ["$runLineButton", `$b{${resolvedLabel}}`],
+        ["$backButton", "$b{Back ◀}"],
+        ["$checkButton", "$b{Check}"],
+        ["$resetButton", "$b{Reset}"],
+        ["$newVariableButton", "$b{+ New variable}"],
+        ["$showAliasesButton", "$b{Show aliases}"],
+      ];
+      let out = String(text ?? "");
+      replacements.forEach(([needle, value]) => {
+        out = out.split(needle).join(value);
+      });
+      return out;
+    }
+
+    function applyButtonTokens(
+      parts: ProgramParts | null,
+      runLabel: string,
+    ): ProgramParts | null {
+      if (!parts) return parts;
+      if (typeof parts === "string") {
+        return replaceButtonTokens(parts, runLabel);
+      }
+      if (Array.isArray(parts)) {
+        return parts.map((part) =>
+          typeof part === "string"
+            ? replaceButtonTokens(part, runLabel)
+            : part,
+        );
+      }
+      return parts;
+    }
+
+    function formatRunLabel(start: number, end: number, withArrow: boolean) {
+      if (start === end) {
+        return `Run line ${start}${withArrow ? " ▶" : ""}`;
+      }
+      return `Run lines ${start}-${end}${withArrow ? " ▶" : ""}`;
+    }
+
+    function runLabelForBoundary(boundary: number): string {
       const group = groupForLine(boundary);
       if (group) {
         const start = group.startLine + 1;
         const end = group.endLine + 1;
-        return `Run lines ${start}-${end} ▶`;
+        return formatRunLabel(start, end, true);
       }
       const range = statementRangeForLine(statementMap, boundary);
       if (range && isMultiLineStatement(range)) {
         const start = range.startLine + 1;
         const end = range.endLine + 1;
-        return `Run lines ${start}-${end} ▶`;
+        return formatRunLabel(start, end, true);
       }
       return `Run line ${boundary + 1} ▶`;
     }
 
-    function partsContext({ boxes, expected, boundaryOverride } = {}) {
-      const boundary = Number.isFinite(boundaryOverride)
-        ? boundaryOverride
-        : state.boundary;
-      const runLabel = runLabelForBoundary(boundary);
-      const stepStart = stepStartForBoundary(boundary);
-      const ctx = {
-        boundary,
-        stepStart,
-        total,
-        runLabel,
-        passed: !!state.passes[state.boundary],
-        boxes: boxes || [],
-        expected: expected || [],
-        byName: Object.fromEntries((boxes || []).map((b) => [b.name, b])),
-        expectedByName: Object.fromEntries(
-          (expected || []).map((b) => [b.name, b]),
-        ),
-        nameStyle: (text) => makeToken("name", text),
-        typeStyle: (text) => makeToken("type", text),
-        valueStyle: (text) => makeToken("value", text),
-        addrStyle: (text) => makeToken("addr", text),
-        codeStyle: (text) => makeToken("code", text),
-        btnStyle: (text) => makeToken("btn", text),
-        pointerTargetName: (box, list) =>
-          pointerTargetName(box, list || boxes || []),
+    function partsContext({
+      boxes,
+    }: {
+      boxes?: MBTypes.BoxState[];
+    } = {}): ProgramContext {
+      return {
+        boxes: boxes ?? [],
+        getBoxByName,
+        getBoxesByName,
       };
-      ctx.withTopNotice = (parts) => withTopNotice(parts, ctx);
-      return ctx;
     }
 
-    function resolveParts(spec, ctx) {
+    function resolveParts(
+      spec: ((ctx: ProgramContext) => MBTypes.Part | null) | null,
+      ctx: ProgramContext,
+    ): ProgramParts | null {
       if (!spec) return null;
-      if (typeof spec === "function") return spec(ctx);
-      if (Array.isArray(spec)) return spec;
-      return [String(spec)];
+      const resolved = spec(ctx);
+      if (!resolved) return null;
+      return String(resolved);
     }
 
-    function getInstructionParts(ctx) {
-      if (!instructions) return null;
-      if (typeof instructions === "function") return instructions(ctx);
-      if (instructions && typeof instructions === "object") {
-        const entry =
-          instructions[ctx.stepStart] ??
-          instructions[ctx.boundary] ??
-          instructions.default ??
-          null;
-        return resolveParts(entry, ctx);
+    function getInstructionParts(boundary: number): ProgramParts | null {
+      if (boundary === 0 && hasInitialInstructionsContent) {
+        return initialInstructions || "";
       }
-      return null;
+      const entry = instructionMap.get(boundary) ?? null;
+      return entry ? String(entry) : null;
     }
 
-    function getHintParts(ctx) {
-      if (!hints) return null;
-      if (typeof hints === "function") return hints(ctx);
-      if (hints && typeof hints === "object") {
-        const entry = hints[ctx.stepStart] ?? hints[state.boundary] ?? null;
-        return resolveParts(entry, ctx);
-      }
-      return null;
+    function getHintParts(ctx: ProgramContext): ProgramParts | null {
+      const entry = hintMap.get(state.boundary) ?? null;
+      return resolveParts(entry, ctx);
     }
 
     function renderCodePaneForBoundary() {
       if (!codeEl) return;
       const progress =
         editableSet.has(state.boundary) && !state.passes[state.boundary];
-      let progressRange;
-      let progressIndex;
-      let doneBoundary;
+      let progressRange: [number, number] | undefined;
+      let progressIndex: number | undefined;
+      let doneBoundary: number | undefined;
       if (progress) {
         const groupRange = groupRangeEndingAt(state.boundary);
         const range =
@@ -739,7 +939,7 @@
         refreshOtherNames();
       });
       stageEl.addEventListener("click", (event) => {
-        const target = event?.target;
+        const target = event?.target as HTMLElement | null;
         if (target?.closest?.(".delete")) {
           requestAnimationFrame(refreshOtherNames);
         }
@@ -747,58 +947,25 @@
     }
 
     function updateInstructions() {
-      const expected = getExpectedState(state.boundary);
-      const ctx = partsContext({ expected });
+      const runLabel = runLabelForBoundary(state.boundary);
       if (state.boundary === total && state.passes[state.boundary]) {
         setPartsContent(instructionsEl, "Program solved!");
         return;
       }
-      let parts = getInstructionParts(ctx);
+      let parts = getInstructionParts(state.boundary);
       if (Array.isArray(parts) && parts.length === 0) parts = null;
-      if (parts && state.boundary === 0) {
-        parts = withTopNotice(parts, ctx);
-      }
-      const fallbackMode =
-        stepperFallback === "buttons" ? "buttons" : "default";
-      if (
-        !parts &&
-        stepperFallback &&
-        state.boundary < firstInstructionBoundary()
-      ) {
-        parts = stepperInstructionParts(ctx, {
-          atStart: state.boundary === 0,
-          mode: fallbackMode,
-        });
-        if (parts && state.boundary === 0) {
-          parts = withTopNotice(parts, ctx);
+      if (state.boundary === 0) {
+        if (parts) {
+          parts = withTopNotice(parts);
+        } else {
+          parts = topNoticeParts();
         }
       }
       if (!parts) {
         parts = null;
       }
+      parts = applyButtonTokens(parts, runLabel);
       setPartsContent(instructionsEl, parts);
-    }
-
-    let cachedFirstInstructionBoundary = null;
-    function firstInstructionBoundary() {
-      if (cachedFirstInstructionBoundary !== null)
-        return cachedFirstInstructionBoundary;
-      if (!instructions) {
-        cachedFirstInstructionBoundary = Infinity;
-        return cachedFirstInstructionBoundary;
-      }
-      for (let b = 0; b <= total; b++) {
-        const expected = getExpectedState(b);
-        const ctx = partsContext({ expected, boundaryOverride: b });
-        let parts = getInstructionParts(ctx);
-        if (Array.isArray(parts) && parts.length === 0) parts = null;
-        if (parts) {
-          cachedFirstInstructionBoundary = b;
-          return cachedFirstInstructionBoundary;
-        }
-      }
-      cachedFirstInstructionBoundary = Infinity;
-      return cachedFirstInstructionBoundary;
     }
 
     function hideHint() {
@@ -807,37 +974,33 @@
       hintPanel.classList.add("hidden");
     }
 
-    function readWorkspaceBoxes() {
+    function readWorkspaceBoxes(): MBTypes.BoxState[] {
       const ws = getWorkspaceEl();
       if (!ws) return [];
-      return [...ws.querySelectorAll(".vbox")].map((v) => readBoxState(v));
+      return [...ws.querySelectorAll(".vbox")]
+        .map((v) => readBoxState(v))
+        .filter(Boolean) as MBTypes.BoxState[];
     }
 
-    function evaluateWorkspace(boxes) {
+    function evaluateWorkspace(boxes: MBTypes.BoxState[]) {
       const expected = getExpectedState(state.boundary);
       return { ok: boxesEqual(boxes, expected), expected };
     }
 
-    function showHint(parts) {
+    function showHint(parts: ProgramParts | null, runLabel: string) {
       if (!hintPanel) return;
       if (!parts || (Array.isArray(parts) && parts.length === 0)) return;
-      renderParts(hintPanel, parts);
+      const rendered = applyButtonTokens(parts, runLabel);
+      renderParts(hintPanel, rendered || "");
       hintPanel.classList.remove("hidden");
       flashStatus(hintPanel);
     }
 
-    function isLooksGoodParts(parts) {
+    function isLooksGoodParts(parts: ProgramParts | null) {
       if (typeof parts === "string") {
-        return parts.trim() === "Looks good. Press $b{Check}.";
+        return parts.trim() === "Looks good. Press $checkButton.";
       }
-      if (!Array.isArray(parts) || parts.length !== 3) return false;
-      const [lead, mid, tail] = parts;
-      if (String(lead) !== "Looks good. Press ") return false;
-      if (!mid || typeof mid !== "object") return false;
-      if (mid.kind !== "tok" || mid.role !== "btn") return false;
-      if (String(mid.text || "") !== "Check") return false;
-      if (String(tail) !== ".") return false;
-      return true;
+      return false;
     }
 
     function render() {
@@ -858,7 +1021,7 @@
       if (addBtn)
         addBtn.classList.toggle(
           "hidden",
-          !editable || !workspace.allowAddAndDelete,
+          !editable || !workspace.allowVariableCreation,
         );
       if (resetBtn) resetBtn.classList.add("hidden");
       updateInstructions();
@@ -932,25 +1095,28 @@
       hintBtn.addEventListener("click", () => {
         const boxes = readWorkspaceBoxes();
         const result = evaluateWorkspace(boxes);
-        const ctx = partsContext({ boxes, expected: result.expected });
+        const ctx = partsContext({ boxes });
+        const runLabel = runLabelForBoundary(state.boundary);
         if (result.ok) {
-          showHint("Looks good. Press $b{Check}.");
+          showHint("Looks good. Press $checkButton.", runLabel);
           return;
         }
         const parts = getHintParts(ctx);
         if (!parts || (Array.isArray(parts) && parts.length === 0)) {
           showHint(
-            "Your program has a problem that isn't covered by a hint, sorry. You can click $b{Reset} to undo all of your changes for this step.",
+            "Your program has a problem that isn't covered by a hint, sorry. You can click $resetButton to undo all of your changes for this step.",
+            runLabel,
           );
           return;
         }
         if (isLooksGoodParts(parts)) {
           showHint(
-            "Your program has a problem that isn't covered by a hint, sorry. You can click $b{Reset} to undo all of your changes for this step.",
+            "Your program has a problem that isn't covered by a hint, sorry. You can click $resetButton to undo all of your changes for this step.",
+            runLabel,
           );
           return;
         }
-        showHint(parts);
+        showHint(parts, runLabel);
       });
     }
 
@@ -970,19 +1136,20 @@
         if (!editableSet.has(step)) return "";
         return state.passes[step] ? "check" : "note";
       },
-      getNextLabel: (boundary, totalCount, atEnd) => {
+      getNextLabel: (boundary) => {
+        const atEnd = boundary >= total;
         if (atEnd) return "Next Program";
         const group = groupForLine(boundary);
         if (group) {
           const start = group.startLine + 1;
           const end = group.endLine + 1;
-          return `Run lines ${start}-${end}`;
+          return formatRunLabel(start, end, false);
         }
         const range = statementRangeForLine(statementMap, boundary);
         if (range && isMultiLineStatement(range)) {
           const start = range.startLine + 1;
           const end = range.endLine + 1;
-          return `Run lines ${start}-${end}`;
+          return formatRunLabel(start, end, false);
         }
         return `Run line ${boundary + 1}`;
       },

@@ -1,38 +1,265 @@
-(function (global) {
-  function $(selector, root = document) {
+namespace MBTypes {
+  export type BaseType = "int" | "long";
+  export interface ParsedType {
+    base: BaseType | null;
+    depth: number | null;
+  }
+  export interface TypeInfo {
+    size: number;
+    align: number;
+  }
+  export type BoxValue = string;
+  export interface BoxState {
+    name: string;
+    type: string;
+    value: BoxValue;
+    address?: string | null;
+    names?: string[] | string | null;
+    nameEditable?: boolean | null;
+    typeEditable?: boolean | null;
+    allowNameEdit?: boolean | null;
+    allowTypeEdit?: boolean | null;
+    allowDelete?: boolean | null;
+    node?: HTMLElement;
+  }
+  export type Statement = { kind: string; [key: string]: any };
+  export type SimpleStatement =
+    | { kind: "decl"; name: string; type: string }
+    | { kind: "assign"; name: string; value: string; valueKind: "num" }
+    | { kind: "assignRef"; name: string; ref: string }
+    | { kind: "assignDeref"; name: string; value: string }
+    | null;
+  export interface Token {
+    type: "kw" | "ident" | "number" | "sym" | "unknown";
+    value: string;
+    line: number;
+    col: number;
+  }
+  export interface StatementPart {
+    tokens: Token[];
+    startLine: number;
+    endLine: number;
+    hasSemicolon: boolean;
+  }
+  export interface LineStatus {
+    invalid: Set<number>;
+    incomplete: Set<number>;
+    errors: Map<number, any>;
+    errorKinds: Map<number, string>;
+    info: Map<number, any>;
+  }
+  export interface SimpleSimulator {
+    tokenizeProgram: (src?: string) => Token[];
+    splitStatements: (tokens: Token[]) => StatementPart[];
+    parseStatements: (text: string) => Statement[];
+    classifyLineStatuses: (
+      lines: string[],
+      opts?: { alloc?: (type?: string) => string },
+    ) => LineStatus;
+    findMissingSemicolonLines: (text: string) => number[];
+    applyProgram: (
+      text: string,
+      opts?: { alloc?: (type?: string) => string },
+    ) => BoxState[] | null;
+  }
+  export interface NavItem {
+    href: string;
+    label: string;
+  }
+  export interface RenderCodePaneOptions {
+    progress?: boolean;
+    progressIndex?: number;
+    progressRange?: [number, number] | { start: number; end: number };
+    doneBoundary?: number;
+  }
+  export interface TokenPart {
+    kind: "tok";
+    role: string;
+    text: string;
+  }
+  export type Part = string;
+  export type Parts = string | string[];
+  export interface StepperOptions {
+    root?: ParentNode | null;
+    prevButtons?: HTMLButtonElement[] | null;
+    nextButtons?: HTMLButtonElement[] | null;
+    lines?: number | string[];
+    nextPage?: string | null;
+    getBoundary?: () => number;
+    setBoundary?: (value: number) => void;
+    onBeforeChange?: (current: number) => void;
+    onAfterChange?: (current: number) => void;
+    isStepLocked?: (current: number, atEnd: boolean) => boolean;
+    getStepBadge?: (step: number) => string;
+    getNextLabel?: (current: number, total: number, atEnd: boolean) => string;
+    getNextBoundary?: (current: number, total: number) => number;
+    getPrevBoundary?: (current: number, total: number) => number;
+    endLabel?: string;
+  }
+  export interface Stepper {
+    update: () => void;
+    goTo: (target: number) => void;
+    boundary: () => number;
+    clearPulse: () => void;
+    pulseNext: () => void;
+  }
+  export type RandAddr = ((type?: string) => number) & {
+    reset: (seed?: number | null) => void;
+  };
+}
+
+interface MBNamespace {
+  $: (selector: string, root?: ParentNode) => Element | null;
+  randAddr: MBTypes.RandAddr;
+  typeInfo: (type?: string) => MBTypes.TypeInfo;
+  getPointerDepth: (type?: string) => number | null;
+  normalizeZeroDisplay: (value: MBTypes.BoxValue) => string;
+  isMobileViewport: () => boolean;
+  isStepperTopVisible: (codepane: Element | null) => boolean;
+  buildNav: (
+    items?: MBTypes.NavItem[],
+    opts?: { activeHref?: string },
+  ) => HTMLElement;
+  resolveActiveNavItem: (
+    items?: MBTypes.NavItem[],
+    activeHref?: string,
+  ) => MBTypes.NavItem | undefined;
+  ensureBaseLayout: (opts?: {
+    navItems?: MBTypes.NavItem[];
+    activeHref?: string;
+  }) => { wrap: HTMLElement; nav: HTMLElement; main: HTMLElement };
+  renderCodePane: (
+    root: Element,
+    lines: string[],
+    boundary: number,
+    opts?: MBTypes.RenderCodePaneOptions,
+  ) => void;
+  updateStepperTopControls: (codepane: Element | null) => void;
+  stripLineComments: (src?: string) => { text: string; unterminated: boolean };
+  createSimpleSimulator: (opts?: {
+    allowVarAssign?: boolean;
+    allowDeclAssign?: boolean;
+    allowDeclAssignVar?: boolean;
+    requireSourceValue?: boolean;
+    allowPointers?: boolean;
+  }) => MBTypes.SimpleSimulator;
+  vbox: (opts?: {
+    address?: string;
+    type?: string;
+    value?: MBTypes.BoxValue;
+    name?: string;
+    editable?: boolean;
+    allowNameEdit?: boolean;
+    allowTypeEdit?: boolean;
+  }) => HTMLElement;
+  readBoxState: (root: Element | null) => MBTypes.BoxState | null;
+  makeAnswerBox: (opts?: {
+    name?: string;
+    names?: string[] | string | null;
+    type?: string;
+    value?: MBTypes.BoxValue;
+    address?: string | number | null;
+    editable?: boolean;
+    deletable?: boolean;
+    allowNameEdit?: boolean | null;
+    allowTypeEdit?: boolean | null;
+    nameEditable?: boolean | null;
+    typeEditable?: boolean | null;
+  }) => HTMLElement;
+  cloneBoxes: (list?: MBTypes.BoxState[] | null) => MBTypes.BoxState[];
+  applyOtherNames: (
+    root: Element | null,
+    opts?: { onToggle?: (() => void) | null; shownAddrs?: Set<string> | null },
+  ) => void;
+  serializeWorkspace: (target: string | Element | null) => MBTypes.BoxState[] | null;
+  restoreWorkspace: (
+    state?: MBTypes.BoxState[] | null,
+    defaults?: MBTypes.BoxState[] | null,
+    opts?: {
+      editable?: boolean;
+      deletable?: boolean;
+      allowNameEdit?: boolean | null;
+      allowTypeEdit?: boolean | null;
+    },
+  ) => HTMLElement;
+  renderParts: (panel: Element | null, parts: MBTypes.Parts) => void;
+  setPartsContent: (
+    panel: Element | null,
+    parts: MBTypes.Parts | null,
+  ) => void;
+  createStepper: (opts?: MBTypes.StepperOptions) => MBTypes.Stepper;
+  flashStatus: (el: Element | null) => void;
+  disableBoxEditing: (root: Element | null) => void;
+  removeBoxDeleteButtons: (root: Element | null) => void;
+  confettiRain?: (opts?: { count?: number; duration?: number }) => void;
+}
+
+interface Window {
+  MB?: MBNamespace;
+}
+
+type MBGlobal = Window & typeof globalThis;
+
+(function (global: MBGlobal) {
+  function $(selector: string, root: ParentNode = document): Element | null {
     return root.querySelector(selector);
   }
 
-  function el(html) {
+  function el(html: string): HTMLElement {
     const t = document.createElement("template");
     t.innerHTML = html.trim();
-    return t.content.firstElementChild;
+    return t.content.firstElementChild as HTMLElement;
   }
 
-  function parseType(type = "int") {
+  function parseType(
+    type: string = "int",
+  ): { base: string | null; depth: number } {
     const clean = String(type || "").trim();
     const match = clean.match(/^(int|long)(\*+)?$/);
-    if (!match) return { base: null, depth: null };
+    if (!match) return { base: null, depth: 0 };
     const base = match[1];
     const depth = match[2] ? match[2].length : 0;
     return { base, depth };
   }
 
-  function getPointerDepth(type = "int") {
+  function isPointerType(type: string = "int"): boolean {
+    const { depth } = parseType(type);
+    return depth != null && Number.isFinite(depth) && depth > 0;
+  }
+
+  function isRefCompatible(
+    targetType: string = "int*",
+    refType: string = "int",
+  ): boolean {
+    const { base: targetBase, depth: targetDepth } = parseType(targetType);
+    const { base: refBase, depth: refDepth } = parseType(refType);
+    if (
+      !targetBase ||
+      !refBase ||
+      targetDepth == null ||
+      refDepth == null ||
+      !Number.isFinite(targetDepth) ||
+      !Number.isFinite(refDepth)
+    )
+      return false;
+    return targetBase === refBase && targetDepth === refDepth + 1;
+  }
+
+  function getPointerDepth(type: string = "int"): number {
     const { depth } = parseType(type);
     return depth;
   }
 
-  function typeInfo(type = "int") {
+  function typeInfo(type: string = "int"): { size: number; align: number } {
     const { base, depth } = parseType(type);
     if (!base) return { size: 4, align: 4 };
-    if (depth > 0) return { size: 8, align: 8 };
+    if (Number.isFinite(depth) && depth > 0) return { size: 8, align: 8 };
     if (base === "long") return { size: 8, align: 8 };
     return { size: 4, align: 4 };
   }
 
-  let nextAddr = null;
-  function randAddr(type = "int") {
+  let nextAddr: number | null = null;
+  const randAddr: MBTypes.RandAddr = (type = "int") => {
     const { size, align } = typeInfo(type);
     if (nextAddr == null) {
       const base = 64 + Math.floor(Math.random() * 837);
@@ -44,22 +271,22 @@
     const addr = nextAddr;
     nextAddr = addr + size;
     return addr;
-  }
-  randAddr.reset = function (seed = null) {
+  };
+  randAddr.reset = function (seed: number | null = null) {
     nextAddr = seed;
   };
 
-  function normalizeZeroDisplay(value) {
+  function normalizeZeroDisplay(value: MBTypes.BoxValue): string {
     const trimmed = String(value ?? "").trim();
     if (trimmed === "-0") return "0";
     return trimmed;
   }
 
-  function txt(n) {
+  function txt(n?: Node | null): string {
     return (n?.textContent || "").trim();
   }
 
-  function disableAutoText(el) {
+  function disableAutoText(el?: Element | null) {
     if (!el || el.nodeType !== 1) return;
     el.setAttribute("autocapitalize", "off");
     el.setAttribute("autocorrect", "off");
@@ -67,7 +294,7 @@
     el.setAttribute("spellcheck", "false");
   }
 
-  function applyAutoTextDefaults(root = document) {
+  function applyAutoTextDefaults(root: ParentNode = document) {
     if (!root) return;
     root
       .querySelectorAll(
@@ -76,9 +303,22 @@
       .forEach((el) => disableAutoText(el));
   }
 
-  const stepperTopState = new Map();
+  type StepperTopEntry = {
+    top: HTMLDivElement;
+    update: (() => void) | null;
+    scheduled: boolean;
+    needsTop: boolean | null;
+    measure: (() => void) | null;
+    locked: boolean;
+    lockOnMeasure: boolean;
+    ro?: ResizeObserver;
+  };
 
-  function findStepperControls(panel) {
+  const stepperTopState = new Map<Element, StepperTopEntry>();
+
+  function findStepperControls(
+    panel: Element | null,
+  ): { prev: HTMLButtonElement; next: HTMLButtonElement } | null {
     if (!panel) return null;
     const controls = [...panel.querySelectorAll(".controls")].find((el) => {
       return (
@@ -87,20 +327,36 @@
       );
     });
     if (!controls) return null;
-    const prev = controls.querySelector('button[data-stepper="prev"]');
-    const next = controls.querySelector('button[data-stepper="next"]');
+    const prev = controls.querySelector(
+      'button[data-stepper="prev"]',
+    ) as HTMLButtonElement | null;
+    const next = controls.querySelector(
+      'button[data-stepper="next"]',
+    ) as HTMLButtonElement | null;
     if (!prev || !next) return null;
     return { prev, next };
   }
 
-  function ensureStepperTopControls(codepane) {
+  function ensureStepperTopControls(
+    codepane: Element | null,
+  ): {
+    top: HTMLDivElement;
+    update: (() => void) | null;
+    scheduled: boolean;
+    needsTop: boolean | null;
+    measure: (() => void) | null;
+    locked: boolean;
+    lockOnMeasure: boolean;
+    ro?: ResizeObserver;
+  } | null {
     if (!codepane) return null;
-    if (stepperTopState.has(codepane)) return stepperTopState.get(codepane);
+    if (stepperTopState.has(codepane))
+      return stepperTopState.get(codepane) || null;
     const panel = codepane.closest(".panel");
     if (!panel) return null;
     const info = findStepperControls(panel);
     if (!info) return null;
-    let top = panel.querySelector(".controls-top");
+    let top = panel.querySelector(".controls-top") as HTMLDivElement | null;
     if (!top) {
       top = document.createElement("div");
       top.className = "controls controls-top hidden";
@@ -114,7 +370,7 @@
       top.appendChild(nextBtn);
       panel.insertBefore(top, codepane);
     }
-    const entry = {
+    const entry: StepperTopEntry = {
       top,
       update: null,
       scheduled: false,
@@ -166,18 +422,18 @@
     return entry;
   }
 
-  function updateStepperTopControls(codepane) {
+  function updateStepperTopControls(codepane: Element | null) {
     const entry = ensureStepperTopControls(codepane);
-    entry?.update();
+    entry?.update?.();
   }
 
   const MOBILE_MEDIA_QUERY = "(max-width: 900px)";
 
-  function isMobileViewport() {
+  function isMobileViewport(): boolean {
     return window.matchMedia && window.matchMedia(MOBILE_MEDIA_QUERY).matches;
   }
 
-  function isStepperTopVisible(codepane) {
+  function isStepperTopVisible(codepane: Element | null): boolean {
     if (!codepane) return false;
     const entry = ensureStepperTopControls(codepane);
     if (!entry) return false;
@@ -185,7 +441,7 @@
     return !!entry.needsTop;
   }
 
-  const DEFAULT_NAV_ITEMS = [
+  const DEFAULT_NAV_ITEMS: MBTypes.NavItem[] = [
     { href: "index.html", label: "Home" },
     { href: "program1.html", label: "1. Assignment I" },
     { href: "program2.html", label: "2. Declaration" },
@@ -203,7 +459,7 @@
     { href: "sandbox.html", label: "Sandbox" },
   ];
 
-  function normalizeNavHref(href = "") {
+  function normalizeNavHref(href = ""): string {
     const clean = String(href || "")
       .split("#")[0]
       .split("?")[0];
@@ -211,20 +467,26 @@
     return parts[parts.length - 1] || "index.html";
   }
 
-  function currentNavHref() {
+  function currentNavHref(): string {
     const pathname = window.location?.pathname || "";
     const cleaned = normalizeNavHref(pathname);
     return cleaned || "index.html";
   }
 
-  function resolveActiveNavItem(items = DEFAULT_NAV_ITEMS, activeHref) {
+  function resolveActiveNavItem(
+    items: MBTypes.NavItem[] = DEFAULT_NAV_ITEMS,
+    activeHref?: string,
+  ): MBTypes.NavItem | undefined {
     const list =
       Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
     const current = normalizeNavHref(activeHref || currentNavHref());
     return list.find((item) => normalizeNavHref(item?.href || "") === current);
   }
 
-  function buildNav(items = DEFAULT_NAV_ITEMS, { activeHref } = {}) {
+  function buildNav(
+    items: MBTypes.NavItem[] = DEFAULT_NAV_ITEMS,
+    { activeHref }: { activeHref?: string } = {},
+  ): HTMLElement {
     const list =
       Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
     const current = normalizeNavHref(activeHref || currentNavHref());
@@ -244,11 +506,15 @@
     return nav;
   }
 
-  function ensureBaseLayout({ navItems, activeHref } = {}) {
-    let wrap = document.querySelector(".wrap");
-    let nav =
-      wrap?.querySelector("nav.tabs") || document.querySelector("nav.tabs");
-    let main = wrap?.querySelector(".main") || document.querySelector(".main");
+  function ensureBaseLayout({
+    navItems,
+    activeHref,
+  }: { navItems?: MBTypes.NavItem[]; activeHref?: string } = {}) {
+    let wrap = document.querySelector(".wrap") as HTMLElement | null;
+    let nav = (wrap?.querySelector("nav.tabs") ||
+      document.querySelector("nav.tabs")) as HTMLElement | null;
+    let main = (wrap?.querySelector(".main") ||
+      document.querySelector(".main")) as HTMLElement | null;
     if (!wrap) {
       wrap = document.createElement("div");
       wrap.className = "wrap";
@@ -270,7 +536,11 @@
         else mount.appendChild(wrap);
       }
     }
-    return { wrap, nav, main };
+    return {
+      wrap: wrap as HTMLElement,
+      nav: nav as HTMLElement,
+      main: main as HTMLElement,
+    };
   }
 
   function initStepperTopControls() {
@@ -278,14 +548,19 @@
       updateStepperTopControls(pane);
     });
     window.addEventListener("resize", () => {
-      stepperTopState.forEach((entry) => entry.update());
+      stepperTopState.forEach((entry) => entry.update?.());
     });
     window.addEventListener("scroll", () => {
-      stepperTopState.forEach((entry) => entry.update());
+      stepperTopState.forEach((entry) => entry.update?.());
     });
   }
 
-  function renderCodePane(root, lines, boundary, opts = {}) {
+  function renderCodePane(
+    root: Element,
+    lines: string[],
+    boundary: number,
+    opts: MBTypes.RenderCodePaneOptions = {},
+  ) {
     root.innerHTML = "";
     const code = el('<div class="codecol"></div>');
     if (opts.progress) code.classList.add("has-progress");
@@ -294,31 +569,43 @@
       code.appendChild(el('<div class="boundary"></div>'));
     const progress = !!opts.progress;
     let progressIndex = -1;
-    let progressRangeStart = null;
-    let progressRangeEnd = null;
+    let progressRangeStart: number | null = null;
+    let progressRangeEnd: number | null = null;
     let doneBoundary = boundary;
-    if (Number.isFinite(opts.doneBoundary)) {
+    if (
+      typeof opts.doneBoundary === "number" &&
+      Number.isFinite(opts.doneBoundary)
+    ) {
       doneBoundary = Math.max(0, Math.min(lines.length, opts.doneBoundary));
     }
     if (progress) {
       const range = opts.progressRange;
-      let rangeStart = null;
-      let rangeEnd = null;
+      let rangeStart: number | null = null;
+      let rangeEnd: number | null = null;
       if (Array.isArray(range) && range.length >= 2) {
         rangeStart = Number(range[0]);
         rangeEnd = Number(range[1]);
-      } else if (range && typeof range === "object") {
+      } else if (range && typeof range === "object" && !Array.isArray(range)) {
         rangeStart = Number(range.start);
         rangeEnd = Number(range.end);
       }
-      if (Number.isFinite(rangeStart) && Number.isFinite(rangeEnd)) {
+      if (
+        typeof rangeStart === "number" &&
+        typeof rangeEnd === "number" &&
+        Number.isFinite(rangeStart) &&
+        Number.isFinite(rangeEnd)
+      ) {
         const start = Math.min(rangeStart, rangeEnd);
         const end = Math.max(rangeStart, rangeEnd);
         const maxIndex = Math.max(0, lines.length - 1);
         progressRangeStart = Math.max(0, Math.min(maxIndex, start));
         progressRangeEnd = Math.max(0, Math.min(maxIndex, end));
-        if (progressIndex < 0) progressIndex = progressRangeStart;
-      } else if (Number.isFinite(opts.progressIndex)) {
+        if (progressIndex < 0 && progressRangeStart != null)
+          progressIndex = progressRangeStart;
+      } else if (
+        typeof opts.progressIndex === "number" &&
+        Number.isFinite(opts.progressIndex)
+      ) {
         progressIndex = Math.max(
           0,
           Math.min(lines.length - 1, opts.progressIndex),
@@ -408,34 +695,11 @@
     return out;
   }
 
-  function parseSimpleStatement(src = "") {
-    const cleaned = stripLineComments(src || "");
-    if (!cleaned || cleaned.unterminated) return null;
-    const raw = cleaned.text.replace(/\u00a0/g, " ");
-    const s = raw.replace(/\s+/g, " ").trim();
-    if (!s) return null;
-    let m = s.match(
-      /^(int|long)\b\s*(\*{0,2})\s*([A-Za-z_][A-Za-z0-9_]*)\s*;$/,
-    );
-    if (m) {
-      const base = m[1];
-      const stars = m[2] || "";
-      const type =
-        stars === "**" ? `${base}**` : stars === "*" ? `${base}*` : base;
-      return { kind: "decl", name: m[3], type };
-    }
-    m = s.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?\d+)\s*;$/);
-    if (m) return { kind: "assign", name: m[1], value: m[2], valueKind: "num" };
-    m = s.match(
-      /^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*&\s*([A-Za-z_][A-Za-z0-9_]*)\s*;$/,
-    );
-    if (m) return { kind: "assignRef", name: m[1], ref: m[2] };
-    m = s.match(/^\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?\d+)\s*;$/);
-    if (m) return { kind: "assignDeref", name: m[1], value: m[2] };
-    return null;
-  }
-
-  function applySimpleStatement(state = [], stmt, opts = {}) {
+  function applySimpleStatement(
+    state: MBTypes.BoxState[] = [],
+    stmt?: MBTypes.Statement | MBTypes.SimpleStatement | null,
+    opts: { alloc?: (type?: string) => string; allowRedeclare?: boolean } = {},
+  ) {
     const {
       alloc = (type) => String(randAddr(type || "int")),
       allowRedeclare = true,
@@ -456,16 +720,17 @@
       }
       return boxes;
     }
-    if (stmt.kind === "assign" || stmt.kind === "assignRef") {
+    if (stmt.kind === "assign") {
       const target = by[stmt.name];
       if (!target) return null;
-      if (stmt.kind === "assign") {
-        const { base, depth } = parseType(target.type);
-        if (!base || depth !== 0) return null;
-        target.value = String(stmt.value);
-        return boxes;
-      }
-      // assignRef
+      const { base, depth } = parseType(target.type);
+      if (!base || depth !== 0) return null;
+      target.value = String(stmt.value);
+      return boxes;
+    }
+    if (stmt.kind === "assignRef") {
+      const target = by[stmt.name];
+      if (!target) return null;
       if (!isPointerType(target.type)) return null;
       const refBox = by[stmt.ref];
       if (!refBox || !refBox.address) return null;
@@ -486,7 +751,15 @@
     return boxes;
   }
 
-  function createSimpleSimulator(opts = {}) {
+  function createSimpleSimulator(
+    opts: {
+      allowVarAssign?: boolean;
+      allowDeclAssign?: boolean;
+      allowDeclAssignVar?: boolean;
+      requireSourceValue?: boolean;
+      allowPointers?: boolean;
+    } = {},
+  ): MBTypes.SimpleSimulator {
     const {
       allowVarAssign = false,
       allowDeclAssign = true,
@@ -495,8 +768,82 @@
       allowPointers = false,
     } = opts;
 
-    function tokenizeProgram(src = "") {
-      const tokens = [];
+    type DeclaredNames = Set<string>;
+    type ExprNode =
+      | { kind: "num"; value: string }
+      | { kind: "var"; name: string }
+      | { kind: "unary"; op: "+" | "-" | "*" | "&"; expr: ExprNode }
+      | {
+          kind: "binary";
+          op: "+" | "-" | "*" | "/" | "==";
+          left: ExprNode;
+          right: ExprNode;
+        };
+    type ExprParseResult = {
+      expr: ExprNode;
+      nextIndex: number;
+      hasVar: boolean;
+    };
+    type AssignRhs =
+      | { kind: "num"; value: string }
+      | { kind: "var"; name: string }
+      | { kind: "ref"; name: string }
+      | { kind: "deref"; name: string; depth: number }
+      | { kind: "unary"; name: string; ops: string[] }
+      | { kind: "expr"; expr: ExprNode; hasVar: boolean };
+    type UnaryLhs = { ops: string[]; name: string; idx: number };
+    type EvalError = {
+      error: string | { text: string; html: string };
+      kind: "compile" | "ub";
+      base?: string;
+      depth?: number;
+      value?: MBTypes.BoxValue | bigint;
+      address?: string;
+      label?: string;
+    };
+    type EvalValue = {
+      kind: "lvalue" | "rvalue";
+      base: string;
+      depth: number;
+      value: MBTypes.BoxValue | bigint;
+      address: string;
+      label: string;
+      error?: undefined;
+    };
+    type EvalResult = EvalValue | EvalError;
+    type ScalarResult =
+      | { value: bigint; base: string; error?: undefined }
+      | EvalError;
+    type UnaryResult =
+      | {
+          kind: "lvalue";
+          type: string;
+          value: MBTypes.BoxValue;
+          address: string;
+          box: MBTypes.BoxState;
+          refBox?: MBTypes.BoxState | null;
+        }
+      | {
+          kind: "rvalue";
+          type: string;
+          value: MBTypes.BoxValue;
+          address: string;
+          box: null;
+          refBox?: MBTypes.BoxState | null;
+        };
+    type StatementValidationResult =
+      | {
+          error: string | { text: string; html: string };
+          kind: "compile" | "ub";
+        }
+      | { parsed: MBTypes.Statement; next: MBTypes.BoxState[] };
+    const isEvalError = (result: EvalResult): result is EvalError =>
+      !!result.error;
+    const isScalarError = (result: ScalarResult): result is EvalError =>
+      !!result.error;
+
+    function tokenizeProgram(src = ""): MBTypes.Token[] {
+      const tokens: MBTypes.Token[] = [];
       let i = 0;
       let line = 0;
       let col = 0;
@@ -632,7 +979,7 @@
       return tokens;
     }
 
-    function hasDeclaredPrefix(prefix, names) {
+    function hasDeclaredPrefix(prefix: string, names: DeclaredNames | null) {
       if (!prefix || !names || !names.size) return false;
       for (const name of names) {
         if (name.startsWith(prefix)) return true;
@@ -640,7 +987,10 @@
       return false;
     }
 
-    function resolveDeclType(stars, baseType = "int") {
+    function resolveDeclType(
+      stars: number,
+      baseType: string = "int",
+    ): string | null {
       if (!Number.isFinite(stars) || stars < 0) return null;
       if (!baseType || (baseType !== "int" && baseType !== "long")) return null;
       if (stars === 0) return baseType;
@@ -648,17 +998,17 @@
       return `${baseType}${"*".repeat(stars)}`;
     }
 
-    function isPointerType(type) {
+    function isPointerType(type: string): boolean {
       const { depth } = parseType(type);
       return Number.isFinite(depth) && depth > 0;
     }
 
-    function pointerDepth(type) {
+    function pointerDepth(type: string): number | null {
       const { depth } = parseType(type);
       return depth;
     }
 
-    function makePointerType(depth, base = "int") {
+    function makePointerType(depth: number, base: string = "int"): string | null {
       if (!Number.isFinite(depth) || depth < 0) return null;
       if (base !== "int" && base !== "long") return null;
       return depth === 0 ? base : `${base}${"*".repeat(depth)}`;
@@ -669,7 +1019,7 @@
     const INT64_MIN = -9223372036854775808n;
     const INT64_MAX = 9223372036854775807n;
 
-    function classifyNumericLiteral(value) {
+    function classifyNumericLiteral(value: string): "ok" | "compile" | "ub" {
       try {
         const n = BigInt(String(value));
         if (n < INT64_MIN || n > INT64_MAX) return "compile";
@@ -680,7 +1030,10 @@
       }
     }
 
-    function numericLiteralErrorForType(value, type) {
+    function numericLiteralErrorForType(
+      value: string,
+      type: string,
+    ): EvalError | null {
       const { base, depth } = parseType(type);
       if (!base || depth !== 0) return null;
       const status = classifyNumericLiteral(value);
@@ -691,7 +1044,9 @@
       return null;
     }
 
-    function numericLiteralError(kind) {
+    function numericLiteralError(
+      kind: "ok" | "compile" | "ub",
+    ): EvalError | null {
       if (kind === "compile")
         return {
           error: "That number is too large to represent.",
@@ -702,7 +1057,7 @@
       return null;
     }
 
-    function isRefCompatible(targetType, refType) {
+    function isRefCompatible(targetType: string, refType: string): boolean {
       const { base: targetBase, depth: targetDepth } = parseType(targetType);
       const { base: refBase, depth: refDepth } = parseType(refType);
       if (
@@ -715,13 +1070,16 @@
       return targetBase === refBase && targetDepth === refDepth + 1;
     }
 
-    function expectedPointerTypeForRef(refType) {
+    function expectedPointerTypeForRef(refType: string): string | null {
       const { base, depth } = parseType(refType);
       if (!base || !Number.isFinite(depth)) return null;
       return makePointerType(depth + 1, base);
     }
 
-    function isExpressionPrefix(tokens, { allowVars = true } = {}) {
+    function isExpressionPrefix(
+      tokens: MBTypes.Token[],
+      { allowVars = true }: { allowVars?: boolean } = {},
+    ): boolean {
       if (!tokens.length) return true;
       let expectingOperand = true;
       let depth = 0;
@@ -774,7 +1132,7 @@
       return true;
     }
 
-    function isDeclPrefix(tokens) {
+    function isDeclPrefix(tokens: MBTypes.Token[]): boolean {
       if (!tokens.length) return false;
       if (tokens[0].type !== "kw") return false;
       const baseType = tokens[0].value;
@@ -802,7 +1160,9 @@
       const rhs = tokens[idx];
       if (rhs.type === "sym" && rhs.value === "&") {
         if (!allowPointers || !allowDeclAssignVar) return false;
-        if (!isPointerType(resolveDeclType(stars, baseType))) return false;
+        const resolvedDecl = resolveDeclType(stars, baseType);
+        if (!resolvedDecl) return false;
+        if (!isPointerType(resolvedDecl)) return false;
         if (idx === tokens.length - 1) return true;
         return tokens[idx + 1]?.type === "ident" && idx + 2 === tokens.length;
       }
@@ -828,7 +1188,10 @@
       return isExpressionPrefix(tokens.slice(idx), { allowVars });
     }
 
-    function isAssignPrefix(tokens, declaredNames) {
+    function isAssignPrefix(
+      tokens: MBTypes.Token[],
+      declaredNames: DeclaredNames,
+    ): boolean {
       if (!tokens.length) return false;
       if (tokens[0].type !== "ident") return false;
       const name = tokens[0].value;
@@ -859,7 +1222,10 @@
       return isExpressionPrefix(tokens.slice(2), { allowVars: allowVarAssign });
     }
 
-    function isUnaryAssignPrefix(tokens, declaredNames) {
+    function isUnaryAssignPrefix(
+      tokens: MBTypes.Token[],
+      declaredNames: DeclaredNames,
+    ): boolean {
       if (!allowPointers) return false;
       if (!tokens.length) return false;
       let idx = 0;
@@ -904,7 +1270,10 @@
       });
     }
 
-    function isDerefPrefix(tokens, declaredNames) {
+    function isDerefPrefix(
+      tokens: MBTypes.Token[],
+      declaredNames: DeclaredNames,
+    ): boolean {
       if (!allowPointers) return false;
       if (!tokens.length) return false;
       let idx = 0;
@@ -935,7 +1304,11 @@
       });
     }
 
-    function isStatementPrefix(tokens, declaredNames, allowIntPrefix) {
+    function isStatementPrefix(
+      tokens: MBTypes.Token[],
+      declaredNames: DeclaredNames,
+      allowIntPrefix: boolean,
+    ): boolean {
       if (!tokens.length) return false;
       if (tokens.some((t) => t.type === "unknown")) return false;
       if (
@@ -967,7 +1340,7 @@
       );
     }
 
-    function exprHasVar(node) {
+    function exprHasVar(node: ExprNode | null): boolean {
       if (!node) return false;
       if (node.kind === "var") return true;
       if (node.kind === "unary") return exprHasVar(node.expr);
@@ -976,11 +1349,15 @@
       return false;
     }
 
-    function parseExpressionTokens(tokens, start, { allowVars = true } = {}) {
+    function parseExpressionTokens(
+      tokens: MBTypes.Token[],
+      start: number,
+      { allowVars = true }: { allowVars?: boolean } = {},
+    ): ExprParseResult | null {
       let idx = start;
       const next = () => tokens[idx];
 
-      function parsePrimary() {
+      function parsePrimary(): ExprNode | null {
         const tok = next();
         if (!tok) return null;
         if (tok.type === "number") {
@@ -1005,7 +1382,7 @@
         return null;
       }
 
-      function parseUnary() {
+      function parseUnary(): ExprNode | null {
         const tok = next();
         if (
           tok &&
@@ -1022,7 +1399,7 @@
         return parsePrimary();
       }
 
-      function parseMulDiv() {
+      function parseMulDiv(): ExprNode | null {
         let left = parseUnary();
         if (!left) return null;
         while (true) {
@@ -1041,7 +1418,7 @@
         return left;
       }
 
-      function parseAddSub() {
+      function parseAddSub(): ExprNode | null {
         let left = parseMulDiv();
         if (!left) return null;
         while (true) {
@@ -1060,7 +1437,7 @@
         return left;
       }
 
-      function parseEquality() {
+      function parseEquality(): ExprNode | null {
         let left = parseAddSub();
         if (!left) return null;
         while (true) {
@@ -1079,7 +1456,15 @@
       return { expr, nextIndex: idx, hasVar: exprHasVar(expr) };
     }
 
-    function evaluateExpression(expr, state, opts = {}) {
+    function evaluateExpression(
+      expr: ExprNode,
+      state: MBTypes.BoxState[],
+      opts: {
+        allowVars?: boolean;
+        targetType?: string;
+        requireValue?: boolean;
+      } = {},
+    ): ScalarResult {
       const {
         allowVars = true,
         targetType = "int",
@@ -1088,7 +1473,10 @@
       const by = Object.fromEntries(state.map((b) => [b.name, b]));
       const targetBase = parseType(targetType).base || "int";
 
-      function makeLvalue(box, label) {
+      function makeLvalue(
+        box: MBTypes.BoxState,
+        label: string,
+      ): EvalResult {
         const { base, depth } = parseType(box.type);
         if (!base || !Number.isFinite(depth)) {
           return {
@@ -1106,16 +1494,22 @@
         };
       }
 
-      function makeRvalue(value, base, depth = 0, label = "") {
+      function makeRvalue(
+        value: MBTypes.BoxValue | bigint,
+        base: string,
+        depth: number = 0,
+        label: string = "",
+      ): EvalResult {
         return { kind: "rvalue", base, depth, value, address: "", label };
       }
 
-      function coerceScalar(result) {
+      function coerceScalar(result: EvalResult | null): ScalarResult {
         if (!result)
           return {
             error: "That expression is not valid here.",
             kind: "compile",
           };
+        if (result.error) return result;
         if (!Number.isFinite(result.depth) || result.depth !== 0)
           return {
             error: "Pointer arithmetic is not supported here.",
@@ -1137,7 +1531,7 @@
         }
       }
 
-      function evalNode(node) {
+      function evalNode(node: ExprNode | null): EvalResult {
         if (!node)
           return {
             error: "That expression is not valid here.",
@@ -1171,19 +1565,20 @@
         }
         if (node.kind === "unary") {
           const rhs = evalNode(node.expr);
-          if (rhs.error) return rhs;
+          if (isEvalError(rhs)) return rhs;
+          const rhsDepth = rhs.depth ?? 0;
           if (node.op === "&") {
             const label = `&${rhs.label || ""}`;
             if (rhs.kind !== "lvalue" || !rhs.address) {
               return { error: `${label} is not valid here.`, kind: "compile" };
             }
-            const nextDepth = Number.isFinite(rhs.depth) ? rhs.depth + 1 : 1;
+            const nextDepth = Number.isFinite(rhsDepth) ? rhsDepth + 1 : 1;
             const nextBase = rhs.base || "int";
             return makeRvalue(String(rhs.address), nextBase, nextDepth, label);
           }
           if (node.op === "*") {
             const label = `*${rhs.label || ""}`;
-            if (!Number.isFinite(rhs.depth) || rhs.depth < 1) {
+            if (!Number.isFinite(rhsDepth) || rhsDepth < 1) {
               return {
                 error: `${label} is not a valid dereference.`,
                 kind: "compile",
@@ -1217,9 +1612,9 @@
             return makeLvalue(target, label);
           }
           const scalar = coerceScalar(rhs);
-          if (scalar.error) return scalar;
-          if (node.op === "+") return makeRvalue(scalar.value, scalar.base);
-          if (node.op === "-") return makeRvalue(-scalar.value, scalar.base);
+          if (isScalarError(scalar)) return scalar;
+          if (node.op === "+") return makeRvalue(scalar.value!, scalar.base);
+          if (node.op === "-") return makeRvalue(-scalar.value!, scalar.base);
           return {
             error: "That expression is not valid here.",
             kind: "compile",
@@ -1227,29 +1622,28 @@
         }
         if (node.kind === "binary") {
           const left = evalNode(node.left);
-          if (left.error) return left;
+          if (isEvalError(left)) return left;
           const right = evalNode(node.right);
-          if (right.error) return right;
+          if (isEvalError(right)) return right;
           const leftScalar = coerceScalar(left);
-          if (leftScalar.error) return leftScalar;
+          if (isScalarError(leftScalar)) return leftScalar;
           const rightScalar = coerceScalar(right);
-          if (rightScalar.error) return rightScalar;
+          if (isScalarError(rightScalar)) return rightScalar;
+          const leftValue = leftScalar.value;
+          const rightValue = rightScalar.value;
           if (node.op === "==") {
             return makeRvalue(
-              leftScalar.value === rightScalar.value ? 1n : 0n,
+              leftValue === rightValue ? 1n : 0n,
               "int",
             );
           }
-          if (node.op === "/" && rightScalar.value === 0n)
+          if (node.op === "/" && rightValue === 0n)
             return { error: "Division by 0 is undefined.", kind: "ub" };
           let value = 0n;
-          if (node.op === "+") value = leftScalar.value + rightScalar.value;
-          else if (node.op === "-")
-            value = leftScalar.value - rightScalar.value;
-          else if (node.op === "*")
-            value = leftScalar.value * rightScalar.value;
-          else if (node.op === "/")
-            value = leftScalar.value / rightScalar.value;
+          if (node.op === "+") value = leftValue + rightValue;
+          else if (node.op === "-") value = leftValue - rightValue;
+          else if (node.op === "*") value = leftValue * rightValue;
+          else if (node.op === "/") value = leftValue / rightValue;
           else
             return {
               error: "That expression is not valid here.",
@@ -1265,13 +1659,17 @@
       }
 
       const evaluated = evalNode(expr);
-      if (evaluated?.error) return evaluated;
+      if (isEvalError(evaluated)) return evaluated;
       const scalar = coerceScalar(evaluated);
-      if (scalar.error) return scalar;
+      if (isScalarError(scalar)) return scalar;
       return scalar;
     }
 
-    function parseAssignRhs(tokens, idx, { allowVar } = {}) {
+    function parseAssignRhs(
+      tokens: MBTypes.Token[],
+      idx: number,
+      { allowVar }: { allowVar?: boolean } = {},
+    ): AssignRhs | null {
       if (idx >= tokens.length) return null;
       const allowVars = allowVar ?? allowVarAssign;
       const rhs = tokens[idx];
@@ -1321,11 +1719,11 @@
       return null;
     }
 
-    function parseUnaryLhs(tokens) {
+    function parseUnaryLhs(tokens: MBTypes.Token[]): UnaryLhs | null {
       if (!allowPointers) return null;
       if (!tokens.length) return null;
       let idx = 0;
-      const ops = [];
+      const ops: string[] = [];
       while (
         idx < tokens.length &&
         tokens[idx].type === "sym" &&
@@ -1340,7 +1738,7 @@
       return { ops, name, idx: idx + 1 };
     }
 
-    function parseStatementTokens(tokens) {
+    function parseStatementTokens(tokens: MBTypes.Token[]): MBTypes.Statement | null {
       if (!tokens.length) return null;
       if (tokens[0].type === "kw") {
         const baseType = tokens[0].value;
@@ -1494,7 +1892,9 @@
       return null;
     }
 
-    function parseDeclAssignRefFallback(tokens) {
+    function parseDeclAssignRefFallback(
+      tokens: MBTypes.Token[],
+    ): { name: string; ref: string; declType: string } | null {
       if (!allowPointers) return null;
       if (!tokens.length) return null;
       if (tokens[0].type !== "kw") return null;
@@ -1523,7 +1923,10 @@
       return { name, ref: tokens[idx + 2].value, declType };
     }
 
-    function applyAssignVar(state, stmt) {
+    function applyAssignVar(
+      state: MBTypes.BoxState[],
+      stmt: MBTypes.Statement,
+    ): MBTypes.BoxState[] | null {
       const boxes = cloneBoxes(state);
       const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
       const target = by[stmt.name];
@@ -1545,14 +1948,18 @@
       return boxes;
     }
 
-    function applyAssignExpr(state, stmt, { allowVars = allowVarAssign } = {}) {
+    function applyAssignExpr(
+      state: MBTypes.BoxState[],
+      stmt: MBTypes.Statement,
+      { allowVars = allowVarAssign }: { allowVars?: boolean } = {},
+    ): MBTypes.BoxState[] | null {
       const boxes = cloneBoxes(state);
       const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
       const target = by[stmt.name];
       if (!target) return null;
       const { depth } = parseType(target.type);
       if (Number.isFinite(depth) && depth > 0) return null;
-      const evaluated = evaluateExpression(stmt.expr, boxes, {
+      const evaluated = evaluateExpression(stmt.expr as ExprNode, boxes, {
         allowVars,
         targetType: target.type,
       });
@@ -1561,7 +1968,10 @@
       return boxes;
     }
 
-    function applyAssignRef(state, stmt) {
+    function applyAssignRef(
+      state: MBTypes.BoxState[],
+      stmt: MBTypes.Statement,
+    ): MBTypes.BoxState[] | null {
       const boxes = cloneBoxes(state);
       const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
       const target = by[stmt.name];
@@ -1572,7 +1982,11 @@
       return boxes;
     }
 
-    function resolveDerefTarget(state, ptrName, depth) {
+    function resolveDerefTarget(
+      state: MBTypes.BoxState[],
+      ptrName: string,
+      depth: number,
+    ): { target?: MBTypes.BoxState; error?: string } {
       const by = Object.fromEntries(state.map((b) => [b.name, b]));
       const ptr = by[ptrName];
       if (!ptr) return { error: "missing" };
@@ -1588,7 +2002,10 @@
       return { target: current };
     }
 
-    function applyAssignDeref(state, stmt) {
+    function applyAssignDeref(
+      state: MBTypes.BoxState[],
+      stmt: MBTypes.Statement,
+    ): MBTypes.BoxState[] | null {
       const boxes = cloneBoxes(state);
       const { target } = resolveDerefTarget(boxes, stmt.name, stmt.depth || 1);
       if (!target) return null;
@@ -1621,15 +2038,15 @@
       return boxes;
     }
 
-    function applyAssignDerefVar(state, stmt) {
-      return applyAssignDeref(state, stmt);
-    }
-
-    function resolveUnaryLvalue(state, ops, name) {
+    function resolveUnaryLvalue(
+      state: MBTypes.BoxState[],
+      ops: string[],
+      name: string,
+    ): { target?: MBTypes.BoxState; label?: string; type?: string; error?: string; name?: string } {
       const by = Object.fromEntries(state.map((b) => [b.name, b]));
       const base = by[name];
       if (!base) return { error: "missing", name };
-      let current = {
+      let current: UnaryResult = {
         kind: "lvalue",
         type: base.type,
         value: base.value,
@@ -1662,11 +2079,11 @@
           if (!Number.isFinite(depth) || depth < 1) {
             return { error: "not_deref", label: nextLabel };
           }
-          const ptrVal = String(current.value ?? "").trim();
+          const ptrVal: string = String(current.value ?? "").trim();
           if (ptrVal === "") {
             return { error: "empty", label };
           }
-          const target = state.find(
+          const target: MBTypes.BoxState | undefined = state.find(
             (b) => String(b.address ?? "") === String(ptrVal),
           );
           if (!target) return { error: "unknown", label: nextLabel };
@@ -1686,11 +2103,15 @@
       return { target: current.box, label, type: current.type };
     }
 
-    function resolveUnaryExpr(state, ops, name) {
+    function resolveUnaryExpr(
+      state: MBTypes.BoxState[],
+      ops: string[],
+      name: string,
+    ): { result?: UnaryResult; label?: string; error?: string; name?: string } {
       const by = Object.fromEntries(state.map((b) => [b.name, b]));
       const base = by[name];
       if (!base) return { error: "missing", name };
-      let current = {
+      let current: UnaryResult = {
         kind: "lvalue",
         type: base.type,
         value: base.value,
@@ -1725,11 +2146,11 @@
           if (!Number.isFinite(depth) || depth < 1) {
             return { error: "not_deref", label: nextLabel };
           }
-          const ptrVal = String(current.value ?? "").trim();
+          const ptrVal: string = String(current.value ?? "").trim();
           if (ptrVal === "") {
             return { error: "empty", label };
           }
-          const target = state.find(
+          const target: MBTypes.BoxState | undefined = state.find(
             (b) => String(b.address ?? "") === String(ptrVal),
           );
           if (!target) return { error: "unknown", label: nextLabel };
@@ -1747,7 +2168,7 @@
       return { result: current, label };
     }
 
-    function minBaseDepthForOps(ops) {
+    function minBaseDepthForOps(ops: string[]): number {
       let delta = 0;
       let required = 0;
       for (let i = ops.length - 1; i >= 0; i--) {
@@ -1762,7 +2183,13 @@
       return Math.max(0, required);
     }
 
-    function validateUnaryRhs(state, targetType, targetName, ops, src) {
+    function validateUnaryRhs(
+      state: MBTypes.BoxState[],
+      targetType: string,
+      targetName: string,
+      ops: string[],
+      src: string,
+    ): EvalError | null {
       const by = Object.fromEntries(state.map((b) => [b.name, b]));
       const base = by[src];
       const minDepth = minBaseDepthForOps(ops || []);
@@ -1777,7 +2204,7 @@
         };
       }
       const baseDepth = pointerDepth(base.type);
-      if (!Number.isFinite(baseDepth) || baseDepth < minDepth) {
+      if (baseDepth == null || !Number.isFinite(baseDepth) || baseDepth < minDepth) {
         return typeMismatchError(src, requiredBaseType);
       }
       const resolved = resolveUnaryExpr(state, ops, src);
@@ -1834,7 +2261,10 @@
       return null;
     }
 
-    function applyAssignUnary(state, stmt) {
+    function applyAssignUnary(
+      state: MBTypes.BoxState[],
+      stmt: MBTypes.Statement,
+    ): MBTypes.BoxState[] | null {
       const boxes = cloneBoxes(state);
       const resolved = resolveUnaryLvalue(boxes, stmt.ops, stmt.name);
       if (!resolved?.target) return null;
@@ -1903,7 +2333,10 @@
       return null;
     }
 
-    function applyAssignUnaryRhs(state, stmt) {
+    function applyAssignUnaryRhs(
+      state: MBTypes.BoxState[],
+      stmt: MBTypes.Statement,
+    ): MBTypes.BoxState[] | null {
       const boxes = cloneBoxes(state);
       const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
       const target = by[stmt.name];
@@ -1927,7 +2360,10 @@
       return boxes;
     }
 
-    function applyAssignFromDeref(state, stmt) {
+    function applyAssignFromDeref(
+      state: MBTypes.BoxState[],
+      stmt: MBTypes.Statement,
+    ): MBTypes.BoxState[] | null {
       const boxes = cloneBoxes(state);
       const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
       const target = by[stmt.name];
@@ -1953,7 +2389,11 @@
       return boxes;
     }
 
-    function applyStatement(state, stmt, opts) {
+    function applyStatement(
+      state: MBTypes.BoxState[],
+      stmt: MBTypes.Statement,
+      opts: { alloc?: (type?: string) => string; allowRedeclare?: boolean },
+    ): MBTypes.BoxState[] | null {
       if (!stmt) return state;
       if (stmt.kind === "declAssign") {
         const decl = {
@@ -2052,19 +2492,28 @@
       return applySimpleStatement(state, stmt, opts);
     }
 
-    function missingDeclError(name, typeLabel = "int") {
+    function missingDeclError(
+      name: string,
+      typeLabel: string = "int",
+    ): EvalError {
       const text = `You can't assign to ${name} before declaring it. You need to first declare it (${typeLabel} ${name};) prior to this line.`;
       const html = `You can't assign to <code class="tok-name">${name}</code> before declaring it. You need to first declare it (<code class="tok-code">${typeLabel} ${name};</code>) prior to this line.`;
       return { error: { text, html }, kind: "compile" };
     }
 
-    function typeMismatchError(name, expectedType) {
+    function typeMismatchError(
+      name: string,
+      expectedType: string,
+    ): EvalError {
       const text = `${name}'s type would need to be ${expectedType} for this line to work.`;
       const html = `<code class="tok-name">${name}</code>'s type would need to be <code class="tok-type">${expectedType}</code> for this line to work.`;
       return { error: { text, html }, kind: "compile" };
     }
 
-    function describeTokensError(tokens, seenDecl) {
+    function describeTokensError(
+      tokens: MBTypes.Token[],
+      seenDecl: DeclaredNames,
+    ): string {
       if (!tokens.length) return "Line has an error.";
       if (tokens.some((t) => t.type === "unknown" && t.value === "/*"))
         return "Block comment is not closed.";
@@ -2143,7 +2592,12 @@
       return "Line should be a declaration or assignment.";
     }
 
-    function validateStatement(tokens, state, seenDecl, alloc, lineNumber) {
+    function validateStatement(
+      tokens: MBTypes.Token[],
+      state: MBTypes.BoxState[],
+      seenDecl: DeclaredNames,
+      alloc: (type?: string) => string,
+    ): StatementValidationResult {
       if (tokens.some((t) => t.type === "unknown")) {
         return {
           error:
@@ -2379,7 +2833,11 @@
           return missingDeclError(parsed.name, requiredBaseType);
         }
         const baseDepth = pointerDepth(base.type);
-        if (!Number.isFinite(baseDepth) || baseDepth < minDepth) {
+        if (
+          baseDepth == null ||
+          !Number.isFinite(baseDepth) ||
+          baseDepth < minDepth
+        ) {
           return typeMismatchError(parsed.name, requiredBaseType);
         }
         const resolved = resolveUnaryLvalue(state, parsed.ops, parsed.name);
@@ -2781,9 +3239,9 @@
       return { next, parsed };
     }
 
-    function splitStatements(tokens) {
-      const parts = [];
-      let current = [];
+    function splitStatements(tokens: MBTypes.Token[]): MBTypes.StatementPart[] {
+      const parts: MBTypes.StatementPart[] = [];
+      let current: MBTypes.Token[] = [];
       let startLine = 0;
       for (const tok of tokens) {
         if (tok.type === "sym" && tok.value === ";") {
@@ -2811,10 +3269,10 @@
       return parts;
     }
 
-    function findMissingSemicolonLines(text) {
+    function findMissingSemicolonLines(text: string): number[] {
       const lines = String(text ?? "").split(/\r?\n/);
-      const missing = [];
-      const patched = [];
+      const missing: number[] = [];
+      const patched: string[] = [];
       let inBlock = false;
       lines.forEach((line, idx) => {
         const raw = String(line ?? "");
@@ -2865,15 +3323,10 @@
       return missing;
     }
 
-    function findMissingSemicolonLine(text) {
-      const missing = findMissingSemicolonLines(text);
-      return missing.length ? missing[0] : null;
-    }
-
-    function parseStatements(text) {
+    function parseStatements(text: string): MBTypes.Statement[] {
       const tokens = tokenizeProgram(text);
       const parts = splitStatements(tokens);
-      const statements = [];
+      const statements: MBTypes.Statement[] = [];
       for (const part of parts) {
         if (!part.tokens.length) continue;
         const parsed = parseStatementTokens(part.tokens);
@@ -2882,30 +3335,37 @@
       return statements;
     }
 
-    function classifyLineStatuses(lines, opts = {}) {
-      const invalid = new Set();
-      const incomplete = new Set();
-      const errors = new Map();
-      const errorKinds = new Map();
-      const info = new Map();
+    function classifyLineStatuses(
+      lines: string[],
+      opts: { alloc?: (type?: string) => string } = {},
+    ): MBTypes.LineStatus {
+      const invalid = new Set<number>();
+      const incomplete = new Set<number>();
+      const errors = new Map<number, any>();
+      const errorKinds = new Map<number, string>();
+      const info = new Map<number, any>();
       const text = lines.join("\n");
       const tokens = tokenizeProgram(text);
       let tokenIndex = 0;
-      let currentTokens = [];
-      let state = [];
-      const alloc = opts.alloc || ((type) => String(randAddr(type || "int")));
-      const seenDecl = new Set();
-      const escapeHtml = (value) =>
+      let currentTokens: MBTypes.Token[] = [];
+      let state: MBTypes.BoxState[] = [];
+      const alloc = opts.alloc || ((type?: string) => String(randAddr(type || "int")));
+      const seenDecl = new Set<string>();
+      const escapeHtml = (value: string) =>
         String(value)
           .replace(/&/g, "&amp;")
           .replace(/</g, "&lt;")
           .replace(/>/g, "&gt;")
           .replace(/"/g, "&quot;")
           .replace(/'/g, "&#39;");
-      const toStatementSnippet = (startLine, startCol, endLine) => {
+      const toStatementSnippet = (
+        startLine: number,
+        startCol: number,
+        endLine: number,
+      ) => {
         const safeStart = Math.max(0, startLine || 0);
         const safeEnd = Math.max(safeStart, endLine || 0);
-        const parts = [];
+        const parts: string[] = [];
         if (safeStart === safeEnd) {
           parts.push((lines[safeStart] || "").slice(startCol || 0));
         } else {
@@ -2932,9 +3392,8 @@
                 state,
                 seenDecl,
                 alloc,
-                tok.line + 1,
               );
-              if (result.error) {
+              if ("error" in result) {
                 status = "invalid";
                 errors.set(tok.line, result.error);
                 errorKinds.set(tok.line, result.kind || "compile");
@@ -3035,12 +3494,16 @@
       return { invalid, incomplete, errors, errorKinds, info };
     }
 
-    function applyProgram(text, opts = {}) {
+    function applyProgram(
+      text: string,
+      opts: { alloc?: (type?: string) => string } = {},
+    ): MBTypes.BoxState[] | null {
       const tokens = tokenizeProgram(text);
       const parts = splitStatements(tokens);
-      let state = [];
-      const alloc = opts.alloc || ((type) => String(randAddr(type || "int")));
-      const seenDecl = new Set();
+      let state: MBTypes.BoxState[] = [];
+      const alloc =
+        opts.alloc || ((type?: string) => String(randAddr(type || "int")));
+      const seenDecl = new Set<string>();
       for (const part of parts) {
         if (!part.tokens.length) continue;
         const parsed = parseStatementTokens(part.tokens);
@@ -3070,17 +3533,15 @@
     return {
       tokenizeProgram,
       splitStatements,
-      parseStatementTokens,
       parseStatements,
       classifyLineStatuses,
-      findMissingSemicolonLine,
       findMissingSemicolonLines,
       applyProgram,
     };
   }
 
   let nameStackResizeInstalled = false;
-  function updateNameStackSpacing(node) {
+  function updateNameStackSpacing(node: HTMLElement | null): void {
     if (!node) return;
     const stack = node.querySelector(".name-stack");
     if (!stack) return;
@@ -3091,7 +3552,7 @@
     node.style.setProperty("--name-stack-space", `${overflow}px`);
   }
 
-  function watchNameStack(node) {
+  function watchNameStack(node: HTMLElement | null): void {
     const stack = node?.querySelector(".name-stack");
     if (!stack) return;
     const update = () => updateNameStackSpacing(node);
@@ -3103,7 +3564,7 @@
       nameStackResizeInstalled = true;
       window.addEventListener("resize", () => {
         document
-          .querySelectorAll(".vbox")
+          .querySelectorAll<HTMLElement>(".vbox")
           .forEach((box) => updateNameStackSpacing(box));
       });
     }
@@ -3117,7 +3578,15 @@
     editable = false,
     allowNameEdit = false,
     allowTypeEdit = false,
-  } = {}) {
+  }: {
+    address?: string;
+    type?: string;
+    value?: MBTypes.BoxValue;
+    name?: string;
+    editable?: boolean;
+    allowNameEdit?: boolean;
+    allowTypeEdit?: boolean;
+  } = {}): HTMLElement {
     const emptyDisplay = String(value ?? "") === "";
     const displayValue = emptyDisplay ? "" : normalizeZeroDisplay(value);
     const resolvedName =
@@ -3156,14 +3625,18 @@
     `);
 
     if (editable) {
-      const valueEl = node.querySelector(".value");
-      valueEl.setAttribute("contenteditable", "true");
-      disableAutoText(valueEl);
+      const valueEl = node.querySelector(".value") as HTMLElement | null;
+      if (valueEl) {
+        valueEl.setAttribute("contenteditable", "true");
+        disableAutoText(valueEl);
+      }
       if (allowTypeEdit) {
-        const typeEl = node.querySelector(".type");
-        typeEl.setAttribute("contenteditable", "true");
-        typeEl.classList.add("editable");
-        disableAutoText(typeEl);
+        const typeEl = node.querySelector(".type") as HTMLElement | null;
+        if (typeEl) {
+          typeEl.setAttribute("contenteditable", "true");
+          typeEl.classList.add("editable");
+          disableAutoText(typeEl);
+        }
       }
       node.querySelectorAll(".name-text").forEach((el) => {
         if (allowNameEdit) {
@@ -3177,7 +3650,7 @@
     return node;
   }
 
-  function disableBoxEditing(root) {
+  function disableBoxEditing(root: Element | null) {
     if (!root) return;
     root
       .querySelectorAll(".value.editable, .type.editable, .name-text.editable")
@@ -3188,13 +3661,14 @@
     root.classList.remove("is-editable");
   }
 
-  function removeBoxDeleteButtons(root) {
+  function removeBoxDeleteButtons(root?: Element | null) {
     const scope = root || document;
     scope.querySelectorAll(".vbox .delete").forEach((btn) => btn.remove());
   }
 
-  function readBoxState(root) {
+  function readBoxState(root: Element | null): MBTypes.BoxState | null {
     if (!root) return null;
+    const el = root as HTMLElement;
     const names = [...root.querySelectorAll(".name-text")]
       .map((el) => txt(el))
       .filter(Boolean);
@@ -3205,7 +3679,7 @@
         ? ""
         : normalizeZeroDisplay(valText);
     const allowDelete =
-      root?.dataset?.allowDelete === "true" || !!root.querySelector(".delete");
+      el?.dataset?.allowDelete === "true" || !!root.querySelector(".delete");
     return {
       address: txt(root.querySelector(".address")),
       type: txt(root.querySelector(".type")),
@@ -3218,24 +3692,27 @@
     };
   }
 
-  function boxAddress(box) {
+  function boxAddress(box: MBTypes.BoxState | null | undefined): string {
     const raw = box?.address ?? "";
     return String(raw ?? "").trim();
   }
 
-  function collectStageBoxes(root) {
+  function collectStageBoxes(root: Element | null): MBTypes.BoxState[] {
     if (!root) return [];
     return [...root.querySelectorAll(".vbox")]
       .map((node) => {
         const box = readBoxState(node);
         if (!box) return null;
-        box.node = node;
+        box.node = node as HTMLElement;
         return box;
       })
-      .filter(Boolean);
+      .filter((box): box is MBTypes.BoxState => !!box);
   }
 
-  function pointerTargetBox(box, byAddr) {
+  function pointerTargetBox(
+    box: MBTypes.BoxState | null | undefined,
+    byAddr: Map<string, MBTypes.BoxState>,
+  ): MBTypes.BoxState | null {
     if (!box) return null;
     const depth = getPointerDepth(box.type);
     if (!Number.isFinite(depth) || depth < 1) return null;
@@ -3249,13 +3726,15 @@
     return target;
   }
 
-  function buildOtherNamesMap(boxes) {
-    const byAddr = new Map();
+  function buildOtherNamesMap(
+    boxes: MBTypes.BoxState[],
+  ): Map<string, Set<string>> {
+    const byAddr = new Map<string, MBTypes.BoxState>();
     boxes.forEach((box) => {
       const addr = boxAddress(box);
       if (addr) byAddr.set(addr, box);
     });
-    const otherNamesByAddr = new Map();
+    const otherNamesByAddr = new Map<string, Set<string>>();
     boxes.forEach((box) => {
       const baseName = String(box.name || "").trim();
       const depth = getPointerDepth(box.type);
@@ -3266,12 +3745,12 @@
         if (!target) break;
         const targetAddr = boxAddress(target);
         if (targetAddr) {
-          if (!otherNamesByAddr.has(targetAddr)) {
-            otherNamesByAddr.set(targetAddr, new Set());
+          let bucket = otherNamesByAddr.get(targetAddr);
+          if (!bucket) {
+            bucket = new Set<string>();
+            otherNamesByAddr.set(targetAddr, bucket);
           }
-          otherNamesByAddr
-            .get(targetAddr)
-            .add(`${"*".repeat(step)}${baseName}`);
+          bucket.add(`${"*".repeat(step)}${baseName}`);
         }
         current = target;
         if (getPointerDepth(current.type) < 1) break;
@@ -3280,7 +3759,7 @@
     return otherNamesByAddr;
   }
 
-  function sortOtherNames(list) {
+  function sortOtherNames(list: Iterable<string>): string[] {
     return [...list].sort((a, b) => {
       const aStars = (a.match(/^\*+/) || [""])[0].length;
       const bStars = (b.match(/^\*+/) || [""])[0].length;
@@ -3289,7 +3768,11 @@
     });
   }
 
-  function updateOtherNamesList(node, aliases, showAliases) {
+  function updateOtherNamesList(
+    node: HTMLElement | null,
+    aliases: string[] | null | undefined,
+    showAliases: boolean,
+  ): void {
     if (!node) return;
     const listInner = node.querySelector(".name-list-inner");
     if (!listInner) return;
@@ -3322,9 +3805,14 @@
     if (label) label.textContent = hasAliases ? "names" : "name";
   }
 
-  function ensureOtherNamesToggle(node, onToggle) {
+  function ensureOtherNamesToggle(
+    node: HTMLElement | null,
+    onToggle?: ((target: HTMLElement) => void) | null,
+  ): HTMLButtonElement | null {
     if (!node) return null;
-    let btn = node.querySelector(".other-names-toggle");
+    let btn = node.querySelector(
+      ".other-names-toggle",
+    ) as HTMLButtonElement | null;
     if (!btn) {
       btn = document.createElement("button");
       btn.type = "button";
@@ -3333,15 +3821,19 @@
     }
     if (!btn.dataset.bound) {
       btn.dataset.bound = "true";
-      btn.addEventListener("click", (event) => {
+      btn.addEventListener("click", (event: MouseEvent) => {
         event.preventDefault();
-        onToggle?.(node);
+        if (node) onToggle?.(node);
       });
     }
     return btn;
   }
 
-  function placeOtherNamesToggle(node, btn, showAliases) {
+  function placeOtherNamesToggle(
+    node: HTMLElement | null,
+    btn: HTMLButtonElement | null,
+    showAliases: boolean,
+  ): void {
     if (!node || !btn) return;
     const listInner = node.querySelector(".name-list-inner");
     const baseTag = listInner?.querySelector(".name-tag");
@@ -3361,16 +3853,19 @@
     }
   }
 
-  function applyOtherNames(root, opts = {}) {
+  function applyOtherNames(
+    root: Element | null,
+    opts: { onToggle?: (() => void) | null; shownAddrs?: Set<string> | null } = {},
+  ) {
     if (!root) return;
     const { onToggle = null, shownAddrs = null } = opts;
     const boxes = collectStageBoxes(root);
     const currentAddrs = new Set(boxes.map((box) => boxAddress(box)));
     const otherNamesByAddr = buildOtherNamesMap(boxes);
     const useShownSet = shownAddrs && typeof shownAddrs.has === "function";
-    const getShown = (node, addr) =>
+    const getShown = (node: HTMLElement, addr: string) =>
       useShownSet ? shownAddrs.has(addr) : node.dataset.otherNames === "on";
-    const setShown = (node, addr, value) => {
+    const setShown = (node: HTMLElement, addr: string, value: boolean) => {
       if (useShownSet) {
         if (value) shownAddrs.add(addr);
         else shownAddrs.delete(addr);
@@ -3379,6 +3874,7 @@
     };
     boxes.forEach((box) => {
       const node = box.node;
+      if (!node) return;
       const addr = boxAddress(box);
       const baseName = String(box.name || "").trim();
       const otherNames = otherNamesByAddr.get(addr);
@@ -3422,14 +3918,15 @@
     }
   }
 
-  const addrPool = { free: [] };
-  function nextPooledAddr(type = "int") {
+  const addrPool: { free: string[] } = { free: [] };
+  function nextPooledAddr(type: string = "int") {
     if (addrPool.free.length) return addrPool.free.pop();
     return randAddr(type);
   }
 
   function makeAnswerBox({
     name = "",
+    names = null,
     type = "",
     value = "",
     address = null,
@@ -3439,6 +3936,18 @@
     allowTypeEdit = null,
     nameEditable = null,
     typeEditable = null,
+  }: {
+    name?: string;
+    names?: string[] | string | null;
+    type?: string;
+    value?: MBTypes.BoxValue;
+    address?: string | number | null;
+    editable?: boolean;
+    deletable?: boolean;
+    allowNameEdit?: boolean | null;
+    allowTypeEdit?: boolean | null;
+    nameEditable?: boolean | null;
+    typeEditable?: boolean | null;
   } = {}) {
     const resolvedAddr =
       address == null ? String(nextPooledAddr(type || "int")) : String(address);
@@ -3477,47 +3986,9 @@
     return node;
   }
 
-  function cloneStateBoxes(state) {
-    if (!Array.isArray(state)) return [];
-    return state
-      .filter(Boolean)
-      .map((st) => {
-        const addr = st.address ?? null;
-        return {
-          name: st.name || "",
-          names: Array.isArray(st.names)
-            ? [...st.names]
-            : st.names
-              ? [st.names]
-              : [],
-          type: st.type || "",
-          value: st.value ?? "",
-          address: addr == null ? null : String(addr),
-          nameEditable: st.nameEditable ?? st.allowNameEdit ?? null,
-          typeEditable: st.typeEditable ?? st.allowTypeEdit ?? null,
-        };
-      })
-      .filter((st) => st.name);
-  }
-
-  function ensureBox(list, spec) {
-    const item = list.find((b) => b.name === spec.name);
-    if (!item) {
-      list.push({
-        name: spec.name,
-        type: spec.type ?? "",
-        value: spec.value ?? "",
-        address: spec.address == null ? null : String(spec.address),
-      });
-      return;
-    }
-    if (spec.address != null) item.address = String(spec.address);
-    if (spec.type && !item.type) item.type = spec.type;
-    if (spec.value != null && (item.value == null || item.value === ""))
-      item.value = spec.value;
-  }
-
-  function cloneBoxes(list) {
+  function cloneBoxes(
+    list: MBTypes.BoxState[] | null | undefined,
+  ): MBTypes.BoxState[] {
     return Array.isArray(list)
       ? list.map((b) => ({
           ...b,
@@ -3532,37 +4003,43 @@
       : [];
   }
 
-  function firstNonEmptyClone(...states) {
-    for (const st of states) {
-      const clone = cloneStateBoxes(st);
-      if (clone.length) return clone;
-    }
-    return [];
-  }
-
-  function serializeWorkspace(target) {
+  function serializeWorkspace(
+    target: string | Element | null,
+  ): MBTypes.BoxState[] | null {
     if (!target) return null;
-    let ws = null;
+    let ws: Element | null = null;
     if (typeof target === "string") {
       ws = document.getElementById(target);
       if (!ws) return null;
-    } else if (target.querySelectorAll) {
+    } else {
       ws = target;
     }
     if (!ws) return null;
+    const wsEl = ws as HTMLElement;
     let boxes = [...ws.querySelectorAll(".vbox")];
-    if (!boxes.length && ws.dataset.inline === "true") {
-      const key = ws.dataset.workspaceKey || "";
+    if (!boxes.length && wsEl.dataset.inline === "true") {
+      const key = wsEl.dataset.workspaceKey || "";
       if (key) {
         boxes = [
           ...document.querySelectorAll(`.vbox[data-workspace="${key}"]`),
         ];
       }
     }
-    return boxes.map((v) => readBoxState(v));
+    return boxes
+      .map((v) => readBoxState(v))
+      .filter(Boolean) as MBTypes.BoxState[];
   }
 
-  function restoreWorkspace(state, defaults, opts = {}) {
+  function restoreWorkspace(
+    state?: MBTypes.BoxState[] | null,
+    defaults?: MBTypes.BoxState[] | null,
+    opts: {
+      editable?: boolean;
+      deletable?: boolean;
+      allowNameEdit?: boolean | null;
+      allowTypeEdit?: boolean | null;
+    } = {},
+  ) {
     const {
       editable = true,
       deletable = editable,
@@ -3588,7 +4065,9 @@
         });
         if (allowDelete) node.dataset.allowDelete = "true";
         if (String(st.value ?? "") === "")
-          node.querySelector(".value").classList.add("placeholder", "muted");
+          node
+            .querySelector(".value")
+            ?.classList.add("placeholder", "muted");
         wrap.appendChild(node);
       });
     } else if (Array.isArray(defaults)) {
@@ -3609,62 +4088,20 @@
         });
         if (allowDelete) node.dataset.allowDelete = "true";
         if (String(d.value ?? "") === "")
-          node.querySelector(".value").classList.add("placeholder", "muted");
+          node
+            .querySelector(".value")
+            ?.classList.add("placeholder", "muted");
         wrap.appendChild(node);
       });
     }
     return wrap;
   }
 
-  function setupInlineWorkspace(workspace, container, opts = {}) {
-    if (!workspace || !container) return;
-    const { useContents = false } = opts;
-    workspace.dataset.inline = "true";
-    if (!workspace.dataset.workspaceKey) {
-      const fallbackKey =
-        workspace.id || `ws-${Math.random().toString(36).slice(2, 10)}`;
-      workspace.dataset.workspaceKey = fallbackKey;
-    }
-    const supportsContents =
-      useContents &&
-      typeof CSS !== "undefined" &&
-      typeof CSS.supports === "function" &&
-      CSS.supports("display", "contents");
-    if (supportsContents) {
-      workspace.classList.add("workspace-inline");
-      workspace.style.display = "";
-      return;
-    }
-    workspace.classList.remove("workspace-inline");
-    workspace.style.display = "none";
-    const key = workspace.dataset.workspaceKey || "";
-    const placeBox = (box) => {
-      if (!box || !box.classList?.contains("vbox")) return;
-      if (key) box.dataset.workspace = key;
-      if (container.contains(workspace)) {
-        container.insertBefore(box, workspace);
-      } else {
-        container.appendChild(box);
-      }
-    };
-    workspace.querySelectorAll(".vbox").forEach((box) => placeBox(box));
-    const observer = new MutationObserver((mutations) => {
-      mutations.forEach((m) => {
-        m.addedNodes.forEach((node) => {
-          if (!(node instanceof Element)) return;
-          if (node.classList?.contains("vbox")) {
-            placeBox(node);
-          } else {
-            node.querySelectorAll?.(".vbox").forEach((box) => placeBox(box));
-          }
-        });
-      });
-    });
-    observer.observe(workspace, { childList: true });
-  }
+  type StyledToken = { kind: "tok"; role: string; text: string };
+  type StyledSegment = string | StyledToken;
 
-  function parseStyledText(text) {
-    const map = {
+  function parseStyledText(text: string): StyledSegment[] {
+    const map: Record<string, string> = {
       n: "name",
       t: "type",
       v: "value",
@@ -3673,7 +4110,7 @@
       b: "btn",
     };
     const raw = String(text ?? "");
-    const out = [];
+    const out: StyledSegment[] = [];
     let i = 0;
     while (i < raw.length) {
       const idx = raw.indexOf("$", i);
@@ -3697,11 +4134,14 @@
     return out;
   }
 
-  function renderParts(panel, parts) {
+  type RenderPart = string | number | MBTypes.TokenPart | { kind: "br" };
+  type RenderParts = RenderPart | RenderPart[];
+
+  function renderParts(panel: Element | null, parts: RenderParts) {
     if (!panel) return;
     panel.innerHTML = "";
     const list = Array.isArray(parts) ? parts : [parts];
-    const appendText = (value) => {
+    const appendText = (value: string | number) => {
       const text = String(value);
       const chunks = text.split("\n");
       chunks.forEach((chunk, idx) => {
@@ -3709,7 +4149,7 @@
         if (chunk) panel.appendChild(document.createTextNode(chunk));
       });
     };
-    const appendToken = (role, text) => {
+    const appendToken = (role: string, text: string) => {
       const chunks = String(text ?? "").split("\n");
       chunks.forEach((chunk, idx) => {
         if (idx > 0) panel.appendChild(document.createElement("br"));
@@ -3725,16 +4165,16 @@
         panel.appendChild(node);
       });
     };
-    const appendPart = (part) => {
+    const appendPart = (part: RenderPart) => {
       if (part === null || part === undefined) return;
       if (typeof part === "string" || typeof part === "number") {
-        const parsed = parseStyledText(part);
+        const parsed = parseStyledText(String(part));
         parsed.forEach((segment) => {
-          if (segment && typeof segment === "object" && segment.kind === "tok") {
+          if (typeof segment === "object" && segment.kind === "tok") {
             const role = String(segment.role || "").trim();
             appendToken(role, segment.text);
           } else {
-            appendText(segment);
+            appendText(String(segment));
           }
         });
         return;
@@ -3755,7 +4195,10 @@
     list.forEach(appendPart);
   }
 
-  function setPartsContent(panel, parts) {
+  function setPartsContent(
+    panel: Element | null,
+    parts: MBTypes.Parts | RenderParts | null,
+  ) {
     if (!panel) return;
     if (!parts || (Array.isArray(parts) && parts.length === 0)) {
       panel.textContent = "";
@@ -3766,29 +4209,15 @@
     renderParts(panel, parts);
   }
 
-  function stepperInstructionParts(ctx, opts = {}) {
-    if (!ctx) return null;
-    const atStart = !!opts.atStart;
-    const mode = opts.mode === "buttons" ? "buttons" : "default";
-    const rawLabel = opts.runLabel ?? ctx.runLabel ?? "";
-    const runLabel = String(rawLabel).replace(/\s*▶▶?$/, "");
-    if (atStart) {
-      if (mode === "buttons") {
-        return `Use the $b{${runLabel} ▶} button, or the right arrow key, to see how the code changes the program state.`;
-      }
-      return `Use $b{${runLabel} ▶} to see how the code changes the program state.`;
-    }
-    if (mode === "buttons") {
-      return `Use the $b{Back ◀} and $b{${runLabel} ▶} buttons, or the left and right arrow keys, to see how the code changes the program state.`;
-    }
-    return `Use $b{Back ◀} and $b{${runLabel} ▶} to see how the code changes the program state.`;
-  }
-
-  function stepperButtons(root, dir) {
-    const list = [];
+  function stepperButtons(
+    root: Element | null,
+    dir: string,
+  ): HTMLButtonElement[] {
+    const list: HTMLButtonElement[] = [];
     if (!root) return list;
     root.querySelectorAll(`[data-stepper="${dir}"]`).forEach((btn) => {
-      if (!list.includes(btn)) list.push(btn);
+      if (btn instanceof HTMLButtonElement && !list.includes(btn))
+        list.push(btn);
     });
     return list;
   }
@@ -3809,10 +4238,12 @@
     getNextBoundary,
     getPrevBoundary,
     endLabel,
-  } = {}) {
+  }: MBTypes.StepperOptions = {}): MBTypes.Stepper {
     const boundButtons = new WeakSet();
-    const getPrevButtons = () => prevButtons || stepperButtons(root, "prev");
-    const getNextButtons = () => nextButtons || stepperButtons(root, "next");
+    const getPrevButtons = () =>
+      prevButtons || stepperButtons(root as Element | null, "prev");
+    const getNextButtons = () =>
+      nextButtons || stepperButtons(root as Element | null, "next");
     const total = Array.isArray(lines)
       ? lines.length
       : Math.max(0, Number(lines) || 0);
@@ -3825,11 +4256,11 @@
       return typeof getBoundary === "function" ? getBoundary() : 0;
     }
 
-    function setBoundaryValue(value) {
+    function setBoundaryValue(value: number) {
       if (typeof setBoundary === "function") setBoundary(value);
     }
 
-    function locked(at) {
+    function locked(at: number) {
       return typeof isStepLocked === "function"
         ? !!isStepLocked(at, at === total)
         : false;
@@ -3881,7 +4312,7 @@
       return document.body.classList.contains("sidebar-collapsed") ? "0" : "1";
     }
 
-    function withSidebarParam(url) {
+    function withSidebarParam(url: string | null) {
       if (!url) return url;
       const [base, hash = ""] = url.split("#");
       const [path, query = ""] = base.split("?");
@@ -3894,7 +4325,7 @@
         : `${path}${hashPart}`;
     }
 
-    function goTo(target) {
+    function goTo(target: number) {
       const current = boundary();
       const clamped = Math.max(0, Math.min(total, target));
       if (clamped === current) return;
@@ -3927,8 +4358,10 @@
           const current = boundary();
           clearPulse();
           if (current === total) {
-            if (!btn.disabled && nextPage)
-              window.location.href = withSidebarParam(nextPage);
+            if (!btn.disabled && nextPage) {
+              const nextUrl = withSidebarParam(nextPage);
+              if (nextUrl) window.location.href = nextUrl;
+            }
             return;
           }
           if (locked(current)) return;
@@ -3955,14 +4388,9 @@
     };
   }
 
-  function pulseNextButton(root) {
-    const buttons = stepperButtons(root, "next");
-    if (!buttons.length) return;
-    buttons.forEach((btn) => btn.classList.add("pulse-success"));
-  }
-
   document.addEventListener("focusin", (e) => {
-    const t = e.target;
+    const t = e.target as HTMLElement | null;
+    if (!t) return;
     disableAutoText(t);
     if (
       t.classList?.contains("code-editable") &&
@@ -3984,7 +4412,8 @@
   });
 
   document.addEventListener("input", (e) => {
-    const t = e.target;
+    const t = e.target as HTMLElement | null;
+    if (!t) return;
     if (t.classList?.contains("placeholder")) {
       if (txt(t) === "") t.classList.add("muted");
       else t.classList.remove("muted");
@@ -3993,7 +4422,7 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
-    const t = e.target;
+    const t = e.target as HTMLElement | null;
     if (!t?.isContentEditable) return;
     if (
       t.classList?.contains("value") ||
@@ -4005,7 +4434,7 @@
     }
   });
 
-  function isTextInputActive(el) {
+  function isTextInputActive(el: HTMLElement | null) {
     if (!el) return false;
     if (el.isContentEditable) return true;
     const tag = el.tagName;
@@ -4016,8 +4445,8 @@
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
     if (e.repeat) return;
     if (
-      isTextInputActive(document.activeElement) ||
-      isTextInputActive(e.target)
+      isTextInputActive(document.activeElement as HTMLElement | null) ||
+      isTextInputActive(e.target as HTMLElement | null)
     )
       return;
     const selector =
@@ -4025,7 +4454,10 @@
         ? 'button[data-stepper="prev"]'
         : 'button[data-stepper="next"]';
     const btn = [...document.querySelectorAll(selector)].find(
-      (node) => node && !node.disabled && node.dataset.stepperEnd !== "true",
+      (node): node is HTMLButtonElement =>
+        node instanceof HTMLButtonElement &&
+        !node.disabled &&
+        node.dataset.stepperEnd !== "true",
     );
     if (!btn || btn.disabled) return;
     e.preventDefault();
@@ -4033,7 +4465,8 @@
   });
 
   document.addEventListener("focusout", (e) => {
-    const t = e.target;
+    const t = e.target as HTMLElement | null;
+    if (!t) return;
     if (t.classList?.contains("code-editable")) {
       const placeholder = t.dataset?.placeholder || "";
       if (!txt(t)) {
@@ -4215,17 +4648,17 @@
     initSidebarToggle();
   }
 
-  function flashStatus(el) {
-    if (!el) return;
-    el.classList.remove("status-flash");
+  function flashStatus(el: Element | null) {
+    const node = el as HTMLElement | null;
+    if (!node) return;
+    node.classList.remove("status-flash");
     // force reflow to restart animation
-    void el.offsetWidth;
-    el.classList.add("status-flash");
+    void node.offsetWidth;
+    node.classList.add("status-flash");
   }
 
-  global.MB = {
+  const MB: MBNamespace = {
     $,
-    el,
     randAddr,
     typeInfo,
     getPointerDepth,
@@ -4235,33 +4668,23 @@
     buildNav,
     resolveActiveNavItem,
     ensureBaseLayout,
-    txt,
-    disableAutoText,
     renderCodePane,
     updateStepperTopControls,
     stripLineComments,
-    stripAllComments,
-    parseSimpleStatement,
-    applySimpleStatement,
     createSimpleSimulator,
     vbox,
     readBoxState,
     makeAnswerBox,
-    cloneStateBoxes,
-    ensureBox,
     cloneBoxes,
-    firstNonEmptyClone,
     applyOtherNames,
     serializeWorkspace,
     restoreWorkspace,
-    setupInlineWorkspace,
     renderParts,
     setPartsContent,
-    stepperInstructionParts,
     createStepper,
-    pulseNextButton,
     flashStatus,
     disableBoxEditing,
     removeBoxDeleteButtons,
   };
+  global.MB = MB;
 })(window);

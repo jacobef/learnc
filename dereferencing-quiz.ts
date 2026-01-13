@@ -1,24 +1,38 @@
-{
-  const {
-    $,
-    randAddr,
-    vbox,
-    flashStatus,
-  } = window.MB;
+/// <reference path="./shared-core.ts" />
 
-  const instructions = $('[data-role="quiz-instructions"]');
-  const stage = $('[data-role="quiz-stage"]');
-  const prompt = $('[data-role="quiz-prompt"]');
-  const statusEl = $('[data-role="quiz-status"]');
-  const streakEl = $('[data-role="quiz-streak"]');
-  const checkBtn = $('[data-role="quiz-check"]');
-  const nextBtn = $('[data-role="quiz-next"]');
+{
+  const { $, randAddr, vbox, flashStatus } = window.MB!;
+
+  const instructions = $(
+    '[data-role="quiz-instructions"]',
+  ) as HTMLElement | null;
+  const stage = $('[data-role="quiz-stage"]') as HTMLElement | null;
+  const prompt = $('[data-role="quiz-prompt"]') as HTMLElement | null;
+  const statusEl = $('[data-role="quiz-status"]') as HTMLElement | null;
+  const streakEl = $('[data-role="quiz-streak"]') as HTMLElement | null;
+  const checkBtn = $('[data-role="quiz-check"]') as HTMLButtonElement | null;
+  const nextBtn = $('[data-role="quiz-next"]') as HTMLButtonElement | null;
 
   const NEXT_PAGE = "program9.html";
   const PULSE_CLASS = "pulse-success";
   const TARGET_STREAK = 4;
 
-  const quiz = {
+  type QuizScenario = {
+    boxes: MBTypes.BoxState[];
+    boxExpr: string;
+    boxTargetName: string;
+  };
+
+  type QuizState = {
+    streak: number;
+    passed: boolean;
+    scenario: QuizScenario | null;
+    selected: string | null;
+    awaitingNext: boolean;
+    lastResult: "correct" | "incorrect" | null;
+  };
+
+  const quiz: QuizState = {
     streak: 0,
     passed: false,
     scenario: null,
@@ -27,15 +41,15 @@
     lastResult: null,
   };
 
-  function randInt(min, max) {
+  function randInt(min: number, max: number): number {
     return Math.floor(Math.random() * (max - min + 1)) + min;
   }
 
-  function pick(list) {
+  function pick<T>(list: T[]): T {
     return list[Math.floor(Math.random() * list.length)];
   }
 
-  function shuffle(list) {
+  function shuffle<T>(list: T[]): T[] {
     const copy = [...list];
     for (let i = copy.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -44,12 +58,12 @@
     return copy;
   }
 
-  function pointerDepth(type) {
+  function pointerDepth(type: string): number {
     const matches = String(type || "").match(/\*/g);
     return matches ? matches.length : 0;
   }
 
-  function buildBoxes(requiredDepth, minDepth = 1) {
+  function buildBoxes(requiredDepth: number, minDepth = 1) {
     randAddr.reset(null);
     const maxDepth = randInt(Math.max(1, requiredDepth, minDepth), 3);
     const counts = {
@@ -89,7 +103,12 @@
       "z",
     ]).slice(0, total);
 
-    const byDepth = { 0: [], 1: [], 2: [], 3: [] };
+    const byDepth: Record<number, MBTypes.BoxState[]> = {
+      0: [],
+      1: [],
+      2: [],
+      3: [],
+    };
     let idx = 0;
     for (let i = 0; i < counts[0]; i++) {
       const name = names[idx++];
@@ -154,8 +173,12 @@
     return { boxes: addressOrder, maxDepth };
   }
 
-  function derefTarget(boxMap, startBox, depth) {
-    let current = startBox;
+  function derefTarget(
+    boxMap: Map<string, MBTypes.BoxState>,
+    startBox: MBTypes.BoxState,
+    depth: number,
+  ) {
+    let current: MBTypes.BoxState | null = startBox;
     for (let i = 0; i < depth; i++) {
       if (!current) return null;
       const next = boxMap.get(String(current.value));
@@ -165,7 +188,11 @@
     return current;
   }
 
-  function pickBoxQuestion(boxes, requiredDepth, minSourceDepth = 1) {
+  function pickBoxQuestion(
+    boxes: MBTypes.BoxState[],
+    requiredDepth: number,
+    minSourceDepth = 1,
+  ) {
     const ptrs = boxes.filter((b) => pointerDepth(b.type) >= 1);
     const depth = Math.max(1, requiredDepth || 1);
     const minDepth = Math.max(depth, minSourceDepth);
@@ -173,11 +200,11 @@
     if (!eligible.length) {
       eligible = ptrs.filter((b) => pointerDepth(b.type) >= depth);
     }
-    const source = pick(eligible);
+    const source = eligible.length ? pick(eligible) : null;
     return { source, depth };
   }
 
-  function pickSecondQuestionSource(boxes) {
+  function pickSecondQuestionSource(boxes: MBTypes.BoxState[]) {
     const ptrs = boxes.filter((b) => pointerDepth(b.type) >= 1);
     const byAddr = new Map(ptrs.map((b) => [String(b.address), b]));
     const pointedToByHigher = new Set();
@@ -199,19 +226,19 @@
     return eligible.length ? pick(eligible) : null;
   }
 
-  function requiredDepthFor(streak) {
+  function requiredDepthFor(streak: number) {
     if (streak <= 1) return 1;
     if (streak === 2) return 2;
     return 3;
   }
 
-  function buildScenario() {
+  function buildScenario(): QuizScenario {
     const requiredDepth = requiredDepthFor(quiz.streak);
     const needsPointedSource = quiz.streak <= 1;
     const minMaxDepth = needsPointedSource ? 2 : 1;
     const { boxes } = buildBoxes(requiredDepth, minMaxDepth);
     const byAddr = new Map(boxes.map((b) => [String(b.address), b]));
-    let source;
+    let source: MBTypes.BoxState | null = null;
     let depth = requiredDepth;
     if (needsPointedSource) {
       source = pickSecondQuestionSource(boxes);
@@ -231,18 +258,20 @@
     };
   }
 
-  function setSelected(name) {
+  function setSelected(name: string) {
     quiz.selected = name;
-    stage.querySelectorAll(".vbox").forEach((node) => {
-      node.classList.toggle("quiz-selected", node.dataset.name === name);
+    stage?.querySelectorAll(".vbox").forEach((node) => {
+      const el = node as HTMLElement;
+      el.classList.toggle("quiz-selected", el.dataset.name === name);
     });
   }
 
-  function renderBoxes(boxes) {
+  function renderBoxes(boxes: MBTypes.BoxState[]) {
+    if (!stage) return;
     stage.innerHTML = "";
     boxes.forEach((b) => {
       const node = vbox({
-        address: b.address,
+        address: b.address ?? undefined,
         type: b.type,
         value: b.value,
         name: b.name,
@@ -262,14 +291,14 @@
     streakEl.textContent = `Streak: ${quiz.streak}/${TARGET_STREAK}`;
   }
 
-  function setStatus(text, ok) {
+  function setStatus(text: string, ok: boolean) {
     if (!statusEl) return;
     statusEl.textContent = text;
     statusEl.className = ok ? "ok" : "err";
     flashStatus(statusEl);
   }
 
-  function setNextMode(mode) {
+  function setNextMode(mode: "advance" | "retry" | "next") {
     if (!nextBtn) return;
     if (mode === "advance") {
       nextBtn.textContent = "Next Program ▶▶";
@@ -282,7 +311,7 @@
     nextBtn.textContent = "Next Question";
   }
 
-  function setNextEnabled(enabled) {
+  function setNextEnabled(enabled: boolean) {
     if (nextBtn) nextBtn.disabled = !enabled;
   }
 
@@ -297,7 +326,7 @@
 
   function clearSelection() {
     quiz.selected = null;
-    stage.querySelectorAll(".vbox").forEach((node) => {
+    stage?.querySelectorAll(".vbox").forEach((node) => {
       node.classList.remove("quiz-selected");
     });
   }
@@ -306,15 +335,17 @@
     quiz.awaitingNext = false;
     quiz.lastResult = null;
     clearSelection();
-    statusEl.textContent = "";
-    statusEl.className = "muted";
+    if (statusEl) {
+      statusEl.textContent = "";
+      statusEl.className = "muted";
+    }
     if (checkBtn) checkBtn.disabled = false;
     setNextMode("next");
     setNextEnabled(false);
     clearNextPulse();
   }
 
-  function setPrompt(scenario) {
+  function setPrompt(scenario: QuizScenario) {
     if (prompt) {
       prompt.innerHTML = `Click on the box that <code class="tok-code">${scenario.boxExpr}</code> refers to, then press <span class="btn-ref">Check</span>.`;
     }
@@ -339,7 +370,7 @@
       return;
     }
 
-    const boxOk = chosen === scenario.boxTargetName;
+    const boxOk = chosen === scenario?.boxTargetName;
     if (boxOk) {
       quiz.streak += 1;
       setStatus("correct", true);
@@ -384,7 +415,7 @@
     return document.body.classList.contains("sidebar-collapsed") ? "0" : "1";
   }
 
-  function withSidebarParam(url) {
+  function withSidebarParam(url: string) {
     if (!url) return url;
     const [base, hash = ""] = url.split("#");
     const [path, query = ""] = base.split("?");

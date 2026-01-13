@@ -1,5 +1,7 @@
+/// <reference path="./shared-core.ts" />
+
 {
-  const { ensureBaseLayout } = window.MB;
+  const { ensureBaseLayout } = window.MB!;
 
   const { main } = ensureBaseLayout();
   if (main) {
@@ -56,7 +58,7 @@
 
     const startWrap = document.createElement("div");
     const startLink = document.createElement("a");
-    const updateStartLink = () => {
+    const updateStartLink = (): void => {
       const sidebarState = document.body.classList.contains("sidebar-collapsed")
         ? "0"
         : "1";

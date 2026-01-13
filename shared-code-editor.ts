@@ -1,5 +1,65 @@
-(function (global) {
-  const MB = global.MB || {};
+/// <reference path="./shared-core.ts" />
+
+type CodeEditorParts = MBTypes.Parts;
+type CodeEditorPartsSpec =
+  | CodeEditorParts
+  | ((ctx: CodeEditorContext) => CodeEditorParts | null)
+  | null;
+
+interface CodeEditorElements {
+  instructionsEl: HTMLElement | null;
+  editor: HTMLTextAreaElement | null;
+  lineNumbers: HTMLElement | null;
+  errorGutter: HTMLElement | null;
+  stage: HTMLElement | null;
+  status: HTMLElement | null;
+  hintPanel: HTMLElement | null;
+  hintBtn: HTMLButtonElement | null;
+  checkBtn: HTMLButtonElement | null;
+  codeRoot: HTMLElement | null;
+}
+
+interface CodeEditorOutcome {
+  kind: "ok" | "compile" | "ub";
+  state: MBTypes.BoxState[] | null;
+}
+
+interface CodeEditorContext {
+  text: string;
+  targetState: MBTypes.BoxState[];
+  tokenizeProgram: MBTypes.SimpleSimulator["tokenizeProgram"];
+  parseStatements: MBTypes.SimpleSimulator["parseStatements"];
+  findMissingSemicolonLines: MBTypes.SimpleSimulator["findMissingSemicolonLines"];
+  applyUserProgram: () => MBTypes.BoxState[] | null;
+}
+
+interface CodeEditorConfig {
+  startCode?: string;
+  targetState?: MBTypes.BoxState[];
+  textareaMinLines: number;
+  allowNewLines?: boolean;
+  hints?: CodeEditorPartsSpec;
+  instructions?: string;
+  next?: string | null;
+}
+
+interface CodeEditorState {
+  text: string;
+  pass: boolean;
+  allocBase: number | null;
+}
+
+interface CodeEditorResult {
+  ok: boolean;
+  outcome: CodeEditorOutcome;
+}
+
+interface MBNamespace {
+  createCodeEditorTemplate?: (config: CodeEditorConfig) => void;
+}
+
+(function (global: MBGlobal) {
+  const MB = (global.MB || {}) as MBNamespace;
   const {
     createSimpleSimulator,
     randAddr,
@@ -13,37 +73,48 @@
     resolveActiveNavItem,
   } = MB;
 
-  function collectCodeEditorElements(root = document) {
+  function collectCodeEditorElements(
+    root: ParentNode = document,
+  ): CodeEditorElements {
     return {
-      instructionsEl: root.querySelector('[data-role="code-instructions"]'),
-      editor: root.querySelector('[data-role="code-editor"]'),
-      lineNumbers: root.querySelector('[data-role="code-line-numbers"]'),
-      errorGutter: root.querySelector('[data-role="code-error-gutter"]'),
-      stage: root.querySelector('[data-role="code-stage"]'),
-      status: root.querySelector('[data-role="code-status"]'),
-      hintPanel: root.querySelector('[data-role="code-hint"]'),
-      hintBtn: root.querySelector('[data-role="code-hint-btn"]'),
-      checkBtn: root.querySelector('[data-role="code-check"]'),
-      codeRoot: root.querySelector('[data-role="code-panel"]'),
+      instructionsEl: root.querySelector(
+        '[data-role="code-instructions"]',
+      ) as HTMLElement | null,
+      editor: root.querySelector(
+        '[data-role="code-editor"]',
+      ) as HTMLTextAreaElement | null,
+      lineNumbers: root.querySelector(
+        '[data-role="code-line-numbers"]',
+      ) as HTMLElement | null,
+      errorGutter: root.querySelector(
+        '[data-role="code-error-gutter"]',
+      ) as HTMLElement | null,
+      stage: root.querySelector('[data-role="code-stage"]') as HTMLElement | null,
+      status: root.querySelector('[data-role="code-status"]') as HTMLElement | null,
+      hintPanel: root.querySelector('[data-role="code-hint"]') as HTMLElement | null,
+      hintBtn: root.querySelector(
+        '[data-role="code-hint-btn"]',
+      ) as HTMLButtonElement | null,
+      checkBtn: root.querySelector(
+        '[data-role="code-check"]',
+      ) as HTMLButtonElement | null,
+      codeRoot: root.querySelector('[data-role="code-panel"]') as HTMLElement | null,
     };
   }
 
   function ensureCodeEditorLayout({
-    pageTitle,
-    browserTitle,
-    navItems,
-    activeHref,
     textareaMinLines,
-  } = {}) {
-    const activeItem = resolveActiveNavItem(navItems, activeHref);
-    const resolvedTitle = pageTitle || activeItem?.label || "";
-    const nextBrowserTitle =
-      browserTitle || (resolvedTitle ? `C Boxes - ${resolvedTitle}` : "");
+  }: {
+    textareaMinLines: number;
+  }): CodeEditorElements {
+    const activeItem = resolveActiveNavItem();
+    const resolvedTitle = activeItem?.label || "";
+    const nextBrowserTitle = resolvedTitle ? `C Boxes - ${resolvedTitle}` : "";
     if (nextBrowserTitle) document.title = nextBrowserTitle;
     const existing = document.querySelector('[data-role="code-editor"]');
     if (existing) return collectCodeEditorElements();
 
-    const { main } = ensureBaseLayout({ navItems, activeHref });
+    const { main } = ensureBaseLayout();
     if (resolvedTitle) {
       const heading = document.createElement("h1");
       heading.className = "page-title";
@@ -82,9 +153,7 @@
     editor.dataset.role = "code-editor";
     editor.className = "code-textarea";
     editor.spellcheck = false;
-    const rows = Number.isFinite(textareaMinLines)
-      ? Math.max(1, Number(textareaMinLines))
-      : 4;
+    const rows = Math.max(1, Number(textareaMinLines));
     editor.setAttribute("rows", String(rows));
     editorWrap.appendChild(editor);
     const errorGutter = document.createElement("div");
@@ -149,21 +218,24 @@
     };
   }
 
-  function createCodeEditorTemplate(config = {}) {
+  function createCodeEditorTemplate(config: CodeEditorConfig): void {
     const {
       startCode = "",
       targetState = [],
-      textareaWidth = null,
-      textareaMinLines = null,
+      textareaMinLines,
       allowNewLines = true,
       hints = null,
-      instructions = null,
+      instructions = "",
       next = null,
-      pageTitle = null,
-      browserTitle = null,
-      navItems = null,
-      activeHref = null,
     } = config;
+
+    const failConfig = (message: string): never => {
+      alert(message);
+      throw new Error(message);
+    };
+    if (!Number.isFinite(textareaMinLines)) {
+      failConfig("Code editor textareaMinLines must be a number.");
+    }
 
     const {
       instructionsEl,
@@ -176,13 +248,7 @@
       hintBtn,
       checkBtn,
       codeRoot,
-    } = ensureCodeEditorLayout({
-      pageTitle,
-      browserTitle,
-      navItems,
-      activeHref,
-      textareaMinLines,
-    });
+    } = ensureCodeEditorLayout({ textareaMinLines });
 
     const measureEl = (() => {
       if (!editor || !editor.parentElement) return null;
@@ -193,26 +259,30 @@
       return el;
     })();
 
-    const state = {
+    const state: CodeEditorState = {
       text: editor ? editor.value : "",
       pass: false,
       allocBase: null,
     };
-    let pager = null;
+    let pager: MBTypes.Stepper | null = null;
 
-    function normalizeEditorText(text) {
+    function normalizeEditorText(text: string): string {
       if (allowNewLines) return String(text ?? "");
       const normalized = String(text ?? "").replace(/\r\n/g, "\n");
       return normalized.replace(/\n/g, " ");
     }
 
-    function adjustSelectionForCarriageReturns(text, pos) {
+    function adjustSelectionForCarriageReturns(
+      text: string,
+      pos: number | null,
+    ): number | null {
       if (!Number.isFinite(pos)) return pos;
+      const safePos = pos as number;
       let removed = 0;
-      for (let i = 0; i < pos && i < text.length; i++) {
+      for (let i = 0; i < safePos && i < text.length; i++) {
         if (text[i] === "\r") removed += 1;
       }
-      return Math.max(0, pos - removed);
+      return Math.max(0, safePos - removed);
     }
 
     if (startCode != null && String(startCode) !== "") {
@@ -220,13 +290,8 @@
       if (editor) editor.value = state.text;
     }
     if (editor) {
-      if (textareaWidth) {
-        editor.style.width = String(textareaWidth);
-      }
-      if (Number.isFinite(textareaMinLines)) {
-        const lines = Math.max(1, Number(textareaMinLines));
-        editor.style.minHeight = `calc(var(--code-line-height) * ${lines} + 16px)`;
-      }
+      const lines = Math.max(1, Number(textareaMinLines));
+      editor.style.minHeight = `calc(var(--code-line-height) * ${lines} + 16px)`;
     }
 
     const simulator = createSimpleSimulator({
@@ -237,7 +302,7 @@
       allowPointers: true,
     });
 
-    function allocFactory() {
+    function allocFactory(): (type?: string) => string {
       if (state.allocBase == null) state.allocBase = randAddr("int");
       let next = Number(state.allocBase);
       return (type = "int") => {
@@ -253,19 +318,19 @@
       };
     }
 
-    function getEditorText() {
+    function getEditorText(): string {
       return editor ? editor.value : state.text || "";
     }
 
-    function getRawLines() {
+    function getRawLines(): string[] {
       return getEditorText().split(/\r?\n/);
     }
 
-    function classifyLineStatuses(lines) {
+    function classifyLineStatuses(lines: string[]): MBTypes.LineStatus {
       return simulator.classifyLineStatuses(lines, { alloc: allocFactory() });
     }
 
-    function getLineHeightPx() {
+    function getLineHeightPx(): number {
       if (!editor) return 32;
       const style = window.getComputedStyle(editor);
       const lh = parseFloat(style.lineHeight);
@@ -278,7 +343,7 @@
       editor.style.height = `${editor.scrollHeight}px`;
     }
 
-    function measureWrapCounts(lines) {
+    function measureWrapCounts(lines: string[]): number[] {
       if (!editor || !measureEl) return lines.map(() => 1);
       const style = window.getComputedStyle(editor);
       const paddingLeft = parseFloat(style.paddingLeft) || 0;
@@ -385,13 +450,13 @@
       }
     }
 
-    function applyUserProgram() {
+    function applyUserProgram(): MBTypes.BoxState[] | null {
       const text = getEditorText();
       state.text = text;
       return simulator.applyProgram(text, { alloc: allocFactory() });
     }
 
-    function getProgramOutcome() {
+    function getProgramOutcome(): CodeEditorOutcome {
       const lines = getRawLines();
       const status = classifyLineStatuses(lines);
       let hasCompile = status.incomplete.size > 0;
@@ -409,7 +474,10 @@
       return { kind: "ok", state };
     }
 
-    function statesMatch(actual, expected) {
+    function statesMatch(
+      actual: MBTypes.BoxState[],
+      expected: MBTypes.BoxState[],
+    ): boolean {
       if (!Array.isArray(actual) || !Array.isArray(expected)) return false;
       if (actual.length !== expected.length) return false;
       const byName = Object.fromEntries(expected.map((b) => [b.name, b]));
@@ -422,7 +490,11 @@
       return true;
     }
 
-    function renderState(title, boxes, status = "ok") {
+    function renderState(
+      title: string,
+      boxes: MBTypes.BoxState[] | null,
+      status: CodeEditorOutcome["kind"] = "ok",
+    ): HTMLElement {
       const wrap = document.createElement("div");
       wrap.className = "state-panel";
       const heading = document.createElement("div");
@@ -475,14 +547,16 @@
       } else {
         boxes.forEach((b) => {
           const node = vbox({
-            address: b.address,
+            address: b.address ?? undefined,
             type: b.type,
             value: b.value,
             name: b.name,
             editable: false,
           });
           if (String(b.value ?? "") === "")
-            node.querySelector(".value").classList.add("placeholder", "muted");
+            node
+              .querySelector(".value")
+              ?.classList.add("placeholder", "muted");
           grid.appendChild(node);
         });
       }
@@ -490,7 +564,7 @@
       return wrap;
     }
 
-    function renderStage() {
+    function renderStage(): void {
       if (!stage) return;
       stage.innerHTML = "";
       const outcome = getProgramOutcome();
@@ -503,54 +577,58 @@
       stage.appendChild(group);
     }
 
-    function makeToken(role, text) {
-      return { kind: "tok", role, text: String(text ?? "") };
-    }
-
-    function partsContext({ state: programState, outcome } = {}) {
+    function partsContext(): CodeEditorContext {
       return {
-        passed: !!state.pass,
         text: getEditorText(),
-        lines: getRawLines(),
-        state: programState,
-        outcome,
         targetState,
-        nameStyle: (text) => makeToken("name", text),
-        typeStyle: (text) => makeToken("type", text),
-        valueStyle: (text) => makeToken("value", text),
-        addrStyle: (text) => makeToken("addr", text),
-        codeStyle: (text) => makeToken("code", text),
-        btnStyle: (text) => makeToken("btn", text),
-        simulator,
         tokenizeProgram: simulator.tokenizeProgram,
         parseStatements: simulator.parseStatements,
-        findMissingSemicolonLine: simulator.findMissingSemicolonLine,
         findMissingSemicolonLines: simulator.findMissingSemicolonLines,
-        classifyLineStatuses,
         applyUserProgram,
       };
     }
 
-    function setStatus(text, cls = "muted") {
+    function replaceButtonTokens(text: string): string {
+      const replacements: Array<[string, string]> = [
+        ["$checkButton", "$b{Check}"],
+        ["$resetButton", "$b{Reset}"],
+        ["$newVariableButton", "$b{+ New variable}"],
+        ["$runLineButton", "$b{Run line}"],
+        ["$backButton", "$b{Back ◀}"],
+        ["$showAliasesButton", "$b{Show aliases}"],
+      ];
+      let out = String(text ?? "");
+      replacements.forEach(([needle, value]) => {
+        out = out.split(needle).join(value);
+      });
+      return out;
+    }
+
+    function applyButtonTokens(
+      parts: CodeEditorParts | null,
+    ): CodeEditorParts | null {
+      if (!parts) return parts;
+      if (typeof parts === "string") {
+        return replaceButtonTokens(parts);
+      }
+      return parts.map((part) =>
+        typeof part === "string" ? replaceButtonTokens(part) : part,
+      );
+    }
+
+    function setStatus(text: string, cls: string = "muted") {
       if (!status) return;
       status.textContent = text;
       status.className = cls;
     }
 
     function updateInstructions() {
-      const outcome = getProgramOutcome();
-      const ctx = partsContext({ state: outcome.state, outcome });
       if (state.pass) {
         setPartsContent(instructionsEl, "Program solved!");
         return;
       }
-      if (typeof instructions === "function") {
-        const parts = instructions(ctx);
-        setPartsContent(instructionsEl, parts);
-        return;
-      }
       if (instructions) {
-        setPartsContent(instructionsEl, instructions);
+        setPartsContent(instructionsEl, applyButtonTokens(instructions));
         return;
       }
       setPartsContent(instructionsEl, []);
@@ -562,10 +640,10 @@
       hintPanel.classList.add("hidden");
     }
 
-    function showHint(parts) {
+    function showHint(parts: CodeEditorParts | null) {
       if (!hintPanel) return;
       if (!parts || (Array.isArray(parts) && parts.length === 0)) return;
-      renderParts(hintPanel, parts);
+      renderParts(hintPanel, applyButtonTokens(parts) || "");
       hintPanel.classList.remove("hidden");
       flashStatus(hintPanel);
     }
@@ -588,28 +666,27 @@
       }
     }
 
-    function evaluate() {
+    function evaluate(): CodeEditorResult {
       const outcome = getProgramOutcome();
       const ok =
-        outcome.kind === "ok" && statesMatch(outcome.state, targetState);
+        outcome.kind === "ok" &&
+        Array.isArray(outcome.state) &&
+        statesMatch(outcome.state, targetState);
       return { ok, outcome };
     }
 
     function handleHint() {
       const result = evaluate();
-      const ctx = partsContext({
-        state: result.outcome.state,
-        outcome: result.outcome,
-      });
+      const ctx = partsContext();
       if (result.ok) {
-        showHint("Looks good. Press $b{Check}.");
+        showHint("Looks good. Press $checkButton.");
         return;
       }
-      let parts = null;
+      let parts: CodeEditorParts | null = null;
       if (typeof hints === "function") {
         parts = hints(ctx);
       } else {
-        parts = hints;
+        parts = hints as CodeEditorParts;
       }
       if (!parts || (Array.isArray(parts) && parts.length === 0)) {
         showHint(
@@ -635,6 +712,8 @@
           );
           editor.value = next;
           if (
+            typeof start === "number" &&
+            typeof end === "number" &&
             Number.isFinite(start) &&
             Number.isFinite(end) &&
             typeof editor.setSelectionRange === "function"

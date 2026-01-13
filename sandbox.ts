@@ -1,3 +1,5 @@
+/// <reference path="./shared-core.ts" />
+
 {
   const {
     $,
@@ -7,21 +9,37 @@
     applyOtherNames,
     updateStepperTopControls,
     confettiRain,
-  } = window.MB;
+  } = window.MB!;
 
-  const instructions = $('[data-role="sandbox-instructions"]');
-  const codepane = $('[data-role="sandbox-code"]');
-  const editor = $('[data-role="sandbox-editor"]');
-  const lineNumbers = $('[data-role="sandbox-line-numbers"]');
-  const errorGutter = $('[data-role="sandbox-error-gutter"]');
-  const errorDetail = $('[data-role="sandbox-error-detail"]');
-  const exprInput = $('[data-role="sandbox-expr"]');
-  const exprResult = $('[data-role="sandbox-expr-result"]');
-  const exprError = $('[data-role="sandbox-expr-error"]');
-  const prevBtn = $('[data-role="sandbox-prev"]');
-  const nextBtn = $('[data-role="sandbox-next"]');
-  const prevButtons = [prevBtn].filter(Boolean);
-  const nextButtons = [nextBtn].filter(Boolean);
+  const instructions = $(
+    '[data-role="sandbox-instructions"]',
+  ) as HTMLElement | null;
+  const codepane = $('[data-role="sandbox-code"]') as HTMLElement | null;
+  const editor = $('[data-role="sandbox-editor"]') as HTMLTextAreaElement | null;
+  const lineNumbers = $(
+    '[data-role="sandbox-line-numbers"]',
+  ) as HTMLElement | null;
+  const errorGutter = $(
+    '[data-role="sandbox-error-gutter"]',
+  ) as HTMLElement | null;
+  const errorDetail = $(
+    '[data-role="sandbox-error-detail"]',
+  ) as HTMLElement | null;
+  const exprInput = $('[data-role="sandbox-expr"]') as HTMLInputElement | null;
+  const exprResult = $(
+    '[data-role="sandbox-expr-result"]',
+  ) as HTMLElement | null;
+  const exprError = $(
+    '[data-role="sandbox-expr-error"]',
+  ) as HTMLElement | null;
+  const prevBtn = $('[data-role="sandbox-prev"]') as HTMLButtonElement | null;
+  const nextBtn = $('[data-role="sandbox-next"]') as HTMLButtonElement | null;
+  const prevButtons = [prevBtn].filter(
+    (btn): btn is HTMLButtonElement => !!btn,
+  );
+  const nextButtons = [nextBtn].filter(
+    (btn): btn is HTMLButtonElement => !!btn,
+  );
   let finishedConfettiShown = false;
   const highlightEl = (() => {
     if (!editor || !editor.parentElement) return null;
@@ -50,7 +68,19 @@
     return el;
   })();
 
-  const sandbox = {
+  type SandboxState = {
+    text: string;
+    allocBase: number | null;
+    errorDetailLine: number | null;
+    errorDetailMessage: string;
+    errorDetailHtml: string;
+    errorDetailKind: string;
+    boundary: number | null;
+    lineCount: number;
+    otherNamesShown: Set<string>;
+  };
+
+  const sandbox: SandboxState = {
     text: editor ? editor.value : "",
     allocBase: null,
     errorDetailLine: null,
@@ -75,18 +105,23 @@
   const INT64_MIN = -9223372036854775808n;
   const INT64_MAX = 9223372036854775807n;
 
-  function classifyNumericLiteral(value) {
+  type LiteralTypeResult =
+    | { error: string; kind: "compile" }
+    | { type: "long" }
+    | { type: "int" };
+
+  function classifyNumericLiteral(value: string) {
     try {
       const n = BigInt(String(value));
-      if (n < INT64_MIN || n > INT64_MAX) return "compile";
-      if (n < INT32_MIN || n > INT32_MAX) return "ub";
-      return "ok";
+      if (n < INT64_MIN || n > INT64_MAX) return "compile" as const;
+      if (n < INT32_MIN || n > INT32_MAX) return "ub" as const;
+      return "ok" as const;
     } catch {
-      return "compile";
+      return "compile" as const;
     }
   }
 
-  function literalTypeFor(value) {
+  function literalTypeFor(value: string): LiteralTypeResult {
     const status = classifyNumericLiteral(value);
     if (status === "compile")
       return { error: "That number is too large to represent.", kind: "compile" };
@@ -94,21 +129,24 @@
     return { type: "int" };
   }
 
-  function typeInfo(type) {
+  function typeInfo(type: string) {
     const cleaned = String(type || "").trim();
     const match = cleaned.match(/^(.*?)(\*+)$/);
     if (!match) return { base: cleaned, depth: 0 };
     return { base: match[1], depth: match[2].length };
   }
 
-  function makePointerType(base, depth) {
+  function makePointerType(base: string, depth: number) {
     if (!Number.isFinite(depth) || depth < 0) return null;
     if (depth === 0) return base;
     return `${base}${"*".repeat(depth)}`;
   }
 
-  function parseExpressionTokens(src = "") {
-    const tokens = [];
+  type ExprToken = { type: "sym" | "ident" | "number"; value: string };
+  type ExprParseTokens = { tokens: ExprToken[] } | { error: string };
+
+  function parseExpressionTokens(src = ""): ExprParseTokens {
+    const tokens: ExprToken[] = [];
     let i = 0;
     while (i < src.length) {
       const ch = src[i];
@@ -148,19 +186,30 @@
         i = j;
         continue;
       }
-      return { error: "That line has a character that does not belong in an expression." };
+      return {
+        error: "That line has a character that does not belong in an expression.",
+      };
     }
     return { tokens };
   }
 
-  function parseExpression(src = "") {
-    const { tokens, error } = parseExpressionTokens(src);
-    if (error) return { error };
+  type ExprNode =
+    | { kind: "num"; value: string }
+    | { kind: "var"; name: string }
+    | { kind: "unary"; op: string; expr: ExprNode }
+    | { kind: "binary"; op: string; left: ExprNode; right: ExprNode };
+
+  type ExprParseResult = { expr: ExprNode } | { error: string };
+
+  function parseExpression(src = ""): ExprParseResult {
+    const parsed = parseExpressionTokens(src);
+    if ("error" in parsed) return { error: parsed.error };
+    const tokens = parsed.tokens;
     if (!tokens.length) return { error: "Enter an expression to evaluate." };
     let idx = 0;
     const next = () => tokens[idx];
 
-    function parsePrimary() {
+    function parsePrimary(): ExprNode | null {
       const tok = next();
       if (!tok) return null;
       if (tok.type === "number") {
@@ -183,7 +232,7 @@
       return null;
     }
 
-    function parseUnary() {
+    function parseUnary(): ExprNode | null {
       const tok = next();
       if (
         tok &&
@@ -201,7 +250,7 @@
       return parsePrimary();
     }
 
-    function parseMulDiv() {
+    function parseMulDiv(): ExprNode | null {
       let left = parseUnary();
       if (!left) return null;
       while (true) {
@@ -216,7 +265,7 @@
       return left;
     }
 
-    function parseAddSub() {
+    function parseAddSub(): ExprNode | null {
       let left = parseMulDiv();
       if (!left) return null;
       while (true) {
@@ -231,7 +280,7 @@
       return left;
     }
 
-    function parseEquality() {
+    function parseEquality(): ExprNode | null {
       let left = parseAddSub();
       if (!left) return null;
       while (true) {
@@ -251,17 +300,32 @@
     return { expr };
   }
 
-  function showExprError(message) {
+  function showExprError(message: string) {
     if (!exprError) return;
     exprError.textContent = message || "";
     exprError.classList.toggle("hidden", !message);
   }
 
-  function evaluateExpression(expr, state) {
+  type EvalKind = "compile" | "ub";
+  type EvalError = { error: string; kind: EvalKind };
+  type EvalValue = string | bigint;
+  type EvalResult = {
+    kind: "lvalue" | "rvalue";
+    base: string;
+    depth: number;
+    value: EvalValue;
+    address: string;
+    label: string;
+  };
+  type EvalOutcome =
+    | EvalError
+    | { result: { kind: string; type: string; value: EvalValue; address: string } };
+
+  function evaluateExpression(expr: string, state: MBTypes.BoxState[]): EvalOutcome {
     const parsed = parseExpression(expr);
-    if (parsed.error) return { error: parsed.error, kind: "compile" };
-    const { expr: ast } = parsed;
-    const byName = new Map();
+    if ("error" in parsed) return { error: parsed.error, kind: "compile" };
+    const ast = parsed.expr;
+    const byName = new Map<string, MBTypes.BoxState>();
     state.forEach((b) => {
       if (b.name) byName.set(b.name, b);
       if (Array.isArray(b.names)) {
@@ -270,7 +334,7 @@
         });
       }
     });
-    function makeLvalue(box, label) {
+    function makeLvalue(box: MBTypes.BoxState, label?: string): EvalResult | EvalError {
       const { base, depth } = typeInfo(box.type);
       if (!base || !Number.isFinite(depth)) {
         return {
@@ -288,15 +352,25 @@
       };
     }
 
-    function makeRvalue(value, base, depth = 0, label = "") {
+    function makeRvalue(
+      value: EvalValue,
+      base: string,
+      depth = 0,
+      label = "",
+    ): EvalResult {
       return { kind: "rvalue", base, depth, value, address: "", label };
     }
 
-    function coerceScalar(result) {
-      if (!result)
+    function coerceScalar(result: EvalResult | EvalError):
+      | { error: string; kind: EvalKind }
+      | { value: bigint; base: string } {
+      if (!result || "error" in result)
         return { error: "That expression is not valid here.", kind: "compile" };
       if (!Number.isFinite(result.depth) || result.depth !== 0)
-        return { error: "Pointer arithmetic is not supported here.", kind: "compile" };
+        return {
+          error: "Pointer arithmetic is not supported here.",
+          kind: "compile",
+        };
       const raw = result.value;
       if (result.kind === "lvalue") {
         if (String(raw ?? "") === "") {
@@ -313,11 +387,12 @@
       }
     }
 
-    function evalNode(node) {
-      if (!node) return { error: "That expression is not valid here.", kind: "compile" };
+    function evalNode(node: ExprNode): EvalResult | EvalError {
+      if (!node)
+        return { error: "That expression is not valid here.", kind: "compile" };
       if (node.kind === "num") {
         const status = literalTypeFor(node.value);
-        if (status.error) return { error: status.error, kind: status.kind };
+        if ("error" in status) return { error: status.error, kind: status.kind };
         try {
           return makeRvalue(BigInt(String(node.value)), status.type || "int");
         } catch {
@@ -332,7 +407,7 @@
       }
       if (node.kind === "unary") {
         const rhs = evalNode(node.expr);
-        if (rhs.error) return rhs;
+        if ("error" in rhs) return rhs;
         if (node.op === "&") {
           const label = `&${rhs.label || ""}`;
           if (rhs.kind !== "lvalue" || !rhs.address) {
@@ -378,20 +453,20 @@
           return makeLvalue(target, label);
         }
         const scalar = coerceScalar(rhs);
-        if (scalar.error) return scalar;
+        if ("error" in scalar) return scalar;
         if (node.op === "+") return makeRvalue(scalar.value, scalar.base);
         if (node.op === "-") return makeRvalue(-scalar.value, scalar.base);
         return { error: "That expression is not valid here.", kind: "compile" };
       }
       if (node.kind === "binary") {
         const left = evalNode(node.left);
-        if (left.error) return left;
+        if ("error" in left) return left;
         const right = evalNode(node.right);
-        if (right.error) return right;
+        if ("error" in right) return right;
         const leftScalar = coerceScalar(left);
-        if (leftScalar.error) return leftScalar;
+        if ("error" in leftScalar) return leftScalar;
         const rightScalar = coerceScalar(right);
-        if (rightScalar.error) return rightScalar;
+        if ("error" in rightScalar) return rightScalar;
         if (node.op === "==") {
           return makeRvalue(
             leftScalar.value === rightScalar.value ? 1n : 0n,
@@ -414,7 +489,7 @@
     }
 
     const evaluated = evalNode(ast);
-    if (evaluated.error) return evaluated;
+    if ("error" in evaluated) return evaluated;
     const resultType = makePointerType(
       evaluated.base || "int",
       Number.isFinite(evaluated.depth) ? evaluated.depth : 0,
@@ -443,7 +518,7 @@
     if (!instructions) return;
     const lines = getRawLines();
     const total = lines.length;
-    const boundary = Number.isFinite(sandbox.boundary) ? sandbox.boundary : total;
+    const boundary = resolveBoundary(sandbox.boundary, total);
     const statementInfo = getStatementContext(lines, boundary);
     const hasCode = lines.some((line) => line.trim() !== "");
     const atEnd = boundary >= total;
@@ -490,7 +565,9 @@
     }
   }
 
-  function parseErrorMessage(message) {
+  type ParsedMessage = { text: string; html: string };
+
+  function parseErrorMessage(message: string | ParsedMessage) {
     if (message && typeof message === "object") {
       return {
         text: String(message.text || ""),
@@ -500,7 +577,7 @@
     return { text: String(message || ""), html: "" };
   }
 
-  function combineMessages(primary, secondary) {
+  function combineMessages(primary: string | ParsedMessage, secondary: string | ParsedMessage) {
     if (!secondary) return primary;
     const p = parseErrorMessage(primary);
     const s = parseErrorMessage(secondary);
@@ -518,14 +595,14 @@
     "Line should be a declaration or assignment.",
   ]);
 
-  function isGenericCompileMessage(message) {
+  function isGenericCompileMessage(message: string | ParsedMessage) {
     const parsed = parseErrorMessage(message);
     const text = (parsed.text || "").trim();
     if (!text) return true;
     return GENERIC_COMPILE_ERRORS.has(text);
   }
 
-  function showErrorDetail(message, kind) {
+  function showErrorDetail(message: string | ParsedMessage, kind: string) {
     if (!errorDetail) return;
     const parsed = parseErrorMessage(message);
     errorDetail.innerHTML = "";
@@ -584,13 +661,25 @@
     return getEditorText().split(/\r?\n/);
   }
 
-  function clampBoundary(value, total) {
+  function clampBoundary(value: number, total: number) {
     if (!Number.isFinite(value)) return 0;
     return Math.max(0, Math.min(total, value));
   }
 
-  function isMultiLineStatement(range) {
-    return (
+  function resolveBoundary(value: number | null | undefined, fallback: number) {
+    return Number.isFinite(value) ? (value as number) : fallback;
+  }
+
+  type StatementRange = {
+    startLine: number;
+    endLine: number;
+    hasSemicolon: boolean;
+  };
+
+  function isMultiLineStatement(
+    range: StatementRange | null,
+  ): range is StatementRange {
+    return !!(
       range &&
       Number.isFinite(range.startLine) &&
       Number.isFinite(range.endLine) &&
@@ -598,7 +687,7 @@
     );
   }
 
-  function formatLineRange(range) {
+  function formatLineRange(range: StatementRange | null) {
     if (!range) return "";
     const start = (range.startLine ?? 0) + 1;
     const end = (range.endLine ?? 0) + 1;
@@ -606,7 +695,7 @@
     return `lines ${start}-${end}`;
   }
 
-  function countNewlines(value) {
+  function countNewlines(value: string) {
     let count = 0;
     for (let i = 0; i < value.length; i++) {
       if (value[i] === "\n") count++;
@@ -614,7 +703,7 @@
     return count;
   }
 
-  function diffSegments(prev, next) {
+  function diffSegments(prev: string, next: string) {
     let start = 0;
     const prevLen = prev.length;
     const nextLen = next.length;
@@ -637,14 +726,11 @@
     };
   }
 
-  function adjustBoundaryForEdit(prevText, nextText) {
+  function adjustBoundaryForEdit(prevText: string, nextText: string) {
     if (prevText === nextText) return;
     const prevLines = prevText.split(/\r?\n/).length;
     const nextLines = nextText.split(/\r?\n/).length;
-    const boundary = Number.isFinite(sandbox.boundary)
-      ? sandbox.boundary
-      : prevLines;
-    if (!Number.isFinite(boundary)) return;
+    const boundary = resolveBoundary(sandbox.boundary, prevLines);
     const { start, oldSegment, newSegment } = diffSegments(prevText, nextText);
     const beforeChange = prevText.slice(0, start);
     const changeLine = countNewlines(beforeChange);
@@ -659,11 +745,16 @@
     sandbox.boundary = clampBoundary(boundary + delta, nextLines);
   }
 
-  function buildStatementMap(lines) {
+  type StatementMap = {
+    parts: MBTypes.StatementPart[];
+    byLine: Array<StatementRange | null>;
+  };
+
+  function buildStatementMap(lines: string[]): StatementMap {
     const text = lines.join("\n");
     const tokens = simulator.tokenizeProgram(text);
     const parts = simulator.splitStatements(tokens);
-    const byLine = new Array(lines.length).fill(null);
+    const byLine = new Array(lines.length).fill(null) as Array<StatementRange | null>;
     parts.forEach((part) => {
       if (!Number.isFinite(part.startLine) || !Number.isFinite(part.endLine))
         return;
@@ -679,14 +770,22 @@
     return { parts, byLine };
   }
 
-  function statementRangeForLine(statementMap, lineIndex) {
+  function statementRangeForLine(statementMap: StatementMap | null, lineIndex: number) {
     if (!statementMap || !Array.isArray(statementMap.byLine)) return null;
     if (!Number.isFinite(lineIndex)) return null;
     if (lineIndex < 0 || lineIndex >= statementMap.byLine.length) return null;
     return statementMap.byLine[lineIndex];
   }
 
-  function getStatementContext(lines, boundary) {
+  type StatementContext = {
+    statementMap: StatementMap;
+    currentRange: StatementRange | null;
+    prevRange: StatementRange | null;
+    midStatement: boolean;
+    atStatementStart: boolean;
+  };
+
+  function getStatementContext(lines: string[], boundary: number): StatementContext {
     const statementMap = buildStatementMap(lines);
     const currentRange = statementRangeForLine(statementMap, boundary);
     const prevRange = statementRangeForLine(statementMap, boundary - 1);
@@ -706,7 +805,7 @@
     };
   }
 
-  function isBoundaryInsideBlockComment(lines, boundary) {
+  function isBoundaryInsideBlockComment(lines: string[], boundary: number) {
     if (!Array.isArray(lines) || boundary <= 0) return false;
     let inComment = false;
     const limit = Math.min(boundary, lines.length);
@@ -731,27 +830,27 @@
     return inComment;
   }
 
-  function syncBoundaryWithLines(lines) {
+  function syncBoundaryWithLines(lines: string[]) {
     const total = lines.length;
     const prevTotal = Number.isFinite(sandbox.lineCount)
       ? sandbox.lineCount
       : total;
     const hasBoundary = Number.isFinite(sandbox.boundary);
-    const wasAtEnd = !hasBoundary || sandbox.boundary >= prevTotal;
+    const wasAtEnd = !hasBoundary || sandbox.boundary! >= prevTotal;
     sandbox.lineCount = total;
     if (wasAtEnd) {
       sandbox.boundary = total;
     } else {
-      sandbox.boundary = clampBoundary(sandbox.boundary, total);
+      sandbox.boundary = clampBoundary(sandbox.boundary as number, total);
     }
-    return { boundary: sandbox.boundary, total };
+    return { boundary: sandbox.boundary as number, total };
   }
 
-  function classifyLineStatuses(lines) {
+  function classifyLineStatuses(lines: string[]) {
     return simulator.classifyLineStatuses(lines, { alloc: allocFactory() });
   }
 
-  function summarizeStatus(lines) {
+  function summarizeStatus(lines: string[]) {
     const status = classifyLineStatuses(lines);
     let hasCompile = status.incomplete.size > 0;
     let hasUb = false;
@@ -764,24 +863,31 @@
     return { hasCompile, hasUb };
   }
 
-  function applyUserProgram(lines) {
+  function applyUserProgram(lines: string[]) {
     const text = lines.join("\n");
     return simulator.applyProgram(text, { alloc: allocFactory() });
   }
 
-  function getProgramOutcome(linesOverride, boundaryOverride) {
+  type ProgramOutcome = {
+    kind: "ok" | "compile" | "ub";
+    globalKind?: "ok" | "compile" | "ub";
+    state: MBTypes.BoxState[] | null;
+    boundary: number;
+    total: number;
+  };
+
+  function getProgramOutcome(linesOverride?: string[], boundaryOverride?: number): ProgramOutcome {
     const lines = linesOverride || getRawLines();
     const total = lines.length;
-    const boundary = Number.isFinite(boundaryOverride)
-      ? boundaryOverride
-      : Number.isFinite(sandbox.boundary)
-        ? sandbox.boundary
-        : total;
+    const boundary = resolveBoundary(
+      Number.isFinite(boundaryOverride) ? boundaryOverride : sandbox.boundary,
+      total,
+    );
     const safeBoundary = clampBoundary(boundary, total);
     const activeLines = lines.slice(0, safeBoundary);
     const activeSummary = summarizeStatus(activeLines);
     const fullSummary = summarizeStatus(lines);
-    let globalKind = "ok";
+    let globalKind: "ok" | "compile" | "ub" = "ok";
     if (fullSummary.hasCompile) globalKind = "compile";
     else if (fullSummary.hasUb) globalKind = "ub";
     if (activeSummary.hasCompile)
@@ -807,7 +913,8 @@
   }
 
   function renderStage() {
-    const stage = $('[data-role="sandbox-stage"]');
+    const stage = $('[data-role="sandbox-stage"]') as HTMLElement | null;
+    if (!stage) return;
     stage.innerHTML = "";
     const lines = getRawLines();
     const { boundary, total } = syncBoundaryWithLines(lines);
@@ -829,7 +936,7 @@
         };
       }
     }
-    let displayOutcome = outcome;
+    let displayOutcome: { kind: string; state: MBTypes.BoxState[] | null } = outcome;
     if (outcome.globalKind && outcome.globalKind !== "ok") {
       displayOutcome = { kind: outcome.globalKind, state: null };
     } else if (statementInfo.midStatement && !inBlockComment) {
@@ -845,7 +952,7 @@
     updateInstructions();
   }
 
-  function renderExpression(outcome) {
+  function renderExpression(outcome: { kind: string; state: MBTypes.BoxState[] | null }) {
     if (!exprResult || !exprInput) return;
     exprResult.innerHTML = "";
     showExprError("");
@@ -856,7 +963,7 @@
       return;
     }
     const evaluated = evaluateExpression(expr, outcome.state || []);
-    if (evaluated.error) {
+    if ("error" in evaluated) {
       showExprError(evaluated.error);
       return;
     }
@@ -864,8 +971,8 @@
     const node = vbox({
       address: result.address ? String(result.address) : "—",
       type: result.type || "int",
-      value: result.value ?? "",
-      name: null,
+      value: String(result.value ?? ""),
+      name: undefined,
       editable: false,
     });
     if (!result.address) node.classList.add("no-addr");
@@ -874,21 +981,19 @@
   }
 
   function updateStepperControls(
-    boundaryOverride,
-    totalOverride,
-    statementInfo,
+    boundaryOverride: number,
+    totalOverride: number,
+    statementInfo: StatementContext,
   ) {
     if (!prevButtons.length && !nextButtons.length) return;
-    const total = Number.isFinite(totalOverride)
-      ? totalOverride
-      : Number.isFinite(sandbox.lineCount)
-        ? sandbox.lineCount
-        : getRawLines().length;
-    const boundary = Number.isFinite(boundaryOverride)
-      ? boundaryOverride
-      : Number.isFinite(sandbox.boundary)
-        ? sandbox.boundary
-        : total;
+    const total = resolveBoundary(
+      Number.isFinite(totalOverride) ? totalOverride : sandbox.lineCount,
+      getRawLines().length,
+    );
+    const boundary = resolveBoundary(
+      Number.isFinite(boundaryOverride) ? boundaryOverride : sandbox.boundary,
+      total,
+    );
     prevButtons.forEach((btn) => {
       btn.disabled = boundary <= 0;
     });
@@ -919,7 +1024,11 @@
     }
   }
 
-  function renderState(title, boxes, status = "ok") {
+  function renderState(
+    title: string,
+    boxes: MBTypes.BoxState[] | null,
+    status: string = "ok",
+  ) {
     const wrap = document.createElement("div");
     wrap.className = "state-panel";
     if (title) {
@@ -980,14 +1089,14 @@
     } else {
       boxes.forEach((b) => {
         const node = vbox({
-          address: b.address,
+          address: b.address ?? undefined,
           type: b.type,
           value: b.value,
           name: b.name,
           editable: false,
         });
         if (String(b.value ?? "") === "")
-          node.querySelector(".value").classList.add("placeholder", "muted");
+          node.querySelector(".value")?.classList.add("placeholder", "muted");
         grid.appendChild(node);
       });
     }
@@ -996,7 +1105,7 @@
   }
 
   function refreshOtherNames() {
-    const stage = $('[data-role="sandbox-stage"]');
+    const stage = $('[data-role="sandbox-stage"]') as HTMLElement | null;
     if (!stage) return;
     applyOtherNames(stage, {
       shownAddrs: sandbox.otherNamesShown,
@@ -1017,7 +1126,7 @@
     editor.style.height = `${editor.scrollHeight}px`;
   }
 
-  function measureWrapCounts(lines) {
+  function measureWrapCounts(lines: string[]) {
     if (!editor || !measureEl) return lines.map(() => 1);
     const style = window.getComputedStyle(editor);
     const paddingLeft = parseFloat(style.paddingLeft) || 0;
@@ -1040,11 +1149,9 @@
     });
   }
 
-  function updateLineGutters(linesOverride) {
+  function updateLineGutters(linesOverride?: string[]) {
     autoSizeEditor();
-    const lines = Array.isArray(linesOverride)
-      ? linesOverride
-      : getRawLines();
+    const lines = Array.isArray(linesOverride) ? linesOverride : getRawLines();
     const count = Math.max(lines.length, 1);
     const safeBoundary = clampBoundary(sandbox.boundary ?? 0, count);
     const lineHeight = getLineHeightPx();
@@ -1221,8 +1328,8 @@
         errorGutter.scrollTop = editor.scrollTop;
       });
     }
-    editor.addEventListener("mouseup", updateLineGutters);
-    window.addEventListener("resize", updateLineGutters);
+    editor.addEventListener("mouseup", () => updateLineGutters());
+    window.addEventListener("resize", () => updateLineGutters());
     if (typeof ResizeObserver !== "undefined") {
       const ro = new ResizeObserver(() => updateLineGutters());
       ro.observe(editor);
@@ -1233,9 +1340,7 @@
     btn.addEventListener("click", () => {
       const lines = getRawLines();
       const total = lines.length;
-      const current = Number.isFinite(sandbox.boundary)
-        ? sandbox.boundary
-        : total;
+      const current = resolveBoundary(sandbox.boundary, total);
       if (current <= 0) return;
       const boundary = clampBoundary(current, total);
       const statementInfo = getStatementContext(lines, boundary);
@@ -1253,9 +1358,7 @@
     btn.addEventListener("click", () => {
       const lines = getRawLines();
       const total = lines.length;
-      const current = Number.isFinite(sandbox.boundary)
-        ? sandbox.boundary
-        : total;
+      const current = resolveBoundary(sandbox.boundary, total);
       if (current >= total) return;
       const boundary = clampBoundary(current, total);
       const statementInfo = getStatementContext(lines, boundary);
