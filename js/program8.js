@@ -14,17 +14,17 @@
             {
                 code: "wolf = &deer;\n",
                 editable: false,
-                instructions: "When $n{wolf} is assigned to $c{&deer}, $n{wolf}'s value becomes $n{deer}'s address. Also, $n{deer} gains an additional name. Use the $showAliasesButton toggle under $n{deer} to reveal this name.\n\nWe say that $n{wolf} now \"points to\" $n{deer}.",
+                instructions: "When $n{wolf} is assigned to $c{&deer}, $n{deer} gains an additional name. Use the $showAliasesButton button under $n{deer} to reveal this name.\n\nIn general, $n{*X} refers to the variable whose address is $n{X}'s value. In this case, $n{*wolf} refers to the variable whose address is $n{wolf}'s value, so $n{*wolf} refers to $n{deer}.",
             },
             {
                 code: "wolf = &hare;\n",
                 editable: false,
-                instructions: 'When $n{wolf} is assigned to $c{&hare}, the $n{*wolf} name moves from $n{deer} to $n{hare}. Use the $showAliasesButton toggle under $n{hare} to reveal it. We say that $n{wolf} now "points to" $n{hare}.\n\nIn general, if some variable $n{X} points to another variable $n{Y}, then $n{*X} refers to $n{Y}. In this case, $n{wolf} points to $n{hare}, so $n{*wolf} refers to $n{hare}.\n\nWe\'ll see the relevance of this alternate name later in the code.',
+                instructions: "When $n{wolf} is assigned to $c{&hare}, the $n{*wolf} name moves from $n{deer} to $n{hare}. Use the $showAliasesButton button under $n{hare} to reveal it.\n\nTo understand why, recall that $n{*wolf} refers to the variable whose address is $n{wolf}'s value.\n\nWe'll see the relevance of this alternate name later in the code.",
             },
             {
                 code: "int** bear = &wolf;\n",
                 editable: false,
-                instructions: "$c{bear = &wolf;} adds the $n{*bear} name to $n{wolf}. It also adds a name to $n{hare}; use the $showAliasesButton toggle under $n{hare} to reveal it.\n\nTo understand why: $n{*bear} points to $n{hare} (because $n{*bear} now refers to $n{wolf}, and $n{wolf} points to $n{hare}). Therefore, we can refer to $n{hare} by adding another asterisk to $n{*bear}, which gives us $n{**bear}.",
+                instructions: "$c{bear = &wolf;} adds the $n{*bear} name to $n{wolf}. It also adds a name to $n{hare}; use the $showAliasesButton button under $n{hare} to reveal it.\n\nTo understand why: $n{**bear} → $n{*(*bear)} → $n{*(wolf)} → $n{*wolf} → $n{hare}.\nMore concisely: $n{**bear} → $n{*wolf} → $n{hare}.",
             },
             {
                 code: "int* fox = wolf;\n",

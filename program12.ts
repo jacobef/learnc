@@ -22,6 +22,9 @@
           if (cinder.type !== "int") {
             return "$n{cinder}'s type should be $t{int}.";
           }
+          if (cinder.value === "15") {
+            return "You're parsing it as $c{(2+3)*(4-1)}, but it should be parsed as $c{2+(3*(4-1))}. Multiplication has higher precedence than addition.";
+          }
           if (cinder.value !== "11") {
             return "Compute $n{cinder} using multiplication before addition. $c{/* 5 */} is a comment.";
           }
