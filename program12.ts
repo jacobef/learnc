@@ -15,20 +15,14 @@
         code: "int cinder = 2 + 3 /* 5 */ * (4 - 1);\n",
         editable: true,
         hints: (ctx) => {
-          const cinder = ctx.getBoxByName(ctx.boxes, "cinder");
-          if (!cinder) {
-            return "Add the $n{cinder} variable.";
-          }
-          if (cinder.type !== "int") {
-            return "$n{cinder}'s type should be $t{int}.";
-          }
-          if (cinder.value === "15") {
-            return "You're parsing it as $c{(2+3)*(4-1)}, but it should be parsed as $c{2+(3*(4-1))}. Multiplication has higher precedence than addition.";
-          }
-          if (cinder.value !== "11") {
+          if (ctx.basicHintTopicIs("value", "cinder")) {
+            const cinder = ctx.boxNamed("cinder")!;
+            if (cinder.value === "15") {
+              return "You're parsing it as $c{(2 + 3) * (4 - 1)}, but it should be parsed as $c{2 + (3 * (4 - 1))}. Multiplication has higher precedence than addition.";
+            }
             return "Compute $n{cinder} using multiplication before addition. $c{/* 5 */} is a comment.";
           }
-          return null;
+          return ctx.basicHint;
         },
       },
       { code: "int* flame = &spark;\n", editable: false },
@@ -36,22 +30,21 @@
         code: "ember = cinder / 3 + - 1;\n",
         editable: true,
         hints: (ctx) => {
-          const ember = ctx.getBoxByName(ctx.boxes, "ember");
-          if (ember!.value !== "2") {
-            return "The order of operations is $c{(cinder / 3) + (-1)}.";
+          if (ctx.basicHintTopicIs("value", "ember")) {
+            return "This is parsed as $c{(cinder / 3) + (-1)}.";
           }
-          return null;
+          return ctx.basicHint;
         },
       },
       {
         code: "*flame = spark * 4;\n",
         editable: true,
         hints: (ctx) => {
-          const spark = ctx.getBoxByName(ctx.boxes, "spark");
+          const spark = ctx.boxNamed("spark");
           if (spark!.value !== "24") {
             return "$n{*flame} refers to the variable whose address is $n{flame}'s value. That variable should be set to the current value of $n{spark} times 4.";
           }
-          return null;
+          return ctx.basicHint;
         },
       },
       { code: "int* smolder = &ember;\n", editable: false },
@@ -61,8 +54,7 @@
         code: "**inferno = &cinder;\n",
         editable: true,
         hints: (ctx) => {
-          const [smolder, ember, cinder] = ctx.getBoxesByName(
-            ctx.boxes,
+          const [smolder, ember, cinder] = ctx.boxesNamed(
             "smolder",
             "ember",
             "cinder",
@@ -73,7 +65,7 @@
           if (smolder!.value !== cinder!.address) {
             return `$n{**inferno} (aka $n{smolder}) should be set to $n{cinder}'s address. I'm not sure where $v{${smolder!.value}} is coming from.`;
           }
-          return null;
+          return ctx.basicHint;
         },
       },
       {
@@ -81,17 +73,10 @@
         editable: true,
         instructions: "Sorry.",
         hints: (ctx) => {
-          const ash = ctx.getBoxByName(ctx.boxes, "ash");
-          if (!ash) {
-            return "Add the $n{ash} variable.";
+          if (ctx.basicHintTopicIs("value", "ash")) {
+            return "The order of operations is $c{(**blaze-(*flame / ember)) + (***inferno == 24)}.";
           }
-          if (ash.type !== "int") {
-            return "$n{ash}'s type should be $t{int}.";
-          }
-          if (ash.value !== "-1") {
-            return "The order of operations is $c{(**blaze - (*flame / ember)) + (***inferno == 24)}.";
-          }
-          return null;
+          return ctx.basicHint;
         },
       },
     ],

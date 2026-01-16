@@ -24,20 +24,10 @@
                 code: "int d; // int e;\n",
                 editable: true,
                 hints: (ctx) => {
-                    const [d, e] = ctx.getBoxesByName(ctx.boxes, "d", "e");
-                    if (!d) {
-                        return "Add the $n{d} variable.";
-                    }
-                    if (e) {
+                    if (ctx.boxNamed("e")) {
                         return "$c{// int e;} is a comment.";
                     }
-                    if (d.type !== "int") {
-                        return "$n{d}'s type should be $t{int}.";
-                    }
-                    if (d.value !== "") {
-                        return "$n{d}'s value should be empty.";
-                    }
-                    return null;
+                    return ctx.basicHint;
                 },
             },
             {
@@ -56,32 +46,26 @@
                 instructions: "A comment can appear on multiple lines, or within a line, beginning with $c{/*} and ending with $c{*/}. This is called a block comment.",
             },
             {
-                code: "int\nh // = 9;\n/* = 10;\n= 11;\n*/ = 12;\n// = 13;\n",
+                code: "int\nh // = 9\n/* = 10\n= 11\n*/ = 12\n// = 13\n;\n",
                 editable: true,
                 hints: (ctx) => {
-                    const h = ctx.getBoxByName(ctx.boxes, "h");
-                    if (!h) {
-                        return "Add the $n{h} variable.";
-                    }
-                    if (h.type !== "int") {
-                        return "$n{h}'s type should be $t{int}.";
-                    }
-                    if (h.value === "9") {
-                        return "$c{// = 9;} is a comment.";
-                    }
-                    else if (h.value === "10" || h.value === "11") {
-                        return "$c{/* = 10;\n= 11;\n*/} is a comment.";
-                    }
-                    else if (h.value === "13") {
-                        return "$c{// = 13;} is a comment.";
-                    }
-                    else if (h.value === "") {
-                        return "$n{h}'s value shouldn't be empty; one of these numbers is not inside a comment.";
-                    }
-                    else if (h.value !== "12") {
+                    if (ctx.basicHintTopicIs("value", "h")) {
+                        const h = ctx.boxNamed("h");
+                        if (h.value === "9") {
+                            return "$c{// = 9;} is a comment.";
+                        }
+                        if (h.value === "10" || h.value === "11") {
+                            return "$c{/* = 10;\n= 11;\n*/} is a comment.";
+                        }
+                        if (h.value === "13") {
+                            return "$c{// = 13;} is a comment.";
+                        }
+                        if (h.value === "") {
+                            return "$n{h}'s value shouldn't be empty; one of the number assignments isn't part of a comment.";
+                        }
                         return `I'm not sure where you're getting $v{${h.value}} from.`;
                     }
-                    return null;
+                    return ctx.basicHint;
                 },
             },
         ],

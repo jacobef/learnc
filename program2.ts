@@ -16,13 +16,12 @@
         instructions:
           "$c{int fridge;} creates a new variable. Click $newVariableButton and enter its attributes.",
         hints: (ctx) => {
-          const { boxes, getBoxesByName } = ctx;
-          if (boxes.length < 2) return "Read the instructions.";
-          if (boxes.length > 2) {
+          if (ctx.boxes.length < 2) return "Read the instructions.";
+          if (ctx.boxes.length > 2) {
             return "Only keep $n{toaster} and $n{fridge} in the program state.";
           }
 
-          const [toaster, fridge] = getBoxesByName(boxes, "toaster", "fridge");
+          const [toaster, fridge] = ctx.boxesNamed("toaster", "fridge");
           if (!fridge) {
             return "The new variable's name should be $n{fridge}.";
           }
@@ -43,11 +42,11 @@
         editable: true,
         instructions: "What does $c{toaster = 28;} do?",
         hints: (ctx) => {
-          const { boxes, getBoxesByName } = ctx;
+          const { boxes, boxesNamed } = ctx;
           if (boxes.length > 2) {
             return "Only keep $n{toaster} and $n{fridge} in the program state.";
           }
-          const [toaster, fridge] = getBoxesByName(boxes, "toaster", "fridge");
+          const [toaster, fridge] = boxesNamed("toaster", "fridge");
           if (fridge!.value === "28" && toaster!.value !== "28") {
             return "$v{28} belongs in $n{toaster}'s value, not $n{fridge}.";
           }

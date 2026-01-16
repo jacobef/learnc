@@ -17,10 +17,10 @@
             resetBtn: root.querySelector('[data-role="program-reset"]'),
         };
     }
-    function getBoxByName(boxes, name) {
+    function boxNamed(boxes, name) {
         return boxes.find((box) => box.name === name);
     }
-    function getBoxesByName(boxes, ...names) {
+    function boxesNamed(boxes, ...names) {
         const map = new Map();
         for (const box of boxes) {
             map.set(box.name, box);
@@ -439,18 +439,6 @@
             }
             return String(next);
         }
-        function pointerTargetName(box, boxes) {
-            if (!box)
-                return "";
-            const depth = getPointerDepth(box.type);
-            if (depth == null || !Number.isFinite(depth) || depth < 1)
-                return "";
-            const raw = String(box.value ?? "").trim();
-            if (raw === "")
-                return "";
-            const target = (boxes || []).find((b) => String(b.address ?? "") === raw);
-            return target?.name || "";
-        }
         function refreshOtherNames() {
             if (!showOtherNames)
                 return;
@@ -485,14 +473,13 @@
                     return false;
                 const depth = getPointerDepth(actType);
                 const isPtr = depth != null && Number.isFinite(depth) && depth > 0;
+                const actVal = String(act.value ?? "").trim();
+                const expVal = String(exp.value ?? "").trim();
                 if (isPtr) {
-                    if (pointerTargetName(act, actual) !== pointerTargetName(exp, expected)) {
+                    if (actVal !== expVal)
                         return false;
-                    }
                 }
                 else {
-                    const actVal = String(act.value ?? "").trim();
-                    const expVal = String(exp.value ?? "").trim();
                     if (actVal === "" && expVal === "")
                         continue;
                     if (normalizeZeroDisplay(actVal) !== normalizeZeroDisplay(expVal))
@@ -587,11 +574,184 @@
             }
             return `Run line ${boundary + 1} ▶`;
         }
+        function formatNameList(names) {
+            const tokens = names.map((name) => `$n{${name}}`);
+            if (tokens.length === 1)
+                return tokens[0] || "";
+            if (tokens.length === 2)
+                return `${tokens[0]} and ${tokens[1]}`;
+            return `${tokens.slice(0, -1).join(", ")}, and ${tokens[tokens.length - 1]}`;
+        }
+        function baselineForBoundary(boundary) {
+            const baseline = state.baseline[boundary];
+            if (Array.isArray(baseline))
+                return baseline;
+            return defaultsForBoundary(boundary);
+        }
+        function basicHintForBoxes(boxes, boundary) {
+            const actual = Array.isArray(boxes) ? boxes : [];
+            const expected = getExpectedState(boundary);
+            const actualCount = actual.length;
+            const expectedCount = expected.length;
+            const nameOf = (box) => String(box?.name || "").trim();
+            const typeOf = (box) => String(box?.type || "").trim();
+            const expectedNames = expected.map(nameOf).filter(Boolean);
+            const expectedNameSet = new Set(expectedNames);
+            const actualNames = actual.map(nameOf);
+            const actualNameSet = new Set(actualNames.filter(Boolean));
+            const missingExpectedNames = expectedNames.filter((name) => !actualNameSet.has(name));
+            if (actualCount < expectedCount) {
+                const expectedName = missingExpectedNames[0] || expectedNames[0] || "";
+                if (!expectedName)
+                    return { message: "You need to add a new variable.", kind: "count" };
+                return {
+                    message: `You need to add the $n{${expectedName}} variable.`,
+                    kind: "count",
+                    variable: expectedName,
+                };
+            }
+            if (actualCount === expectedCount && missingExpectedNames.length > 0) {
+                const baseline = baselineForBoundary(boundary);
+                const baselineNames = new Set(baseline.map(nameOf).filter(Boolean));
+                const expectedNewNames = expectedNames.filter((name) => !baselineNames.has(name));
+                if (expectedNewNames.length > 1) {
+                    return {
+                        message: `The new variables should be named ${formatNameList(expectedNewNames)}.`,
+                        kind: "name",
+                        variable: expectedNewNames[0],
+                    };
+                }
+                const expectedName = expectedNewNames[0] || missingExpectedNames[0] || "";
+                if (!expectedName)
+                    return null;
+                return {
+                    message: `The new variable should be named $n{${expectedName}}.`,
+                    kind: "name",
+                    variable: expectedName,
+                };
+            }
+            if (actualCount > expectedCount) {
+                const baseline = baselineForBoundary(boundary);
+                const baselineCount = Array.isArray(baseline) ? baseline.length : 0;
+                const expectedNew = Math.max(0, expectedCount - baselineCount);
+                const actualNew = Math.max(0, actualCount - baselineCount);
+                const extraCount = Math.max(0, actualNew - expectedNew);
+                const groupRange = groupRangeEndingAt(boundary);
+                const statementRange = statementRangeEndingAt(statementMap, boundary);
+                let label = `Line ${boundary + 1}`;
+                if (groupRange && Number.isFinite(groupRange.startLine)) {
+                    const start = groupRange.startLine + 1;
+                    const end = groupRange.endLine + 1;
+                    label = start === end ? `Line ${start}` : `Lines ${start}-${end}`;
+                }
+                else if (statementRange && isMultiLineStatement(statementRange)) {
+                    const start = statementRange.startLine + 1;
+                    const end = statementRange.endLine + 1;
+                    label = start === end ? `Line ${start}` : `Lines ${start}-${end}`;
+                }
+                const extraLabel = extraCount === 1 ? "variable" : "variables";
+                if (expectedNew === 0) {
+                    return {
+                        message: `${label} shouldn't add any new variables. Remove the extra ${extraLabel}.`,
+                        kind: "count",
+                    };
+                }
+                const expectedLabel = expectedNew === 1 ? "variable" : "variables";
+                return {
+                    message: `${label} should only add ${expectedNew} new ${expectedLabel}, but you added ${actualNew}. Remove the extra ${extraLabel}.`,
+                    kind: "count",
+                };
+            }
+            const baseline = baselineForBoundary(boundary);
+            const baselineByName = new Map();
+            baseline.forEach((box) => {
+                const name = nameOf(box);
+                if (name && !baselineByName.has(name))
+                    baselineByName.set(name, box);
+            });
+            const actualByName = new Map();
+            actual.forEach((box) => {
+                const name = nameOf(box);
+                if (name && !actualByName.has(name))
+                    actualByName.set(name, box);
+            });
+            let deferredBe = null;
+            for (const exp of expected) {
+                const name = nameOf(exp);
+                if (!name)
+                    continue;
+                const act = actualByName.get(name);
+                if (!act)
+                    continue;
+                const expType = typeOf(exp);
+                const actType = typeOf(act);
+                if (actType !== expType) {
+                    return {
+                        message: `$n{${name}}'s type should be $t{${expType}}.`,
+                        kind: "type",
+                        variable: name,
+                    };
+                }
+                const depth = getPointerDepth(expType);
+                const isPtr = depth != null && Number.isFinite(depth) && depth > 0;
+                let mismatch = false;
+                const actVal = String(act.value ?? "").trim();
+                const expVal = String(exp.value ?? "").trim();
+                if (isPtr) {
+                    mismatch = actVal !== expVal;
+                }
+                else if (!(actVal === "" && expVal === "")) {
+                    mismatch = normalizeZeroDisplay(actVal) !== normalizeZeroDisplay(expVal);
+                }
+                if (mismatch) {
+                    const expVal = String(exp.value ?? "").trim();
+                    const label = expVal === "" ? "empty" : `$v{${normalizeZeroDisplay(expVal)}}`;
+                    const baselineBox = baselineByName.get(name);
+                    let shouldRemain = false;
+                    if (baselineBox) {
+                        const baseVal = String(baselineBox.value ?? "").trim();
+                        if (isPtr) {
+                            shouldRemain = baseVal === expVal;
+                        }
+                        else if (baseVal === "" && expVal === "") {
+                            shouldRemain = true;
+                        }
+                        else {
+                            shouldRemain =
+                                normalizeZeroDisplay(baseVal) === normalizeZeroDisplay(expVal);
+                        }
+                    }
+                    const message = `$n{${name}}'s value should ${shouldRemain ? "remain" : "be"} ${label}.`;
+                    if (shouldRemain) {
+                        return {
+                            message,
+                            kind: "value",
+                            variable: name,
+                        };
+                    }
+                    if (!deferredBe) {
+                        deferredBe = {
+                            message,
+                            kind: "value",
+                            variable: name,
+                        };
+                    }
+                }
+            }
+            return deferredBe;
+        }
         function partsContext({ boxes, } = {}) {
+            const resolvedBoxes = boxes ?? [];
+            const topic = basicHintForBoxes(resolvedBoxes, state.boundary);
             return {
-                boxes: boxes ?? [],
-                getBoxByName,
-                getBoxesByName,
+                boxes: resolvedBoxes,
+                basicHint: topic?.message ?? null,
+                basicHintTopicIs: (kind, variable) => !!topic &&
+                    topic.kind === kind &&
+                    (variable === undefined || topic.variable === variable),
+                _basicHintTopic: topic,
+                boxNamed: (name) => boxNamed(resolvedBoxes, name),
+                boxesNamed: (...names) => boxesNamed(resolvedBoxes, ...names),
             };
         }
         function resolveParts(spec, ctx) {

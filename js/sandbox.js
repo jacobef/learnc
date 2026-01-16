@@ -81,7 +81,16 @@
             return "compile";
         }
     }
+    function isDecimalLiteral(value) {
+        return String(value).includes(".");
+    }
     function literalTypeFor(value) {
+        if (isDecimalLiteral(value)) {
+            const parsed = Number(value);
+            if (!Number.isFinite(parsed))
+                return { error: "That number is too large to represent.", kind: "compile" };
+            return { type: "double" };
+        }
         const status = classifyNumericLiteral(value);
         if (status === "compile")
             return { error: "That number is too large to represent.", kind: "compile" };
@@ -140,6 +149,11 @@
                 let j = i + 1;
                 while (j < src.length && /[0-9]/.test(src[j]))
                     j++;
+                if (src[j] === "." && /[0-9]/.test(src[j + 1] || "")) {
+                    j++;
+                    while (j < src.length && /[0-9]/.test(src[j]))
+                        j++;
+                }
                 tokens.push({ type: "number", value: src.slice(i, j) });
                 i = j;
                 continue;
@@ -277,6 +291,7 @@
                 });
             }
         });
+        const toNumber = (value) => typeof value === "bigint" ? Number(value) : value;
         function makeLvalue(box, label) {
             const { base, depth } = typeInfo(box.type);
             if (!base || !Number.isFinite(depth)) {
@@ -312,9 +327,22 @@
                     return { error: `${label} doesn't have a value yet.`, kind: "ub" };
                 }
             }
+            const base = result.base || "int";
+            if (base === "double") {
+                const value = typeof raw === "number"
+                    ? raw
+                    : typeof raw === "bigint"
+                        ? Number(raw)
+                        : Number(String(raw));
+                if (!Number.isFinite(value)) {
+                    const label = result.label || "That value";
+                    return { error: `${label} isn't a number.`, kind: "compile" };
+                }
+                return { value, base };
+            }
             try {
                 const value = typeof raw === "bigint" ? raw : BigInt(String(raw));
-                return { value, base: result.base || "int" };
+                return { value, base };
             }
             catch {
                 const label = result.label || "That value";
@@ -329,6 +357,9 @@
                 if ("error" in status)
                     return { error: status.error, kind: status.kind };
                 try {
+                    if (status.type === "double") {
+                        return makeRvalue(Number(node.value), "double");
+                    }
                     return makeRvalue(BigInt(String(node.value)), status.type || "int");
                 }
                 catch {
@@ -410,22 +441,52 @@
                 if ("error" in rightScalar)
                     return rightScalar;
                 if (node.op === "==") {
-                    return makeRvalue(leftScalar.value === rightScalar.value ? 1n : 0n, "int");
+                    return makeRvalue((leftScalar.base === "double" || rightScalar.base === "double"
+                        ? toNumber(leftScalar.value) === toNumber(rightScalar.value)
+                        : leftScalar.value === rightScalar.value)
+                        ? 1n
+                        : 0n, "int");
                 }
-                if (node.op === "/" && rightScalar.value === 0n)
+                if (node.op === "/" &&
+                    (leftScalar.base === "double" || rightScalar.base === "double"
+                        ? toNumber(rightScalar.value) === 0
+                        : rightScalar.value === 0n))
                     return { error: "Division by 0 is undefined.", kind: "ub" };
+                const useDouble = leftScalar.base === "double" || rightScalar.base === "double";
                 let value = 0n;
-                if (node.op === "+")
-                    value = leftScalar.value + rightScalar.value;
-                else if (node.op === "-")
-                    value = leftScalar.value - rightScalar.value;
-                else if (node.op === "*")
-                    value = leftScalar.value * rightScalar.value;
-                else if (node.op === "/")
-                    value = leftScalar.value / rightScalar.value;
-                else
-                    return { error: "That expression is not valid here.", kind: "compile" };
-                const base = leftScalar.base === "long" || rightScalar.base === "long" ? "long" : "int";
+                if (useDouble) {
+                    const leftNum = toNumber(leftScalar.value);
+                    const rightNum = toNumber(rightScalar.value);
+                    if (node.op === "+")
+                        value = leftNum + rightNum;
+                    else if (node.op === "-")
+                        value = leftNum - rightNum;
+                    else if (node.op === "*")
+                        value = leftNum * rightNum;
+                    else if (node.op === "/")
+                        value = leftNum / rightNum;
+                    else
+                        return { error: "That expression is not valid here.", kind: "compile" };
+                }
+                else {
+                    const leftBig = leftScalar.value;
+                    const rightBig = rightScalar.value;
+                    if (node.op === "+")
+                        value = leftBig + rightBig;
+                    else if (node.op === "-")
+                        value = leftBig - rightBig;
+                    else if (node.op === "*")
+                        value = leftBig * rightBig;
+                    else if (node.op === "/")
+                        value = leftBig / rightBig;
+                    else
+                        return { error: "That expression is not valid here.", kind: "compile" };
+                }
+                const base = useDouble
+                    ? "double"
+                    : leftScalar.base === "long" || rightScalar.base === "long"
+                        ? "long"
+                        : "int";
                 return makeRvalue(value, base);
             }
             return { error: "That expression is not valid here.", kind: "compile" };
@@ -523,8 +584,8 @@
     }
     const GENERIC_COMPILE_ERRORS = new Set([
         "Line has an error.",
-        'Declarations should look like "int name;" or "long name;" or "int name = value;".',
-        'Declarations should look like "int name;" or "long name;".',
+        'Declarations should look like "int name;" or "long name;" or "double name;" or "int name = value;".',
+        'Declarations should look like "int name;" or "long name;" or "double name;".',
         'Assignments should look like "name = value;".',
         "Line should be a declaration or assignment.",
     ]);

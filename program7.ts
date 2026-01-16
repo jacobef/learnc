@@ -15,45 +15,38 @@
         code: "wolf = &hare;\n",
         editable: true,
         hints: (ctx) => {
-          const [wolf, hare] = ctx.getBoxesByName(ctx.boxes, "wolf", "hare");
-          if (wolf!.value !== hare!.address) {
+          if (ctx.basicHintTopicIs("value", "wolf")) {
             return "$c{wolf = &deer;} set $n{wolf}'s value to $n{deer}'s address. What should $c{wolf = &hare;} do?";
           }
-          return null;
+          return ctx.basicHint;
         },
       },
       {
         code: "int** bear = &wolf;\n",
         editable: true,
         hints: (ctx) => {
-          const [bear, wolf] = ctx.getBoxesByName(ctx.boxes, "bear", "wolf");
-          if (!bear) {
-            return "You need to add the $n{bear} variable.";
-          }
-          if (bear.type !== "int**") {
-            return "$n{bear}'s type should be $t{int**}.";
-          }
-          if (bear.value !== wolf!.address) {
+          if (ctx.basicHintTopicIs("value", "bear")) {
+            const [bear, wolf] = ctx.boxesNamed("bear", "wolf");
+            if (bear!.value === wolf!.value) {
+              return "$n{bear} is being initialized with $c{&wolf}, not $c{wolf}. Set $n{bear}'s value to $n{wolf}'s address, not $n{wolf}'s value.";
+            }
             return "Set $n{bear}'s value to $n{wolf}'s address.";
           }
-          return null;
+          return ctx.basicHint;
         },
       },
       {
         code: "int* fox = wolf;\n",
         editable: true,
         hints: (ctx) => {
-          const [fox, wolf] = ctx.getBoxesByName(ctx.boxes, "fox", "wolf");
-          if (!fox) {
-            return "You need to add the $n{fox} variable.";
+          if (ctx.basicHintTopicIs("value", "fox")) {
+            const [fox, wolf] = ctx.boxesNamed("fox", "wolf");
+            if (fox!.value === wolf!.address) {
+              return "$n{fox} is being assigned to $c{wolf}, not $c{&wolf}. Set $n{fox}'s value to $n{wolf}'s value, not $n{wolf}'s address.";
+            }
+            return "Set $n{fox}'s value to $n{wolf}'s value.";
           }
-          if (fox.type !== "int*") {
-            return "$n{fox}'s type should be $t{int*}.";
-          }
-          if (fox.value !== wolf!.value) {
-            return "$n{fox}'s value should be set to $n{wolf}'s value.";
-          }
-          return null;
+          return ctx.basicHint;
         },
       },
     ],

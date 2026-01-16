@@ -3,7 +3,7 @@
 type CodeEditorParts = MBTypes.Parts;
 type CodeEditorPartsSpec =
   | CodeEditorParts
-  | ((ctx: CodeEditorContext) => CodeEditorParts | null)
+  | ((ctx: CodeEditorContext) => CodeEditorParts | null | undefined)
   | null;
 
 interface CodeEditorElements {
@@ -682,7 +682,7 @@ interface MBNamespace {
         showHint("Looks good. Press $checkButton.");
         return;
       }
-      let parts: CodeEditorParts | null = null;
+      let parts: CodeEditorParts | null | undefined = null;
       if (typeof hints === "function") {
         parts = hints(ctx);
       } else {

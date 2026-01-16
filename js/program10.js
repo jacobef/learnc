@@ -3,66 +3,65 @@
 {
     const createProgramTemplate = window.MB.createProgramTemplate;
     createProgramTemplate({
-        initialInstructions: "Click $runLineButton to continue.",
+        initialInstructions: "Feel free to use a calculator if it helps, but blindly copying from it will not always give you the right answer here.",
         steps: [
             {
                 code: "int a = 5 + 2 * (3 - 1);\n",
                 editable: false,
-                instructions: "The order of operations you know from math class (PEMDAS) applies, and isn't affected by spacing.",
+                instructions: "Order of operations, from highest to lowest: parenthesis, then multiplication and division, then addition and subtraction.",
             },
             {
                 code: "a = 1-3 * 4;\n",
                 editable: true,
-                instructions: "The order of operations you know from math class (PEMDAS) applies, and isn't affected by spacing.",
+                instructions: "Order of operations, from highest to lowest: parenthesis, then multiplication and division, then addition and subtraction.",
                 hints: (ctx) => {
-                    const a = ctx.getBoxByName(ctx.boxes, "a");
-                    if (a.value === "-8") {
-                        return "You're parsing it as $c{(1 - 3) * 4}, but it should be parsed as $c{1 - (3 * 4)}, since multiplication has higher precedence than subtraction.";
-                    }
-                    if (a.value !== "-11") {
+                    if (ctx.basicHintTopicIs("value", "a")) {
+                        const a = ctx.boxNamed("a");
+                        if (a.value === "-8") {
+                            return "You're parsing it as $c{(1-3) * 4}, but it should be parsed as $c{1-(3 * 4)}, since multiplication has higher precedence than subtraction.";
+                        }
                         return "Multiply before subtracting, then update $n{a}.";
                     }
-                    return null;
+                    return ctx.basicHint;
                 },
             },
             {
                 code: "a = (1 - 3) * 4;\n",
                 editable: true,
-                instructions: "The order of operations you know from math class (PEMDAS) applies, and isn't affected by spacing.",
                 hints: (ctx) => {
-                    const a = ctx.getBoxByName(ctx.boxes, "a");
-                    if (a.value !== "-8") {
+                    if (ctx.basicHintTopicIs("value", "a")) {
                         return "Evaluate the parentheses first, then multiply, then update $n{a}.";
                     }
-                    return null;
+                    return ctx.basicHint;
                 },
             },
-            { code: "int b = 9 / 3;\n", editable: false },
+            {
+                code: "int b = 12 / 4;\n",
+                editable: false,
+            },
             {
                 code: "a = 5 / 3;\n",
                 editable: false,
-                instructions: "Integer division rounds towards 0, i.e. it drops everything after the decimal point.",
+                instructions: "Division drops the decimal part. 5 divided by 3 is 1.666..., which becomes $v{1}.",
             },
             {
                 code: "a = -7 / 2;\n",
                 editable: false,
-                instructions: "Integer division rounds towards 0, i.e. it drops everything after the decimal point.",
+                instructions: "Division drops the decimal part. -7 divided by 2 is -3.5, which becomes $v{-3}.\n\nTrivia, feel free to ignore: When used as negation (e.g. $c{-7}) as opposed to subtraction (e.g. $c{9-8}), the $c{-} operator has higher precedence than multiplication and division, so this is parsed as $c{(-7) / 2}, not $c{-(7 / 2)}. In this case it doesn't affect the final result, but in very rare cases that we'll encounter in much later programs, it does.",
             },
             {
-                code: "a = 1/2 + 1/2;\n",
+                code: "a = 1/2 + 3/4;\n",
                 editable: false,
-                instructions: "Rounding happens at the division, so both 1/2s round to 0, so this becomes $c{a = 0 + 0;}, which is 0.",
+                instructions: "The decimal part is dropped by each division itself, not at the end. Both $c{1/2} (0.5) and $c{3/4} (0.75) immediately round to 0, so this becomes $c{a = 0 + 0;}, which is $v{0}.",
             },
             {
                 code: "a = 8 / -(2 + 1);\n",
                 editable: true,
-                instructions: "Integer division rounds towards 0, i.e. it drops everything after the decimal point.",
                 hints: (ctx) => {
-                    const a = ctx.getBoxByName(ctx.boxes, "a");
-                    if (a.value !== "-2") {
+                    if (ctx.basicHintTopicIs("value", "a")) {
                         return "Compute the parentheses first, then negate, then divide, then update $n{a}.";
                     }
-                    return null;
+                    return ctx.basicHint;
                 },
             },
             {
@@ -80,20 +79,14 @@
                 editable: true,
                 instructions: '$c{x == y} evaluates to 1 if x and y have equal values, and 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\n\nThe name of this operation is "equality".',
                 hints: (ctx) => {
-                    const e = ctx.getBoxByName(ctx.boxes, "e");
-                    if (!e) {
-                        return "Add the $n{e} variable.";
+                    if (ctx.basicHintTopicIs("value", "e")) {
+                        const e = ctx.boxNamed("e");
+                        if (e.value === "11") {
+                            return "You're parsing it as $c{11/(3 == 3)}, but it should be parsed as $c{(11/3) == 3}. Division ($c{/}) has higher precedence than equality ($c{==}).";
+                        }
+                        return "Calculate $c{11 / 3}, then drop the decimal part. Is that equal to 3?";
                     }
-                    if (e.type !== "int") {
-                        return "$n{e}'s type should be $t{int}.";
-                    }
-                    if (e.value === "11") {
-                        return "You're parsing it as $c{11 / (3==3)}, but it should be parsed as $c{(11/3) == 3}. Division ($c{/}) has higher precedence than equality ($c{==}).";
-                    }
-                    if (e.value !== "1") {
-                        return "Calculate $c{11 / 3}, then drop everything after the decimal point. Is that equal to 3?";
-                    }
-                    return null;
+                    return ctx.basicHint;
                 },
             },
             {
@@ -101,23 +94,17 @@
                 editable: true,
                 instructions: '$c{x == y} evaluates to 1 if x and y have equal values, and 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\n\nThe name of this operation is "equality".',
                 hints: (ctx) => {
-                    const f = ctx.getBoxByName(ctx.boxes, "f");
-                    if (!f) {
-                        return "Add the $n{f} variable.";
-                    }
-                    if (f.type !== "int") {
-                        return "$n{f}'s type should be $t{int}.";
-                    }
-                    if (f.value === "1") {
-                        return "You're probably parsing it as $c{(9 / (2+1)) == 3}, but it should be parsed as $c{((9/2) + 1) == 3}. Division has higher precedence than addition.";
-                    }
-                    if (f.value === "4") {
-                        return "You're parsing it as $c{(9/2) + (1==3)}, but it should be parsed as $c{((9/2) + 1) == 3}. Division ($c{/}) has higher precedence than addition ($c{+}), which has higher precedence than equality ($c{==}).";
-                    }
-                    if (f.value !== "0") {
+                    if (ctx.basicHintTopicIs("value", "f")) {
+                        const f = ctx.boxNamed("f");
+                        if (f.value === "1") {
+                            return "You're probably parsing it as $c{(9 / (2+1)) == 3}, but it should be parsed as $c{((9 / 2)+1) == 3}. Division has higher precedence than addition.";
+                        }
+                        if (f.value === "4") {
+                            return "You're parsing it as $c{(9 / 2)+(1 == 3)}, but it should be parsed as $c{((9 / 2)+1) == 3}. Division ($c{/}) has higher precedence than addition ($c{+}), which has higher precedence than equality ($c{==}).";
+                        }
                         return "Evaluate division ($c{/}), then addition ($c{+}), then equality ($c{==}).";
                     }
-                    return null;
+                    return ctx.basicHint;
                 },
             },
             {
@@ -130,18 +117,16 @@
                 editable: true,
                 instructions: "Remember that spacing doesn't affect order of operations.",
                 hints: (ctx) => {
-                    const h = ctx.getBoxByName(ctx.boxes, "h");
-                    if (!h) {
-                        return "Add the $n{h} variable.";
-                    }
-                    if (h.type !== "int") {
-                        return "$n{h}'s type should be $t{int}.";
-                    }
-                    if (h.value !== "-2") {
+                    if (ctx.basicHintTopicIs("value", "h")) {
                         return "The precedence order of the operations used in this line is, from highest to lowest: Parenthesis, division ($c{/}), subtraction ($c{-}), equality ($c{==}). Also recall that equality is left-associative, so $c{x == y == z} is parsed as $c{(x == y) == z}.";
                     }
-                    return null;
+                    return ctx.basicHint;
                 },
+            },
+            {
+                code: "h = 9/2/2-3/7;\n",
+                editable: true,
+                instructions: "Division is left-associative.",
             },
         ],
         next: "program11.html",

@@ -43,7 +43,7 @@
   mobileNote.appendChild(document.createElement("br"));
 
   const updated = document.createElement("i");
-  updated.textContent = "Site last updated January 14, 2026";
+  updated.textContent = "Site last updated January 16, 2026";
 
   intro.appendChild(mainCopy);
   intro.appendChild(mobileNote);

@@ -93,18 +93,28 @@ code {
 }
 code.tok-name {
     color: var(--name);
+    display: inline-block;
+    white-space: nowrap;
 }
 code.tok-value {
     color: var(--value);
+    display: inline-block;
+    white-space: nowrap;
 }
 code.tok-type {
     color: var(--type);
+    display: inline-block;
+    white-space: nowrap;
 }
 code.tok-addr {
     color: var(--addr);
+    display: inline-block;
+    white-space: nowrap;
 }
 code.tok-code {
     color: var(--code-line);
+    display: inline-block;
+    white-space: nowrap;
 }
 .btn-ref {
     display: inline-flex;
@@ -1071,6 +1081,32 @@ button:hover:not([disabled]) {
     min-height: 26px;
     display: inline-flex;
     align-items: center;
+}
+.vbox .value[data-double-approx="true"]::before {
+    content: "~";
+    color: #9a9a9a;
+    font-weight: 700;
+    margin-right: 4px;
+}
+.vbox .double-toggle {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    border: 1px solid #ccc;
+    background: #fff;
+    border-radius: 999px;
+    padding: 2px 6px;
+    font-size: 10px;
+    color: #666;
+    cursor: pointer;
+    line-height: 1;
+    font-weight: 600;
+}
+.vbox .double-toggle[aria-pressed="true"] {
+    background: #f3f3f3;
+}
+.vbox .double-toggle.hidden {
+    display: none;
 }
 
 .vbox .address {

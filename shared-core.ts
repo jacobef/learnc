@@ -1,5 +1,5 @@
 namespace MBTypes {
-  export type BaseType = "int" | "long";
+  export type BaseType = "int" | "long" | "double";
   export interface ParsedType {
     base: BaseType | null;
     depth: number | null;
@@ -20,6 +20,7 @@ namespace MBTypes {
     allowNameEdit?: boolean | null;
     allowTypeEdit?: boolean | null;
     allowDelete?: boolean | null;
+    showDoubleExact?: boolean | null;
     node?: HTMLElement;
   }
   export type Statement = { kind: string; [key: string]: any };
@@ -151,6 +152,7 @@ interface MBNamespace {
     editable?: boolean;
     allowNameEdit?: boolean;
     allowTypeEdit?: boolean;
+    showDoubleExact?: boolean;
   }) => HTMLElement;
   readBoxState: (root: Element | null) => MBTypes.BoxState | null;
   makeAnswerBox: (opts?: {
@@ -215,7 +217,7 @@ type MBGlobal = Window & typeof globalThis;
     type: string = "int",
   ): { base: string | null; depth: number } {
     const clean = String(type || "").trim();
-    const match = clean.match(/^(int|long)(\*+)?$/);
+    const match = clean.match(/^(int|long|double)(\*+)?$/);
     if (!match) return { base: null, depth: 0 };
     const base = match[1];
     const depth = match[2] ? match[2].length : 0;
@@ -254,7 +256,7 @@ type MBGlobal = Window & typeof globalThis;
     const { base, depth } = parseType(type);
     if (!base) return { size: 4, align: 4 };
     if (Number.isFinite(depth) && depth > 0) return { size: 8, align: 8 };
-    if (base === "long") return { size: 8, align: 8 };
+    if (base === "long" || base === "double") return { size: 8, align: 8 };
     return { size: 4, align: 4 };
   }
 
@@ -280,6 +282,71 @@ type MBGlobal = Window & typeof globalThis;
     const trimmed = String(value ?? "").trim();
     if (trimmed === "-0") return "0";
     return trimmed;
+  }
+
+  function stripTrailingZeros(value: string): string {
+    const trimmed = String(value ?? "").trim();
+    if (!trimmed.includes(".")) return trimmed === "-0" ? "0" : trimmed;
+    let out = trimmed.replace(/0+$/, "");
+    if (out.endsWith(".")) out = out.slice(0, -1);
+    if (out === "-0") out = "0";
+    return out;
+  }
+
+  function formatDoubleDefault(value: number): string {
+    const safe = Object.is(value, -0) ? 0 : value;
+    return stripTrailingZeros(safe.toFixed(6));
+  }
+
+  function formatDoubleExact(value: number): string {
+    if (!Number.isFinite(value)) return String(value);
+    if (Object.is(value, -0)) return "0";
+    const buf = new ArrayBuffer(8);
+    const view = new DataView(buf);
+    view.setFloat64(0, value, false);
+    const bits = view.getBigUint64(0, false);
+    const sign = bits >> 63n;
+    const expBits = Number((bits >> 52n) & 0x7ffn);
+    const frac = bits & ((1n << 52n) - 1n);
+    if (expBits === 0x7ff) return String(value);
+    if (expBits === 0 && frac === 0n) return sign ? "-0" : "0";
+    const exponent = expBits === 0 ? -1022 : expBits - 1023;
+    const significand =
+      expBits === 0 ? frac : (1n << 52n) | frac;
+    const exp2 = exponent - 52;
+    let out = "";
+    if (exp2 >= 0) {
+      out = (significand << BigInt(exp2)).toString();
+    } else {
+      const k = -exp2;
+      const scaled = significand * 5n ** BigInt(k);
+      let digits = scaled.toString();
+      if (digits.length <= k) digits = digits.padStart(k + 1, "0");
+      const intPart = digits.slice(0, digits.length - k);
+      let fracPart = digits.slice(digits.length - k);
+      fracPart = fracPart.replace(/0+$/, "");
+      out = fracPart ? `${intPart}.${fracPart}` : intPart;
+    }
+    if (sign) out = `-${out}`;
+    return out;
+  }
+
+  function doubleDisplayIsExact(defaultText: string, exactText: string): boolean {
+    return defaultText === exactText;
+  }
+
+  function parseDoubleValue(
+    value: MBTypes.BoxValue | bigint | number,
+  ): number | null {
+    if (typeof value === "number") {
+      return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value === "bigint") {
+      const asNumber = Number(value);
+      return Number.isFinite(asNumber) ? asNumber : null;
+    }
+    const parsed = Number(String(value ?? "").trim());
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   function txt(n?: Node | null): string {
@@ -797,7 +864,7 @@ type MBGlobal = Window & typeof globalThis;
       kind: "compile" | "ub";
       base?: string;
       depth?: number;
-      value?: MBTypes.BoxValue | bigint;
+      value?: MBTypes.BoxValue | bigint | number;
       address?: string;
       label?: string;
     };
@@ -805,14 +872,14 @@ type MBGlobal = Window & typeof globalThis;
       kind: "lvalue" | "rvalue";
       base: string;
       depth: number;
-      value: MBTypes.BoxValue | bigint;
+      value: MBTypes.BoxValue | bigint | number;
       address: string;
       label: string;
       error?: undefined;
     };
     type EvalResult = EvalValue | EvalError;
     type ScalarResult =
-      | { value: bigint; base: string; error?: undefined }
+      | { value: bigint | number; base: string; error?: undefined }
       | EvalError;
     type UnaryResult =
       | {
@@ -949,7 +1016,10 @@ type MBGlobal = Window & typeof globalThis;
           while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j++;
           const ident = src.slice(i, j);
           tokens.push({
-            type: ident === "int" || ident === "long" ? "kw" : "ident",
+            type:
+              ident === "int" || ident === "long" || ident === "double"
+                ? "kw"
+                : "ident",
             value: ident,
             line,
             col: startCol,
@@ -962,6 +1032,10 @@ type MBGlobal = Window & typeof globalThis;
           const startCol = col;
           let j = i;
           while (j < src.length && /[0-9]/.test(src[j])) j++;
+          if (src[j] === "." && /[0-9]/.test(src[j + 1] || "")) {
+            j++;
+            while (j < src.length && /[0-9]/.test(src[j])) j++;
+          }
           tokens.push({
             type: "number",
             value: src.slice(i, j),
@@ -992,7 +1066,11 @@ type MBGlobal = Window & typeof globalThis;
       baseType: string = "int",
     ): string | null {
       if (!Number.isFinite(stars) || stars < 0) return null;
-      if (!baseType || (baseType !== "int" && baseType !== "long")) return null;
+      if (
+        !baseType ||
+        (baseType !== "int" && baseType !== "long" && baseType !== "double")
+      )
+        return null;
       if (stars === 0) return baseType;
       if (!allowPointers) return null;
       return `${baseType}${"*".repeat(stars)}`;
@@ -1010,7 +1088,7 @@ type MBGlobal = Window & typeof globalThis;
 
     function makePointerType(depth: number, base: string = "int"): string | null {
       if (!Number.isFinite(depth) || depth < 0) return null;
-      if (base !== "int" && base !== "long") return null;
+      if (base !== "int" && base !== "long" && base !== "double") return null;
       return depth === 0 ? base : `${base}${"*".repeat(depth)}`;
     }
 
@@ -1030,12 +1108,29 @@ type MBGlobal = Window & typeof globalThis;
       }
     }
 
+    function isDecimalLiteral(value: string): boolean {
+      return String(value).includes(".");
+    }
+
     function numericLiteralErrorForType(
       value: string,
       type: string,
     ): EvalError | null {
       const { base, depth } = parseType(type);
       if (!base || depth !== 0) return null;
+      if (isDecimalLiteral(value)) {
+        if (base === "double") {
+          const parsed = Number(value);
+          if (!Number.isFinite(parsed))
+            return {
+              error: "That number is too large to represent.",
+              kind: "compile",
+            };
+          return null;
+        }
+        return { error: "That number isn't an integer.", kind: "compile" };
+      }
+      if (base === "double") return null;
       const status = classifyNumericLiteral(value);
       if (base === "long") {
         return status === "compile" ? numericLiteralError(status) : null;
@@ -1136,7 +1231,8 @@ type MBGlobal = Window & typeof globalThis;
       if (!tokens.length) return false;
       if (tokens[0].type !== "kw") return false;
       const baseType = tokens[0].value;
-      if (baseType !== "int" && baseType !== "long") return false;
+      if (baseType !== "int" && baseType !== "long" && baseType !== "double")
+        return false;
       let idx = 1;
       let stars = 0;
       while (
@@ -1320,12 +1416,17 @@ type MBGlobal = Window & typeof globalThis;
         return false;
       if (tokens.length === 1) {
         const t0 = tokens[0];
-        if (t0.type === "kw" && (t0.value === "int" || t0.value === "long"))
+        if (
+          t0.type === "kw" &&
+          (t0.value === "int" || t0.value === "long" || t0.value === "double")
+        )
           return true;
         if (t0.type === "ident") {
           if (
             allowIntPrefix &&
-            ("int".startsWith(t0.value) || "long".startsWith(t0.value))
+            ("int".startsWith(t0.value) ||
+              "long".startsWith(t0.value) ||
+              "double".startsWith(t0.value))
           )
             return true;
           return hasDeclaredPrefix(t0.value, declaredNames);
@@ -1472,6 +1573,8 @@ type MBGlobal = Window & typeof globalThis;
       } = opts;
       const by = Object.fromEntries(state.map((b) => [b.name, b]));
       const targetBase = parseType(targetType).base || "int";
+      const toNumber = (value: bigint | number): number =>
+        typeof value === "bigint" ? Number(value) : value;
 
       function makeLvalue(
         box: MBTypes.BoxState,
@@ -1495,7 +1598,7 @@ type MBGlobal = Window & typeof globalThis;
       }
 
       function makeRvalue(
-        value: MBTypes.BoxValue | bigint,
+        value: MBTypes.BoxValue | bigint | number,
         base: string,
         depth: number = 0,
         label: string = "",
@@ -1522,9 +1625,23 @@ type MBGlobal = Window & typeof globalThis;
             return { error: `${label} doesn't have a value yet.`, kind: "ub" };
           }
         }
+        const base = result.base || "int";
+        if (base === "double") {
+          const value =
+            typeof raw === "number"
+              ? raw
+              : typeof raw === "bigint"
+                ? Number(raw)
+                : Number(String(raw));
+          if (!Number.isFinite(value)) {
+            const label = result.label || "That value";
+            return { error: `${label} isn't a number.`, kind: "compile" };
+          }
+          return { value, base };
+        }
         try {
           const value = typeof raw === "bigint" ? raw : BigInt(String(raw));
-          return { value, base: result.base || "int" };
+          return { value, base };
         } catch {
           const label = result.label || "That value";
           return { error: `${label} isn't a number.`, kind: "compile" };
@@ -1541,6 +1658,9 @@ type MBGlobal = Window & typeof globalThis;
           const err = numericLiteralErrorForType(node.value, targetType);
           if (err) return err;
           try {
+            if (targetBase === "double" || isDecimalLiteral(node.value)) {
+              return makeRvalue(Number(node.value), "double");
+            }
             return makeRvalue(BigInt(String(node.value)), targetBase);
           } catch {
             return {
@@ -1631,26 +1751,56 @@ type MBGlobal = Window & typeof globalThis;
           if (isScalarError(rightScalar)) return rightScalar;
           const leftValue = leftScalar.value;
           const rightValue = rightScalar.value;
+          const useDouble =
+            leftScalar.base === "double" || rightScalar.base === "double";
           if (node.op === "==") {
             return makeRvalue(
-              leftValue === rightValue ? 1n : 0n,
+              useDouble
+                ? toNumber(leftValue) === toNumber(rightValue)
+                  ? 1n
+                  : 0n
+                : leftValue === rightValue
+                  ? 1n
+                  : 0n,
               "int",
             );
           }
-          if (node.op === "/" && rightValue === 0n)
+          if (
+            node.op === "/" &&
+            (useDouble
+              ? toNumber(rightValue) === 0
+              : rightValue === 0n)
+          )
             return { error: "Division by 0 is undefined.", kind: "ub" };
-          let value = 0n;
-          if (node.op === "+") value = leftValue + rightValue;
-          else if (node.op === "-") value = leftValue - rightValue;
-          else if (node.op === "*") value = leftValue * rightValue;
-          else if (node.op === "/") value = leftValue / rightValue;
-          else
-            return {
-              error: "That expression is not valid here.",
-              kind: "compile",
-            };
-          const base =
-            leftScalar.base === "long" || rightScalar.base === "long"
+          let value: bigint | number;
+          if (useDouble) {
+            const leftNum = toNumber(leftValue);
+            const rightNum = toNumber(rightValue);
+            if (node.op === "+") value = leftNum + rightNum;
+            else if (node.op === "-") value = leftNum - rightNum;
+            else if (node.op === "*") value = leftNum * rightNum;
+            else if (node.op === "/") value = leftNum / rightNum;
+            else
+              return {
+                error: "That expression is not valid here.",
+                kind: "compile",
+              };
+          } else {
+            const leftBig = leftValue as bigint;
+            const rightBig = rightValue as bigint;
+            if (node.op === "+") value = leftBig + rightBig;
+            else if (node.op === "-") value = leftBig - rightBig;
+            else if (node.op === "*") value = leftBig * rightBig;
+            else if (node.op === "/") value = leftBig / rightBig;
+            else
+              return {
+                error: "That expression is not valid here.",
+                kind: "compile",
+              };
+          }
+          const base = useDouble
+            ? "double"
+            : leftScalar.base === "long" || rightScalar.base === "long"
               ? "long"
               : "int";
           return makeRvalue(value, base);
@@ -1742,7 +1892,8 @@ type MBGlobal = Window & typeof globalThis;
       if (!tokens.length) return null;
       if (tokens[0].type === "kw") {
         const baseType = tokens[0].value;
-        if (baseType !== "int" && baseType !== "long") return null;
+        if (baseType !== "int" && baseType !== "long" && baseType !== "double")
+          return null;
         let idx = 1;
         let stars = 0;
         while (
@@ -1899,7 +2050,8 @@ type MBGlobal = Window & typeof globalThis;
       if (!tokens.length) return null;
       if (tokens[0].type !== "kw") return null;
       const baseType = tokens[0].value;
-      if (baseType !== "int" && baseType !== "long") return null;
+      if (baseType !== "int" && baseType !== "long" && baseType !== "double")
+        return null;
       let idx = 1;
       let stars = 0;
       while (
@@ -2529,7 +2681,7 @@ type MBGlobal = Window & typeof globalThis;
       }
       if (tokens[0].type === "kw") {
         const baseType = tokens[0].value;
-        if (baseType !== "int" && baseType !== "long")
+        if (baseType !== "int" && baseType !== "long" && baseType !== "double")
           return "A declaration needs a variable name.";
         if (tokens.length === 1) return "A declaration needs a variable name.";
         if (
@@ -2558,8 +2710,8 @@ type MBGlobal = Window & typeof globalThis;
         if (tokens[1].type !== "ident")
           return "A declaration needs a variable name.";
         if (allowDeclAssign || allowDeclAssignVar)
-          return 'Declarations should look like "int name;" or "long name;" or "int name = value;".';
-        return 'Declarations should look like "int name;" or "long name;".';
+          return 'Declarations should look like "int name;" or "long name;" or "double name;" or "int name = value;".';
+        return 'Declarations should look like "int name;" or "long name;" or "double name;".';
       }
       if (
         allowPointers &&
@@ -3578,6 +3730,7 @@ type MBGlobal = Window & typeof globalThis;
     editable = false,
     allowNameEdit = false,
     allowTypeEdit = false,
+    showDoubleExact = false,
   }: {
     address?: string;
     type?: string;
@@ -3586,9 +3739,13 @@ type MBGlobal = Window & typeof globalThis;
     editable?: boolean;
     allowNameEdit?: boolean;
     allowTypeEdit?: boolean;
+    showDoubleExact?: boolean;
   } = {}): HTMLElement {
-    const emptyDisplay = String(value ?? "") === "";
-    const displayValue = emptyDisplay ? "" : normalizeZeroDisplay(value);
+    const parsedType = parseType(type || "int");
+    const isDoubleScalar = parsedType.base === "double" && parsedType.depth === 0;
+    const rawValue = String(value ?? "");
+    const emptyDisplay = rawValue === "";
+    const displayValue = emptyDisplay ? "" : normalizeZeroDisplay(rawValue);
     const resolvedName =
       name !== undefined && name !== null ? String(name) : "";
     const namesList = resolvedName ? [resolvedName] : [""];
@@ -3612,6 +3769,7 @@ type MBGlobal = Window & typeof globalThis;
           <div class="cell">
           <div class="lbl lbl-value">value</div>
           <div class="${valueClasses}">${displayValue}</div>
+          <button class="double-toggle hidden" type="button" aria-pressed="false">exact</button>
         </div>
         <div class="lbl lbl-type">type</div>
         <div class="${typeClasses}">${type}</div>
@@ -3646,6 +3804,93 @@ type MBGlobal = Window & typeof globalThis;
         }
       });
     }
+    const valueEl = node.querySelector(".value") as HTMLElement | null;
+    const toggleEl = node.querySelector(".double-toggle") as HTMLButtonElement | null;
+    if (valueEl && isDoubleScalar && !emptyDisplay) {
+      const parsed = parseDoubleValue(rawValue);
+      if (parsed != null) {
+        valueEl.dataset.doubleValue = String(parsed);
+        node.dataset.doubleDisplay = showDoubleExact ? "exact" : "short";
+        const exactText = formatDoubleExact(parsed);
+        const defaultText = formatDoubleDefault(parsed);
+        const approx = !doubleDisplayIsExact(defaultText, exactText);
+        valueEl.textContent = showDoubleExact ? exactText : defaultText;
+        if (approx && !showDoubleExact) valueEl.dataset.doubleApprox = "true";
+        else delete valueEl.dataset.doubleApprox;
+        if (toggleEl) {
+          if (approx) {
+            toggleEl.classList.remove("hidden");
+            toggleEl.textContent = showDoubleExact ? "short" : "exact";
+            toggleEl.setAttribute(
+              "aria-pressed",
+              showDoubleExact ? "true" : "false",
+            );
+            toggleEl.addEventListener("click", (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const currentValue = parseDoubleValue(
+                valueEl.dataset.doubleValue ?? valueEl.textContent ?? "",
+              );
+              if (currentValue == null) return;
+              const nextExact = node.dataset.doubleDisplay !== "exact";
+              const nextExactText = formatDoubleExact(currentValue);
+              const nextDefaultText = formatDoubleDefault(currentValue);
+              const nextApprox = !doubleDisplayIsExact(
+                nextDefaultText,
+                nextExactText,
+              );
+              node.dataset.doubleDisplay = nextApprox
+                ? nextExact
+                  ? "exact"
+                  : "short"
+                : "short";
+              valueEl.textContent = nextExact ? nextExactText : nextDefaultText;
+              if (nextApprox && !nextExact)
+                valueEl.dataset.doubleApprox = "true";
+              else delete valueEl.dataset.doubleApprox;
+              if (!nextApprox) {
+                toggleEl.classList.add("hidden");
+              } else {
+                toggleEl.classList.remove("hidden");
+                toggleEl.textContent = nextExact ? "short" : "exact";
+                toggleEl.setAttribute(
+                  "aria-pressed",
+                  nextExact ? "true" : "false",
+                );
+              }
+            });
+          } else {
+            toggleEl.classList.add("hidden");
+          }
+        }
+        if (valueEl.isContentEditable) {
+          valueEl.addEventListener("input", () => {
+            const next = parseDoubleValue(valueEl.textContent || "");
+            if (next == null) return;
+            valueEl.dataset.doubleValue = String(next);
+            const nextExactText = formatDoubleExact(next);
+            const nextDefaultText = formatDoubleDefault(next);
+            const nextApprox = !doubleDisplayIsExact(
+              nextDefaultText,
+              nextExactText,
+            );
+            const isExact = node.dataset.doubleDisplay === "exact";
+            if (nextApprox && !isExact)
+              valueEl.dataset.doubleApprox = "true";
+            else delete valueEl.dataset.doubleApprox;
+            if (toggleEl) {
+              if (!nextApprox) {
+                toggleEl.classList.add("hidden");
+              } else {
+                toggleEl.classList.remove("hidden");
+              }
+            }
+          });
+        }
+      }
+    } else if (toggleEl) {
+      toggleEl.classList.add("hidden");
+    }
     watchNameStack(node);
     return node;
   }
@@ -3674,21 +3919,33 @@ type MBGlobal = Window & typeof globalThis;
       .filter(Boolean);
     const valEl = root.querySelector(".value");
     const valText = txt(valEl);
-    const value =
+    const typeText = txt(root.querySelector(".type"));
+    const parsedType = parseType(typeText || "int");
+    const rawValue =
       valEl?.classList?.contains("placeholder") && valText === ""
         ? ""
-        : normalizeZeroDisplay(valText);
+        : valText;
+    let value = normalizeZeroDisplay(rawValue);
+    if (
+      parsedType.base === "double" &&
+      parsedType.depth === 0 &&
+      valEl instanceof HTMLElement
+    ) {
+      const stored = valEl.dataset.doubleValue;
+      if (stored != null && stored !== "") value = stored;
+    }
     const allowDelete =
       el?.dataset?.allowDelete === "true" || !!root.querySelector(".delete");
     return {
       address: txt(root.querySelector(".address")),
-      type: txt(root.querySelector(".type")),
+      type: typeText,
       value,
       name: names[0] || "",
       names,
       nameEditable: !!root.querySelector(".name-text[contenteditable]"),
       typeEditable: !!root.querySelector(".type[contenteditable]"),
       allowDelete,
+      showDoubleExact: el.dataset.doubleDisplay === "exact",
     };
   }
 
@@ -3936,6 +4193,7 @@ type MBGlobal = Window & typeof globalThis;
     allowTypeEdit = null,
     nameEditable = null,
     typeEditable = null,
+    showDoubleExact = null,
   }: {
     name?: string;
     names?: string[] | string | null;
@@ -3948,6 +4206,7 @@ type MBGlobal = Window & typeof globalThis;
     allowTypeEdit?: boolean | null;
     nameEditable?: boolean | null;
     typeEditable?: boolean | null;
+    showDoubleExact?: boolean | null;
   } = {}) {
     const resolvedAddr =
       address == null ? String(nextPooledAddr(type || "int")) : String(address);
@@ -3971,6 +4230,7 @@ type MBGlobal = Window & typeof globalThis;
       editable,
       allowNameEdit: resolvedNameEdit,
       allowTypeEdit: resolvedTypeEdit,
+      showDoubleExact: showDoubleExact ?? false,
     });
     node.dataset.allowNameEdit = resolvedNameEdit ? "true" : "false";
     node.dataset.allowTypeEdit = resolvedTypeEdit ? "true" : "false";
@@ -4062,6 +4322,7 @@ type MBGlobal = Window & typeof globalThis;
           deletable: allowDelete,
           allowNameEdit: allowNameEdit ?? st.nameEditable ?? st.allowNameEdit,
           allowTypeEdit: allowTypeEdit ?? st.typeEditable ?? st.allowTypeEdit,
+          showDoubleExact: st.showDoubleExact ?? null,
         });
         if (allowDelete) node.dataset.allowDelete = "true";
         if (String(st.value ?? "") === "")
@@ -4085,6 +4346,7 @@ type MBGlobal = Window & typeof globalThis;
           deletable: allowDelete,
           allowNameEdit: allowNameEdit ?? d.nameEditable ?? d.allowNameEdit,
           allowTypeEdit: allowTypeEdit ?? d.typeEditable ?? d.allowTypeEdit,
+          showDoubleExact: d.showDoubleExact ?? null,
         });
         if (allowDelete) node.dataset.allowDelete = "true";
         if (String(d.value ?? "") === "")
