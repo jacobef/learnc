@@ -647,7 +647,9 @@ button:hover:not([disabled]) {
     pointer-events: none;
     z-index: 0;
 }
-[data-role="sandbox-code"] .code-textarea-highlight .code-highlight-line.is-done {
+[data-role="sandbox-code"]
+    .code-textarea-highlight
+    .code-highlight-line.is-done {
     color: var(--done);
 }
 .codepane-row .code-editor-wrap {

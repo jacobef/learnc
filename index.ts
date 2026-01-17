@@ -1,8 +1,6 @@
-/// <reference path="./shared-core.ts" />
+import { ensureBaseLayout } from "./shared-core.js";
 
 {
-  const { ensureBaseLayout } = window.MB!;
-
   const { main } = ensureBaseLayout();
   document.title = "C Boxes - Home";
 

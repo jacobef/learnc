@@ -1,7 +1,5 @@
-"use strict";
-/// <reference path="./shared-core.ts" />
+import { ensureBaseLayout } from "./shared-core.js";
 {
-    const { ensureBaseLayout } = window.MB;
     const { main } = ensureBaseLayout();
     document.title = "C Boxes - Home";
     const heading = document.createElement("h1");
@@ -23,7 +21,7 @@
     mobileNote.appendChild(document.createTextNode("It's a bit rough on mobile at the moment, sorry!"));
     mobileNote.appendChild(document.createElement("br"));
     const updated = document.createElement("i");
-    updated.textContent = "Site last updated January 14, 2026";
+    updated.textContent = "Site last updated January 16, 2026";
     intro.appendChild(mainCopy);
     intro.appendChild(mobileNote);
     intro.appendChild(updated);
