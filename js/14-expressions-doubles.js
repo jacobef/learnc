@@ -11,38 +11,6 @@ createExpressionEvalTemplate({
             editable: false,
         },
         {
-            expression: "&x",
-            boxes: [{ name: "x", type: "int", value: "5", address: "108" }],
-            editable: false,
-        },
-        {
-            expression: "&b",
-            boxes: [
-                { name: "a", type: "int", value: "11", address: "212" },
-                { name: "b", type: "int*", value: "212", address: "216" },
-            ],
-            editable: false,
-        },
-        {
-            expression: "&d",
-            boxes: [
-                { name: "c", type: "int**", value: "", address: "200" },
-                { name: "d", type: "int***", value: "200", address: "208" },
-            ],
-            fixValueCategory: true,
-            editable: true,
-            hints: (ctx) => {
-                const box = ctx.enteredBox;
-                if (box.type !== "int****") {
-                    return "In general, if $c{X}'s type is $t{T}, then $c{&X}'s type is $t{T*}.";
-                }
-                if (box.value === "200") {
-                    return "$v{200} is the value of $n{d} (or the address of $n{c}), not the address of $n{d}.";
-                }
-                return "The value of $c{&d} should be the address of $n{d}.";
-            },
-        },
-        {
             expression: "x+3",
             boxes: [
                 { name: "x", type: "int", value: "5", address: "108" },
