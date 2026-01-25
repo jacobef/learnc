@@ -116,6 +116,9 @@ code.tok-code {
     display: inline-block;
     white-space: nowrap;
 }
+.tok-italic {
+    font-style: italic;
+}
 .btn-ref {
     display: inline-flex;
     align-items: center;
@@ -409,8 +412,15 @@ h2 {
     position: relative;
     min-width: 0;
 }
+.expr-expression-panel,
+.expr-answer-panel {
+    padding-top: 28px;
+}
 .program-state-panel {
     padding-top: 28px;
+}
+.program-state-panel [data-role="quiz-stage"] {
+    margin-top: 12px;
 }
 .sandbox-state-panel {
     padding-top: 12px;
@@ -424,12 +434,101 @@ h2 {
 .expr-panel {
     margin-top: 16px;
 }
+.expr-eval-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-top: 24px;
+}
+.expr-eval-row {
+    display: flex;
+    gap: 16px;
+    align-items: start;
+}
+.expr-left-col {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    flex: 0 0 360px;
+    min-width: 0;
+}
+.expr-eval-row .program-state-panel {
+    flex: 1 1 0;
+    min-width: 0;
+}
+.expr-answer-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.expr-answer-slot {
+    min-height: 210px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 10px;
+}
+.expr-answer-slot .vbox {
+    margin: 6px auto;
+}
+.expr-answer-toggle {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.expr-answer-toggle button.is-active {
+    border-color: var(--focus);
+    box-shadow: 0 0 0 2px rgba(30, 119, 255, 0.2);
+}
+.expr-answer-empty {
+    padding: 10px 8px;
+    font-style: italic;
+}
+.controls-break {
+    flex-basis: 100%;
+    height: 0;
+}
+.controls .expr-check-inline {
+    flex: 0 0 auto;
+    margin-top: 0;
+}
+.expr-answer-result {
+    display: flex;
+    justify-content: center;
+}
 .expr-title {
     display: block;
     font-size: 13px;
     font-weight: 700;
     color: #234;
     margin-bottom: 6px;
+}
+.expr-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.expr-display {
+    font-size: 24px;
+    font-weight: 700;
+    color: #111;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    text-align: center;
+    padding: 18px 8px 8px;
+}
+.expr-display.expr-quiz-display {
+    color: var(--code-line) !important;
+}
+.quiz-row {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+    margin-top: 24px;
+}
+.quiz-expression-panel .expr-display {
+    padding-top: 10px;
+    color: #234;
 }
 .expr-input {
     width: 100%;
@@ -443,9 +542,15 @@ h2 {
 }
 .quiz-prompt {
     font-size: 18px;
-    font-weight: 700;
+    font-weight: 400;
     color: #234;
-    margin: 8px 0 6px;
+    margin: 0 0 6px;
+    display: block;
+}
+.quiz-instructions {
+    display: block;
+    font-size: inherit;
+    color: #345;
 }
 .quiz-sub {
     font-size: 14px;
@@ -464,7 +569,7 @@ h2 {
 }
 .quiz-streak {
     margin-top: 6px;
-    font-size: 14px;
+    font-size: 16px;
     font-weight: 700;
     color: #234;
 }
@@ -516,7 +621,7 @@ h2 {
     font-size: 12px;
 }
 .state-status {
-    font-size: 16px;
+    font-size: 18px;
 }
 .ok {
     color: #0a7a0a;
@@ -564,6 +669,11 @@ button:hover:not([disabled]) {
 .controls [id$="-status"] {
     flex-basis: 100%;
     margin-top: 6px;
+}
+.controls [data-role$="status"].expr-check-inline,
+.controls [id$="-status"].expr-check-inline {
+    flex-basis: auto;
+    margin-top: 0;
 }
 .controls-top {
     margin-top: 12px;
@@ -799,7 +909,7 @@ button:hover:not([disabled]) {
 .line .line-invalid {
     margin-left: auto;
     color: #c0392b;
-    font-size: 16px;
+    font-size: 18px;
 }
 
 .line:last-child {
@@ -1046,10 +1156,28 @@ button:hover:not([disabled]) {
 .vbox.quiz-selectable {
     cursor: pointer;
 }
-.vbox.quiz-selectable:not(.quiz-selected):hover .cell {
+.vbox.quiz-static {
+    cursor: default;
+}
+.vbox.quiz-static.quiz-selectable:not(.quiz-selected):hover::after {
+    box-shadow: none;
+}
+.vbox.quiz-selectable::after {
+    content: "";
+    position: absolute;
+    top: -14px;
+    bottom: calc(-14px - var(--name-stack-space));
+    left: -8px;
+    right: -8px;
+    border-radius: 14px;
+    pointer-events: none;
+    box-shadow: none;
+    transition: box-shadow 0.15s ease;
+}
+.vbox.quiz-selectable:not(.quiz-selected):hover::after {
     box-shadow: 0 0 0 2px rgba(30, 119, 255, 0.35);
 }
-.vbox.quiz-selected .cell {
+.vbox.quiz-selected::after {
     box-shadow: 0 0 0 3px var(--focus);
 }
 .confetti-canvas {
@@ -1069,9 +1197,9 @@ button:hover:not([disabled]) {
     border-radius: 12px;
     background: transparent;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
-    padding: 10px;
+    padding: 36px 10px 16px;
 }
 
 .vbox .value {
@@ -1081,8 +1209,23 @@ button:hover:not([disabled]) {
     font-weight: 700;
     line-height: 1.2;
     min-height: 26px;
-    display: inline-flex;
-    align-items: center;
+    display: block;
+    width: 100%;
+    text-align: center;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    margin-top: 2px;
+    max-width: max-content;
+    margin-left: auto;
+    margin-right: auto;
+}
+.vbox .value:empty::before {
+    content: "\\00a0";
+}
+.vbox .value.placeholder:empty::before,
+.vbox .value.placeholder[data-empty="true"]::before {
+    content: "0";
+    visibility: hidden;
 }
 .vbox .value[data-double-approx="true"]::before {
     content: "~";
@@ -1093,7 +1236,7 @@ button:hover:not([disabled]) {
 .vbox .double-toggle {
     position: absolute;
     right: 8px;
-    bottom: 8px;
+    top: 8px;
     border: 1px solid #ccc;
     background: #fff;
     border-radius: 999px;
@@ -1271,6 +1414,22 @@ nav.tabs {
     border: 1px solid rgba(30, 119, 255, 0.2);
     padding: 8px 12px;
     border-radius: 10px;
+    max-height: 80vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    flex-wrap: nowrap;
+}
+nav.tabs.nav-scroll-top {
+    box-shadow: inset 0 12px 10px -8px rgba(30, 119, 255, 0.38);
+}
+nav.tabs.nav-scroll-bottom {
+    box-shadow: inset 0 -12px 10px -8px rgba(30, 119, 255, 0.38);
+}
+nav.tabs.nav-scroll-top.nav-scroll-bottom {
+    box-shadow:
+        inset 0 12px 10px -8px rgba(30, 119, 255, 0.38),
+        inset 0 -12px 10px -8px rgba(30, 119, 255, 0.38);
 }
 
 nav.tabs a {
@@ -1403,6 +1562,7 @@ nav.tabs a.active:hover {
     font-size: calc(1em - 2px);
 }
 
+
 .ub-explain-link {
     border: 0;
     background: none;
@@ -1481,6 +1641,9 @@ nav.tabs a.active:hover {
 @media (max-width: 900px) {
     .row {
         grid-template-columns: 1fr;
+    }
+    .expr-eval-row {
+        flex-direction: column;
     }
     .grid {
         width: 100%;

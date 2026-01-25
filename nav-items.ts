@@ -1,0 +1,23 @@
+import type { NavItem } from "./shared-core-dom.js";
+
+const DEFAULT_NAV_ITEMS: NavItem[] = [
+  { href: "index.html", label: "Home" },
+  { href: "1-assignment-i.html", label: "1. Assignment I" },
+  { href: "2-declaration.html", label: "2. Declaration" },
+  { href: "3-initialization.html", label: "3. Initialization" },
+  { href: "4-code-editing-i.html", label: "4. Code Editing I" },
+  { href: "5-code-editing-ii.html", label: "5. Code Editing II" },
+  { href: "6-assignment-ii.html", label: "6. Assignment II" },
+  { href: "7-pointers.html", label: "7. Pointers" },
+  { href: "8-dereferencing.html", label: "8. Dereferencing" },
+  { href: "9-dereferencing-quiz.html", label: "9. Dereferencing Quiz" },
+  { href: "10-whitespace-comments.html", label: "10. Whitespace & Comments" },
+  { href: "11-integer-arithmetic.html", label: "11. Integer Arithmetic" },
+  { href: "12-assignment-iii.html", label: "12. Assignment III" },
+  { href: "13-review.html", label: "13. Review" },
+  { href: "14-expressions-doubles.html", label: "14. Expressions & Doubles" },
+  { href: "15-doubles.html", label: "15. Doubles" },
+  { href: "sandbox.html", label: "Sandbox" },
+];
+
+export { DEFAULT_NAV_ITEMS };

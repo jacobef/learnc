@@ -1,0 +1,25 @@
+import { createProgramTemplate } from "./shared-program-template.js";
+createProgramTemplate({
+    initialInstructions: "No instructions for this one. Good luck!",
+    steps: [
+        {
+            code: "int north;\n",
+            editable: true,
+            hints: (ctx) => ctx.basicHint,
+        },
+        { code: "int east = 9;\n", editable: false },
+        {
+            code: "north = 5;\n",
+            editable: true,
+            hints: (ctx) => ctx.basicHint,
+        },
+        { code: "int south = -5;\n", editable: false },
+        {
+            code: "int west = -9;\n",
+            editable: true,
+            hints: (ctx) => ctx.basicHint,
+        },
+    ],
+    next: "4-code-editing-i.html",
+    workspace: { allowVariableCreation: true },
+});

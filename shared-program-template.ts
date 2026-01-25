@@ -1,15 +1,17 @@
 import {
   applyOtherNames,
+  boxValueMatchesSpec,
   cloneBoxes,
   createSimpleSimulator,
   createStepper,
   disableBoxEditing,
   ensureBaseLayout,
   flashStatus,
-  getPointerDepth,
+  getNavLabelForHref,
   isMobileViewport,
   isStepperTopVisible,
   makeAnswerBox,
+  normalizeBoxValueForContext,
   normalizeZeroDisplay,
   randAddr,
   readBoxState,
@@ -87,6 +89,7 @@ interface ProgramTemplateConfig {
   initialInstructions?: string;
   next: string | null;
   workspace: ProgramWorkspaceConfig;
+  isLast?: boolean;
 }
 
 interface ProgramTemplateState {
@@ -272,7 +275,13 @@ function createProgramTemplate(
     initialInstructions,
     next = null,
     workspace = {},
+    isLast = false,
   } = config;
+  const endLabel = (() => {
+    if (isLast) return "Finish";
+    const label = getNavLabelForHref(next);
+    return label ? `Next: ${label}` : "Next Program";
+  })();
   const showOtherNames = !!(workspace && workspace.showOtherNames);
   const failConfig = (message: string): never => {
     alert(message);
@@ -626,17 +635,7 @@ function createProgramTemplate(
       const actType = String(act.type || "").trim();
       const expType = String(exp.type || "").trim();
       if (actType !== expType) return false;
-      const depth = getPointerDepth(actType);
-      const isPtr = depth != null && Number.isFinite(depth) && depth > 0;
-      const actVal = String(act.value ?? "").trim();
-      const expVal = String(exp.value ?? "").trim();
-      if (isPtr) {
-        if (actVal !== expVal) return false;
-      } else {
-        if (actVal === "" && expVal === "") continue;
-        if (normalizeZeroDisplay(actVal) !== normalizeZeroDisplay(expVal))
-          return false;
-      }
+      if (!boxValueMatchesSpec(simulator, act, exp).ok) return false;
     }
     return true;
   }
@@ -695,27 +694,36 @@ function createProgramTemplate(
     return parts;
   }
 
-  function formatRunLabel(start: number, end: number, withArrow: boolean) {
+  function formatRunLabel(
+    start: number,
+    end: number,
+    withArrow: boolean,
+    verb: "Run" | "Solve" = "Run",
+  ) {
     if (start === end) {
-      return `Run line ${start}${withArrow ? " ▶" : ""}`;
+      return `${verb} line ${start}${withArrow ? " ▶" : ""}`;
     }
-    return `Run lines ${start}-${end}${withArrow ? " ▶" : ""}`;
+    return `${verb} lines ${start}-${end}${withArrow ? " ▶" : ""}`;
   }
 
   function runLabelForBoundary(boundary: number): string {
+    const nextStep = boundary + 1;
+    const needsSolve =
+      editableSet.has(nextStep) && !state.passes[nextStep];
+    const verb: "Run" | "Solve" = needsSolve ? "Solve" : "Run";
     const group = groupForLine(boundary);
     if (group) {
       const start = group.startLine + 1;
       const end = group.endLine + 1;
-      return formatRunLabel(start, end, true);
+      return formatRunLabel(start, end, true, verb);
     }
     const range = simulator.statementRangeForLine(statementMap, boundary);
     if (range && isMultiLineStatement(range)) {
       const start = range.startLine + 1;
       const end = range.endLine + 1;
-      return formatRunLabel(start, end, true);
+      return formatRunLabel(start, end, true, verb);
     }
-    return `Run line ${boundary + 1} ▶`;
+    return `${verb} line ${boundary + 1} ▶`;
   }
 
   function formatNameList(names: string[]): string {
@@ -853,34 +861,15 @@ function createProgramTemplate(
           variable: name,
         };
       }
-      const depth = getPointerDepth(expType);
-      const isPtr = depth != null && Number.isFinite(depth) && depth > 0;
-      let mismatch = false;
-      const actVal = String(act.value ?? "").trim();
-      const expVal = String(exp.value ?? "").trim();
-      if (isPtr) {
-        mismatch = actVal !== expVal;
-      } else if (!(actVal === "" && expVal === "")) {
-        mismatch =
-          normalizeZeroDisplay(actVal) !== normalizeZeroDisplay(expVal);
-      }
+      const mismatch = !boxValueMatchesSpec(simulator, act, exp).ok;
       if (mismatch) {
         const expVal = String(exp.value ?? "").trim();
         const label =
           expVal === "" ? "empty" : `$v{${normalizeZeroDisplay(expVal)}}`;
         const baselineBox = baselineByName.get(name);
-        let shouldRemain = false;
-        if (baselineBox) {
-          const baseVal = String(baselineBox.value ?? "").trim();
-          if (isPtr) {
-            shouldRemain = baseVal === expVal;
-          } else if (baseVal === "" && expVal === "") {
-            shouldRemain = true;
-          } else {
-            shouldRemain =
-              normalizeZeroDisplay(baseVal) === normalizeZeroDisplay(expVal);
-          }
-        }
+        const shouldRemain = baselineBox
+          ? boxValueMatchesSpec(simulator, baselineBox, exp).ok
+          : false;
         const message = `$n{${name}}'s value should ${shouldRemain ? "remain" : "be"} ${label}.`;
         if (shouldRemain) {
           return {
@@ -908,9 +897,12 @@ function createProgramTemplate(
     boxes?: BoxState[];
   } = {}): ProgramContext {
     const resolvedBoxes = boxes ?? [];
-    const topic = basicHintForBoxes(resolvedBoxes, state.boundary);
+    const normalizedBoxes = resolvedBoxes.map((box) =>
+      normalizeBoxValueForContext(simulator, box),
+    );
+    const topic = basicHintForBoxes(normalizedBoxes, state.boundary);
     return {
-      boxes: resolvedBoxes,
+      boxes: normalizedBoxes,
       basicHint: topic?.message ?? null,
       basicHintTopicIs: (kind, variable) =>
         !!topic &&
@@ -1213,6 +1205,7 @@ function createProgramTemplate(
       pager.pulseNext();
       updateInstructions();
       renderCodePaneForBoundary();
+      renderStage();
       pager.update();
     });
   }
@@ -1264,7 +1257,7 @@ function createProgramTemplate(
     },
     getNextLabel: (boundary) => {
       const atEnd = boundary >= total;
-      if (atEnd) return "Next Program";
+      if (atEnd) return endLabel;
       const group = groupForLine(boundary);
       if (group) {
         const start = group.startLine + 1;

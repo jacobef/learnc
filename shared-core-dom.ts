@@ -1,4 +1,5 @@
 import type { BoxState, BoxValue } from "./shared-core-utils.js";
+import { DEFAULT_NAV_ITEMS as NAV_ITEMS } from "./nav-items.js";
 import {
   doubleDisplayIsExact,
   formatDoubleDefault,
@@ -222,23 +223,8 @@ function isStepperTopVisible(codepane: Element | null): boolean {
   return !!entry.needsTop;
 }
 
-const DEFAULT_NAV_ITEMS: NavItem[] = [
-  { href: "index.html", label: "Home" },
-  { href: "program1.html", label: "1. Assignment I" },
-  { href: "program2.html", label: "2. Declaration" },
-  { href: "program3.html", label: "3. Initialization" },
-  { href: "program4.html", label: "4. Code Editing I" },
-  { href: "program5.html", label: "5. Code Editing II" },
-  { href: "program6.html", label: "6. Assignment II" },
-  { href: "program7.html", label: "7. Pointers" },
-  { href: "program8.html", label: "8. Dereferencing" },
-  { href: "dereferencing-quiz.html", label: "Dereferencing Quiz" },
-  { href: "program9.html", label: "9. Whitespace & Comments" },
-  { href: "program10.html", label: "10. Integer Arithmetic" },
-  { href: "program11.html", label: "11. Assignment III" },
-  { href: "program12.html", label: "12. Review" },
-  { href: "sandbox.html", label: "Sandbox" },
-];
+const DEFAULT_NAV_ITEMS: NavItem[] = NAV_ITEMS;
+
 
 function normalizeNavHref(href = ""): string {
   const clean = String(href || "")
@@ -246,6 +232,17 @@ function normalizeNavHref(href = ""): string {
     .split("?")[0];
   const parts = clean.split("/").filter(Boolean);
   return parts[parts.length - 1] || "index.html";
+}
+
+function getNavLabelForHref(href: string | null | undefined): string | null {
+  if (!href) return null;
+  const target = normalizeNavHref(href);
+  const match = DEFAULT_NAV_ITEMS.find(
+    (item) => normalizeNavHref(item?.href || "") === target,
+  );
+  const label = match?.label || "";
+  if (!label) return null;
+  return label.replace(/^\d+\.\s*/, "");
 }
 
 function currentNavHref(): string {
@@ -314,7 +311,12 @@ function ensureBaseLayout({
   if (!wrap.isConnected) {
     const mount = document.body;
     const firstScript = mount?.querySelector("script");
-    const anchor = main?.parentElement === mount ? main : nav?.parentElement === mount ? nav : null;
+    const anchor =
+      main?.parentElement === mount
+        ? main
+        : nav?.parentElement === mount
+          ? nav
+          : null;
     if (mount) {
       if (anchor) mount.insertBefore(wrap, anchor);
       else if (firstScript) mount.insertBefore(wrap, firstScript);
@@ -330,11 +332,94 @@ function ensureBaseLayout({
   if (nav.nextElementSibling !== main) {
     wrap.insertBefore(nav, main);
   }
+  requestAnimationFrame(() => {
+    ensureNavSelectionVisible(nav);
+    bindNavScrollIndicators(nav);
+  });
   return {
     wrap: wrap as HTMLElement,
     nav: nav as HTMLElement,
     main: main as HTMLElement,
   };
+}
+
+function bindNavScrollIndicators(nav: HTMLElement | null) {
+  if (!nav || nav.dataset.scrollIndicatorsBound === "true") return;
+  nav.dataset.scrollIndicatorsBound = "true";
+  const update = () => {
+    adjustNavHeight(nav);
+    updateNavScrollIndicators(nav);
+  };
+  nav.addEventListener("scroll", update, { passive: true });
+  window.addEventListener("resize", update, { passive: true });
+  update();
+}
+
+function adjustNavHeight(nav: HTMLElement | null) {
+  if (!nav) return;
+  const links = [...nav.querySelectorAll("a")];
+  if (!links.length) return;
+  const first = links[0];
+  if (!(first instanceof HTMLElement)) return;
+  const rect = first.getBoundingClientRect();
+  if (!rect.height) return;
+  const style = window.getComputedStyle(first);
+  const marginTop = parseFloat(style.marginTop) || 0;
+  const marginBottom = parseFloat(style.marginBottom) || 0;
+  const itemHeight = rect.height + marginTop + marginBottom;
+  const maxHeight = window.innerHeight * 0.8;
+  const halfItem = itemHeight * 0.5;
+  const count = Math.max(0, Math.floor((maxHeight - halfItem) / itemHeight));
+  const roundedHeight = Math.max(
+    halfItem,
+    Math.min(maxHeight, count * itemHeight + halfItem),
+  );
+  const fullHeight = Math.min(maxHeight, nav.scrollHeight);
+  const activeIndex = links.findIndex((link) =>
+    link.classList.contains("active"),
+  );
+  const nearBottom = activeIndex >= links.length - 2;
+  const remainder = nav.scrollHeight - roundedHeight;
+  const targetHeight =
+    nearBottom || remainder < itemHeight ? fullHeight : roundedHeight;
+  nav.style.height = `${Math.round(targetHeight)}px`;
+}
+
+function updateNavScrollIndicators(nav: HTMLElement | null) {
+  if (!nav) return;
+  const maxScroll = Math.max(0, nav.scrollHeight - nav.clientHeight);
+  const top = Math.max(0, nav.scrollTop);
+  nav.classList.toggle("nav-scroll-top", top > 4);
+  nav.classList.toggle("nav-scroll-bottom", top < maxScroll - 4);
+}
+
+function ensureNavSelectionVisible(nav: HTMLElement | null) {
+  if (!nav) return;
+  const links = [...nav.querySelectorAll("a")];
+  if (!links.length) return;
+  const activeIndex = links.findIndex((link) =>
+    link.classList.contains("active"),
+  );
+  if (activeIndex < 0) return;
+  const active = links[activeIndex];
+  const next = links[activeIndex + 1] || active;
+  const nextNext = links[activeIndex + 2] || next;
+  const top = Math.min(active.offsetTop, next.offsetTop, nextNext.offsetTop);
+  const bottom = Math.max(
+    active.offsetTop + active.offsetHeight,
+    next.offsetTop + next.offsetHeight,
+    nextNext.offsetTop + nextNext.offsetHeight,
+  );
+  const padding = 8;
+  const viewTop = nav.scrollTop;
+  const viewBottom = viewTop + nav.clientHeight;
+  if (top < viewTop + padding) {
+    nav.scrollTop = Math.max(0, top - padding);
+    return;
+  }
+  if (bottom > viewBottom - padding) {
+    nav.scrollTop = Math.max(0, bottom - nav.clientHeight + padding);
+  }
 }
 
 function initStepperTopControls() {
@@ -406,7 +491,8 @@ function renderCodePane(
   for (let i = 0; i < lines.length; i++) {
     const lr = el('<div class="line"></div>');
     const ln = el(`<div class="ln">${i + 1}</div>`);
-    const src = el(`<div class="src">${lines[i]}</div>`);
+    const src = el('<div class="src"></div>');
+    src.textContent = lines[i];
     if (i < doneBoundary) lr.classList.add("done");
     const inProgressRange =
       progressRangeStart !== null &&
@@ -450,6 +536,48 @@ function watchNameStack(node: HTMLElement | null): void {
         .querySelectorAll<HTMLElement>(".vbox")
         .forEach((box) => updateNameStackSpacing(box));
     });
+  }
+}
+
+function adjustValueOverflow(node: HTMLElement | null): void {
+  if (!node) return;
+  if (!node.isConnected) return;
+  const valueEl = node.querySelector(".value") as HTMLElement | null;
+  const cell = node.querySelector(".cell") as HTMLElement | null;
+  if (!valueEl || !cell) return;
+  let baseHeight = Number(node.dataset.baseHeight);
+  if (!baseHeight) {
+    const computed = parseFloat(getComputedStyle(node).height || "");
+    baseHeight =
+      Number.isFinite(computed) && computed > 0
+        ? computed
+        : node.getBoundingClientRect().height;
+    if (!baseHeight) baseHeight = 200;
+    node.dataset.baseHeight = String(baseHeight);
+  }
+  let baseNameStackTop = Number(node.dataset.baseNameStackTop);
+  if (!baseNameStackTop) {
+    const rawTop = getComputedStyle(node).getPropertyValue("--name-stack-top");
+    const parsedTop = parseFloat(rawTop || "");
+    baseNameStackTop =
+      Number.isFinite(parsedTop) && parsedTop > 0 ? parsedTop : 160;
+    node.dataset.baseNameStackTop = String(baseNameStackTop);
+  }
+  const valueHeight = Math.ceil(valueEl.scrollHeight);
+  const measuredCellHeight = Math.ceil(cell.getBoundingClientRect().height);
+  const expectedCellHeight = Math.ceil(baseHeight - 92);
+  const extra = Math.max(0, valueHeight - expectedCellHeight + 56);
+  const nextHeight = Math.ceil(baseHeight + extra);
+  const nextNameTop = Math.ceil(baseNameStackTop + extra);
+  const currentHeight = parseFloat(node.style.height || "") || baseHeight;
+  if (Math.abs(currentHeight - nextHeight) >= 1) {
+    node.style.height = `${nextHeight}px`;
+  }
+  node.style.setProperty("--name-stack-top", `${nextNameTop}px`);
+  updateNameStackSpacing(node);
+  const nextCellHeight = Math.ceil(cell.getBoundingClientRect().height);
+  if (Math.abs(nextCellHeight - measuredCellHeight) >= 1) {
+    requestAnimationFrame(() => adjustValueOverflow(node));
   }
 }
 
@@ -512,11 +640,42 @@ function vbox({
     </div>
   `);
 
-  if (editable) {
-    const valueEl = node.querySelector(".value") as HTMLElement | null;
-    if (valueEl) {
-      valueEl.setAttribute("contenteditable", "true");
-      disableAutoText(valueEl);
+  const valueEl = node.querySelector(".value") as HTMLElement | null;
+  const scheduleAdjust = () => {
+    if ((node.dataset.adjustPending || "") === "true") return;
+    node.dataset.adjustPending = "true";
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        node.dataset.adjustPending = "false";
+        if (!node.isConnected) return;
+        adjustValueOverflow(node);
+      });
+    });
+  };
+
+  if (valueEl) {
+    valueEl.dataset.rawValue = rawValue.trim();
+  }
+
+  if (editable && valueEl) {
+    valueEl.setAttribute("contenteditable", "true");
+    disableAutoText(valueEl);
+    valueEl.addEventListener("input", () => {
+      const raw = valueEl.textContent || "";
+      const text = raw.replace(/\s+/g, "");
+      valueEl.dataset.rawValue = raw.trim();
+      if (!text) {
+        valueEl.classList.add("placeholder", "muted");
+        valueEl.dataset.empty = "true";
+        valueEl.textContent = "";
+      } else {
+        valueEl.classList.remove("placeholder", "muted");
+        delete valueEl.dataset.empty;
+      }
+      scheduleAdjust();
+    });
+    if (emptyDisplay) {
+      valueEl.dataset.empty = "true";
     }
     if (allowTypeEdit) {
       const typeEl = node.querySelector(".type") as HTMLElement | null;
@@ -527,18 +686,16 @@ function vbox({
       }
     }
     node.querySelectorAll(".name-text").forEach((el) => {
-      if (allowNameEdit) {
-        el.setAttribute("contenteditable", "true");
-        el.classList.add("editable");
-        disableAutoText(el);
-      }
+      if (!allowNameEdit || !(el instanceof HTMLElement)) return;
+      el.setAttribute("contenteditable", "true");
+      el.classList.add("editable");
+      disableAutoText(el);
     });
   }
-  const valueEl = node.querySelector(".value") as HTMLElement | null;
   const toggleEl = node.querySelector(
     ".double-toggle",
   ) as HTMLButtonElement | null;
-  if (valueEl && isDoubleScalar && !emptyDisplay) {
+  if (valueEl && isDoubleScalar && !emptyDisplay && !editable) {
     const parsed = parseDoubleValueWithSign(rawValue);
     if (parsed != null) {
       const nanSign = parsed.nanSign;
@@ -587,15 +744,13 @@ function vbox({
           if (nextApprox && !nextExact) valueEl.dataset.doubleApprox = "true";
           else delete valueEl.dataset.doubleApprox;
           toggleEl.textContent = nextExact ? "short" : "exact";
-          toggleEl.setAttribute(
-            "aria-pressed",
-            nextExact ? "true" : "false",
-          );
+          toggleEl.setAttribute("aria-pressed", nextExact ? "true" : "false");
           if (nextApprox) {
             toggleEl.classList.remove("hidden");
           } else {
             toggleEl.classList.add("hidden");
           }
+          scheduleAdjust();
         });
       }
       if (valueEl.isContentEditable) {
@@ -623,6 +778,7 @@ function vbox({
               toggleEl.classList.add("hidden");
             }
           }
+          scheduleAdjust();
         });
       }
     }
@@ -630,6 +786,7 @@ function vbox({
     toggleEl.classList.add("hidden");
   }
   watchNameStack(node);
+  requestAnimationFrame(scheduleAdjust);
   return node;
 }
 
@@ -659,13 +816,21 @@ function readBoxState(root: Element | null): BoxState | null {
   const valText = txt(valEl);
   const typeText = txt(root.querySelector(".type"));
   const parsedType = parseType(typeText || "int");
+  const placeholderEmpty =
+    valEl?.classList?.contains("placeholder") && valText === "";
+  const fallbackRawValue = placeholderEmpty ? "" : valText;
+  const storedRawValue =
+    valEl instanceof HTMLElement ? valEl.dataset.rawValue : undefined;
   const rawValue =
-    valEl?.classList?.contains("placeholder") && valText === "" ? "" : valText;
+    storedRawValue !== undefined ? storedRawValue : fallbackRawValue;
   let value = normalizeZeroDisplay(rawValue);
+  const valueEditable =
+    valEl instanceof HTMLElement && valEl.isContentEditable;
   if (
     parsedType.base === "double" &&
     parsedType.depth === 0 &&
-    valEl instanceof HTMLElement
+    valEl instanceof HTMLElement &&
+    !valueEditable
   ) {
     const stored = valEl.dataset.doubleValue;
     if (stored != null && stored !== "") value = stored;
@@ -676,6 +841,7 @@ function readBoxState(root: Element | null): BoxState | null {
     address: txt(root.querySelector(".address")),
     type: typeText,
     value,
+    rawValue,
     name: names[0] || "",
     names,
     nameEditable: !!root.querySelector(".name-text[contenteditable]"),
@@ -849,13 +1015,22 @@ function applyOtherNames(
   opts: {
     onToggle?: (() => void) | null;
     shownAddrs?: Set<string> | null;
+    sourceBoxes?: BoxState[] | null;
+    cleanupShownAddrs?: boolean;
   } = {},
 ) {
   if (!root) return;
-  const { onToggle = null, shownAddrs = null } = opts;
+  const {
+    onToggle = null,
+    shownAddrs = null,
+    sourceBoxes = null,
+    cleanupShownAddrs = true,
+  } = opts;
   const boxes = collectStageBoxes(root);
   const currentAddrs = new Set(boxes.map((box) => boxAddress(box)));
-  const otherNamesByAddr = buildOtherNamesMap(boxes);
+  const aliasSource =
+    Array.isArray(sourceBoxes) && sourceBoxes.length ? sourceBoxes : boxes;
+  const otherNamesByAddr = buildOtherNamesMap(aliasSource);
   const useShownSet = shownAddrs && typeof shownAddrs.has === "function";
   const getShown = (node: HTMLElement, addr: string) =>
     useShownSet ? shownAddrs.has(addr) : node.dataset.otherNames === "on";
@@ -905,7 +1080,7 @@ function applyOtherNames(
     updateOtherNamesList(node, filtered, showAliases);
     if (toggle) placeOtherNamesToggle(node, toggle, showAliases);
   });
-  if (useShownSet) {
+  if (useShownSet && cleanupShownAddrs) {
     shownAddrs.forEach((addr) => {
       if (!currentAddrs.has(addr)) shownAddrs.delete(addr);
     });
@@ -1032,7 +1207,7 @@ function restoreWorkspace(
       const node = makeAnswerBox({
         name: st.name,
         type: st.type,
-        value: st.value,
+        value: st.rawValue ?? st.value,
         address: st.address ?? null,
         editable,
         deletable: allowDelete,
@@ -1054,7 +1229,7 @@ function restoreWorkspace(
       const node = makeAnswerBox({
         name: d.name,
         type: d.type,
-        value: d.value,
+        value: d.rawValue ?? d.value,
         address: d.address ?? null,
         editable,
         deletable: allowDelete,
@@ -1082,6 +1257,7 @@ function parseStyledText(text: string): StyledSegment[] {
     a: "addr",
     c: "code",
     b: "btn",
+    i: "italic",
   };
   const raw = String(text ?? "");
   const out: StyledSegment[] = [];
@@ -1135,6 +1311,9 @@ function renderParts(panel: Element | null, parts: RenderParts) {
       if (role === "btn") {
         node = document.createElement("span");
         node.className = "btn-ref";
+      } else if (role === "italic") {
+        node = document.createElement("em");
+        node.className = "tok-italic";
       } else {
         node = document.createElement("code");
         node.className = role ? `tok-${role}` : "";
@@ -1261,6 +1440,16 @@ function createStepper({
       const isLocked = locked(current);
       const lockTag = isLocked ? " 🔒" : "";
       const labelPrefix = badgeTag ? `${badgeTag} ` : "";
+      const adjustLabelForBadge = (label: string) => {
+        if (badge !== "note") return label;
+        if (label.startsWith("Run line ")) {
+          return `Solve line ${label.slice("Run line ".length)}`;
+        }
+        if (label.startsWith("Run lines ")) {
+          return `Solve lines ${label.slice("Run lines ".length)}`;
+        }
+        return label;
+      };
       const customLabel =
         typeof getNextLabel === "function"
           ? getNextLabel(current, total, atEnd)
@@ -1273,8 +1462,9 @@ function createStepper({
         });
       } else {
         const label = customLabel || `Run line ${current + 1}`;
+        const adjustedLabel = adjustLabelForBadge(label);
         nextButtons.forEach((btn) => {
-          btn.textContent = `${labelPrefix}${label}${lockTag} ▶`;
+          btn.textContent = `${labelPrefix}${adjustedLabel}${lockTag} ▶`;
           btn.dataset.stepperEnd = "false";
         });
       }
@@ -1623,6 +1813,7 @@ export {
   disableBoxEditing,
   ensureBaseLayout,
   flashStatus,
+  getNavLabelForHref,
   isMobileViewport,
   isStepperTopVisible,
   makeAnswerBox,

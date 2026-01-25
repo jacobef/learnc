@@ -1,4 +1,4 @@
-import { createSimpleSimulator, createStepper, ensureBaseLayout, flashStatus, randAddr, renderParts, resolveActiveNavItem, setPartsContent, typeInfo, vbox, } from "./shared-core.js";
+import { createSimpleSimulator, createStepper, ensureBaseLayout, flashStatus, getNavLabelForHref, randAddr, renderParts, resolveActiveNavItem, setPartsContent, typeInfo, vbox, } from "./shared-core.js";
 function collectCodeEditorElements(root = document) {
     return {
         instructionsEl: root.querySelector('[data-role="code-instructions"]'),
@@ -120,7 +120,13 @@ function ensureCodeEditorLayout({ textareaMinLines, }) {
     };
 }
 function createCodeEditorTemplate(config) {
-    const { startCode = "", targetState = [], textareaMinLines, allowNewLines = true, hints = null, instructions = "", next = null, } = config;
+    const { startCode = "", targetState = [], textareaMinLines, allowNewLines = true, hints = null, instructions = "", next = null, isLast = false, } = config;
+    const endLabel = (() => {
+        if (isLast)
+            return "Finish";
+        const label = getNavLabelForHref(next);
+        return label ? `Next: ${label}` : "Next Program";
+    })();
     const failConfig = (message) => {
         alert(message);
         throw new Error(message);
@@ -630,7 +636,7 @@ function createCodeEditorTemplate(config) {
         root: codeRoot || editor?.closest(".panel") || document.body,
         lines: 0,
         nextPage: next || null,
-        endLabel: "Next Program",
+        endLabel,
         getBoundary: () => 0,
         setBoundary: () => { },
         onAfterChange: render,

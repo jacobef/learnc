@@ -202,6 +202,117 @@ export function formatValueForType(value, type, opts = {}) {
     }
     return raw;
 }
+function isNumericLiteralTokens(tokens) {
+    if (tokens.length === 1) {
+        return tokens[0]?.type === "number";
+    }
+    if (tokens.length === 2) {
+        return (tokens[0]?.type === "sym" &&
+            tokens[0]?.value === "-" &&
+            tokens[1]?.type === "number");
+    }
+    return false;
+}
+export function parseValueExpressionInput(evaluator, raw) {
+    const trimmed = String(raw ?? "").trim();
+    if (!trimmed)
+        return { kind: "empty", trimmed: "" };
+    const tokens = evaluator.tokenizeProgram(trimmed);
+    if (!tokens.length)
+        return { kind: "invalid", trimmed };
+    if (tokens.some((t) => t.type === "unknown"))
+        return { kind: "invalid", trimmed };
+    if (!isNumericLiteralTokens(tokens))
+        return { kind: "invalid", trimmed };
+    const evaluated = evaluator.evaluateExpressionText(trimmed, []);
+    if ("error" in evaluated)
+        return { kind: "invalid", trimmed };
+    const result = evaluated.result;
+    if (!result || result.kind !== "rvalue")
+        return { kind: "invalid", trimmed };
+    const type = String(result.type || "").trim();
+    if (!type)
+        return { kind: "invalid", trimmed };
+    return {
+        kind: "ok",
+        trimmed,
+        type,
+        value: result.value,
+        nanSign: result.nanSign,
+    };
+}
+export function valueTypeMatchesTarget(valueType, targetType) {
+    const target = parseType(targetType || "int");
+    const value = parseType(valueType || "int");
+    if (!target.base || !value.base)
+        return false;
+    const targetIsDouble = target.base === "double" && target.depth === 0;
+    if (targetIsDouble)
+        return value.base === "double";
+    return value.base !== "double";
+}
+function doubleValuesEqual(actualValue, expectedValue, actualNanSign, expectedNanSign) {
+    if (Number.isNaN(actualValue) || Number.isNaN(expectedValue)) {
+        if (!Number.isNaN(actualValue) || !Number.isNaN(expectedValue))
+            return false;
+        return (actualNanSign ?? 1) === (expectedNanSign ?? 1);
+    }
+    return Object.is(actualValue, expectedValue);
+}
+export function parsedValuesEqual(actual, expected) {
+    if (actual.kind !== "ok" || expected.kind !== "ok")
+        return false;
+    const expectedBase = parseType(expected.type).base;
+    if (expectedBase === "double") {
+        return doubleValuesEqual(Number(actual.value), Number(expected.value), actual.nanSign, expected.nanSign);
+    }
+    try {
+        return BigInt(actual.value) === BigInt(expected.value);
+    }
+    catch {
+        return false;
+    }
+}
+export function normalizeBoxValueForContext(evaluator, box) {
+    const raw = box.rawValue ?? box.value ?? "";
+    const parsed = parseValueExpressionInput(evaluator, raw);
+    if (parsed.kind !== "ok") {
+        return { ...box, value: parsed.trimmed };
+    }
+    const value = formatValueForType(parsed.value, parsed.type, {
+        nanSign: parsed.nanSign,
+    });
+    return { ...box, value };
+}
+export function boxValueMatchesSpec(evaluator, actual, expected) {
+    const targetType = String(expected.type || actual.type || "").trim();
+    const actualRaw = actual.rawValue ?? actual.value ?? "";
+    const expectedRaw = expected.value ?? "";
+    const actualTrimmed = String(actualRaw ?? "").trim();
+    const expectedTrimmed = String(expectedRaw ?? "").trim();
+    if (actualTrimmed === "" || expectedTrimmed === "") {
+        const ok = actualTrimmed === "" && expectedTrimmed === "";
+        return { ok, normalized: "" };
+    }
+    const parsedActual = parseValueExpressionInput(evaluator, actualRaw);
+    const parsedExpected = parseValueExpressionInput(evaluator, expectedRaw);
+    if (parsedActual.kind !== "ok" || parsedExpected.kind !== "ok") {
+        return { ok: false, normalized: "" };
+    }
+    if (!valueTypeMatchesTarget(parsedActual.type, targetType)) {
+        return { ok: false, normalized: "" };
+    }
+    if (!valueTypeMatchesTarget(parsedExpected.type, targetType)) {
+        return { ok: false, normalized: "" };
+    }
+    const ok = parsedValuesEqual(parsedActual, parsedExpected);
+    if (!ok)
+        return { ok: false, normalized: "" };
+    const normalized = formatValueForType(parsedExpected.value, targetType, {
+        nanSign: parsedExpected.nanSign,
+    });
+    return { ok: true, normalized };
+}
 export function stripLineComments(src = "") {
     let out = "";
     let i = 0;

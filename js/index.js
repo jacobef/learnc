@@ -8,7 +8,7 @@ import { ensureBaseLayout } from "./shared-core.js";
     const intro = document.createElement("div");
     intro.className = "intro";
     const mainCopy = document.createElement("p");
-    mainCopy.appendChild(document.createTextNode("This is an unfinished, work-in-progress tutorial that teaches the C programming language. I'll try to update it with a new program every other day or so."));
+    mainCopy.appendChild(document.createTextNode("This is an unfinished, work-in-progress tutorial that teaches the C programming language."));
     mainCopy.appendChild(document.createElement("br"));
     mainCopy.appendChild(document.createTextNode('Treat it like a puzzle game; you might not understand certain elements the first time you see them. For example, an "address" first appears on the 1st page, but is not relevant until the 7th page.'));
     mainCopy.appendChild(document.createElement("br"));
@@ -21,7 +21,7 @@ import { ensureBaseLayout } from "./shared-core.js";
     mobileNote.appendChild(document.createTextNode("It's a bit rough on mobile at the moment, sorry!"));
     mobileNote.appendChild(document.createElement("br"));
     const updated = document.createElement("i");
-    updated.textContent = "Site last updated January 16, 2026";
+    updated.textContent = "Site last updated January 19, 2026";
     intro.appendChild(mainCopy);
     intro.appendChild(mobileNote);
     intro.appendChild(updated);
@@ -32,7 +32,7 @@ import { ensureBaseLayout } from "./shared-core.js";
         const sidebarState = document.body.classList.contains("sidebar-collapsed")
             ? "0"
             : "1";
-        const startUrl = new URL("program1.html", window.location.href);
+        const startUrl = new URL("1-assignment-i.html", window.location.href);
         startUrl.searchParams.set("sidebar", sidebarState);
         startLink.href = startUrl.toString();
     };

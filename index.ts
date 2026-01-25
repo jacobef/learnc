@@ -14,7 +14,7 @@ import { ensureBaseLayout } from "./shared-core.js";
   const mainCopy = document.createElement("p");
   mainCopy.appendChild(
     document.createTextNode(
-      "This is an unfinished, work-in-progress tutorial that teaches the C programming language. I'll try to update it with a new program every other day or so.",
+      "This is an unfinished, work-in-progress tutorial that teaches the C programming language.",
     ),
   );
   mainCopy.appendChild(document.createElement("br"));
@@ -41,7 +41,7 @@ import { ensureBaseLayout } from "./shared-core.js";
   mobileNote.appendChild(document.createElement("br"));
 
   const updated = document.createElement("i");
-  updated.textContent = "Site last updated January 16, 2026";
+  updated.textContent = "Site last updated January 19, 2026";
 
   intro.appendChild(mainCopy);
   intro.appendChild(mobileNote);
@@ -55,7 +55,7 @@ import { ensureBaseLayout } from "./shared-core.js";
     const sidebarState = document.body.classList.contains("sidebar-collapsed")
       ? "0"
       : "1";
-    const startUrl = new URL("program1.html", window.location.href);
+    const startUrl = new URL("1-assignment-i.html", window.location.href);
     startUrl.searchParams.set("sidebar", sidebarState);
     startLink.href = startUrl.toString();
   };

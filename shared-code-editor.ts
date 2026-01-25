@@ -6,6 +6,7 @@ import {
   disableBoxEditing,
   ensureBaseLayout,
   flashStatus,
+  getNavLabelForHref,
   makeAnswerBox,
   randAddr,
   readBoxState,
@@ -68,6 +69,7 @@ interface CodeEditorConfig {
   hints?: CodeEditorPartsSpec;
   instructions?: string;
   next?: string | null;
+  isLast?: boolean;
 }
 
 interface CodeEditorState {
@@ -241,7 +243,13 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     hints = null,
     instructions = "",
     next = null,
+    isLast = false,
   } = config;
+  const endLabel = (() => {
+    if (isLast) return "Finish";
+    const label = getNavLabelForHref(next);
+    return label ? `Next: ${label}` : "Next Program";
+  })();
 
   const failConfig = (message: string): never => {
     alert(message);
@@ -782,7 +790,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     root: codeRoot || editor?.closest(".panel") || document.body,
     lines: 0,
     nextPage: next || null,
-    endLabel: "Next Program",
+    endLabel,
     getBoundary: () => 0,
     setBoundary: () => {},
     onAfterChange: render,

@@ -350,14 +350,51 @@ export function createSimpleSimulator(
       if (/[0-9]/.test(ch)) {
         const startCol = col;
         let j = i;
-        while (j < src.length && /[0-9]/.test(src[j])) j++;
-        if (src[j] === "." && /[0-9]/.test(src[j + 1] || "")) {
-          j++;
+        if (src[j] === "0" && (src[j + 1] === "x" || src[j + 1] === "X")) {
+          j += 2;
+          while (j < src.length && /[0-9a-fA-F]/.test(src[j])) j++;
+        } else {
           while (j < src.length && /[0-9]/.test(src[j])) j++;
+          if (src[j] === ".") {
+            j++;
+            while (j < src.length && /[0-9]/.test(src[j])) j++;
+          }
+          if (src[j] === "e" || src[j] === "E") {
+            let k = j + 1;
+            if (src[k] === "+" || src[k] === "-") k++;
+            const expStart = k;
+            while (k < src.length && /[0-9]/.test(src[k])) k++;
+            if (k > expStart) {
+              j = k;
+            }
+          }
         }
         tokens.push({
           type: "number",
           value: src.slice(i, j),
+          line,
+          col: startCol,
+        });
+        col += j - i;
+        i = j;
+        continue;
+      }
+      if (ch === "." && /[0-9]/.test(src[i + 1] || "")) {
+        const startCol = col;
+        let j = i + 1;
+        while (j < src.length && /[0-9]/.test(src[j])) j++;
+        if (src[j] === "e" || src[j] === "E") {
+          let k = j + 1;
+          if (src[k] === "+" || src[k] === "-") k++;
+          const expStart = k;
+          while (k < src.length && /[0-9]/.test(src[k])) k++;
+          if (k > expStart) {
+            j = k;
+          }
+        }
+        tokens.push({
+          type: "number",
+          value: `0${src.slice(i, j)}`,
           line,
           col: startCol,
         });
@@ -416,15 +453,39 @@ export function createSimpleSimulator(
   const INT64_MIN = -9223372036854775808n;
   const INT64_MAX = 9223372036854775807n;
 
-  function classifyNumericLiteral(value: string): "ok" | "compile" | "ub" {
-    try {
-      const n = BigInt(String(value));
-      if (n < INT64_MIN || n > INT64_MAX) return "compile";
-      if (n < INT32_MIN || n > INT32_MAX) return "ub";
-      return "ok";
-    } catch {
-      return "compile";
+  function parseIntegerLiteral(value: string): bigint | null {
+    const raw = String(value ?? "").trim();
+    if (!raw) return null;
+    if (raw.startsWith("0x") || raw.startsWith("0X")) {
+      const digits = raw.slice(2);
+      if (!digits || !/^[0-9a-fA-F]+$/.test(digits)) return null;
+      try {
+        return BigInt(`0x${digits}`);
+      } catch {
+        return null;
+      }
     }
+    if (raw.length > 1 && raw.startsWith("0")) {
+      if (!/^0[0-7]+$/.test(raw)) return null;
+      try {
+        return BigInt(`0o${raw.slice(1)}`);
+      } catch {
+        return null;
+      }
+    }
+    try {
+      return BigInt(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  function classifyNumericLiteral(value: string): "ok" | "compile" | "ub" {
+    const n = parseIntegerLiteral(value);
+    if (n == null) return "compile";
+    if (n < INT64_MIN || n > INT64_MAX) return "compile";
+    if (n < INT32_MIN || n > INT32_MAX) return "ub";
+    return "ok";
   }
 
   function isSpecialFloatLiteral(value: string): boolean {
@@ -432,7 +493,7 @@ export function createSimpleSimulator(
   }
 
   function isDecimalLiteral(value: string): boolean {
-    return String(value).includes(".");
+    return /[.eE]/.test(String(value));
   }
 
   function numericLiteralErrorForType(
@@ -990,7 +1051,14 @@ export function createSimpleSimulator(
             };
           }
           const literalBase = literalStatus === "ub" ? "long" : "int";
-          return makeRvalue(BigInt(String(node.value)), literalBase);
+          const intValue = parseIntegerLiteral(node.value);
+          if (intValue == null) {
+            return {
+              error: "That number is too large to represent.",
+              kind: "compile",
+            };
+          }
+          return makeRvalue(intValue, literalBase);
         } catch {
           return {
             error: "That number is too large to represent.",

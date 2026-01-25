@@ -76,6 +76,8 @@ type SandboxState = {
   boundary: number | null;
   lineCount: number;
   otherNamesShown: Set<string>;
+  lastState: BoxState[] | null;
+  exprOtherNamesShown: Set<string>;
 };
 
 const sandbox: SandboxState = {
@@ -88,6 +90,8 @@ const sandbox: SandboxState = {
   boundary: null,
   lineCount: 0,
   otherNamesShown: new Set(),
+  lastState: null,
+  exprOtherNamesShown: new Set(),
 };
 
 const simulator = createSimpleSimulator({
@@ -487,6 +491,7 @@ function renderStage() {
   } else if (statementInfo.midStatement && !inBlockComment) {
     displayOutcome = { kind: "mid", state: null };
   }
+  sandbox.lastState = outcome.state;
   stage.appendChild(renderState("", displayOutcome.state, displayOutcome.kind));
   applyOtherNames(stage, {
     shownAddrs: sandbox.otherNamesShown,
@@ -517,18 +522,43 @@ function renderExpression(outcome: { kind: string; state: BoxState[] | null }) {
     return;
   }
   const { result } = evaluated;
-  const node = vbox({
-    address: result.address ? String(result.address) : "—",
-    type: result.type || "int",
-    value: formatValueForType(result.value ?? "", result.type || "int", {
-      nanSign: result.nanSign,
-    }),
-    name: undefined,
-    editable: false,
-  });
-  if (!result.address) node.classList.add("no-addr");
-  node.classList.add("no-name");
+  const match =
+    result.kind === "lvalue"
+      ? (outcome.state || []).find(
+          (box) => String(box.address) === String(result.address),
+        )
+      : null;
+  const node = match
+    ? vbox({
+        address: match.address ?? undefined,
+        type: match.type,
+        value: match.value,
+        name: match.name,
+        editable: false,
+      })
+    : vbox({
+        address: result.address ? String(result.address) : "—",
+        type: result.type || "int",
+        value: formatValueForType(result.value ?? "", result.type || "int", {
+          nanSign: result.nanSign,
+        }),
+        name: "",
+        editable: false,
+      });
+  if (match && String(match.value ?? "") === "") {
+    node.querySelector(".value")?.classList.add("placeholder", "muted");
+  }
+  if (!match && !result.address) node.classList.add("no-addr");
+  if (!match) node.classList.add("no-name");
   exprResult.appendChild(node);
+  if (match) {
+    applyOtherNames(exprResult, {
+      shownAddrs: sandbox.exprOtherNamesShown,
+      onToggle: refreshOtherNames,
+      sourceBoxes: outcome.state || [],
+      cleanupShownAddrs: false,
+    });
+  }
 }
 
 function updateStepperControls(
@@ -657,11 +687,20 @@ function renderState(
 
 function refreshOtherNames() {
   const stage = $('[data-role="sandbox-stage"]') as HTMLElement | null;
-  if (!stage) return;
-  applyOtherNames(stage, {
-    shownAddrs: sandbox.otherNamesShown,
-    onToggle: refreshOtherNames,
-  });
+  if (stage) {
+    applyOtherNames(stage, {
+      shownAddrs: sandbox.otherNamesShown,
+      onToggle: refreshOtherNames,
+    });
+  }
+  if (exprResult) {
+    applyOtherNames(exprResult, {
+      shownAddrs: sandbox.exprOtherNamesShown,
+      onToggle: refreshOtherNames,
+      sourceBoxes: sandbox.lastState || [],
+      cleanupShownAddrs: false,
+    });
+  }
 }
 
 function getLineHeightPx() {
