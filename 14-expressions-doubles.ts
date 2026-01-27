@@ -117,7 +117,7 @@ createExpressionEvalTemplate({
       expression: "2/4.0",
       editable: false,
       instructions:
-        "When an arithmetic operation is performed with a $t{double} and an $t{int}, the operation is performed as if both were $t{double}s. Here, $c{2/4.0} is performed as $c{2.0/4.0}, which is $v{0.5}.",
+        "When an operation is performed on a $t{double} and an $t{int}, the operation is performed as if both were $t{double}s. Here, $c{2/4.0} is performed as $c{2.0/4.0}, which is $v{0.5}.",
     },
     {
       expression: "0.5+4/8",

@@ -41,6 +41,7 @@ type ProgramHint = (ctx: ProgramContext) => Part | null | undefined;
 interface ProgramWorkspaceConfig {
   showOtherNames?: boolean;
   allowVariableCreation?: boolean;
+  allowVariableDeletion?: boolean;
 }
 
 interface NormalizedRunGroup {
@@ -65,11 +66,11 @@ interface ProgramContext {
   boxes: BoxState[];
   basicHint: string | null;
   basicHintTopicIs: (
-    kind: "count" | "name" | "type" | "value",
+    kind: "count" | "removed" | "name" | "type" | "value",
     variable?: string,
   ) => boolean;
   _basicHintTopic?: {
-    kind: "count" | "name" | "type" | "value";
+    kind: "count" | "removed" | "name" | "type" | "value";
     variable?: string;
   } | null;
   boxNamed: (name: string) => BoxState | undefined;
@@ -283,6 +284,9 @@ function createProgramTemplate(
     return label ? `Next: ${label}` : "Next Program";
   })();
   const showOtherNames = !!(workspace && workspace.showOtherNames);
+  const allowVariableDeletion = !!(
+    workspace && workspace.allowVariableDeletion
+  );
   const failConfig = (message: string): never => {
     alert(message);
     throw new Error(message);
@@ -744,7 +748,7 @@ function createProgramTemplate(
     boundary: number,
   ): {
     message: string;
-    kind: "count" | "name" | "type" | "value";
+    kind: "count" | "removed" | "name" | "type" | "value";
     variable?: string;
   } | null {
     const actual = Array.isArray(boxes) ? boxes : [];
@@ -762,6 +766,21 @@ function createProgramTemplate(
     const missingExpectedNames = expectedNames.filter(
       (name) => !actualNameSet.has(name),
     );
+    const baselineAtBoundary = baselineForBoundary(boundary);
+    const baselineNames = new Set(
+      baselineAtBoundary.map(nameOf).filter(Boolean),
+    );
+
+    const removedName = missingExpectedNames.find((name) =>
+      baselineNames.has(name),
+    );
+    if (removedName) {
+      return {
+        message: `This line shouldn't remove the $n{${removedName}} variable.`,
+        kind: "removed",
+        variable: removedName,
+      };
+    }
 
     if (actualCount < expectedCount) {
       const expectedName = missingExpectedNames[0] || expectedNames[0] || "";
@@ -775,8 +794,6 @@ function createProgramTemplate(
     }
 
     if (actualCount === expectedCount && missingExpectedNames.length > 0) {
-      const baseline = baselineForBoundary(boundary);
-      const baselineNames = new Set(baseline.map(nameOf).filter(Boolean));
       const expectedNewNames = expectedNames.filter(
         (name) => !baselineNames.has(name),
       );
@@ -799,8 +816,9 @@ function createProgramTemplate(
     }
 
     if (actualCount > expectedCount) {
-      const baseline = baselineForBoundary(boundary);
-      const baselineCount = Array.isArray(baseline) ? baseline.length : 0;
+      const baselineCount = Array.isArray(baselineAtBoundary)
+        ? baselineAtBoundary.length
+        : 0;
       const expectedNew = Math.max(0, expectedCount - baselineCount);
       const actualNew = Math.max(0, actualCount - baselineCount);
       const extraCount = Math.max(0, actualNew - expectedNew);
@@ -830,9 +848,8 @@ function createProgramTemplate(
       };
     }
 
-    const baseline = baselineForBoundary(boundary);
     const baselineByName = new Map<string, BoxState>();
-    baseline.forEach((box) => {
+    baselineAtBoundary.forEach((box) => {
       const name = nameOf(box);
       if (name && !baselineByName.has(name)) baselineByName.set(name, box);
     });
@@ -1007,7 +1024,7 @@ function createProgramTemplate(
 
     const wrap = restoreWorkspace(state.ws[state.boundary], defaults, {
       editable,
-      deletable: false,
+      deletable: allowVariableDeletion,
       allowNameEdit: null,
       allowTypeEdit: null,
     });

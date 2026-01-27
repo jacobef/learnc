@@ -135,6 +135,7 @@ function createProgramTemplate(config) {
         return label ? `Next: ${label}` : "Next Program";
     })();
     const showOtherNames = !!(workspace && workspace.showOtherNames);
+    const allowVariableDeletion = !!(workspace && workspace.allowVariableDeletion);
     const failConfig = (message) => {
         alert(message);
         throw new Error(message);
@@ -535,6 +536,16 @@ function createProgramTemplate(config) {
         const actualNames = actual.map(nameOf);
         const actualNameSet = new Set(actualNames.filter(Boolean));
         const missingExpectedNames = expectedNames.filter((name) => !actualNameSet.has(name));
+        const baselineAtBoundary = baselineForBoundary(boundary);
+        const baselineNames = new Set(baselineAtBoundary.map(nameOf).filter(Boolean));
+        const removedName = missingExpectedNames.find((name) => baselineNames.has(name));
+        if (removedName) {
+            return {
+                message: `This line shouldn't remove the $n{${removedName}} variable.`,
+                kind: "removed",
+                variable: removedName,
+            };
+        }
         if (actualCount < expectedCount) {
             const expectedName = missingExpectedNames[0] || expectedNames[0] || "";
             if (!expectedName)
@@ -546,8 +557,6 @@ function createProgramTemplate(config) {
             };
         }
         if (actualCount === expectedCount && missingExpectedNames.length > 0) {
-            const baseline = baselineForBoundary(boundary);
-            const baselineNames = new Set(baseline.map(nameOf).filter(Boolean));
             const expectedNewNames = expectedNames.filter((name) => !baselineNames.has(name));
             if (expectedNewNames.length > 1) {
                 return {
@@ -566,8 +575,9 @@ function createProgramTemplate(config) {
             };
         }
         if (actualCount > expectedCount) {
-            const baseline = baselineForBoundary(boundary);
-            const baselineCount = Array.isArray(baseline) ? baseline.length : 0;
+            const baselineCount = Array.isArray(baselineAtBoundary)
+                ? baselineAtBoundary.length
+                : 0;
             const expectedNew = Math.max(0, expectedCount - baselineCount);
             const actualNew = Math.max(0, actualCount - baselineCount);
             const extraCount = Math.max(0, actualNew - expectedNew);
@@ -597,9 +607,8 @@ function createProgramTemplate(config) {
                 kind: "count",
             };
         }
-        const baseline = baselineForBoundary(boundary);
         const baselineByName = new Map();
-        baseline.forEach((box) => {
+        baselineAtBoundary.forEach((box) => {
             const name = nameOf(box);
             if (name && !baselineByName.has(name))
                 baselineByName.set(name, box);
@@ -753,7 +762,7 @@ function createProgramTemplate(config) {
         }
         const wrap = restoreWorkspace(state.ws[state.boundary], defaults, {
             editable,
-            deletable: false,
+            deletable: allowVariableDeletion,
             allowNameEdit: null,
             allowTypeEdit: null,
         });

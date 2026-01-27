@@ -882,7 +882,7 @@ button:hover:not([disabled]) {
     position: absolute;
     left: 0;
     right: 0;
-    top: 6px;
+    bottom: 6px;
     height: 2px;
     background: linear-gradient(
         90deg,

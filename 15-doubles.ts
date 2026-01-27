@@ -20,6 +20,20 @@ createProgramTemplate({
         "When a $t{double} is assigned to an $t{int}, the mathematical value is preserved. In this case, $v{4} is simply converted to $v{4.0}.",
     },
     {
+      code: "circus = 5.0/2.0;\n",
+      editable: true,
+      hints: (ctx) => {
+        if (ctx.basicHintTopicIs("value", "circus")) {
+          const circus = ctx.boxNamed("circus")!;
+          if (circus.value === "2" || circus.value === "2.0") {
+            return "Both operands are $t{double}s, so keep the decimal part: $v{2.5}.";
+          }
+          return "Compute $c{5.0/2.0} using $t{double} division.";
+        }
+        return ctx.basicHint;
+      },
+    },
+    {
       code: "circus = 5/2;\n",
       editable: true,
       hints: (ctx) => {
@@ -32,20 +46,6 @@ createProgramTemplate({
             return "$c{5/2} evalutes to $v{2}, then assigning it to a $t{double} makes it $v{2.0}. Enter $v{2.0}, not $v{2}.";
           }
           return "Compute $c{5/2} using $t{int} division, then convert the result to a $t{double} (since $n{circus} is a $t{double}).";
-        }
-        return ctx.basicHint;
-      },
-    },
-    {
-      code: "circus = 5.0/2.0;\n",
-      editable: true,
-      hints: (ctx) => {
-        if (ctx.basicHintTopicIs("value", "circus")) {
-          const circus = ctx.boxNamed("circus")!;
-          if (circus.value === "2" || circus.value === "2.0") {
-            return "Both operands are $t{double}s, so keep the decimal part: $v{2.5}.";
-          }
-          return "Compute $c{5.0/2.0} using $t{double} division.";
         }
         return ctx.basicHint;
       },
@@ -141,7 +141,6 @@ createProgramTemplate({
       },
     },
   ],
-  next: "sandbox.html?finished=1",
-  isLast: true,
+  next: "16-blocks.html",
   workspace: { allowVariableCreation: true },
 });

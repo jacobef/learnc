@@ -92,14 +92,37 @@ export function createSimpleSimulator(opts = {}) {
                 }
                 continue;
             }
+            if (ch === "<" || ch === ">") {
+                if (src[i + 1] === ch) {
+                    tokens.push({ type: "sym", value: `${ch}${ch}`, line, col });
+                    i += 2;
+                    col += 2;
+                }
+                else if (src[i + 1] === "=") {
+                    tokens.push({ type: "sym", value: `${ch}=`, line, col });
+                    i += 2;
+                    col += 2;
+                }
+                else {
+                    tokens.push({ type: "sym", value: ch, line, col });
+                    i++;
+                    col++;
+                }
+                continue;
+            }
             if (ch === "+" ||
                 ch === "-" ||
                 ch === "*" ||
                 ch === "/" ||
                 ch === "&" ||
+                ch === "|" ||
+                ch === "^" ||
+                ch === "~" ||
                 ch === ";" ||
                 ch === "(" ||
-                ch === ")") {
+                ch === ")" ||
+                ch === "{" ||
+                ch === "}") {
                 tokens.push({ type: "sym", value: ch, line, col });
                 i++;
                 col++;
@@ -115,7 +138,11 @@ export function createSimpleSimulator(opts = {}) {
                 tokens.push({
                     type: special
                         ? "number"
-                        : ident === "int" || ident === "long" || ident === "double"
+                        : ident === "int" ||
+                            ident === "long" ||
+                            ident === "double" ||
+                            ident === "if" ||
+                            ident === "else"
                             ? "kw"
                             : "ident",
                     value: special || ident,
@@ -204,6 +231,27 @@ export function createSimpleSimulator(opts = {}) {
                 return true;
         }
         return false;
+    }
+    function isBraceToken(tok) {
+        return tok.type === "sym" && (tok.value === "{" || tok.value === "}");
+    }
+    function addDeclaredName(scopes, declared, name) {
+        declared.add(name);
+        const current = scopes[scopes.length - 1];
+        if (current)
+            current.add(name);
+    }
+    function popScope(scopes, declared, state) {
+        if (scopes.length <= 1) {
+            return { state, error: "Unexpected }." };
+        }
+        const frame = scopes.pop();
+        if (!frame || frame.size === 0)
+            return { state };
+        const namesToRemove = new Set(frame);
+        const nextState = state.filter((box) => !namesToRemove.has(box.name));
+        frame.forEach((name) => declared.delete(name));
+        return { state: nextState };
     }
     function resolveDeclType(stars, baseType = "int") {
         if (!Number.isFinite(stars) || stars < 0)
@@ -329,6 +377,35 @@ export function createSimpleSimulator(opts = {}) {
             return { error: "That number is too large for int.", kind: "ub" };
         return null;
     }
+    function integerRangeForBase(base) {
+        if (base === "int")
+            return { min: INT32_MIN, max: INT32_MAX };
+        if (base === "long")
+            return { min: INT64_MIN, max: INT64_MAX };
+        return null;
+    }
+    function integerOverflowError(base) {
+        const article = base === "int" ? "an" : "a";
+        return {
+            error: `That calculation overflows ${article} ${base}.`,
+            kind: "ub",
+        };
+    }
+    function checkIntegerRange(value, base) {
+        const range = integerRangeForBase(base);
+        if (!range)
+            return null;
+        if (value < range.min || value > range.max)
+            return integerOverflowError(base);
+        return null;
+    }
+    function bitWidthForBase(base) {
+        if (base === "int")
+            return 32;
+        if (base === "long")
+            return 64;
+        return null;
+    }
     function isRefCompatible(targetType, refType) {
         const { base: targetBase, depth: targetDepth } = parseType(targetType);
         const { base: refBase, depth: refDepth } = parseType(refType);
@@ -369,7 +446,7 @@ export function createSimpleSimulator(opts = {}) {
                         depth++;
                         continue;
                     }
-                    if (tok.value === "+" || tok.value === "-") {
+                    if (tok.value === "+" || tok.value === "-" || tok.value === "~") {
                         continue;
                     }
                     if (allowPointers && (tok.value === "*" || tok.value === "&")) {
@@ -390,7 +467,16 @@ export function createSimpleSimulator(opts = {}) {
                         tok.value === "-" ||
                         tok.value === "*" ||
                         tok.value === "/" ||
-                        tok.value === "==") {
+                        tok.value === "==" ||
+                        tok.value === "<<" ||
+                        tok.value === ">>" ||
+                        tok.value === "<" ||
+                        tok.value === "<=" ||
+                        tok.value === ">" ||
+                        tok.value === ">=" ||
+                        tok.value === "&" ||
+                        tok.value === "^" ||
+                        tok.value === "|") {
                         expectingOperand = true;
                         continue;
                     }
@@ -553,13 +639,12 @@ export function createSimpleSimulator(opts = {}) {
             return false;
         if (tokens.some((t) => t.type === "unknown"))
             return false;
-        if (!allowPointers &&
-            tokens.some((t) => t.type === "sym" && (t.value === "*" || t.value === "&")))
-            return false;
         if (tokens.length === 1) {
             const t0 = tokens[0];
             if (t0.type === "kw" &&
                 (t0.value === "int" || t0.value === "long" || t0.value === "double"))
+                return true;
+            if (t0.type === "sym" && (t0.value === "{" || t0.value === "}"))
                 return true;
             if (t0.type === "ident") {
                 if (allowIntPrefix &&
@@ -607,7 +692,7 @@ export function createSimpleSimulator(opts = {}) {
             }
             if (tok.type === "sym" && tok.value === "(") {
                 idx++;
-                const expr = parseEquality();
+                const expr = parseBitwiseOr();
                 if (!expr)
                     return null;
                 const close = next();
@@ -624,6 +709,7 @@ export function createSimpleSimulator(opts = {}) {
                 tok.type === "sym" &&
                 (tok.value === "+" ||
                     tok.value === "-" ||
+                    tok.value === "~" ||
                     (allowPointers && (tok.value === "*" || tok.value === "&")))) {
                 idx++;
                 const expr = parseUnary();
@@ -669,13 +755,15 @@ export function createSimpleSimulator(opts = {}) {
             }
             return left;
         }
-        function parseEquality() {
+        function parseShift() {
             let left = parseAddSub();
             if (!left)
                 return null;
             while (true) {
                 const tok = next();
-                if (!tok || tok.type !== "sym" || tok.value !== "==")
+                if (!tok ||
+                    tok.type !== "sym" ||
+                    (tok.value !== "<<" && tok.value !== ">>"))
                     break;
                 idx++;
                 const right = parseAddSub();
@@ -685,7 +773,92 @@ export function createSimpleSimulator(opts = {}) {
             }
             return left;
         }
-        const expr = parseEquality();
+        function parseRelational() {
+            let left = parseShift();
+            if (!left)
+                return null;
+            while (true) {
+                const tok = next();
+                if (!tok ||
+                    tok.type !== "sym" ||
+                    (tok.value !== "<" &&
+                        tok.value !== "<=" &&
+                        tok.value !== ">" &&
+                        tok.value !== ">="))
+                    break;
+                idx++;
+                const right = parseShift();
+                if (!right)
+                    return null;
+                left = { kind: "binary", op: tok.value, left, right };
+            }
+            return left;
+        }
+        function parseEquality() {
+            let left = parseRelational();
+            if (!left)
+                return null;
+            while (true) {
+                const tok = next();
+                if (!tok || tok.type !== "sym" || tok.value !== "==")
+                    break;
+                idx++;
+                const right = parseRelational();
+                if (!right)
+                    return null;
+                left = { kind: "binary", op: tok.value, left, right };
+            }
+            return left;
+        }
+        function parseBitwiseAnd() {
+            let left = parseEquality();
+            if (!left)
+                return null;
+            while (true) {
+                const tok = next();
+                if (!tok || tok.type !== "sym" || tok.value !== "&")
+                    break;
+                idx++;
+                const right = parseEquality();
+                if (!right)
+                    return null;
+                left = { kind: "binary", op: tok.value, left, right };
+            }
+            return left;
+        }
+        function parseBitwiseXor() {
+            let left = parseBitwiseAnd();
+            if (!left)
+                return null;
+            while (true) {
+                const tok = next();
+                if (!tok || tok.type !== "sym" || tok.value !== "^")
+                    break;
+                idx++;
+                const right = parseBitwiseAnd();
+                if (!right)
+                    return null;
+                left = { kind: "binary", op: tok.value, left, right };
+            }
+            return left;
+        }
+        function parseBitwiseOr() {
+            let left = parseBitwiseXor();
+            if (!left)
+                return null;
+            while (true) {
+                const tok = next();
+                if (!tok || tok.type !== "sym" || tok.value !== "|")
+                    break;
+                idx++;
+                const right = parseBitwiseXor();
+                if (!right)
+                    return null;
+                left = { kind: "binary", op: tok.value, left, right };
+            }
+            return left;
+        }
+        const expr = parseBitwiseOr();
         if (!expr)
             return null;
         return { expr, nextIndex: idx, hasVar: exprHasVar(expr) };
@@ -876,12 +1049,33 @@ export function createSimpleSimulator(opts = {}) {
                 const scalar = coerceScalarResult(rhs, requireValue);
                 if (isScalarError(scalar))
                     return scalar;
+                if (node.op === "~") {
+                    if (scalar.base === "double") {
+                        return {
+                            error: "Bitwise operators require integer values.",
+                            kind: "compile",
+                        };
+                    }
+                    const value = scalar.value;
+                    const overflow = checkIntegerRange(value, scalar.base);
+                    if (overflow)
+                        return overflow;
+                    return makeRvalue(~value, scalar.base);
+                }
                 if (node.op === "+")
                     return makeRvalue(scalar.value, scalar.base, 0, "", scalar.nanSign);
                 if (node.op === "-") {
                     if (scalar.base === "double" && Number.isNaN(scalar.value)) {
                         const flipped = scalar.nanSign === -1 ? 1 : -1;
                         return makeRvalue(scalar.value, scalar.base, 0, "", flipped);
+                    }
+                    if (scalar.base !== "double") {
+                        const value = scalar.value;
+                        const range = integerRangeForBase(scalar.base);
+                        if (range && value === range.min) {
+                            return integerOverflowError(scalar.base);
+                        }
+                        return makeRvalue(-value, scalar.base);
                     }
                     return makeRvalue(-scalar.value, scalar.base);
                 }
@@ -906,14 +1100,93 @@ export function createSimpleSimulator(opts = {}) {
                 const leftValue = leftScalar.value;
                 const rightValue = rightScalar.value;
                 const useDouble = leftScalar.base === "double" || rightScalar.base === "double";
-                if (node.op === "==") {
-                    return makeRvalue(useDouble
-                        ? toNumber(leftValue) === toNumber(rightValue)
-                            ? 1n
-                            : 0n
-                        : leftValue === rightValue
-                            ? 1n
-                            : 0n, "int");
+                if (node.op === "==" ||
+                    node.op === "<" ||
+                    node.op === "<=" ||
+                    node.op === ">" ||
+                    node.op === ">=") {
+                    let result = false;
+                    if (useDouble) {
+                        const leftNum = toNumber(leftValue);
+                        const rightNum = toNumber(rightValue);
+                        if (Number.isNaN(leftNum) || Number.isNaN(rightNum)) {
+                            result = false;
+                        }
+                        else if (node.op === "==") {
+                            result = leftNum === rightNum;
+                        }
+                        else if (node.op === "<") {
+                            result = leftNum < rightNum;
+                        }
+                        else if (node.op === "<=") {
+                            result = leftNum <= rightNum;
+                        }
+                        else if (node.op === ">") {
+                            result = leftNum > rightNum;
+                        }
+                        else if (node.op === ">=") {
+                            result = leftNum >= rightNum;
+                        }
+                    }
+                    else {
+                        const leftBig = leftValue;
+                        const rightBig = rightValue;
+                        if (node.op === "==")
+                            result = leftBig === rightBig;
+                        else if (node.op === "<")
+                            result = leftBig < rightBig;
+                        else if (node.op === "<=")
+                            result = leftBig <= rightBig;
+                        else if (node.op === ">")
+                            result = leftBig > rightBig;
+                        else if (node.op === ">=")
+                            result = leftBig >= rightBig;
+                    }
+                    return makeRvalue(result ? 1n : 0n, "int");
+                }
+                if (node.op === "<<" ||
+                    node.op === ">>" ||
+                    node.op === "&" ||
+                    node.op === "^" ||
+                    node.op === "|") {
+                    if (useDouble) {
+                        return {
+                            error: "Bitwise operators require integer values.",
+                            kind: "compile",
+                        };
+                    }
+                    const leftBig = leftValue;
+                    const rightBig = rightValue;
+                    const base = leftScalar.base === "long" || rightScalar.base === "long"
+                        ? "long"
+                        : "int";
+                    const width = bitWidthForBase(base);
+                    const leftOverflow = checkIntegerRange(leftBig, base);
+                    if (leftOverflow)
+                        return leftOverflow;
+                    const rightOverflow = checkIntegerRange(rightBig, base);
+                    if (rightOverflow)
+                        return rightOverflow;
+                    if (node.op === "&") {
+                        return makeRvalue(leftBig & rightBig, base);
+                    }
+                    if (node.op === "^") {
+                        return makeRvalue(leftBig ^ rightBig, base);
+                    }
+                    if (node.op === "|") {
+                        return makeRvalue(leftBig | rightBig, base);
+                    }
+                    if (width == null || rightBig < 0n || rightBig >= BigInt(width)) {
+                        return { error: "That shift is undefined.", kind: "ub" };
+                    }
+                    if (node.op === "<<" && leftBig < 0n) {
+                        return { error: "That shift is undefined.", kind: "ub" };
+                    }
+                    const shifted = node.op === "<<" ? leftBig << rightBig : leftBig >> rightBig;
+                    const overflow = checkIntegerRange(shifted, base);
+                    if (overflow)
+                        return overflow;
+                    return makeRvalue(shifted, base);
                 }
                 if (node.op === "/" && !useDouble && rightValue === 0n)
                     return { error: "Division by 0 is undefined.", kind: "ub" };
@@ -944,6 +1217,15 @@ export function createSimpleSimulator(opts = {}) {
                 else {
                     const leftBig = leftValue;
                     const rightBig = rightValue;
+                    const base = leftScalar.base === "long" || rightScalar.base === "long"
+                        ? "long"
+                        : "int";
+                    if (node.op === "/" && rightBig === -1n) {
+                        const range = integerRangeForBase(base);
+                        if (range && leftBig === range.min) {
+                            return integerOverflowError(base);
+                        }
+                    }
                     if (node.op === "+")
                         value = leftBig + rightBig;
                     else if (node.op === "-")
@@ -957,6 +1239,9 @@ export function createSimpleSimulator(opts = {}) {
                             error: "That expression is not valid here.",
                             kind: "compile",
                         };
+                    const overflow = checkIntegerRange(value, base);
+                    if (overflow)
+                        return overflow;
                 }
                 const base = useDouble
                     ? "double"
@@ -1143,6 +1428,12 @@ export function createSimpleSimulator(opts = {}) {
     function parseStatementTokens(tokens) {
         if (!tokens.length)
             return null;
+        if (tokens.length === 1 && tokens[0].type === "sym") {
+            if (tokens[0].value === "{")
+                return { kind: "blockStart" };
+            if (tokens[0].value === "}")
+                return { kind: "blockEnd" };
+        }
         if (tokens[0].type === "kw") {
             const baseType = tokens[0].value;
             if (baseType !== "int" && baseType !== "long" && baseType !== "double")
@@ -1900,9 +2191,11 @@ export function createSimpleSimulator(opts = {}) {
             return "Block comment is not closed.";
         if (tokens.some((t) => t.type === "unknown"))
             return "That line has a character that does not belong in a declaration or assignment.";
-        if (!allowPointers &&
-            tokens.some((t) => t.type === "sym" && (t.value === "*" || t.value === "&"))) {
-            return "Pointers are not supported here.";
+        if (tokens[0].type === "kw" && tokens[0].value === "if") {
+            return "If statements are not supported yet.";
+        }
+        if (tokens[0].type === "kw" && tokens[0].value === "else") {
+            return "Else statements are not supported yet.";
         }
         if (tokens[0].type === "kw") {
             const baseType = tokens[0].value;
@@ -1964,16 +2257,15 @@ export function createSimpleSimulator(opts = {}) {
                 kind: "compile",
             };
         }
-        if (!allowPointers &&
-            tokens.some((t) => t.type === "sym" && (t.value === "*" || t.value === "&"))) {
-            return { error: "Pointers are not supported here.", kind: "compile" };
-        }
         const parsed = parseStatementTokens(tokens);
         if (!parsed) {
             return {
                 error: describeTokensError(tokens, seenDecl),
                 kind: "compile",
             };
+        }
+        if (parsed.kind === "blockStart" || parsed.kind === "blockEnd") {
+            return { parsed, next: state };
         }
         if (parsed.kind === "decl" ||
             parsed.kind === "declAssign" ||
@@ -2519,6 +2811,25 @@ export function createSimpleSimulator(opts = {}) {
                 startLine = tok.line;
                 continue;
             }
+            if (isBraceToken(tok)) {
+                if (current.length) {
+                    parts.push({
+                        tokens: current,
+                        startLine: current[0]?.line ?? startLine,
+                        endLine: current[current.length - 1].line,
+                        hasSemicolon: false,
+                    });
+                    current = [];
+                }
+                parts.push({
+                    tokens: [tok],
+                    startLine: tok.line,
+                    endLine: tok.line,
+                    hasSemicolon: true,
+                });
+                startLine = tok.line;
+                continue;
+            }
             if (!current.length)
                 startLine = tok.line;
             current.push(tok);
@@ -2612,6 +2923,10 @@ export function createSimpleSimulator(opts = {}) {
                     i += 2;
                     continue;
                 }
+                if (ch === "{" || ch === "}") {
+                    i += 1;
+                    continue;
+                }
                 if (!/\s/.test(ch)) {
                     sawCode = true;
                     lastCodeIndex = i;
@@ -2619,6 +2934,11 @@ export function createSimpleSimulator(opts = {}) {
                 i += 1;
             }
             if (!sawCode) {
+                patched.push(raw);
+                return;
+            }
+            const clean = stripAllComments(raw).trim();
+            if (!clean || clean === "{" || clean === "}") {
                 patched.push(raw);
                 return;
             }
@@ -2645,7 +2965,9 @@ export function createSimpleSimulator(opts = {}) {
             if (!part.tokens.length)
                 continue;
             const parsed = parseStatementTokens(part.tokens);
-            if (parsed && part.hasSemicolon)
+            if (!parsed)
+                continue;
+            if (part.hasSemicolon)
                 statements.push(parsed);
         }
         return statements;
@@ -2662,7 +2984,8 @@ export function createSimpleSimulator(opts = {}) {
         let currentTokens = [];
         let state = [];
         const alloc = opts.alloc || ((type) => String(randAddr(type || "int")));
-        const seenDecl = new Set();
+        const declared = new Set();
+        const scopes = [new Set()];
         const escapeHtml = (value) => String(value)
             .replace(/&/g, "&amp;")
             .replace(/</g, "&lt;")
@@ -2688,49 +3011,82 @@ export function createSimpleSimulator(opts = {}) {
         };
         for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
             let status = "";
+            const applyStatementTokens = (tokensToValidate, endTok, commit = true) => {
+                if (!tokensToValidate.length)
+                    return;
+                const result = validateStatement(tokensToValidate, state, declared, alloc);
+                if ("error" in result) {
+                    status = "invalid";
+                    errors.set(endTok.line, result.error);
+                    errorKinds.set(endTok.line, result.kind || "compile");
+                    const startLine = tokensToValidate[0]?.line;
+                    const startCol = tokensToValidate[0]?.col;
+                    const errKind = result.kind || "compile";
+                    if (errKind === "compile" &&
+                        Number.isFinite(startLine) &&
+                        endTok.line > startLine) {
+                        const snippet = toStatementSnippet(startLine, startCol, endTok.line);
+                        const text = `This statement spans multiple lines and has a compilation error. In C, a line break acts like a space, so your statement is ${snippet}.`;
+                        const html = `This statement spans multiple lines and has a compilation error. In C, a line break acts like a space, so your statement is <code class="tok-code">${escapeHtml(snippet)}</code>.`;
+                        info.set(endTok.line, { text, html });
+                    }
+                    return;
+                }
+                if (commit) {
+                    const startLine = tokensToValidate[0]?.line;
+                    const startCol = tokensToValidate[0]?.col;
+                    if (Number.isFinite(startLine) && endTok.line > startLine) {
+                        const snippet = toStatementSnippet(startLine, startCol, endTok.line);
+                        const text = `This statement spans multiple lines. In C, a line break acts like a space, so this statement is ${snippet}.`;
+                        const html = `This statement spans multiple lines. In C, a line break acts like a space, so this statement is <code class="tok-code">${escapeHtml(snippet)}</code>.`;
+                        info.set(endTok.line, { text, html });
+                    }
+                }
+                if (result.parsed.kind === "blockStart") {
+                    scopes.push(new Set());
+                    return;
+                }
+                if (result.parsed.kind === "blockEnd") {
+                    const popped = popScope(scopes, declared, result.next);
+                    if (popped.error) {
+                        status = "invalid";
+                        errors.set(endTok.line, popped.error);
+                        errorKinds.set(endTok.line, "compile");
+                        return;
+                    }
+                    state = popped.state;
+                    return;
+                }
+                if (!commit)
+                    return;
+                if (result.parsed.kind === "decl" ||
+                    result.parsed.kind === "declAssign" ||
+                    result.parsed.kind === "declAssignVar" ||
+                    result.parsed.kind === "declAssignRef" ||
+                    result.parsed.kind === "declAssignDeref" ||
+                    result.parsed.kind === "declAssignUnary") {
+                    addDeclaredName(scopes, declared, result.parsed.name);
+                }
+                state = result.next;
+            };
             while (tokenIndex < tokens.length &&
                 tokens[tokenIndex].line === lineIndex) {
                 const tok = tokens[tokenIndex];
                 if (tok.type === "sym" && tok.value === ";") {
                     if (currentTokens.length) {
-                        const result = validateStatement(currentTokens, state, seenDecl, alloc);
-                        if ("error" in result) {
-                            status = "invalid";
-                            errors.set(tok.line, result.error);
-                            errorKinds.set(tok.line, result.kind || "compile");
-                            const startLine = currentTokens[0]?.line;
-                            const startCol = currentTokens[0]?.col;
-                            const errKind = result.kind || "compile";
-                            if (errKind === "compile" &&
-                                Number.isFinite(startLine) &&
-                                tok.line > startLine) {
-                                const snippet = toStatementSnippet(startLine, startCol, tok.line);
-                                const text = `This statement spans multiple lines and has a compilation error. In C, a line break acts like a space, so your statement is ${snippet}.`;
-                                const html = `This statement spans multiple lines and has a compilation error. In C, a line break acts like a space, so your statement is <code class="tok-code">${escapeHtml(snippet)}</code>.`;
-                                info.set(tok.line, { text, html });
-                            }
-                        }
-                        else {
-                            const startLine = currentTokens[0]?.line;
-                            const startCol = currentTokens[0]?.col;
-                            if (Number.isFinite(startLine) && tok.line > startLine) {
-                                const snippet = toStatementSnippet(startLine, startCol, tok.line);
-                                const text = `This statement spans multiple lines. In C, a line break acts like a space, so this statement is ${snippet}.`;
-                                const html = `This statement spans multiple lines. In C, a line break acts like a space, so this statement is <code class="tok-code">${escapeHtml(snippet)}</code>.`;
-                                info.set(tok.line, { text, html });
-                            }
-                            if (result.parsed?.kind === "decl" ||
-                                result.parsed?.kind === "declAssign" ||
-                                result.parsed?.kind === "declAssignVar" ||
-                                result.parsed?.kind === "declAssignRef" ||
-                                result.parsed?.kind === "declAssignDeref" ||
-                                result.parsed?.kind === "declAssignUnary") {
-                                seenDecl.add(result.parsed.name);
-                            }
-                            state = result.next;
-                        }
+                        applyStatementTokens(currentTokens, tok);
                         currentTokens = [];
                     }
+                    tokenIndex++;
+                    continue;
+                }
+                if (isBraceToken(tok)) {
+                    if (currentTokens.length) {
+                        const endTok = currentTokens[currentTokens.length - 1];
+                        applyStatementTokens(currentTokens, endTok, false);
+                        currentTokens = [];
+                    }
+                    applyStatementTokens([tok], tok);
                     tokenIndex++;
                     continue;
                 }
@@ -2742,10 +3098,10 @@ export function createSimpleSimulator(opts = {}) {
                 if (lastLine === lineIndex) {
                     const lineText = lines[lineIndex] || "";
                     const allowIntPrefix = !/\s$/.test(lineText);
-                    const isPrefix = isStatementPrefix(currentTokens, seenDecl, allowIntPrefix);
+                    const isPrefix = isStatementPrefix(currentTokens, declared, allowIntPrefix);
                     if (!isPrefix) {
                         status = "invalid";
-                        errors.set(lineIndex, describeTokensError(currentTokens, seenDecl));
+                        errors.set(lineIndex, describeTokensError(currentTokens, declared));
                         errorKinds.set(lineIndex, "compile");
                     }
                 }
@@ -2792,13 +3148,25 @@ export function createSimpleSimulator(opts = {}) {
         const parts = splitStatements(tokens);
         let state = [];
         const alloc = opts.alloc || ((type) => String(randAddr(type || "int")));
-        const seenDecl = new Set();
+        const declared = new Set();
+        const scopes = [new Set()];
         for (const part of parts) {
             if (!part.tokens.length)
                 continue;
             const parsed = parseStatementTokens(part.tokens);
             if (!parsed)
                 return null;
+            if (parsed.kind === "blockStart" || parsed.kind === "blockEnd") {
+                if (parsed.kind === "blockStart") {
+                    scopes.push(new Set());
+                    continue;
+                }
+                const popped = popScope(scopes, declared, state);
+                if (popped.error)
+                    return null;
+                state = popped.state;
+                continue;
+            }
             if (!part.hasSemicolon)
                 return null;
             if (parsed.kind === "decl" ||
@@ -2807,9 +3175,8 @@ export function createSimpleSimulator(opts = {}) {
                 parsed.kind === "declAssignRef" ||
                 parsed.kind === "declAssignDeref" ||
                 parsed.kind === "declAssignUnary") {
-                if (seenDecl.has(parsed.name))
+                if (declared.has(parsed.name))
                     return null;
-                seenDecl.add(parsed.name);
             }
             const next = applyStatement(state, parsed, {
                 alloc,
@@ -2817,6 +3184,14 @@ export function createSimpleSimulator(opts = {}) {
             });
             if (!next)
                 return null;
+            if (parsed.kind === "decl" ||
+                parsed.kind === "declAssign" ||
+                parsed.kind === "declAssignVar" ||
+                parsed.kind === "declAssignRef" ||
+                parsed.kind === "declAssignDeref" ||
+                parsed.kind === "declAssignUnary") {
+                addDeclaredName(scopes, declared, parsed.name);
+            }
             state = next;
         }
         return state;

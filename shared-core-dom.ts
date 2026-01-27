@@ -1271,14 +1271,33 @@ function parseStyledText(text: string): StyledSegment[] {
     if (idx > i) out.push(raw.slice(i, idx));
     const key = raw[idx + 1];
     if (map[key] && raw[idx + 2] === "{") {
-      const end = raw.indexOf("}", idx + 3);
-      if (end > idx + 2) {
+      let j = idx + 3;
+      let foundEnd = false;
+      let text = "";
+      while (j < raw.length) {
+        const ch = raw[j];
+        if (ch === "\\" && j + 1 < raw.length) {
+          const next = raw[j + 1];
+          if (next === "{" || next === "}") {
+            text += next;
+            j += 2;
+            continue;
+          }
+        }
+        if (ch === "}") {
+          foundEnd = true;
+          break;
+        }
+        text += ch;
+        j += 1;
+      }
+      if (foundEnd) {
         out.push({
           kind: "tok",
           role: map[key],
-          text: raw.slice(idx + 3, end),
+          text,
         });
-        i = end + 1;
+        i = j + 1;
         continue;
       }
     }

@@ -41,7 +41,7 @@ import { ensureBaseLayout } from "./shared-core.js";
   mobileNote.appendChild(document.createElement("br"));
 
   const updated = document.createElement("i");
-  updated.textContent = "Site last updated January 25, 2026";
+  updated.textContent = "Site last updated January 26, 2026";
 
   intro.appendChild(mainCopy);
   intro.appendChild(mobileNote);
