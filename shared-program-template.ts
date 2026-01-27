@@ -711,23 +711,45 @@ function createProgramTemplate(
   }
 
   function runLabelForBoundary(boundary: number): string {
-    const nextStep = boundary + 1;
-    const needsSolve =
-      editableSet.has(nextStep) && !state.passes[nextStep];
-    const verb: "Run" | "Solve" = needsSolve ? "Solve" : "Run";
+    let nextStep = boundary + 1;
     const group = groupForLine(boundary);
     if (group) {
+      nextStep = group.endLine + 1;
+      const needsSolve =
+        editableSet.has(nextStep) && !state.passes[nextStep];
+      const verb: "Run" | "Solve" = needsSolve ? "Solve" : "Run";
       const start = group.startLine + 1;
       const end = group.endLine + 1;
       return formatRunLabel(start, end, true, verb);
     }
     const range = simulator.statementRangeForLine(statementMap, boundary);
     if (range && isMultiLineStatement(range)) {
+      nextStep = range.endLine + 1;
+      const needsSolve =
+        editableSet.has(nextStep) && !state.passes[nextStep];
+      const verb: "Run" | "Solve" = needsSolve ? "Solve" : "Run";
       const start = range.startLine + 1;
       const end = range.endLine + 1;
       return formatRunLabel(start, end, true, verb);
     }
+    const needsSolve =
+      editableSet.has(nextStep) && !state.passes[nextStep];
+    const verb: "Run" | "Solve" = needsSolve ? "Solve" : "Run";
     return `${verb} line ${boundary + 1} ▶`;
+  }
+
+  function nextBoundaryForStep(current: number): number {
+    const group = groupForLine(current);
+    if (group) {
+      return group.endLine + 1;
+    }
+    const ctx = getStatementContext(current);
+    if (ctx?.currentRange && isMultiLineStatement(ctx.currentRange)) {
+      if (ctx.midStatement || ctx.atStatementStart) {
+        return ctx.currentRange.endLine + 1;
+      }
+    }
+    return current + 1;
   }
 
   function formatNameList(names: string[]): string {
@@ -967,7 +989,7 @@ function createProgramTemplate(
         groupRange || statementRangeEndingAt(statementMap, state.boundary);
       if (range && isMultiLineStatement(range)) {
         progressRange = [range.startLine, range.endLine];
-        progressIndex = range.startLine;
+        progressIndex = range.endLine;
         doneBoundary = range.startLine;
       }
     }
@@ -1268,40 +1290,33 @@ function createProgramTemplate(
     onAfterChange: render,
     isStepLocked: (boundary) =>
       editableSet.has(boundary) && !state.passes[boundary],
-    getStepBadge: (step) => {
-      if (!editableSet.has(step)) return "";
-      return state.passes[step] ? "check" : "note";
+    getStepBadge: () => {
+      const nextBoundary = nextBoundaryForStep(state.boundary);
+      if (!editableSet.has(nextBoundary)) return "";
+      return state.passes[nextBoundary] ? "check" : "note";
     },
     getNextLabel: (boundary) => {
       const atEnd = boundary >= total;
       if (atEnd) return endLabel;
+      const nextBoundary = nextBoundaryForStep(boundary);
+      const needsSolve =
+        editableSet.has(nextBoundary) && !state.passes[nextBoundary];
+      const verb: "Run" | "Solve" = needsSolve ? "Solve" : "Run";
       const group = groupForLine(boundary);
       if (group) {
         const start = group.startLine + 1;
         const end = group.endLine + 1;
-        return formatRunLabel(start, end, false);
+        return formatRunLabel(start, end, false, verb);
       }
       const range = simulator.statementRangeForLine(statementMap, boundary);
       if (range && isMultiLineStatement(range)) {
         const start = range.startLine + 1;
         const end = range.endLine + 1;
-        return formatRunLabel(start, end, false);
+        return formatRunLabel(start, end, false, verb);
       }
-      return `Run line ${boundary + 1}`;
+      return `${verb} line ${boundary + 1}`;
     },
-    getNextBoundary: (current) => {
-      const group = groupForLine(current);
-      if (group) {
-        return group.endLine + 1;
-      }
-      const ctx = getStatementContext(current);
-      if (ctx?.currentRange && isMultiLineStatement(ctx.currentRange)) {
-        if (ctx.midStatement || ctx.atStatementStart) {
-          return ctx.currentRange.endLine + 1;
-        }
-      }
-      return current + 1;
-    },
+    getNextBoundary: (current) => nextBoundaryForStep(current),
     getPrevBoundary: (current) => {
       const prevGroup = groupForLine(current - 1);
       if (prevGroup) {

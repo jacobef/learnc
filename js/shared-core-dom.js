@@ -354,8 +354,13 @@ function renderCodePane(root, lines, boundary, opts = {}) {
             const maxIndex = Math.max(0, lines.length - 1);
             progressRangeStart = Math.max(0, Math.min(maxIndex, start));
             progressRangeEnd = Math.max(0, Math.min(maxIndex, end));
-            if (progressIndex < 0 && progressRangeStart != null)
+            if (typeof opts.progressIndex === "number" &&
+                Number.isFinite(opts.progressIndex)) {
+                progressIndex = Math.max(0, Math.min(lines.length - 1, opts.progressIndex));
+            }
+            else if (progressIndex < 0 && progressRangeStart != null) {
                 progressIndex = progressRangeStart;
+            }
         }
         else if (typeof opts.progressIndex === "number" &&
             Number.isFinite(opts.progressIndex)) {
