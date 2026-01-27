@@ -19,7 +19,7 @@ const streakEl = $('[data-role="quiz-streak"]') as HTMLElement | null;
 const checkBtn = $('[data-role="quiz-check"]') as HTMLButtonElement | null;
 const nextBtn = $('[data-role="quiz-next"]') as HTMLButtonElement | null;
 
-const NEXT_PAGE = "10-whitespace-comments.html";
+const NEXT_PAGE = "9-dereferencing-ii.html";
 const NEXT_LABEL = (() => {
   const label = getNavLabelForHref(NEXT_PAGE);
   return label ? `Next: ${label}` : "Next Program";
@@ -358,7 +358,7 @@ function resetAttempt() {
 function setPrompt(scenario: QuizScenario) {
   if (!instructions) return;
   const text =
-    "Click on the variable that the expression refers to, then press $b{Check}.\nGet 4 in a row correct to pass.";
+    "Click on the variable that the expression refers to, then press $b{Check}.\nGet 4 in a row correct to pass.\nIn general, $c{*X} refers to the variable whose address is $n{X}'s value.";
   setPartsContent(instructions, text);
 }
 

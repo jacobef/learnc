@@ -59,6 +59,6 @@ createProgramTemplate({
             },
         },
     ],
-    next: "8-dereferencing.html",
+    next: "8-dereferencing-i.html",
     workspace: { allowVariableCreation: true },
 });

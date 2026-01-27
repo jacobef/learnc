@@ -14,13 +14,13 @@ createProgramTemplate({
       code: "wolf = &deer;\n",
       editable: false,
       instructions:
-        "When $n{wolf} is assigned to $c{&deer}, $n{deer} gains an additional name. Use the $showAliasesButton button under $n{deer} to reveal this name.\n\nIn general, $n{*X} refers to the variable whose address is $n{X}'s value. In this case, $n{*wolf} refers to the variable whose address is $n{wolf}'s value, so $n{*wolf} refers to $n{deer}.",
+        "When $n{wolf} is assigned to $c{&deer}, $n{deer} gains an additional name. Use the $showAliasesButton button under $n{deer} to reveal this name.",
     },
     {
       code: "wolf = &hare;\n",
       editable: false,
       instructions:
-        "When $n{wolf} is assigned to $c{&hare}, the $n{*wolf} name moves from $n{deer} to $n{hare}. Use the $showAliasesButton button under $n{hare} to reveal it.\n\nTo understand why, recall that $n{*wolf} refers to the variable whose address is $n{wolf}'s value.\n\nWe'll see the relevance of this alternate name later in the code.",
+        "When $n{wolf} is assigned to $c{&hare}, the $n{*wolf} name moves from $n{deer} to $n{hare}.",
     },
     {
       code: "int** bear;\n",
@@ -30,7 +30,7 @@ createProgramTemplate({
       code: "bear = &wolf;\n",
       editable: false,
       instructions:
-        "$c{bear = &wolf;} adds the $n{*bear} name to $n{wolf}. It also adds a name to $n{hare}; use the $showAliasesButton button under $n{hare} to reveal it.\n\nTo understand why: $n{**bear} → $n{*(*bear)} → $n{*(wolf)} → $n{*wolf} → $n{hare}.\nMore concisely: $n{**bear} → $n{*wolf} → $n{hare}.",
+        "$c{bear = &wolf;} adds names to $n{wolf} and $n{hare}. Use the $showAliasesButton buttons under those variables to reveal them.",
     },
     {
       code: "int* fox = wolf;\n",
@@ -96,6 +96,6 @@ createProgramTemplate({
       },
     },
   ],
-  next: "9-dereferencing-quiz.html",
+  next: "10-whitespace-comments.html",
   workspace: { allowVariableCreation: true, showOtherNames: true },
 });
