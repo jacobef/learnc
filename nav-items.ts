@@ -18,6 +18,8 @@ const DEFAULT_NAV_ITEMS: NavItem[] = [
   { href: "14-expressions-doubles.html", label: "14. Expressions & Doubles" },
   { href: "15-doubles.html", label: "15. Doubles" },
   { href: "16-blocks.html", label: "16. Blocks" },
+  { href: "17-comparisons.html", label: "17. Comparisons" },
+  { href: "18-if.html", label: "18. If" },
   { href: "sandbox.html", label: "Sandbox" },
 ];
 

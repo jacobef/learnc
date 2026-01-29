@@ -154,7 +154,59 @@ function createProgramTemplate(config) {
         failConfig("Program steps must be a non-empty array.");
     }
     const stepInfos = [];
+    const stepByStartLine = new Map();
     const lineList = [];
+    const canRunWithAutoClosedBlocks = (text) => {
+        const tokens = simulator.tokenizeProgram(text);
+        let balance = 0;
+        tokens.forEach((tok) => {
+            if (tok.type !== "sym")
+                return;
+            if (tok.value === "{")
+                balance += 1;
+            else if (tok.value === "}")
+                balance -= 1;
+        });
+        if (balance <= 0)
+            return false;
+        const closers = "}\n".repeat(balance);
+        const patched = `${text}\n${closers}`;
+        const result = simulator.applyProgram(patched);
+        return Array.isArray(result);
+    };
+    const isIfHeaderPart = (part) => {
+        const tokens = part?.tokens;
+        if (!tokens || tokens.length < 2)
+            return false;
+        const first = tokens[0];
+        const second = tokens[1];
+        if (first.type !== "kw" || first.value !== "if")
+            return false;
+        if (second.type !== "sym" || second.value !== "(")
+            return false;
+        let depth = 0;
+        for (let i = 1; i < tokens.length; i++) {
+            const tok = tokens[i];
+            if (tok.type !== "sym")
+                continue;
+            if (tok.value === "(")
+                depth += 1;
+            if (tok.value === ")") {
+                depth -= 1;
+                if (depth === 0)
+                    return i === tokens.length - 1;
+                if (depth < 0)
+                    return false;
+            }
+        }
+        return false;
+    };
+    const isOpenBracePart = (part) => {
+        if (!part?.tokens?.length || part.tokens.length !== 1)
+            return false;
+        const tok = part.tokens[0];
+        return tok.type === "sym" && tok.value === "{";
+    };
     steps.forEach((step, index) => {
         if (!step || typeof step !== "object") {
             failConfig(`Step ${index + 1} must be an object.`);
@@ -182,8 +234,51 @@ function createProgramTemplate(config) {
         }
         const tokens = simulator.tokenizeProgram(step.code);
         const parts = simulator.splitStatements(tokens);
-        for (const part of parts) {
+        const stepStartLine = lineList.length;
+        const stepEndLine = stepStartLine + rawLines.length - 1;
+        const ifBlocks = simulator.buildIfStatementMap(parts, {
+            lastLine: Math.max(0, rawLines.length - 1),
+        });
+        const headerIndices = [];
+        parts.forEach((part, partIndex) => {
+            if (part.tokens.length && isIfHeaderPart(part)) {
+                headerIndices.push(partIndex);
+            }
+        });
+        const nonEmptyParts = parts.filter((part) => part.tokens.length > 0);
+        let ifHeaderOnly = false;
+        let ifHeaderHasOpenBrace = false;
+        if (headerIndices.length > 0) {
+            const headerOnlyCandidate = headerIndices.length === 1 &&
+                nonEmptyParts.every((part) => isIfHeaderPart(part) || isOpenBracePart(part));
+            if (headerOnlyCandidate) {
+                ifHeaderOnly = true;
+                ifHeaderHasOpenBrace = nonEmptyParts.some((part) => isOpenBracePart(part));
+            }
+            else {
+                const incompleteHeader = headerIndices.some((idx) => {
+                    const block = ifBlocks.map.get(idx);
+                    if (!block)
+                        return true;
+                    const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+                        ? parts[block.closeIndex].endLine
+                        : block.headerEndLine;
+                    if (!Number.isFinite(closeLine))
+                        return true;
+                    return stepStartLine + closeLine > stepEndLine;
+                });
+                if (incompleteHeader) {
+                    failConfig(`Step ${index + 1} contains an if statement that doesn't include its full block. Either include the full if statement in the step, or make the step only the if header (optionally with "{").`);
+                }
+            }
+        }
+        for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+            const part = parts[partIndex];
             if (part?.tokens?.length && !part.hasSemicolon) {
+                if (ifBlocks.map.has(partIndex))
+                    continue;
+                if (isIfHeaderPart(part))
+                    continue;
                 failConfig(`Step ${index + 1} contains an incomplete statement. Each step must be runnable on its own.`);
             }
         }
@@ -201,7 +296,10 @@ function createProgramTemplate(config) {
             hints: step.hints,
             editable: step.editable,
             scrollUp: step.scrollUp,
+            ifHeaderOnly,
+            ifHeaderHasOpenBrace,
         });
+        stepByStartLine.set(startLine, stepInfos[stepInfos.length - 1]);
     });
     if (stepInfos.some((step) => step.endLine < step.startLine)) {
         failConfig("Program steps must each contain at least one line.");
@@ -211,6 +309,7 @@ function createProgramTemplate(config) {
     const scrollUpByBoundary = new Map();
     const hintMap = new Map();
     const editableByBoundary = new Map();
+    const stepByBoundary = new Map();
     stepInfos.forEach((step) => {
         if (step.instructions !== undefined && step.instructions !== null) {
             instructionMap.set(step.boundary, step.instructions);
@@ -222,16 +321,20 @@ function createProgramTemplate(config) {
         if (step.editable) {
             editableByBoundary.set(step.boundary, step.startLine + 1);
         }
+        stepByBoundary.set(step.boundary, step);
     });
     const state = {
         boundary: 0,
         passes: {},
         ws: {},
         baseline: {},
+        branchPasses: {},
         allocBase: null,
         workspaceEl: null,
         lastInstructionKey: null,
         lastBoundary: -1,
+        lastBranchCorrectBoundary: null,
+        lastSkippedRanges: [],
     };
     function allocFactory() {
         if (state.allocBase == null)
@@ -265,16 +368,105 @@ function createProgramTemplate(config) {
         return endLine > startLine;
     }
     const statementMap = simulator.buildStatementMap(lineList);
+    const parts = statementMap.parts || [];
+    const totalLines = total;
+    const ifBlocks = simulator.buildIfStatementMap(parts, {
+        lastLine: Math.max(0, total - 1),
+    });
+    let activeBranchTargets = null;
+    let activeBranchExpected = null;
+    let branchSelectionActive = false;
+    let branchSelectionTarget = null;
+    let branchSelectionBoundary = null;
     const groupRanges = stepInfos.map((step) => ({
         startLine: step.startLine,
         endLine: step.endLine,
     }));
     const editableSet = new Set(editableByBoundary.keys());
+    const stepBoundaries = stepInfos.map((step) => step.boundary);
+    const allBoundaries = Array.from({ length: totalLines + 1 }, (_, i) => i);
+    const allBoundaryTargets = new Map();
+    allBoundaries.forEach((boundary) => {
+        allBoundaryTargets.set(boundary, boundary);
+    });
     const hasInitialInstructionsContent = typeof initialInstructions === "string" && initialInstructions.length > 0;
+    function partAt(index) {
+        if (!Number.isFinite(index))
+            return null;
+        if (index < 0 || index >= parts.length)
+            return null;
+        return parts[index] || null;
+    }
+    function stopIndexForBoundary(boundary) {
+        const target = Math.max(0, Math.min(totalLines, boundary));
+        if (!parts.length)
+            return 0;
+        const idx = parts.findIndex((part) => {
+            const end = part?.endLine;
+            return Number.isFinite(end) && end >= target;
+        });
+        return idx === -1 ? parts.length : idx;
+    }
+    function headerIndexForLine(lineIndex) {
+        if (!Number.isFinite(lineIndex))
+            return null;
+        let selected = null;
+        for (let i = 0; i < parts.length; i++) {
+            const block = ifBlocks.map.get(i);
+            if (!block)
+                continue;
+            if (block.headerStartLine !== lineIndex)
+                continue;
+            const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+                ? parts[block.closeIndex].endLine
+                : block.headerEndLine;
+            if (Number.isFinite(closeLine) && closeLine > lineIndex) {
+                selected = i;
+            }
+        }
+        return selected;
+    }
+    function normalizedStatementRange(lineIndex) {
+        const range = simulator.statementRangeForLine(statementMap, lineIndex);
+        if (range &&
+            typeof range.startLine === "number" &&
+            typeof range.endLine === "number" &&
+            Number.isFinite(range.startLine) &&
+            Number.isFinite(range.endLine) &&
+            range.endLine >= range.startLine) {
+            return { start: range.startLine, end: range.endLine };
+        }
+        return null;
+    }
+    function runRangeForBoundary(boundary) {
+        const groupRange = groupForLine(boundary);
+        if (groupRange && groupRange.endLine > groupRange.startLine) {
+            return { start: groupRange.startLine, end: groupRange.endLine };
+        }
+        const range = normalizedStatementRange(boundary);
+        if (range && range.end > range.start)
+            return range;
+        return null;
+    }
+    function executedRangeForBoundary(boundary) {
+        if (!Number.isFinite(boundary) || boundary <= 0)
+            return null;
+        const groupRange = groupRangeEndingAt(boundary);
+        if (groupRange && groupRange.endLine > groupRange.startLine) {
+            return { start: groupRange.startLine, end: groupRange.endLine };
+        }
+        const range = normalizedStatementRange(boundary - 1);
+        if (range && range.end > range.start)
+            return range;
+        return null;
+    }
     stepInfos.forEach((step) => {
         const text = lineList.slice(0, step.boundary).join("\n");
         const result = simulator.applyProgram(text);
-        if (!Array.isArray(result)) {
+        const allowHeaderOnly = step.ifHeaderOnly && !step.ifHeaderHasOpenBrace;
+        if (!Array.isArray(result) &&
+            !canRunWithAutoClosedBlocks(text) &&
+            !allowHeaderOnly) {
             failConfig(`Step ${step.index + 1} cannot be run as-is. Fix the code in this step.`);
         }
     });
@@ -287,6 +479,84 @@ function createProgramTemplate(config) {
             return null;
         return (groupRanges.find((group) => lineIndex >= group.startLine && lineIndex <= group.endLine) || null);
     }
+    function stepEndingAtBoundary(boundary) {
+        return stepByBoundary.get(boundary) || null;
+    }
+    function branchStepInfo(boundary) {
+        const step = stepEndingAtBoundary(boundary);
+        if (!step?.ifHeaderOnly)
+            return null;
+        return step;
+    }
+    function branchInfoForBoundary(boundary) {
+        const step = stepEndingAtBoundary(boundary);
+        if (!step?.ifHeaderOnly)
+            return null;
+        const headerIndex = headerIndexForLine(step.startLine);
+        if (headerIndex == null)
+            return null;
+        const block = ifBlocks.map.get(headerIndex);
+        if (!block)
+            return null;
+        const truePart = parts[block.trueTarget];
+        const trueLine = Number.isFinite(truePart?.startLine)
+            ? truePart.startLine
+            : block.headerEndLine;
+        const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+            ? parts[block.closeIndex].endLine
+            : block.headerEndLine;
+        let falseLine = closeLine + 1;
+        const falsePart = parts[block.falseTarget];
+        if (falsePart && Number.isFinite(falsePart.startLine)) {
+            falseLine = falsePart.startLine;
+        }
+        const maxLine = Math.max(0, totalLines);
+        const trueTarget = Math.max(0, Math.min(maxLine, trueLine));
+        const falseTarget = Math.max(0, Math.min(maxLine, falseLine));
+        const targets = [];
+        const targetMap = new Map();
+        const addTarget = (boundaryIndex) => {
+            if (!Number.isFinite(boundaryIndex))
+                return;
+            if (boundaryIndex < 0 || boundaryIndex > totalLines)
+                return;
+            if (!targets.includes(boundaryIndex))
+                targets.push(boundaryIndex);
+            targetMap.set(boundaryIndex, boundaryIndex);
+        };
+        addTarget(trueTarget);
+        addTarget(falseTarget);
+        let expected = null;
+        const currentState = stateBeforePart(headerIndex);
+        const condition = simulator.evaluateCondition(block.expr, currentState);
+        if (!("error" in condition)) {
+            expected = condition.value ? trueTarget : falseTarget;
+        }
+        return {
+            rangeStart: step.startLine,
+            rangeEnd: step.endLine,
+            targets,
+            targetMap,
+            expected,
+        };
+    }
+    function previousStepBoundary(boundary) {
+        let prev = null;
+        for (const b of stepBoundaries) {
+            if (b < boundary)
+                prev = b;
+            else
+                break;
+        }
+        return prev;
+    }
+    function nextStepBoundary(boundary) {
+        for (const b of stepBoundaries) {
+            if (b > boundary)
+                return b;
+        }
+        return totalLines;
+    }
     function groupRangeEndingAt(boundary) {
         const endLine = boundary - 1;
         if (!Number.isFinite(endLine))
@@ -296,11 +566,22 @@ function createProgramTemplate(config) {
     function getStatementContext(boundary) {
         return simulator.getStatementContext(lineList, boundary);
     }
-    function getExpectedState(boundary) {
-        const safeBoundary = Math.max(0, Math.min(total, boundary));
-        const text = lineList.slice(0, safeBoundary).join("\n");
+    function stateBeforePart(partIndex) {
+        const safeIndex = Math.max(0, Math.min(parts.length, partIndex));
         const alloc = allocFactory();
-        const result = simulator.applyProgram(text, { alloc });
+        const result = simulator.applyProgramParts(parts, {
+            alloc,
+            stop: safeIndex,
+        });
+        return Array.isArray(result) ? result : [];
+    }
+    function getExpectedState(boundary) {
+        const stopIndex = stopIndexForBoundary(boundary);
+        const alloc = allocFactory();
+        const result = simulator.applyProgramParts(parts, {
+            alloc,
+            stop: stopIndex,
+        });
         return Array.isArray(result) ? result : [];
     }
     function decorateState(boxes) {
@@ -493,41 +774,105 @@ function createProgramTemplate(config) {
         return `${verb} lines ${start}-${end}${withArrow ? " ▶" : ""}`;
     }
     function runLabelForBoundary(boundary) {
-        let nextStep = boundary + 1;
-        const group = groupForLine(boundary);
-        if (group) {
-            nextStep = group.endLine + 1;
-            const needsSolve = editableSet.has(nextStep) && !state.passes[nextStep];
-            const verb = needsSolve ? "Solve" : "Run";
-            const start = group.startLine + 1;
-            const end = group.endLine + 1;
-            return formatRunLabel(start, end, true, verb);
-        }
-        const range = simulator.statementRangeForLine(statementMap, boundary);
-        if (range && isMultiLineStatement(range)) {
-            nextStep = range.endLine + 1;
-            const needsSolve = editableSet.has(nextStep) && !state.passes[nextStep];
-            const verb = needsSolve ? "Solve" : "Run";
-            const start = range.startLine + 1;
-            const end = range.endLine + 1;
-            return formatRunLabel(start, end, true, verb);
-        }
+        const nextStep = nextStepBoundary(boundary);
         const needsSolve = editableSet.has(nextStep) && !state.passes[nextStep];
         const verb = needsSolve ? "Solve" : "Run";
-        return `${verb} line ${boundary + 1} ▶`;
+        const branchStep = branchStepInfo(boundary);
+        const branchSolved = branchStep
+            ? !!state.branchPasses[branchStep.startLine]
+            : false;
+        const branchInfo = branchInfoForBoundary(boundary) ||
+            branchInfoForBoundary(nextStep);
+        if (branchInfo && !branchSolved) {
+            const start = branchInfo.rangeStart + 1;
+            const end = branchInfo.rangeEnd + 1;
+            return formatRunLabel(start, end, true, "Branch from");
+        }
+        const range = runRangeForBoundary(boundary);
+        if (range) {
+            const start = range.start + 1;
+            const end = range.end + 1;
+            return formatRunLabel(start, end, true, verb);
+        }
+        const lineNumber = Math.max(1, Math.min(totalLines, boundary + 1));
+        return `${verb} line ${lineNumber} ▶`;
     }
-    function nextBoundaryForStep(current) {
-        const group = groupForLine(current);
-        if (group) {
-            return group.endLine + 1;
-        }
-        const ctx = getStatementContext(current);
-        if (ctx?.currentRange && isMultiLineStatement(ctx.currentRange)) {
-            if (ctx.midStatement || ctx.atStatementStart) {
-                return ctx.currentRange.endLine + 1;
+    function nextBoundaryForLine(current) {
+        if (!Number.isFinite(current))
+            return current + 1;
+        if (current >= totalLines)
+            return totalLines;
+        const range = simulator.statementRangeForLine(statementMap, current);
+        const rangeStart = typeof range?.startLine === "number" ? range.startLine : current;
+        const rangeEnd = typeof range?.endLine === "number" ? range.endLine : current;
+        const groupRange = groupForLine(current);
+        const branchStep = !!branchStepInfo(current);
+        const headerIndex = headerIndexForLine(rangeStart);
+        if (headerIndex == null) {
+            if (groupRange &&
+                Number.isFinite(groupRange.endLine) &&
+                groupRange.endLine > current) {
+                return Math.min(totalLines, groupRange.endLine + 1);
             }
+            if (Number.isFinite(rangeEnd) && rangeEnd > current)
+                return Math.min(totalLines, rangeEnd + 1);
+            return Math.min(totalLines, current + 1);
         }
-        return current + 1;
+        const block = ifBlocks.map.get(headerIndex);
+        if (!block) {
+            if (groupRange &&
+                Number.isFinite(groupRange.endLine) &&
+                groupRange.endLine > current) {
+                return Math.min(totalLines, groupRange.endLine + 1);
+            }
+            if (Number.isFinite(rangeEnd) && rangeEnd > current)
+                return Math.min(totalLines, rangeEnd + 1);
+            return Math.min(totalLines, current + 1);
+        }
+        const currentState = stateBeforePart(headerIndex);
+        const condition = simulator.evaluateCondition(block.expr, currentState);
+        if ("error" in condition || condition.value) {
+            if (branchStep) {
+                const truePart = parts[block.trueTarget];
+                const trueLine = Number.isFinite(truePart?.startLine)
+                    ? truePart.startLine
+                    : block.headerEndLine;
+                if (Number.isFinite(trueLine))
+                    return Math.min(totalLines, Math.max(0, trueLine));
+            }
+            if (groupRange &&
+                Number.isFinite(groupRange.endLine) &&
+                groupRange.endLine > current) {
+                return Math.min(totalLines, groupRange.endLine + 1);
+            }
+            if (Number.isFinite(rangeEnd) && rangeEnd > current)
+                return Math.min(totalLines, rangeEnd + 1);
+            return Math.min(totalLines, current + 1);
+        }
+        const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+            ? parts[block.closeIndex].endLine
+            : block.headerEndLine;
+        if (!Number.isFinite(closeLine))
+            return Math.min(totalLines, current + 1);
+        return Math.min(totalLines, closeLine + 1);
+    }
+    function prevBoundaryForLine(current) {
+        if (!Number.isFinite(current))
+            return current - 1;
+        if (current <= 0)
+            return current - 1;
+        let boundary = 0;
+        let prev = 0;
+        let guard = 0;
+        while (boundary < current && guard < totalLines + 5) {
+            prev = boundary;
+            const next = nextBoundaryForLine(boundary);
+            boundary = next === boundary ? boundary + 1 : next;
+            guard += 1;
+        }
+        if (boundary === current)
+            return prev;
+        return current - 1;
     }
     function formatNameList(names) {
         const tokens = names.map((name) => `$n{${name}}`);
@@ -719,34 +1064,100 @@ function createProgramTemplate(config) {
     function renderCodePaneForBoundary() {
         if (!codeEl)
             return;
-        const progress = editableSet.has(state.boundary) && !state.passes[state.boundary];
+        const key = state.boundary;
+        const branchStep = branchStepInfo(key);
+        const branchStepEditable = !!branchStep?.editable && !state.branchPasses[branchStep.startLine];
+        let progress = editableSet.has(key) &&
+            !state.passes[key] &&
+            !branchStepEditable;
         let progressRange;
         let progressIndex;
         let doneBoundary;
+        const branchInfo = branchInfoForBoundary(key);
+        const branchSelectable = !!branchInfo && !!branchStep?.editable && branchSelectionActive;
+        activeBranchTargets = branchSelectable ? allBoundaryTargets : null;
+        activeBranchExpected =
+            branchSelectable && branchInfo ? branchInfo.expected : null;
         if (progress) {
-            const groupRange = groupRangeEndingAt(state.boundary);
-            const range = groupRange || statementRangeEndingAt(statementMap, state.boundary);
-            if (range && isMultiLineStatement(range)) {
-                progressRange = [range.startLine, range.endLine];
-                progressIndex = range.endLine;
-                doneBoundary = range.startLine;
+            const range = executedRangeForBoundary(key);
+            if (range) {
+                progressRange = [range.start, range.end];
+                progressIndex = range.end;
+                doneBoundary = range.start;
             }
         }
-        renderCodePane(codeEl, lineList, state.boundary, {
+        else if (branchStepEditable &&
+            branchSelectionActive &&
+            branchSelectionBoundary === key) {
+            const branchInfo = branchInfoForBoundary(key);
+            if (branchInfo) {
+                progress = true;
+                progressRange = [branchInfo.rangeStart, branchInfo.rangeEnd];
+                progressIndex = undefined;
+            }
+        }
+        let strikeRanges = [];
+        const prevBoundary = prevBoundaryForLine(key);
+        if (prevBoundary >= 0 && prevBoundary < key) {
+            const headerIndex = headerIndexForLine(prevBoundary);
+            if (headerIndex != null) {
+                const block = ifBlocks.map.get(headerIndex);
+                if (block) {
+                    const currentState = stateBeforePart(headerIndex);
+                    const condition = simulator.evaluateCondition(block.expr, currentState);
+                    if (!("error" in condition) && !condition.value) {
+                        const headerStep = stepByStartLine.get(block.headerStartLine);
+                        const allowStrike = !headerStep?.editable ||
+                            !headerStep.ifHeaderOnly ||
+                            !!state.branchPasses[headerStep.startLine];
+                        if (allowStrike) {
+                            const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+                                ? parts[block.closeIndex].endLine
+                                : block.headerEndLine;
+                            const openLine = Number.isFinite(parts[block.openIndex]?.startLine)
+                                ? parts[block.openIndex].startLine
+                                : block.headerEndLine;
+                            if (Number.isFinite(openLine) && Number.isFinite(closeLine)) {
+                                const range = [openLine, closeLine];
+                                strikeRanges.push(range);
+                                state.lastSkippedRanges.push(range);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (state.lastSkippedRanges.length) {
+            state.lastSkippedRanges = state.lastSkippedRanges.filter(([start]) => key > start);
+        }
+        if (state.lastSkippedRanges.length) {
+            strikeRanges = strikeRanges.concat(state.lastSkippedRanges);
+        }
+        renderCodePane(codeEl, lineList, key, {
             progress,
             progressRange,
             progressIndex,
             doneBoundary,
+            hideBoundary: branchSelectable,
+            selectableBoundaries: branchSelectable ? allBoundaries : undefined,
+            selectedBoundary: branchSelectable ? branchSelectionTarget : null,
+            suppressProgressMid: branchStepEditable && branchSelectionActive,
+            boundaryTargets: branchSelectable,
+            strikeRanges,
         });
     }
     function renderStage() {
         if (!stageEl)
             return;
         stageEl.innerHTML = "";
-        const editable = editableSet.has(state.boundary) && !state.passes[state.boundary];
-        const defaults = defaultsForBoundary(state.boundary);
+        const key = state.boundary;
+        const editStep = stepEndingAtBoundary(key);
+        const editable = !!editStep?.editable &&
+            !editStep.ifHeaderOnly &&
+            !state.passes[key];
+        const defaults = defaultsForBoundary(key);
         state.workspaceEl = null;
-        if (state.boundary <= 0) {
+        if (key <= 0) {
             refreshOtherNames();
             return;
         }
@@ -779,7 +1190,7 @@ function createProgramTemplate(config) {
             refreshOtherNames();
             return;
         }
-        const wrap = restoreWorkspace(state.ws[state.boundary], defaults, {
+        const wrap = restoreWorkspace(state.ws[key], defaults, {
             editable,
             deletable: allowVariableDeletion,
             allowNameEdit: null,
@@ -787,8 +1198,8 @@ function createProgramTemplate(config) {
         });
         stageEl.appendChild(wrap);
         state.workspaceEl = wrap;
-        attachResetWatcher(wrap, state.boundary);
-        ensureBaseline(state.boundary, defaults);
+        attachResetWatcher(wrap, key);
+        ensureBaseline(key, defaults);
         refreshOtherNames();
     }
     if (showOtherNames && stageEl) {
@@ -803,11 +1214,11 @@ function createProgramTemplate(config) {
         });
     }
     function updateInstructions() {
+        const key = state.boundary;
         const runLabel = runLabelForBoundary(state.boundary);
-        const scrollUp = scrollUpByBoundary.get(state.boundary) !== false &&
-            !!instructionsEl;
+        const scrollUp = scrollUpByBoundary.get(key) !== false && !!instructionsEl;
         let specKey = null;
-        if (state.boundary === total && state.passes[state.boundary]) {
+        if (key === total && state.passes[key]) {
             setPartsContent(instructionsEl, "Program solved!");
             specKey = "__solved__";
             if (scrollUp && specKey !== state.lastInstructionKey) {
@@ -825,10 +1236,26 @@ function createProgramTemplate(config) {
             state.lastInstructionKey = specKey;
             return;
         }
-        let parts = getInstructionParts(state.boundary);
+        let parts = getInstructionParts(key);
         if (Array.isArray(parts) && parts.length === 0)
             parts = null;
-        if (state.boundary === 0) {
+        if (!parts) {
+            const step = stepByStartLine.get(key);
+            if (step?.instructions) {
+                if (step.ifHeaderOnly) {
+                    if (branchSelectionActive && branchSelectionBoundary === key) {
+                        parts = String(step.instructions);
+                    }
+                }
+                else {
+                    const nextBoundary = nextBoundaryForLine(key);
+                    if (nextBoundary > step.boundary) {
+                        parts = String(step.instructions);
+                    }
+                }
+            }
+        }
+        if (key === 0) {
             if (parts) {
                 parts = parts;
             }
@@ -838,7 +1265,7 @@ function createProgramTemplate(config) {
             specKey = "__initial__";
         }
         else {
-            const spec = instructionMap.get(state.boundary) ?? null;
+            const spec = instructionMap.get(key) ?? null;
             specKey = spec ? String(spec) : null;
         }
         if (!parts) {
@@ -859,7 +1286,7 @@ function createProgramTemplate(config) {
             });
         }
         state.lastInstructionKey = specKey;
-        state.lastBoundary = state.boundary;
+        state.lastBoundary = key;
     }
     function hideHint() {
         if (!hintPanel)
@@ -896,37 +1323,76 @@ function createProgramTemplate(config) {
         return false;
     }
     function render() {
+        if (branchSelectionActive &&
+            branchSelectionBoundary !== state.boundary) {
+            branchSelectionActive = false;
+            branchSelectionTarget = null;
+            branchSelectionBoundary = null;
+        }
         renderCodePaneForBoundary();
         renderStage();
         hideHint();
-        const editable = editableSet.has(state.boundary) && !state.passes[state.boundary];
-        if (editable && statusEl) {
-            setStatus("", "muted");
+        const key = state.boundary;
+        const branchStep = branchStepInfo(key);
+        const branchSolved = branchStep
+            ? !!state.branchPasses[branchStep.startLine]
+            : false;
+        const editStep = stepEndingAtBoundary(key);
+        const editPass = !!editStep?.editable && !!state.passes[key];
+        const branchSelectionHere = branchSelectionActive && branchSelectionBoundary === key;
+        const hasSolvedEditable = !!editStep?.editable && editPass;
+        const normalEditable = !!editStep?.editable && !editPass && !editStep?.ifHeaderOnly;
+        const branchInfo = branchInfoForBoundary(key);
+        const branchEditable = branchSelectionActive &&
+            branchSelectionBoundary === key &&
+            !!branchInfo &&
+            !!branchStep?.editable &&
+            !branchSolved;
+        if (statusEl) {
+            if (hasSolvedEditable && !branchSelectionHere) {
+                setStatus("correct", "ok");
+            }
+            else if (normalEditable) {
+                setStatus("", "muted");
+            }
+            else if (branchStep) {
+                setStatus(branchSolved ? "correct" : "", branchSolved ? "ok" : "muted");
+            }
+            else if (editableSet.has(key)) {
+                setStatus("correct", "ok");
+            }
+            else {
+                setStatus("", "muted");
+            }
         }
-        else if (editableSet.has(state.boundary) && statusEl) {
+        if (state.lastBranchCorrectBoundary !== null &&
+            state.lastBranchCorrectBoundary === key &&
+            statusEl) {
             setStatus("correct", "ok");
-        }
-        else if (statusEl) {
-            setStatus("", "muted");
+            state.lastBranchCorrectBoundary = null;
         }
         if (checkBtn)
-            checkBtn.classList.toggle("hidden", !editable);
+            checkBtn.classList.toggle("hidden", !normalEditable && !branchEditable);
+        const branchStepActive = branchSelectionActive && branchSelectionBoundary === key;
         if (hintBtn)
-            hintBtn.classList.toggle("hidden", !editable);
+            hintBtn.classList.toggle("hidden", !normalEditable || branchStepActive);
         if (addBtn)
-            addBtn.classList.toggle("hidden", !editable || !workspace.allowVariableCreation);
+            addBtn.classList.toggle("hidden", !normalEditable ||
+                !workspace.allowVariableCreation ||
+                branchStepActive);
         if (resetBtn)
             resetBtn.classList.add("hidden");
         updateInstructions();
-        if (editable && resetBtn)
-            updateResetVisibility(state.boundary);
+        if (normalEditable && resetBtn)
+            updateResetVisibility(key);
     }
     function save() {
-        if (!editableSet.has(state.boundary))
+        const key = state.boundary;
+        if (!editableSet.has(key))
             return;
         const snapshot = serializeWorkspace(getWorkspaceEl());
         if (Array.isArray(snapshot)) {
-            state.ws[state.boundary] = snapshot;
+            state.ws[key] = snapshot;
         }
     }
     if (addBtn) {
@@ -947,11 +1413,12 @@ function createProgramTemplate(config) {
     }
     if (resetBtn) {
         resetBtn.addEventListener("click", () => {
-            if (!editableSet.has(state.boundary))
+            const key = state.boundary;
+            if (!editableSet.has(key))
                 return;
-            state.ws[state.boundary] = null;
-            state.passes[state.boundary] = false;
-            state.baseline[state.boundary] = null;
+            state.ws[key] = null;
+            state.passes[key] = false;
+            state.baseline[key] = null;
             render();
             pager.update();
         });
@@ -959,7 +1426,61 @@ function createProgramTemplate(config) {
     if (checkBtn) {
         checkBtn.addEventListener("click", () => {
             hideHint();
-            if (!editableSet.has(state.boundary))
+            const key = state.boundary;
+            if (branchSelectionActive &&
+                branchSelectionBoundary !== key) {
+                branchSelectionActive = false;
+                branchSelectionBoundary = null;
+                branchSelectionTarget = null;
+            }
+            const branchInfo = branchInfoForBoundary(key);
+            const branchStep = branchStepInfo(key);
+            const branchSolved = branchStep
+                ? !!state.branchPasses[branchStep.startLine]
+                : false;
+            const branchEditable = branchSelectionActive &&
+                branchSelectionBoundary === key &&
+                !!branchInfo &&
+                !!branchStep?.editable &&
+                !branchSolved;
+            if (branchEditable) {
+                if (!branchSelectionActive) {
+                    setStatus("Select a branch first.", "err");
+                    flashStatus(statusEl);
+                    return;
+                }
+                if (branchSelectionTarget == null) {
+                    setStatus("Select a line boundary.", "err");
+                    flashStatus(statusEl);
+                    return;
+                }
+                if (branchInfo?.expected == null) {
+                    setStatus("That branch can't be evaluated.", "err");
+                    flashStatus(statusEl);
+                    return;
+                }
+                if (branchSelectionTarget !== branchInfo.expected) {
+                    setStatus("incorrect", "err");
+                    flashStatus(statusEl);
+                    return;
+                }
+                if (branchStep) {
+                    state.branchPasses[branchStep.startLine] = true;
+                    state.passes[key] = true;
+                }
+                setStatus("correct", "ok");
+                flashStatus(statusEl);
+                branchSelectionActive = false;
+                branchSelectionBoundary = null;
+                branchSelectionTarget = null;
+                state.lastBranchCorrectBoundary = Math.max(0, Math.min(totalLines, branchInfo.expected));
+                state.boundary = Math.max(0, Math.min(totalLines, branchInfo.expected));
+                render();
+                pager.update();
+                pager.pulseNext();
+                return;
+            }
+            if (!editableSet.has(key))
                 return;
             const boxes = readWorkspaceBoxes();
             const result = evaluateWorkspace(boxes);
@@ -968,8 +1489,8 @@ function createProgramTemplate(config) {
             flashStatus(statusEl);
             if (!ok)
                 return;
-            state.passes[state.boundary] = true;
-            state.ws[state.boundary] = boxes;
+            state.passes[key] = true;
+            state.ws[key] = boxes;
             const ws = getWorkspaceEl();
             if (ws) {
                 ws.querySelectorAll(".vbox").forEach((v) => disableBoxEditing(v));
@@ -1014,7 +1535,7 @@ function createProgramTemplate(config) {
     }
     const pager = createStepper({
         root: codeRoot || codeEl?.closest(".panel") || document.body,
-        lines: lineList,
+        lines: totalLines,
         nextPage: next || null,
         getBoundary: () => state.boundary,
         setBoundary: (val) => {
@@ -1022,47 +1543,119 @@ function createProgramTemplate(config) {
         },
         onBeforeChange: save,
         onAfterChange: render,
-        isStepLocked: (boundary) => editableSet.has(boundary) && !state.passes[boundary],
+        isStepLocked: (boundary) => {
+            const editStep = stepEndingAtBoundary(boundary);
+            if (editStep?.ifHeaderOnly && editStep.editable) {
+                const solved = !!state.branchPasses[editStep.startLine];
+                if (solved)
+                    return false;
+                return branchSelectionActive && branchSelectionBoundary === boundary;
+            }
+            if (editStep?.editable) {
+                return !state.passes[boundary];
+            }
+            return false;
+        },
         getStepBadge: () => {
-            const nextBoundary = nextBoundaryForStep(state.boundary);
+            const nextBoundary = nextStepBoundary(state.boundary);
             if (!editableSet.has(nextBoundary))
                 return "";
             return state.passes[nextBoundary] ? "check" : "note";
         },
         getNextLabel: (boundary) => {
-            const atEnd = boundary >= total;
+            const atEnd = boundary >= totalLines;
             if (atEnd)
                 return endLabel;
-            const nextBoundary = nextBoundaryForStep(boundary);
+            if (branchSelectionActive &&
+                branchSelectionBoundary === boundary) {
+                return "???";
+            }
+            const nextBoundary = nextStepBoundary(boundary);
             const needsSolve = editableSet.has(nextBoundary) && !state.passes[nextBoundary];
             const verb = needsSolve ? "Solve" : "Run";
-            const group = groupForLine(boundary);
-            if (group) {
-                const start = group.startLine + 1;
-                const end = group.endLine + 1;
+            const branchStep = branchStepInfo(nextBoundary);
+            const branchSolved = branchStep
+                ? !!state.branchPasses[branchStep.startLine]
+                : false;
+            const branchInfo = branchInfoForBoundary(nextBoundary);
+            if (branchInfo && !branchSolved) {
+                const start = branchInfo.rangeStart + 1;
+                const end = branchInfo.rangeEnd + 1;
+                return formatRunLabel(start, end, false, "Branch from");
+            }
+            const range = runRangeForBoundary(boundary);
+            if (range) {
+                const start = range.start + 1;
+                const end = range.end + 1;
                 return formatRunLabel(start, end, false, verb);
             }
-            const range = simulator.statementRangeForLine(statementMap, boundary);
-            if (range && isMultiLineStatement(range)) {
-                const start = range.startLine + 1;
-                const end = range.endLine + 1;
-                return formatRunLabel(start, end, false, verb);
-            }
-            return `${verb} line ${boundary + 1}`;
+            const lineNumber = Math.max(1, Math.min(totalLines, boundary + 1));
+            return `${verb} line ${lineNumber}`;
         },
-        getNextBoundary: (current) => nextBoundaryForStep(current),
+        getNextBoundary: (current) => {
+            const stepNext = nextStepBoundary(current);
+            const nextStep = stepEndingAtBoundary(stepNext);
+            if (nextStep?.ifHeaderOnly && nextStep.editable) {
+                const solved = !!state.branchPasses[nextStep.startLine];
+                if (!solved) {
+                    const branchInfo = branchInfoForBoundary(stepNext);
+                    if (branchInfo && !branchSelectionActive) {
+                        branchSelectionActive = true;
+                        branchSelectionBoundary = stepNext;
+                        branchSelectionTarget = null;
+                    }
+                    return stepNext;
+                }
+            }
+            const next = nextBoundaryForLine(current);
+            const editStep = stepEndingAtBoundary(current);
+            if (editStep?.ifHeaderOnly && editStep.editable) {
+                const solved = !!state.branchPasses[editStep.startLine];
+                if (!solved) {
+                    const branchInfo = branchInfoForBoundary(current);
+                    if (branchInfo && !branchSelectionActive) {
+                        branchSelectionActive = true;
+                        branchSelectionBoundary = current;
+                        branchSelectionTarget = null;
+                    }
+                    return current;
+                }
+            }
+            return next;
+        },
         getPrevBoundary: (current) => {
-            const prevGroup = groupForLine(current - 1);
-            if (prevGroup) {
-                return prevGroup.startLine;
+            if (branchSelectionActive &&
+                branchSelectionBoundary === current) {
+                branchSelectionActive = false;
+                branchSelectionBoundary = null;
+                branchSelectionTarget = null;
+                return prevBoundaryForLine(current);
             }
-            const ctx = getStatementContext(current);
-            if (ctx?.prevRange && isMultiLineStatement(ctx.prevRange)) {
-                return ctx.prevRange.startLine;
-            }
-            return current - 1;
+            return prevBoundaryForLine(current);
         },
+        allowSameBoundary: true,
     });
+    if (codeEl) {
+        codeEl.addEventListener("click", (event) => {
+            if (!activeBranchTargets)
+                return;
+            const target = event?.target;
+            const boundaryEl = target?.closest?.(".boundary.selectable");
+            if (!boundaryEl)
+                return;
+            const boundaryStr = boundaryEl.dataset.boundary;
+            if (!boundaryStr)
+                return;
+            const boundaryIndex = Number(boundaryStr);
+            if (!Number.isFinite(boundaryIndex))
+                return;
+            if (!activeBranchTargets.has(boundaryIndex))
+                return;
+            branchSelectionTarget = boundaryIndex;
+            render();
+            pager.update();
+        });
+    }
     render();
     pager.update();
     return { state, pager };

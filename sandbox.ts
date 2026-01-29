@@ -10,8 +10,8 @@ import {
 } from "./shared-core.js";
 import type {
   BoxState,
-  StatementContext,
-  StatementRange,
+  StatementPart,
+  IfBlockMap,
 } from "./shared-core.js";
 import { confettiRain } from "./confetti.js";
 
@@ -121,29 +121,14 @@ function updateInstructions() {
   const lines = getRawLines();
   const total = lines.length;
   const boundary = resolveBoundary(sandbox.boundary, total);
-  const statementInfo = simulator.getStatementContext(lines, boundary);
   const hasCode = lines.some((line) => line.trim() !== "");
   const atEnd = boundary >= total;
   const base =
     "This is the sandbox. The program state will update as you write code.";
   let suffix = "";
   if (hasCode) {
-    let runLabel = "";
-    if (
-      statementInfo?.midStatement &&
-      isMultiLineStatement(statementInfo.currentRange)
-    ) {
-      runLabel = `Finish running ${formatLineRange(
-        statementInfo.currentRange,
-      )} ▶`;
-    } else if (
-      statementInfo?.atStatementStart &&
-      isMultiLineStatement(statementInfo.currentRange)
-    ) {
-      runLabel = `Run ${formatLineRange(statementInfo.currentRange)} ▶`;
-    } else {
-      runLabel = `Run line ${boundary + 1} ▶`;
-    }
+    const { statementMap } = getProgramParts(lines);
+    const runLabel = runLabelForBoundary(boundary, total, statementMap);
     if (atEnd) {
       suffix =
         ' Use <span class="btn-ref">Back ◀</span> to step through your program.';
@@ -276,23 +261,46 @@ function resolveBoundary(value: number | null | undefined, fallback: number) {
   return Number.isFinite(value) ? (value as number) : fallback;
 }
 
-function isMultiLineStatement(
-  range: StatementRange | null,
-): range is StatementRange {
-  return !!(
-    range &&
-    Number.isFinite(range.startLine) &&
-    Number.isFinite(range.endLine) &&
-    range.endLine > range.startLine
-  );
+function partAt(parts: StatementPart[], index: number): StatementPart | null {
+  if (!Number.isFinite(index)) return null;
+  if (index < 0 || index >= parts.length) return null;
+  return parts[index] || null;
 }
 
-function formatLineRange(range: StatementRange | null) {
-  if (!range) return "";
-  const start = (range.startLine ?? 0) + 1;
-  const end = (range.endLine ?? 0) + 1;
-  if (start === end) return `line ${start}`;
-  return `lines ${start}-${end}`;
+
+function stopIndexForBoundary(
+  parts: StatementPart[],
+  boundary: number,
+  totalLines: number,
+) {
+  const target = Math.max(0, Math.min(totalLines, boundary));
+  if (!parts.length) return 0;
+  const idx = parts.findIndex((part) => {
+    const end = part?.endLine;
+    return Number.isFinite(end) && end >= target;
+  });
+  return idx === -1 ? parts.length : idx;
+}
+
+function headerIndexForLine(
+  parts: StatementPart[],
+  ifBlocks: IfBlockMap,
+  lineIndex: number,
+) {
+  if (!Number.isFinite(lineIndex)) return null;
+  let selected: number | null = null;
+  for (let i = 0; i < parts.length; i++) {
+    const block = ifBlocks.map.get(i);
+    if (!block) continue;
+    if (block.headerStartLine !== lineIndex) continue;
+    const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+      ? parts[block.closeIndex]!.endLine
+      : block.headerEndLine;
+    if (Number.isFinite(closeLine) && closeLine > lineIndex) {
+      selected = i;
+    }
+  }
+  return selected;
 }
 
 function countNewlines(value: string) {
@@ -390,9 +398,43 @@ function classifyLineStatuses(lines: string[]) {
   return simulator.classifyLineStatuses(lines, { alloc: allocFactory() });
 }
 
-function summarizeStatus(lines: string[]) {
+function getProgramParts(lines: string[]) {
+  const statementMap = simulator.buildStatementMap(lines);
+  const parts = statementMap.parts || [];
+  const ifBlocks = simulator.buildIfStatementMap(parts, {
+    lastLine: Math.max(0, lines.length - 1),
+  });
+  return { parts, ifBlocks, statementMap };
+}
+
+function summarizeStatus(lines: string[], fullLines?: string[]) {
   const status = classifyLineStatuses(lines);
   let hasCompile = status.incomplete.size > 0;
+  if (hasCompile && fullLines && fullLines.length >= lines.length) {
+    const activeTokens = simulator.tokenizeProgram(lines.join("\n"));
+    const fullTokens = simulator.tokenizeProgram(fullLines.join("\n"));
+    const activeParts = simulator.splitStatements(activeTokens);
+    const fullParts = simulator.splitStatements(fullTokens);
+    const activeIfs = simulator.buildIfStatementMap(activeParts, {
+      lastLine: Math.max(0, lines.length - 1),
+    });
+    const fullIfs = simulator.buildIfStatementMap(fullParts, {
+      lastLine: Math.max(0, fullLines.length - 1),
+    });
+    const ignoreIncomplete = new Set<number>();
+    for (let i = 0; i < activeParts.length; i++) {
+      if (fullIfs.map.has(i) && !activeIfs.map.has(i)) {
+        const endLine = activeParts[i]?.endLine;
+        if (Number.isFinite(endLine)) ignoreIncomplete.add(endLine);
+      }
+    }
+    if (ignoreIncomplete.size) {
+      const remaining = [...status.incomplete].filter(
+        (line) => !ignoreIncomplete.has(line),
+      );
+      hasCompile = remaining.length > 0;
+    }
+  }
   let hasUb = false;
   if (status.errorKinds) {
     for (const kind of status.errorKinds.values()) {
@@ -401,6 +443,102 @@ function summarizeStatus(lines: string[]) {
     }
   }
   return { hasCompile, hasUb };
+}
+
+function runLabelForBoundary(
+  boundary: number,
+  totalLines: number,
+  statementMap: ReturnType<typeof simulator.buildStatementMap>,
+) {
+  const range = simulator.statementRangeForLine(statementMap, boundary);
+  if (
+    range &&
+    typeof range.startLine === "number" &&
+    typeof range.endLine === "number" &&
+    range.endLine > range.startLine
+  ) {
+    const start = range.startLine + 1;
+    const end = range.endLine + 1;
+    return `Run lines ${start}-${end} ▶`;
+  }
+  const lineNumber = Math.max(1, Math.min(totalLines, boundary + 1));
+  return `Run line ${lineNumber} ▶`;
+}
+
+function stateBeforePart(parts: StatementPart[], partIndex: number): BoxState[] {
+  const alloc = allocFactory();
+  const result = simulator.applyProgramParts(parts, {
+    alloc,
+    stop: Math.max(0, Math.min(parts.length, partIndex)),
+  });
+  return Array.isArray(result) ? result : [];
+}
+
+function nextBoundaryForLine(
+  current: number,
+  parts: StatementPart[],
+  ifBlocks: IfBlockMap,
+  statementMap: ReturnType<typeof simulator.buildStatementMap>,
+  totalLines: number,
+): number {
+  if (!Number.isFinite(current)) return current + 1;
+  if (current >= totalLines) return totalLines;
+  const range = simulator.statementRangeForLine(statementMap, current);
+  const rangeStart =
+    typeof range?.startLine === "number" ? range.startLine : current;
+  const rangeEnd = typeof range?.endLine === "number" ? range.endLine : current;
+  const headerIndex = headerIndexForLine(parts, ifBlocks, rangeStart);
+  if (headerIndex == null) {
+    if (Number.isFinite(rangeEnd) && rangeEnd > current)
+      return Math.min(totalLines, rangeEnd + 1);
+    return Math.min(totalLines, current + 1);
+  }
+  const block = ifBlocks.map.get(headerIndex);
+  if (!block) {
+    if (Number.isFinite(rangeEnd) && rangeEnd > current)
+      return Math.min(totalLines, rangeEnd + 1);
+    return Math.min(totalLines, current + 1);
+  }
+  const currentState = stateBeforePart(parts, headerIndex);
+  const condition = simulator.evaluateCondition(block.expr, currentState);
+  if ("error" in condition || condition.value) {
+    if (Number.isFinite(rangeEnd) && rangeEnd > current)
+      return Math.min(totalLines, rangeEnd + 1);
+    return Math.min(totalLines, current + 1);
+  }
+  const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+    ? parts[block.closeIndex]!.endLine
+    : block.headerEndLine;
+  if (!Number.isFinite(closeLine)) return Math.min(totalLines, current + 1);
+  return Math.min(totalLines, closeLine + 1);
+}
+
+function prevBoundaryForLine(
+  current: number,
+  parts: StatementPart[],
+  ifBlocks: IfBlockMap,
+  statementMap: ReturnType<typeof simulator.buildStatementMap>,
+  totalLines: number,
+): number {
+  if (!Number.isFinite(current)) return current - 1;
+  if (current <= 0) return current - 1;
+  let boundary = 0;
+  let prev = 0;
+  let guard = 0;
+  while (boundary < current && guard < totalLines + 5) {
+    prev = boundary;
+    const next = nextBoundaryForLine(
+      boundary,
+      parts,
+      ifBlocks,
+      statementMap,
+      totalLines,
+    );
+    boundary = next === boundary ? boundary + 1 : next;
+    guard += 1;
+  }
+  if (boundary === current) return prev;
+  return current - 1;
 }
 
 function applyUserProgram(lines: string[]) {
@@ -418,47 +556,43 @@ type ProgramOutcome = {
 
 function getProgramOutcome(
   linesOverride?: string[],
+  partsOverride?: StatementPart[],
   boundaryOverride?: number,
 ): ProgramOutcome {
   const lines = linesOverride || getRawLines();
+  const { parts } = Array.isArray(partsOverride)
+    ? { parts: partsOverride }
+    : getProgramParts(lines);
   const total = lines.length;
   const boundary = resolveBoundary(
     Number.isFinite(boundaryOverride) ? boundaryOverride : sandbox.boundary,
     total,
   );
   const safeBoundary = clampBoundary(boundary, total);
-  const activeLines = lines.slice(0, safeBoundary);
-  const activeSummary = summarizeStatus(activeLines);
   const fullSummary = summarizeStatus(lines);
   let globalKind: "ok" | "compile" | "ub" = "ok";
   if (fullSummary.hasCompile) globalKind = "compile";
   else if (fullSummary.hasUb) globalKind = "ub";
-  if (activeSummary.hasCompile)
+  const stopIndex = stopIndexForBoundary(parts, safeBoundary, total);
+  const activeResult = simulator.analyzeProgramParts(parts, {
+    alloc: allocFactory(),
+    stop: stopIndex,
+  });
+  if (activeResult.kind !== "ok")
     return {
-      kind: "compile",
+      kind: activeResult.kind,
       globalKind,
       state: null,
       boundary: safeBoundary,
       total,
     };
-  if (activeSummary.hasUb)
-    return {
-      kind: "ub",
-      globalKind,
-      state: null,
-      boundary: safeBoundary,
-      total,
-    };
-  const state = applyUserProgram(activeLines);
-  if (!state)
-    return {
-      kind: "compile",
-      globalKind,
-      state: null,
-      boundary: safeBoundary,
-      total,
-    };
-  return { kind: "ok", globalKind, state, boundary: safeBoundary, total };
+  return {
+    kind: "ok",
+    globalKind,
+    state: activeResult.state,
+    boundary: safeBoundary,
+    total,
+  };
 }
 
 function renderStage() {
@@ -466,10 +600,10 @@ function renderStage() {
   if (!stage) return;
   stage.innerHTML = "";
   const lines = getRawLines();
+  const { parts } = getProgramParts(lines);
   const { boundary, total } = syncBoundaryWithLines(lines);
-  const statementInfo = simulator.getStatementContext(lines, boundary);
   const inBlockComment = isBoundaryInsideBlockComment(lines, boundary);
-  let outcome = getProgramOutcome(lines, boundary);
+  let outcome = getProgramOutcome(lines, parts, boundary);
   if (inBlockComment && outcome.kind === "compile") {
     // Close the open comment at the boundary so comments don't look invalid.
     const activeLines = lines.slice(0, boundary);
@@ -488,8 +622,6 @@ function renderStage() {
   let displayOutcome: { kind: string; state: BoxState[] | null } = outcome;
   if (outcome.globalKind && outcome.globalKind !== "ok") {
     displayOutcome = { kind: outcome.globalKind, state: null };
-  } else if (statementInfo.midStatement && !inBlockComment) {
-    displayOutcome = { kind: "mid", state: null };
   }
   sandbox.lastState = outcome.state;
   stage.appendChild(renderState("", displayOutcome.state, displayOutcome.kind));
@@ -498,7 +630,7 @@ function renderStage() {
     onToggle: refreshOtherNames,
   });
   renderExpression(displayOutcome);
-  updateStepperControls(boundary, total, statementInfo);
+  updateStepperControls(boundary, total);
   updateInstructions();
 }
 
@@ -564,39 +696,25 @@ function renderExpression(outcome: { kind: string; state: BoxState[] | null }) {
 function updateStepperControls(
   boundaryOverride: number,
   totalOverride: number,
-  statementInfo: StatementContext,
 ) {
   if (!prevButtons.length && !nextButtons.length) return;
-  const total = resolveBoundary(
+  const totalLines = resolveBoundary(
     Number.isFinite(totalOverride) ? totalOverride : sandbox.lineCount,
     getRawLines().length,
   );
   const boundary = resolveBoundary(
     Number.isFinite(boundaryOverride) ? boundaryOverride : sandbox.boundary,
-    total,
+    totalLines,
   );
   prevButtons.forEach((btn) => {
     btn.disabled = boundary <= 0;
   });
   if (nextButtons.length) {
-    const atEnd = boundary >= total;
+    const atEnd = boundary >= totalLines;
     let label = "At end ▶";
     if (!atEnd) {
-      if (
-        statementInfo?.midStatement &&
-        isMultiLineStatement(statementInfo.currentRange)
-      ) {
-        label = `Finish running ${formatLineRange(
-          statementInfo.currentRange,
-        )} ▶`;
-      } else if (
-        statementInfo?.atStatementStart &&
-        isMultiLineStatement(statementInfo.currentRange)
-      ) {
-        label = `Run ${formatLineRange(statementInfo.currentRange)} ▶`;
-      } else {
-        label = `Run line ${boundary + 1} ▶`;
-      }
+      const { statementMap } = getProgramParts(getRawLines());
+      label = runLabelForBoundary(boundary, totalLines, statementMap);
     }
     nextButtons.forEach((btn) => {
       btn.textContent = label;
@@ -743,7 +861,8 @@ function updateLineGutters(linesOverride?: string[]) {
   autoSizeEditor();
   const lines = Array.isArray(linesOverride) ? linesOverride : getRawLines();
   const count = Math.max(lines.length, 1);
-  const safeBoundary = clampBoundary(sandbox.boundary ?? 0, count);
+  const boundary = resolveBoundary(sandbox.boundary, count);
+  const safeBoundary = clampBoundary(boundary, count);
   const lineHeight = getLineHeightPx();
   const wraps = measureWrapCounts(lines);
   if (highlightEl) {
@@ -931,15 +1050,18 @@ if (editor) {
 prevButtons.forEach((btn) => {
   btn.addEventListener("click", () => {
     const lines = getRawLines();
+    const { parts, ifBlocks, statementMap } = getProgramParts(lines);
     const total = lines.length;
     const current = resolveBoundary(sandbox.boundary, total);
     if (current <= 0) return;
     const boundary = clampBoundary(current, total);
-    const statementInfo = simulator.getStatementContext(lines, boundary);
-    const prevRange = statementInfo.prevRange;
-    const target = isMultiLineStatement(prevRange)
-      ? prevRange.startLine
-      : boundary - 1;
+    const target = prevBoundaryForLine(
+      boundary,
+      parts,
+      ifBlocks,
+      statementMap,
+      total,
+    );
     sandbox.boundary = clampBoundary(target, total);
     renderStage();
     updateLineGutters();
@@ -949,18 +1071,18 @@ prevButtons.forEach((btn) => {
 nextButtons.forEach((btn) => {
   btn.addEventListener("click", () => {
     const lines = getRawLines();
+    const { parts, ifBlocks, statementMap } = getProgramParts(lines);
     const total = lines.length;
     const current = resolveBoundary(sandbox.boundary, total);
     if (current >= total) return;
     const boundary = clampBoundary(current, total);
-    const statementInfo = simulator.getStatementContext(lines, boundary);
-    let target = boundary + 1;
-    if (
-      (statementInfo.midStatement || statementInfo.atStatementStart) &&
-      statementInfo.currentRange
-    ) {
-      target = statementInfo.currentRange.endLine + 1;
-    }
+    const target = nextBoundaryForLine(
+      boundary,
+      parts,
+      ifBlocks,
+      statementMap,
+      total,
+    );
     sandbox.boundary = clampBoundary(target, total);
     renderStage();
     updateLineGutters();

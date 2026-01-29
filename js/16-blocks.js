@@ -145,7 +145,6 @@ createProgramTemplate({
             },
         },
     ],
-    next: "sandbox.html?finished=1",
-    isLast: true,
+    next: "17-comparisons.html",
     workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

@@ -21,6 +21,7 @@ export type ExprNode =
         | "*"
         | "/"
         | "=="
+        | "!="
         | ">"
         | ">="
         | "<"
@@ -43,6 +44,7 @@ export type AssignRhs =
 export type Statement =
   | { kind: "blockStart" }
   | { kind: "blockEnd" }
+  | { kind: "if"; expr: ExprNode; hasVar: boolean }
   | { kind: "decl"; name: string; type: string }
   | { kind: "assign"; name: string; value: string; valueKind: "num" }
   | {
@@ -119,6 +121,28 @@ export type StatementContext = {
   midStatement: boolean;
   atStatementStart: boolean;
 };
+export type IfBlock = {
+  headerIndex: number;
+  headerStartLine: number;
+  headerEndLine: number;
+  openIndex: number;
+  closeIndex: number;
+  trueTarget: number;
+  falseTarget: number;
+  expr: ExprNode;
+  hasVar: boolean;
+};
+export type IfBlockMap = {
+  map: Map<number, IfBlock>;
+  errors: Map<number, string>;
+  incomplete: Set<number>;
+};
+export type ConditionResult =
+  | { value: boolean }
+  | { error: string | { text: string; html: string }; kind: "compile" | "ub" };
+export type ProgramResult =
+  | { kind: "ok"; state: BoxState[] }
+  | { kind: "compile" | "ub" };
 export interface LineStatus {
   invalid: Set<number>;
   incomplete: Set<number>;
@@ -131,11 +155,16 @@ export interface SimpleSimulator {
   splitStatements: (tokens: Token[]) => StatementPart[];
   parseStatements: (text: string) => Statement[];
   buildStatementMap: (lines: string[]) => StatementMap;
+  buildIfStatementMap: (
+    parts: StatementPart[],
+    opts?: { lastLine?: number },
+  ) => IfBlockMap;
   statementRangeForLine: (
     statementMap: StatementMap | null,
     lineIndex: number,
   ) => StatementRange | null;
   getStatementContext: (lines: string[], boundary: number) => StatementContext;
+  evaluateCondition: (expr: ExprNode, state: BoxState[]) => ConditionResult;
   evaluateExpressionText: (
     expr: string,
     state: BoxState[],
@@ -158,6 +187,14 @@ export interface SimpleSimulator {
     opts?: { alloc?: (type?: string) => string },
   ) => LineStatus;
   findMissingSemicolonLines: (text: string) => number[];
+  applyProgramParts: (
+    parts: StatementPart[],
+    opts?: { alloc?: (type?: string) => string; stop?: number },
+  ) => BoxState[] | null;
+  analyzeProgramParts: (
+    parts: StatementPart[],
+    opts?: { alloc?: (type?: string) => string; stop?: number },
+  ) => ProgramResult;
   applyProgram: (
     text: string,
     opts?: { alloc?: (type?: string) => string },
@@ -324,6 +361,18 @@ export function createSimpleSimulator(
           col += 2;
         } else {
           tokens.push({ type: "sym", value: ch, line, col });
+          i++;
+          col++;
+        }
+        continue;
+      }
+      if (ch === "!") {
+        if (src[i + 1] === "=") {
+          tokens.push({ type: "sym", value: "!=", line, col });
+          i += 2;
+          col += 2;
+        } else {
+          tokens.push({ type: "unknown", value: ch, line, col });
           i++;
           col++;
         }
@@ -710,6 +759,7 @@ export function createSimpleSimulator(
             tok.value === "*" ||
             tok.value === "/" ||
             tok.value === "==" ||
+            tok.value === "!=" ||
             tok.value === "<<" ||
             tok.value === ">>" ||
             tok.value === "<" ||
@@ -874,6 +924,28 @@ export function createSimpleSimulator(
     });
   }
 
+  function isIfPrefix(tokens: Token[]): boolean {
+    if (!tokens.length) return false;
+    if (tokens[0].type !== "kw" || tokens[0].value !== "if") return false;
+    if (tokens.length === 1) return true;
+    if (tokens[1].type !== "sym" || tokens[1].value !== "(") return false;
+    let depth = 0;
+    for (let i = 1; i < tokens.length; i++) {
+      const tok = tokens[i];
+      if (tok.type === "sym" && tok.value === "(") {
+        depth++;
+        continue;
+      }
+      if (tok.type === "sym" && tok.value === ")") {
+        depth--;
+        if (depth === 0) {
+          return i === tokens.length - 1;
+        }
+      }
+    }
+    return true;
+  }
+
   function isStatementPrefix(
     tokens: Token[],
     declaredNames: DeclaredNames,
@@ -903,6 +975,7 @@ export function createSimpleSimulator(
       if (allowPointers && t0.type === "sym" && t0.value === "*") return true;
     }
     return (
+      isIfPrefix(tokens) ||
       isDeclPrefix(tokens) ||
       isAssignPrefix(tokens, declaredNames) ||
       isDerefPrefix(tokens, declaredNames) ||
@@ -1053,7 +1126,12 @@ export function createSimpleSimulator(
       if (!left) return null;
       while (true) {
         const tok = next();
-        if (!tok || tok.type !== "sym" || tok.value !== "==") break;
+        if (
+          !tok ||
+          tok.type !== "sym" ||
+          (tok.value !== "==" && tok.value !== "!=")
+        )
+          break;
         idx++;
         const right = parseRelational();
         if (!right) return null;
@@ -1369,6 +1447,7 @@ export function createSimpleSimulator(
           leftScalar.base === "double" || rightScalar.base === "double";
         if (
           node.op === "==" ||
+          node.op === "!=" ||
           node.op === "<" ||
           node.op === "<=" ||
           node.op === ">" ||
@@ -1379,9 +1458,11 @@ export function createSimpleSimulator(
             const leftNum = toNumber(leftValue);
             const rightNum = toNumber(rightValue);
             if (Number.isNaN(leftNum) || Number.isNaN(rightNum)) {
-              result = false;
+              result = node.op === "!=";
             } else if (node.op === "==") {
               result = leftNum === rightNum;
+            } else if (node.op === "!=") {
+              result = leftNum !== rightNum;
             } else if (node.op === "<") {
               result = leftNum < rightNum;
             } else if (node.op === "<=") {
@@ -1395,6 +1476,7 @@ export function createSimpleSimulator(
             const leftBig = leftValue as bigint;
             const rightBig = rightValue as bigint;
             if (node.op === "==") result = leftBig === rightBig;
+            else if (node.op === "!=") result = leftBig !== rightBig;
             else if (node.op === "<") result = leftBig < rightBig;
             else if (node.op === "<=") result = leftBig <= rightBig;
             else if (node.op === ">") result = leftBig > rightBig;
@@ -1524,6 +1606,27 @@ export function createSimpleSimulator(
     const scalar = coerceScalarResult(evaluated, requireValue);
     if (isScalarError(scalar)) return scalar;
     return scalar;
+  }
+
+  function evaluateCondition(
+    expr: ExprNode,
+    state: BoxState[],
+  ): ConditionResult {
+    const evaluated = evaluateExpression(expr, state, {
+      allowVars: true,
+      targetType: "double",
+    });
+    if (isScalarError(evaluated)) return evaluated;
+    const base = evaluated.base || "int";
+    if (base === "double") {
+      const num =
+        typeof evaluated.value === "number"
+          ? evaluated.value
+          : Number(evaluated.value);
+      return { value: num !== 0 };
+    }
+    const value = evaluated.value as bigint;
+    return { value: value !== 0n };
   }
 
   function evaluateExpressionText(
@@ -1727,11 +1830,46 @@ export function createSimpleSimulator(
     return { ops, name, idx: idx + 1 };
   }
 
+  function parseIfHeaderTokens(
+    tokens: Token[],
+  ): { expr: ExprNode; hasVar: boolean } | null {
+    if (!tokens.length) return null;
+    if (tokens[0].type !== "kw" || tokens[0].value !== "if") return null;
+    if (tokens.length < 3) return null;
+    if (tokens[1].type !== "sym" || tokens[1].value !== "(") return null;
+    let depth = 0;
+    let endIdx = -1;
+    for (let i = 1; i < tokens.length; i++) {
+      const tok = tokens[i];
+      if (tok.type === "sym" && tok.value === "(") {
+        depth++;
+        continue;
+      }
+      if (tok.type === "sym" && tok.value === ")") {
+        depth--;
+        if (depth === 0) {
+          endIdx = i;
+          break;
+        }
+      }
+    }
+    if (endIdx < 0 || endIdx !== tokens.length - 1) return null;
+    const exprTokens = tokens.slice(2, endIdx);
+    if (!exprTokens.length) return null;
+    const parsed = parseExpressionTokens(exprTokens, 0, { allowVars: true });
+    if (!parsed || parsed.nextIndex !== exprTokens.length) return null;
+    return { expr: parsed.expr, hasVar: parsed.hasVar };
+  }
+
   function parseStatementTokens(tokens: Token[]): Statement | null {
     if (!tokens.length) return null;
     if (tokens.length === 1 && tokens[0].type === "sym") {
       if (tokens[0].value === "{") return { kind: "blockStart" };
       if (tokens[0].value === "}") return { kind: "blockEnd" };
+    }
+    const ifParsed = parseIfHeaderTokens(tokens);
+    if (ifParsed) {
+      return { kind: "if", expr: ifParsed.expr, hasVar: ifParsed.hasVar };
     }
     if (tokens[0].type === "kw") {
       const baseType = tokens[0].value;
@@ -2564,7 +2702,7 @@ export function createSimpleSimulator(
     if (tokens.some((t) => t.type === "unknown"))
       return "That line has a character that does not belong in a declaration or assignment.";
     if (tokens[0].type === "kw" && tokens[0].value === "if") {
-      return "If statements are not supported yet.";
+      return 'If statements should look like "if (condition) { ... }".';
     }
     if (tokens[0].type === "kw" && tokens[0].value === "else") {
       return "Else statements are not supported yet.";
@@ -2648,6 +2786,13 @@ export function createSimpleSimulator(
       };
     }
     if (parsed.kind === "blockStart" || parsed.kind === "blockEnd") {
+      return { parsed, next: state };
+    }
+    if (parsed.kind === "if") {
+      const result = evaluateCondition(parsed.expr, state);
+      if ("error" in result) {
+        return { error: result.error, kind: result.kind };
+      }
       return { parsed, next: state };
     }
     if (
@@ -3294,6 +3439,84 @@ export function createSimpleSimulator(
     return parts;
   }
 
+  function isBracePart(part: StatementPart, brace?: "{" | "}") {
+    if (!part?.tokens?.length || part.tokens.length !== 1) return false;
+    const tok = part.tokens[0];
+    if (tok.type !== "sym") return false;
+    if (brace) return tok.value === brace;
+    return tok.value === "{" || tok.value === "}";
+  }
+
+  function buildIfStatementMap(
+    parts: StatementPart[],
+    opts: { lastLine?: number } = {},
+  ): IfBlockMap {
+    const map = new Map<number, IfBlock>();
+    const errors = new Map<number, string>();
+    const incomplete = new Set<number>();
+    const fallbackLastLine =
+      parts.length > 0
+        ? Number.isFinite(parts[parts.length - 1]?.endLine)
+          ? parts[parts.length - 1]!.endLine
+          : 0
+        : 0;
+    const lastLine = Number.isFinite(opts.lastLine)
+      ? Math.max(0, Number(opts.lastLine))
+      : Math.max(0, fallbackLastLine);
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (!part?.tokens?.length) continue;
+      const ifParsed = parseIfHeaderTokens(part.tokens);
+      if (!ifParsed) continue;
+      const headerStartLine = part.startLine;
+      const headerEndLine = part.endLine;
+      const openIndex = i + 1;
+      const openPart = parts[openIndex];
+      if (!openPart || !isBracePart(openPart, "{")) {
+        errors.set(headerEndLine, "If statements must use braces.");
+        continue;
+      }
+      let depth = 0;
+      let closeIndex: number | null = null;
+      for (let j = openIndex; j < parts.length; j++) {
+        const probe = parts[j];
+        if (isBracePart(probe, "{")) {
+          depth++;
+          continue;
+        }
+        if (isBracePart(probe, "}")) {
+          depth--;
+          if (depth === 0) {
+            closeIndex = j;
+            break;
+          }
+        }
+      }
+      if (closeIndex == null) {
+        incomplete.add(lastLine);
+        continue;
+      }
+      let trueTarget = openIndex;
+      if (closeIndex > openIndex + 1) {
+        trueTarget = openIndex + 1;
+      }
+      const falseTarget =
+        closeIndex + 1 < parts.length ? closeIndex + 1 : parts.length;
+      map.set(i, {
+        headerIndex: i,
+        headerStartLine,
+        headerEndLine,
+        openIndex,
+        closeIndex,
+        trueTarget,
+        falseTarget,
+        expr: ifParsed.expr,
+        hasVar: ifParsed.hasVar,
+      });
+    }
+    return { map, errors, incomplete };
+  }
+
   function buildStatementMap(lines: string[]): StatementMap {
     const text = lines.join("\n");
     const tokens = tokenizeProgram(text);
@@ -3397,6 +3620,10 @@ export function createSimpleSimulator(
       }
       const clean = stripAllComments(raw).trim();
       if (!clean || clean === "{" || clean === "}") {
+        patched.push(raw);
+        return;
+      }
+      if (/^if\b/.test(clean)) {
         patched.push(raw);
         return;
       }
@@ -3596,9 +3823,18 @@ export function createSimpleSimulator(
     }
     incomplete.clear();
     const parts = splitStatements(tokens);
-    parts.forEach((part) => {
+    const ifBlocks = buildIfStatementMap(parts, {
+      lastLine: Math.max(0, lines.length - 1),
+    });
+    parts.forEach((part, idx) => {
       if (!part?.tokens?.length) return;
       if (part.hasSemicolon) return;
+      if (ifBlocks.map.has(idx)) return;
+      if (
+        part.tokens[0]?.type === "kw" &&
+        part.tokens[0]?.value === "else"
+      )
+        return;
       if (!Number.isFinite(part.endLine)) return;
       incomplete.add(part.endLine);
       const start = Number.isFinite(part.startLine)
@@ -3616,6 +3852,18 @@ export function createSimpleSimulator(
       if (errors.has(idx)) errors.delete(idx);
       if (errorKinds.has(idx)) errorKinds.delete(idx);
     });
+    ifBlocks.errors.forEach((message, line) => {
+      invalid.add(line);
+      errors.set(line, message);
+      errorKinds.set(line, "compile");
+    });
+    ifBlocks.incomplete.forEach((line) => {
+      incomplete.add(line);
+      if (invalid.has(line)) invalid.delete(line);
+      if (errors.has(line)) errors.delete(line);
+      if (errorKinds.has(line)) errorKinds.delete(line);
+      if (info.has(line)) info.delete(line);
+    });
     return { invalid, incomplete, errors, errorKinds, info };
   }
 
@@ -3625,23 +3873,56 @@ export function createSimpleSimulator(
   ): BoxState[] | null {
     const tokens = tokenizeProgram(text);
     const parts = splitStatements(tokens);
+    return applyProgramParts(parts, opts);
+  }
+
+  function applyProgramParts(
+    parts: StatementPart[],
+    opts: { alloc?: (type?: string) => string; stop?: number } = {},
+  ): BoxState[] | null {
     let state: BoxState[] = [];
     const alloc =
       opts.alloc || ((type?: string) => String(randAddr(type || "int")));
+    const stop =
+      Number.isFinite(opts.stop) && opts.stop !== undefined
+        ? Math.max(0, Math.min(parts.length, Number(opts.stop)))
+        : null;
     const declared = new Set<string>();
     const scopes: ScopeStack = [new Set<string>()];
-    for (const part of parts) {
-      if (!part.tokens.length) continue;
+    const ifBlocks = buildIfStatementMap(parts);
+    let i = 0;
+    while (i < parts.length) {
+      if (stop !== null && i >= stop) break;
+      const part = parts[i];
+      if (!part.tokens.length) {
+        i += 1;
+        continue;
+      }
       const parsed = parseStatementTokens(part.tokens);
       if (!parsed) return null;
+      if (parsed.kind === "if") {
+        const block = ifBlocks.map.get(i);
+        if (!block) return null;
+        const result = evaluateCondition(parsed.expr, state);
+        if ("error" in result) return null;
+        if (result.value) {
+          i += 1;
+          continue;
+        }
+        if (stop !== null && stop <= block.closeIndex) break;
+        i = block.closeIndex + 1;
+        continue;
+      }
       if (parsed.kind === "blockStart" || parsed.kind === "blockEnd") {
         if (parsed.kind === "blockStart") {
           scopes.push(new Set<string>());
+          i += 1;
           continue;
         }
         const popped = popScope(scopes, declared, state);
         if (popped.error) return null;
         state = popped.state;
+        i += 1;
         continue;
       }
       if (!part.hasSemicolon) return null;
@@ -3671,8 +3952,80 @@ export function createSimpleSimulator(
         addDeclaredName(scopes, declared, parsed.name);
       }
       state = next;
+      i += 1;
     }
     return state;
+  }
+
+  function analyzeProgramParts(
+    parts: StatementPart[],
+    opts: { alloc?: (type?: string) => string; stop?: number } = {},
+  ): ProgramResult {
+    let state: BoxState[] = [];
+    const alloc =
+      opts.alloc || ((type?: string) => String(randAddr(type || "int")));
+    const stop =
+      Number.isFinite(opts.stop) && opts.stop !== undefined
+        ? Math.max(0, Math.min(parts.length, Number(opts.stop)))
+        : null;
+    const declared = new Set<string>();
+    const scopes: ScopeStack = [new Set<string>()];
+    const ifBlocks = buildIfStatementMap(parts);
+    let i = 0;
+    while (i < parts.length) {
+      if (stop !== null && i >= stop) break;
+      const part = parts[i];
+      if (!part.tokens.length) {
+        i += 1;
+        continue;
+      }
+      const result = validateStatement(part.tokens, state, declared, alloc);
+      if ("error" in result) {
+        return { kind: result.kind || "compile" };
+      }
+      const parsed = result.parsed;
+      if (parsed.kind === "if") {
+        const block = ifBlocks.map.get(i);
+        if (!block) return { kind: "compile" };
+        const condition = evaluateCondition(parsed.expr, state);
+        if ("error" in condition) {
+          return { kind: condition.kind || "compile" };
+        }
+        if (condition.value) {
+          i += 1;
+          continue;
+        }
+        if (stop !== null && stop <= block.closeIndex) break;
+        i = block.closeIndex + 1;
+        continue;
+      }
+      if (parsed.kind === "blockStart") {
+        scopes.push(new Set<string>());
+        i += 1;
+        continue;
+      }
+      if (parsed.kind === "blockEnd") {
+        const popped = popScope(scopes, declared, result.next);
+        if (popped.error) return { kind: "compile" };
+        state = popped.state;
+        i += 1;
+        continue;
+      }
+      if (!part.hasSemicolon) return { kind: "compile" };
+      if (
+        parsed.kind === "decl" ||
+        parsed.kind === "declAssign" ||
+        parsed.kind === "declAssignVar" ||
+        parsed.kind === "declAssignRef" ||
+        parsed.kind === "declAssignDeref" ||
+        parsed.kind === "declAssignUnary"
+      ) {
+        addDeclaredName(scopes, declared, parsed.name);
+      }
+      state = result.next;
+      i += 1;
+    }
+    return { kind: "ok", state };
   }
 
   return {
@@ -3680,11 +4033,15 @@ export function createSimpleSimulator(
     splitStatements,
     parseStatements,
     buildStatementMap,
+    buildIfStatementMap,
     statementRangeForLine,
     getStatementContext,
+    evaluateCondition,
     evaluateExpressionText,
     classifyLineStatuses,
     findMissingSemicolonLines,
+    applyProgramParts,
+    analyzeProgramParts,
     applyProgram,
   };
 }

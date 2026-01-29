@@ -877,6 +877,13 @@ button:hover:not([disabled]) {
 .line.progress-range .ln {
     color: #999;
 }
+.line.skipped .src {
+    text-decoration: line-through;
+    color: #b0b0b0;
+}
+.line.skipped .ln {
+    color: #b0b0b0;
+}
 .line.progress-mid::after {
     content: "";
     position: absolute;
@@ -910,6 +917,31 @@ button:hover:not([disabled]) {
     margin-left: auto;
     color: #c0392b;
     font-size: 18px;
+}
+
+.line.selectable {
+    cursor: pointer;
+}
+
+.line.selectable:hover {
+    background: rgba(0, 0, 0, 0.06);
+}
+
+.boundary.selectable {
+    cursor: pointer;
+    border-top: none;
+}
+
+.boundary.selectable::before {
+    opacity: 0;
+}
+
+.boundary.selectable:hover::before {
+    opacity: 0.55;
+}
+
+.boundary.selectable.selected::before {
+    opacity: 1;
 }
 
 .line:last-child {
@@ -1137,7 +1169,18 @@ button:hover:not([disabled]) {
     );
     opacity: 0.9;
 }
-.codecol.has-progress .boundary {
+.codecol.boundary-targets .boundary.selectable {
+    height: 0;
+    padding-top: 12px;
+    padding-bottom: 12px;
+    margin-top: -12px;
+    margin-bottom: -12px;
+}
+.codecol.boundary-targets .boundary.selectable::before {
+    top: 50%;
+    transform: translateY(-50%);
+}
+.codecol.has-progress .boundary:not(.selectable) {
     display: none;
 }
 

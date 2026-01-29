@@ -322,12 +322,33 @@ function renderCodePane(root, lines, boundary, opts = {}) {
     const code = el('<div class="codecol"></div>');
     if (opts.progress)
         code.classList.add("has-progress");
+    if (opts.boundaryTargets)
+        code.classList.add("boundary-targets");
     root.appendChild(code);
-    const addBoundary = () => code.appendChild(el('<div class="boundary"></div>'));
+    const addBoundary = (boundaryIndex, selectable = false) => {
+        const node = el('<div class="boundary"></div>');
+        if (selectable) {
+            node.classList.add("selectable");
+            if (typeof boundaryIndex === "number") {
+                node.dataset.boundary = String(boundaryIndex);
+                const selected = typeof opts.selectedBoundary === "number" &&
+                    Number.isFinite(opts.selectedBoundary) &&
+                    Number(opts.selectedBoundary) === boundaryIndex;
+                if (selected)
+                    node.classList.add("selected");
+            }
+        }
+        code.appendChild(node);
+    };
+    const hideBoundary = !!opts.hideBoundary;
+    const selectableBoundaries = Array.isArray(opts.selectableBoundaries)
+        ? new Set(opts.selectableBoundaries)
+        : null;
     const progress = !!opts.progress;
     let progressIndex = -1;
     let progressRangeStart = null;
     let progressRangeEnd = null;
+    let strikeRanges = [];
     let doneBoundary = boundary;
     if (typeof opts.doneBoundary === "number" &&
         Number.isFinite(opts.doneBoundary)) {
@@ -358,7 +379,7 @@ function renderCodePane(root, lines, boundary, opts = {}) {
                 Number.isFinite(opts.progressIndex)) {
                 progressIndex = Math.max(0, Math.min(lines.length - 1, opts.progressIndex));
             }
-            else if (progressIndex < 0 && progressRangeStart != null) {
+            else if (!opts.suppressProgressMid && progressRangeStart != null) {
                 progressIndex = progressRangeStart;
             }
         }
@@ -366,12 +387,30 @@ function renderCodePane(root, lines, boundary, opts = {}) {
             Number.isFinite(opts.progressIndex)) {
             progressIndex = Math.max(0, Math.min(lines.length - 1, opts.progressIndex));
         }
-        else if (boundary > 0) {
+        else if (!opts.suppressProgressMid && boundary > 0) {
             progressIndex = boundary - 1;
         }
     }
-    if (doneBoundary === 0)
+    const appendStrike = (range) => {
+        let start = Number(Array.isArray(range) ? range[0] : range.start);
+        let end = Number(Array.isArray(range) ? range[1] : range.end);
+        if (!Number.isFinite(start) || !Number.isFinite(end))
+            return;
+        const maxIndex = Math.max(0, lines.length - 1);
+        start = Math.max(0, Math.min(maxIndex, Math.min(start, end)));
+        end = Math.max(0, Math.min(maxIndex, Math.max(start, end)));
+        strikeRanges.push([start, end]);
+    };
+    if (opts.strikeRange)
+        appendStrike(opts.strikeRange);
+    if (Array.isArray(opts.strikeRanges)) {
+        opts.strikeRanges.forEach((range) => appendStrike(range));
+    }
+    if (doneBoundary === 0 && !hideBoundary)
         addBoundary();
+    if (selectableBoundaries && selectableBoundaries.has(0)) {
+        addBoundary(0, true);
+    }
     for (let i = 0; i < lines.length; i++) {
         const lr = el('<div class="line"></div>');
         const ln = el(`<div class="ln">${i + 1}</div>`);
@@ -385,13 +424,21 @@ function renderCodePane(root, lines, boundary, opts = {}) {
             i <= progressRangeEnd;
         if (inProgressRange)
             lr.classList.add("progress-range");
+        const inStrikeRange = strikeRanges.some(([start, end]) => i >= start && i <= end);
+        if (inStrikeRange)
+            lr.classList.add("skipped");
         if (i === progressIndex)
             lr.classList.add("progress-mid");
         lr.appendChild(ln);
         lr.appendChild(src);
         code.appendChild(lr);
-        if (i + 1 === doneBoundary && i !== progressIndex)
+        const afterLine = i + 1;
+        if (selectableBoundaries && selectableBoundaries.has(afterLine)) {
+            addBoundary(afterLine, true);
+        }
+        if (!hideBoundary && i + 1 === doneBoundary && i !== progressIndex) {
             addBoundary();
+        }
     }
     updateStepperTopControls(root);
 }
@@ -1191,7 +1238,7 @@ function stepperButtons(root, dir) {
     });
     return list;
 }
-function createStepper({ root, prevButtons = null, nextButtons = null, lines = [], nextPage = null, getBoundary, setBoundary, onBeforeChange, onAfterChange, isStepLocked, getStepBadge, getNextLabel, getNextBoundary, getPrevBoundary, endLabel, } = {}) {
+function createStepper({ root, prevButtons = null, nextButtons = null, lines = [], nextPage = null, getBoundary, setBoundary, onBeforeChange, onAfterChange, isStepLocked, getStepBadge, getNextLabel, getNextBoundary, getPrevBoundary, endLabel, allowSameBoundary = false, } = {}) {
     const boundButtons = new WeakSet();
     const getPrevButtons = () => prevButtons || stepperButtons(root, "prev");
     const getNextButtons = () => nextButtons || stepperButtons(root, "next");
@@ -1281,8 +1328,14 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
     function goTo(target) {
         const current = boundary();
         const clamped = Math.max(0, Math.min(total, target));
-        if (clamped === current)
+        if (clamped === current) {
+            if (!allowSameBoundary)
+                return;
+            onBeforeChange?.(current);
+            onAfterChange?.(clamped);
+            update();
             return;
+        }
         onBeforeChange?.(current);
         setBoundaryValue(clamped);
         onAfterChange?.(clamped);
