@@ -910,6 +910,17 @@ function createProgramTemplate(config) {
                 variable: removedName,
             };
         }
+        const extraBaselineNames = actualNames.filter((name) => name && baselineNames.has(name) && !expectedNameSet.has(name));
+        if (extraBaselineNames.length > 0) {
+            const name = extraBaselineNames[0] || "";
+            if (name) {
+                return {
+                    message: `This line should remove the $n{${name}} variable.`,
+                    kind: "not-removed",
+                    variable: name,
+                };
+            }
+        }
         if (actualCount < expectedCount) {
             const expectedName = missingExpectedNames[0] || expectedNames[0] || "";
             if (!expectedName)

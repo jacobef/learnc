@@ -38,6 +38,12 @@ createProgramTemplate({
     {
       code: "}\n",
       editable: true,
+      hints: (ctx) => {
+        if (ctx.boxNamed("leaf")) {
+          return "$n{leaf} was created in this block, so it should be removed.";
+        }
+        return ctx.basicHint;
+      },
     },
     {
       code: "if (tree == 10) {\n",
@@ -89,6 +95,12 @@ createProgramTemplate({
     {
       code: "}\n",
       editable: true,
+      hints: (ctx) => {
+        if (ctx.boxNamed("stem")) {
+          return "$n{stem} was created in this block, so it should be removed.";
+        }
+        return ctx.basicHint;
+      },
     },
   ],
   next: "sandbox.html?finished=1",

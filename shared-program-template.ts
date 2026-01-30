@@ -67,11 +67,11 @@ interface ProgramContext {
   boxes: BoxState[];
   basicHint: string | null;
   basicHintTopicIs: (
-    kind: "count" | "removed" | "name" | "type" | "value",
+    kind: "count" | "removed" | "not-removed" | "name" | "type" | "value",
     variable?: string,
   ) => boolean;
   _basicHintTopic?: {
-    kind: "count" | "removed" | "name" | "type" | "value";
+    kind: "count" | "removed" | "not-removed" | "name" | "type" | "value";
     variable?: string;
   } | null;
   boxNamed: (name: string) => BoxState | undefined;
@@ -1129,7 +1129,7 @@ function createProgramTemplate(
     boundary: number,
   ): {
     message: string;
-    kind: "count" | "removed" | "name" | "type" | "value";
+    kind: "count" | "removed" | "not-removed" | "name" | "type" | "value";
     variable?: string;
   } | null {
     const actual = Array.isArray(boxes) ? boxes : [];
@@ -1161,6 +1161,20 @@ function createProgramTemplate(
         kind: "removed",
         variable: removedName,
       };
+    }
+
+    const extraBaselineNames = actualNames.filter(
+      (name) => name && baselineNames.has(name) && !expectedNameSet.has(name),
+    );
+    if (extraBaselineNames.length > 0) {
+      const name = extraBaselineNames[0] || "";
+      if (name) {
+        return {
+          message: `This line should remove the $n{${name}} variable.`,
+          kind: "not-removed",
+          variable: name,
+        };
+      }
     }
 
     if (actualCount < expectedCount) {
