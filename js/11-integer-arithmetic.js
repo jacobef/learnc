@@ -64,17 +64,17 @@ createProgramTemplate({
         {
             code: "int c = b+1 == 4;\n",
             editable: false,
-            instructions: '$c{x == y} evaluates to 1 if x and y have equal values, or 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\n\nThe name of this operation is "equality".',
+            instructions: '$c{x == y} evaluates to 1 if x and y have equal values, or 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\nThe name of this operation is "equality".',
         },
         {
             code: "int d = b == 58;\n",
             editable: false,
-            instructions: '$c{x == y} evaluates to 1 if x and y have equal values, or 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\n\nThe name of this operation is "equality".',
+            instructions: '$c{x == y} evaluates to 1 if x and y have equal values, or 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\nThe name of this operation is "equality".',
         },
         {
             code: "int e = 11/3 == 3;\n",
             editable: true,
-            instructions: '$c{x == y} evaluates to 1 if x and y have equal values, or 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\n\nThe name of this operation is "equality".',
+            instructions: '$c{x == y} evaluates to 1 if x and y have equal values, or 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\nThe name of this operation is "equality".',
             hints: (ctx) => {
                 if (ctx.basicHintTopicIs("value", "e")) {
                     const e = ctx.boxNamed("e");
@@ -89,7 +89,7 @@ createProgramTemplate({
         {
             code: "int f = 9 / 2+1 == 3;\n",
             editable: true,
-            instructions: '$c{x == y} evaluates to 1 if x and y have equal values, or 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\n\nThe name of this operation is "equality".',
+            instructions: '$c{x == y} evaluates to 1 if x and y have equal values, or 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\nThe name of this operation is "equality".',
             hints: (ctx) => {
                 if (ctx.basicHintTopicIs("value", "f")) {
                     const f = ctx.boxNamed("f");

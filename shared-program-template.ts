@@ -2025,14 +2025,19 @@ function createProgramTemplate(
     if (!codeEl) return;
     if (!Number.isFinite(lineIndex)) return;
     if (lineIndex < 0 || lineIndex >= lineList.length) return;
+    const range = runRangeForBoundary(lineIndex);
+    const startIndex = range ? range.start : lineIndex;
+    const endIndex = range ? range.end : lineIndex;
     const lines = codeEl.querySelectorAll(".line");
-    const lineEl = lines[lineIndex] as HTMLElement | undefined;
-    if (!lineEl) return;
+    const startEl = lines[startIndex] as HTMLElement | undefined;
+    const endEl = lines[endIndex] as HTMLElement | undefined;
+    if (!startEl || !endEl) return;
     const container = codeEl as HTMLElement;
     const containerRect = container.getBoundingClientRect();
-    const lineRect = lineEl.getBoundingClientRect();
-    const lineTop = lineRect.top - containerRect.top + container.scrollTop;
-    const lineBottom = lineTop + lineRect.height;
+    const startRect = startEl.getBoundingClientRect();
+    const endRect = endEl.getBoundingClientRect();
+    const lineTop = startRect.top - containerRect.top + container.scrollTop;
+    const lineBottom = endRect.bottom - containerRect.top + container.scrollTop;
     const viewTop = container.scrollTop;
     const viewBottom = viewTop + container.clientHeight;
     if (lineTop < viewTop) {

@@ -999,10 +999,13 @@ body.panel-layout .panel-controls.controls-main {
 .controls-bar-expr .intro,
 .controls-bar-expr .hint-inline {
     margin-top: 0;
-    padding: 0 12px;
+    padding: 14px 16px;
 }
 .controls-bar-expr .intro {
     margin-bottom: 8px;
+}
+.controls-bar-expr .hint-inline {
+    padding: 0 12px;
 }
 .controls-bar-code {
     display: flex;
