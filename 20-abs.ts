@@ -2,7 +2,7 @@ import { createProgramTemplate } from "./shared-program-template.js";
 
 createProgramTemplate({
   initialInstructions:
-    "Here's our first program that performs an actually meaningful computation. It calculates the absolute value of $n{x}. It works no matter what $n{x}'s value is.",
+    "Here's our first program that performs an actually meaningful computation. It calculates the absolute value of $n{x}. Here, $n{x} happens to be $v{-91}, but it would work for any value.",
   steps: [
     {
       code: "int x = -91;\n",

@@ -1,6 +1,7 @@
 import { $, applyOtherNames, createSimpleSimulator, ensureBaseLayout, formatValueForType, randAddr, updateStepperTopControls, vbox, } from "./shared-core.js";
 import { confettiRain } from "./confetti.js";
-ensureBaseLayout();
+const { main } = ensureBaseLayout();
+main.classList.add("main-panelized");
 const instructions = $('[data-role="sandbox-instructions"]');
 const codepane = $('[data-role="sandbox-code"]');
 const editor = $('[data-role="sandbox-editor"]');
@@ -81,28 +82,8 @@ function allocFactory() {
 function updateInstructions() {
     if (!instructions)
         return;
-    const lines = getRawLines();
-    const total = lines.length;
-    const boundary = resolveBoundary(sandbox.boundary, total);
-    const hasCode = lines.some((line) => line.trim() !== "");
-    const atEnd = boundary >= total;
     const base = "This is the sandbox. The program state will update as you write code.";
-    let suffix = "";
-    if (hasCode) {
-        const { statementMap } = getProgramParts(lines);
-        const runLabel = runLabelForBoundary(boundary, total, statementMap);
-        if (atEnd) {
-            suffix =
-                ' Use <span class="btn-ref">Back ◀</span> to step through your program.';
-        }
-        else if (boundary <= 0) {
-            suffix = ` Use <span class="btn-ref">${runLabel}</span> to step through your program.`;
-        }
-        else {
-            suffix = ` Use <span class="btn-ref">Back ◀</span> and <span class="btn-ref">${runLabel}</span> to step through your program.`;
-        }
-    }
-    const message = `${base}${suffix}`;
+    const message = base;
     const params = new URLSearchParams(window.location.search);
     const finished = params.get("finished") === "1";
     instructions.classList.toggle("sandbox-finished", finished);
@@ -549,6 +530,7 @@ function renderExpression(outcome) {
     if (!exprResult || !exprInput)
         return;
     exprResult.innerHTML = "";
+    exprResult.classList.add("hidden");
     showExprError("");
     const expr = exprInput.value.trim();
     if (!expr)
@@ -594,6 +576,7 @@ function renderExpression(outcome) {
     if (!match)
         node.classList.add("no-name");
     exprResult.appendChild(node);
+    exprResult.classList.remove("hidden");
     if (match) {
         applyOtherNames(exprResult, {
             shownAddrs: sandbox.exprOtherNamesShown,

@@ -9,13 +9,34 @@
     <body>
         <div class="wrap">
             <div class="main">
-                <p data-role="sandbox-instructions" class="intro"></p>
-
-                <section>
-                    <div class="row">
-                        <div class="panel">
+                <section class="panel-shell sandbox-shell">
+                    <div class="controls-bar">
+                        <div class="controls-main panel panel-controls">
+                            <div class="controls-row controls-left">
+                                <button
+                                    data-role="sandbox-prev"
+                                    data-stepper="prev"
+                                >
+                                    Back ◀
+                                </button>
+                                <button
+                                    data-role="sandbox-next"
+                                    data-stepper="next"
+                                >
+                                    Run line 1 ▶
+                                </button>
+                            </div>
+                            <div class="controls-row controls-right"></div>
+                        </div>
+                        <p data-role="sandbox-instructions" class="intro"></p>
+                    </div>
+                    <div class="row panel-row">
+                        <div class="panel panel-scroll">
                             <div class="panel-title code-title">Code</div>
-                            <div data-role="sandbox-code" class="codepane">
+                            <div
+                                data-role="sandbox-code"
+                                class="codepane panel-body"
+                            >
                                 <div class="codepane-row">
                                     <div
                                         data-role="sandbox-line-numbers"
@@ -41,34 +62,30 @@
                                 data-role="sandbox-error-detail"
                                 class="hint-inline hidden"
                             ></div>
-                            <div class="controls">
-                                <button data-role="sandbox-prev">
-                                    Back ◀
-                                </button>
-                                <button data-role="sandbox-next">
-                                    Run line 1 ▶
-                                </button>
-                            </div>
                         </div>
                         <div
-                            class="panel program-state-panel sandbox-state-panel"
+                            class="panel program-state-panel sandbox-state-panel panel-scroll"
                         >
                             <div class="panel-title">Program state</div>
-                            <div data-role="sandbox-stage"></div>
+                            <div data-role="sandbox-stage" class="panel-body"></div>
                             <div class="expr-panel">
-                                <label class="expr-title">
-                                    Evaluate expression
-                                </label>
-                                <input
-                                    data-role="sandbox-expr"
-                                    class="expr-input"
-                                    type="text"
-                                    spellcheck="false"
-                                />
-                                <div
-                                    data-role="sandbox-expr-result"
-                                    class="grid"
-                                ></div>
+                                <div class="sandbox-expr-row">
+                                    <div class="sandbox-expr-input-wrap">
+                                        <label class="expr-title">
+                                            Evaluate expression
+                                        </label>
+                                        <input
+                                            data-role="sandbox-expr"
+                                            class="expr-input"
+                                            type="text"
+                                            spellcheck="false"
+                                        />
+                                    </div>
+                                    <div
+                                        data-role="sandbox-expr-result"
+                                        class="grid"
+                                    ></div>
+                                </div>
                                 <div
                                     data-role="sandbox-expr-error"
                                     class="hint-inline hidden"

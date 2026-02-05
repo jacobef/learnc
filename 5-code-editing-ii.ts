@@ -83,18 +83,14 @@ createCodeEditorTemplate({
     );
     const declNames = new Set(
       parsedStatements
-        .filter(
-          (s) =>
-            s.kind === "decl" ||
-            s.kind === "declAssign",
-        )
+        .filter((s) => s.kind === "decl" || s.kind === "declAssign")
         .map((s) => s.name),
     );
     if (!hasTokens || !declNames.has("apple")) {
-      return "You need to declare a variable named $n{apple}. Look at how variables were declared in the earlier programs.";
+      return "You need to create a variable named $n{apple}. Look at how variables were created in the earlier programs.";
     }
     if (!declNames.has("berry")) {
-      return "You also need to declare a variable named $n{berry}.";
+      return "You also need to create a variable named $n{berry}.";
     }
     if (Array.isArray(currentState)) {
       const byName = Object.fromEntries(currentState.map((b) => [b.name, b]));

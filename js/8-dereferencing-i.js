@@ -1,5 +1,14 @@
-import { $, ensureBaseLayout, flashStatus, getNavLabelForHref, randAddr, setPartsContent, vbox, } from "./shared-core.js";
-ensureBaseLayout();
+import { $, ensureBaseLayout, flashStatus, getNavLabelForHref, randAddr, resolveActiveNavItem, setPartsContent, vbox, } from "./shared-core.js";
+const { main } = ensureBaseLayout();
+main.classList.add("main-panelized");
+const activeItem = resolveActiveNavItem();
+const resolvedTitle = activeItem?.label || "";
+if (resolvedTitle) {
+    document.title = `C Boxes - ${resolvedTitle}`;
+    const heading = document.querySelector(".page-title");
+    if (heading)
+        heading.textContent = resolvedTitle;
+}
 const instructions = $('[data-role="quiz-instructions"]');
 const stage = $('[data-role="quiz-stage"]');
 const expressionEl = $('[data-role="quiz-expression"]');

@@ -136,6 +136,7 @@ function ensureExpressionLayout(): ExpressionTemplateElements {
   if (existing) return collectExpressionElements();
 
   const { main } = ensureBaseLayout();
+  main.classList.add("main-panelized");
   if (resolvedTitle) {
     const heading = document.createElement("h1");
     heading.className = "page-title";
@@ -154,44 +155,48 @@ function ensureExpressionLayout(): ExpressionTemplateElements {
 
   const section = document.createElement("section");
   section.dataset.role = "expr-section";
+  section.classList.add("panel-shell");
   const actionBar = document.createElement("div");
-  actionBar.className = "controls-bar";
+  actionBar.className = "controls-bar controls-bar-expr";
+  const controlsMain = document.createElement("div");
+  controlsMain.className = "controls-main panel panel-controls";
   const leftControls = document.createElement("div");
   leftControls.className = "controls-row controls-left";
   const rightControls = document.createElement("div");
   rightControls.className = "controls-row controls-right";
-  actionBar.appendChild(leftControls);
-  actionBar.appendChild(rightControls);
+  controlsMain.appendChild(leftControls);
+  controlsMain.appendChild(rightControls);
+  actionBar.appendChild(controlsMain);
   section.appendChild(actionBar);
   const stack = document.createElement("div");
-  stack.className = "expr-eval-stack";
+  stack.className = "expr-eval-stack panel-stack";
   section.appendChild(stack);
   main.appendChild(section);
 
   const exprPanel = document.createElement("div");
-  exprPanel.className = "panel quiz-expression-panel";
+  exprPanel.className = "panel quiz-expression-panel panel-scroll";
   const exprTitle = document.createElement("div");
   exprTitle.className = "panel-title";
   exprTitle.textContent = "Expression";
   const exprDisplay = document.createElement("div");
   exprDisplay.dataset.role = "expr-expression";
-  exprDisplay.className = "expr-display expr-quiz-display";
+  exprDisplay.className = "expr-display expr-quiz-display panel-body";
   exprPanel.appendChild(exprTitle);
   exprPanel.appendChild(exprDisplay);
 
   const leftCol = document.createElement("div");
-  leftCol.className = "expr-left-col";
+  leftCol.className = "expr-left-col panel-col";
 
   const row = document.createElement("div");
-  row.className = "expr-eval-row";
+  row.className = "expr-eval-row panel-row";
 
   const answerPanel = document.createElement("div");
-  answerPanel.className = "panel expr-answer-panel";
+  answerPanel.className = "panel expr-answer-panel panel-scroll";
   const answerTitle = document.createElement("div");
   answerTitle.className = "panel-title";
   answerTitle.textContent = "Expression result";
   const answerStack = document.createElement("div");
-  answerStack.className = "expr-answer-stack";
+  answerStack.className = "expr-answer-stack panel-body";
   const answerResult = document.createElement("div");
   answerResult.dataset.role = "expr-answer-result";
   answerResult.className = "expr-answer-result hidden";
@@ -248,14 +253,14 @@ function ensureExpressionLayout(): ExpressionTemplateElements {
   answerPanel.appendChild(answerStack);
 
   const statePanel = document.createElement("div");
-  statePanel.className = "panel program-state-panel";
+  statePanel.className = "panel program-state-panel panel-scroll";
   statePanel.dataset.role = "expr-state-panel";
   const stateTitle = document.createElement("div");
   stateTitle.className = "panel-title";
   stateTitle.textContent = "Program state";
   const stageEl = document.createElement("div");
   stageEl.dataset.role = "expr-stage";
-  stageEl.className = "grid";
+  stageEl.className = "grid panel-body";
   statePanel.appendChild(stateTitle);
   statePanel.appendChild(stageEl);
 

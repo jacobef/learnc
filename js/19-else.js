@@ -43,7 +43,7 @@ createProgramTemplate({
             editable: false,
         },
         {
-            code: "if (/*1 - 1 * -1*/0) {\n",
+            code: "if (1 - 1 * -1) {\n",
             editable: true,
             instructions: "Select the line boundary where execution will resume.",
         },

@@ -9,35 +9,42 @@
     <body>
         <div class="wrap">
             <div class="main">
-                <h1 class="page-title">Dereferencing I</h1>
-                <p data-role="quiz-instructions" class="intro"></p>
-
-                <section>
-                    <div class="quiz-row">
-                        <div class="panel quiz-expression-panel">
-                            <div class="panel-title">Expression</div>
-                            <div
-                                data-role="quiz-expression"
-                                class="expr-display"
-                            ></div>
-                        </div>
-                        <div class="panel program-state-panel">
-                            <div class="panel-title">Program state</div>
-                            <div
-                                data-role="quiz-streak"
-                                class="quiz-streak"
-                            ></div>
-                            <div class="controls controls-top">
+                <h1 class="page-title"></h1>
+                <section class="panel-shell">
+                    <div class="controls-bar controls-bar-quiz">
+                        <div class="controls-main panel panel-controls">
+                            <div class="controls-row controls-left"></div>
+                            <div class="controls-row controls-right">
                                 <button data-role="quiz-check">Check</button>
                                 <button data-role="quiz-next">
                                     Next Program ▶▶
                                 </button>
                                 <span
+                                    data-role="quiz-streak"
+                                    class="quiz-streak"
+                                ></span>
+                                <span
                                     data-role="quiz-status"
                                     class="muted"
                                 ></span>
                             </div>
-                            <div data-role="quiz-stage" class="grid"></div>
+                        </div>
+                        <p data-role="quiz-instructions" class="intro"></p>
+                    </div>
+                    <div class="quiz-row panel-row">
+                        <div class="panel quiz-expression-panel panel-scroll">
+                            <div class="panel-title">Expression</div>
+                            <div
+                                data-role="quiz-expression"
+                                class="expr-display panel-body"
+                            ></div>
+                        </div>
+                        <div class="panel program-state-panel panel-scroll">
+                            <div class="panel-title">Program state</div>
+                            <div
+                                data-role="quiz-stage"
+                                class="grid panel-body"
+                            ></div>
                         </div>
                     </div>
                 </section>

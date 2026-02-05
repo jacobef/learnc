@@ -4,12 +4,21 @@ import {
   flashStatus,
   getNavLabelForHref,
   randAddr,
+  resolveActiveNavItem,
   setPartsContent,
   vbox,
 } from "./shared-core.js";
 import type { BoxState } from "./shared-core.js";
 
-ensureBaseLayout();
+const { main } = ensureBaseLayout();
+main.classList.add("main-panelized");
+const activeItem = resolveActiveNavItem();
+const resolvedTitle = activeItem?.label || "";
+if (resolvedTitle) {
+  document.title = `C Boxes - ${resolvedTitle}`;
+  const heading = document.querySelector(".page-title") as HTMLElement | null;
+  if (heading) heading.textContent = resolvedTitle;
+}
 
 const instructions = $('[data-role="quiz-instructions"]') as HTMLElement | null;
 const stage = $('[data-role="quiz-stage"]') as HTMLElement | null;

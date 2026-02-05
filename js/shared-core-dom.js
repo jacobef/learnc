@@ -230,6 +230,7 @@ function ensureBaseLayout({ navItems, activeHref, } = {}) {
     if (nav.nextElementSibling !== main) {
         wrap.insertBefore(nav, main);
     }
+    document.body.classList.add("panel-layout");
     requestAnimationFrame(() => {
         ensureNavSelectionVisible(nav);
         bindNavScrollIndicators(nav);
@@ -1593,11 +1594,84 @@ function initScrollHint() {
     });
     update();
 }
+function initProgramStateScrollHints() {
+    const bind = (panel) => {
+        if (panel.dataset.programStateScrollHintBound === "1")
+            return;
+        panel.dataset.programStateScrollHintBound = "1";
+        const target = panel.querySelector('[data-role="program-stage"], [data-role="expr-stage"], [data-role="sandbox-stage"], [data-role="quiz-stage"]') ||
+            panel.querySelector(".panel-body");
+        if (!target)
+            return;
+        const btn = document.createElement("button");
+        btn.className = "panel-scroll-down-btn hidden";
+        btn.setAttribute("aria-label", "Scroll program state to bottom");
+        btn.type = "button";
+        btn.textContent = "↓";
+        panel.appendChild(btn);
+        const shouldShow = () => {
+            const scrollable = Math.max(0, target.scrollHeight - target.clientHeight);
+            if (scrollable <= 10)
+                return false;
+            const boxes = Array.from(target.querySelectorAll(".vbox"));
+            if (!boxes.length) {
+                const nearBottom = target.scrollTop >= scrollable - 6;
+                return !nearBottom;
+            }
+            const rows = boxes.map((box) => ({
+                top: box.offsetTop,
+                bottom: box.offsetTop + box.offsetHeight,
+            }));
+            const maxTop = Math.max(...rows.map((row) => row.top));
+            const epsilon = 2;
+            const bottomRow = rows.filter((row) => Math.abs(row.top - maxTop) <= epsilon);
+            if (!bottomRow.length) {
+                const nearBottom = target.scrollTop >= scrollable - 6;
+                return !nearBottom;
+            }
+            const rowTop = Math.min(...bottomRow.map((row) => row.top));
+            const rowBottom = Math.max(...bottomRow.map((row) => row.bottom));
+            const rowHeight = Math.max(1, rowBottom - rowTop);
+            const viewTop = target.scrollTop;
+            const viewBottom = viewTop + target.clientHeight;
+            const visibleTop = Math.max(viewTop, rowTop);
+            const visibleBottom = Math.min(viewBottom, rowBottom);
+            const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+            const visibleRatio = visibleHeight / rowHeight;
+            return visibleRatio < 0.5;
+        };
+        const update = () => {
+            btn.classList.toggle("hidden", !shouldShow());
+        };
+        target.addEventListener("scroll", update, { passive: true });
+        window.addEventListener("resize", update, { passive: true });
+        const observer = new MutationObserver(update);
+        observer.observe(target, { childList: true, subtree: true });
+        btn.addEventListener("click", () => {
+            target.scrollTo({ top: target.scrollHeight, behavior: "smooth" });
+        });
+        requestAnimationFrame(update);
+    };
+    const scan = () => {
+        document
+            .querySelectorAll(".program-state-panel")
+            .forEach((node) => bind(node));
+    };
+    scan();
+    const rootObserver = new MutationObserver(scan);
+    rootObserver.observe(document.body, { childList: true, subtree: true });
+}
 if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", initScrollHint);
 }
 else {
     initScrollHint();
+}
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initProgramStateScrollHints);
+}
+else {
+    initProgramStateScrollHints();
 }
 if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => {

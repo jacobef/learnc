@@ -24,6 +24,7 @@ function ensureCodeEditorLayout({ textareaMinLines, }) {
     if (existing)
         return collectCodeEditorElements();
     const { main } = ensureBaseLayout();
+    main.classList.add("main-panelized");
     if (resolvedTitle) {
         const heading = document.createElement("h1");
         heading.className = "page-title";
@@ -35,27 +36,31 @@ function ensureCodeEditorLayout({ textareaMinLines, }) {
     instructionsEl.className = "intro";
     const section = document.createElement("section");
     section.dataset.role = "code-root";
+    section.classList.add("panel-shell");
     const actionBar = document.createElement("div");
-    actionBar.className = "controls-bar";
+    actionBar.className = "controls-bar controls-bar-code";
+    const controlsMain = document.createElement("div");
+    controlsMain.className = "controls-main panel panel-controls";
     const leftControls = document.createElement("div");
     leftControls.className = "controls-row controls-left";
     const rightControls = document.createElement("div");
     rightControls.className = "controls-row controls-right";
-    actionBar.appendChild(leftControls);
-    actionBar.appendChild(rightControls);
+    controlsMain.appendChild(leftControls);
+    controlsMain.appendChild(rightControls);
+    actionBar.appendChild(controlsMain);
     section.appendChild(actionBar);
     const row = document.createElement("div");
-    row.className = "row";
+    row.className = "row panel-row";
     section.appendChild(row);
     main.appendChild(section);
     const codePanel = document.createElement("div");
-    codePanel.className = "panel code-editor-panel";
+    codePanel.className = "panel code-editor-panel panel-scroll";
     codePanel.dataset.role = "code-panel";
     const codeTitle = document.createElement("div");
     codeTitle.className = "panel-title code-title";
     codeTitle.textContent = "Code";
     const codePane = document.createElement("div");
-    codePane.className = "codepane";
+    codePane.className = "codepane panel-body";
     const codeRow = document.createElement("div");
     codeRow.className = "codepane-row";
     const lineNumbers = document.createElement("div");
@@ -86,9 +91,10 @@ function ensureCodeEditorLayout({ textareaMinLines, }) {
     codePanel.appendChild(codeTitle);
     codePanel.appendChild(codePane);
     const statePanel = document.createElement("div");
-    statePanel.className = "panel code-editor-panel";
+    statePanel.className = "panel code-editor-panel panel-scroll";
     const stage = document.createElement("div");
     stage.dataset.role = "code-stage";
+    stage.className = "panel-body";
     const checkBtn = document.createElement("button");
     checkBtn.dataset.role = "code-check";
     checkBtn.textContent = "Check";

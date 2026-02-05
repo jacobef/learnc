@@ -56,7 +56,10 @@ interface ProgramElements {
   instructionsEl: HTMLElement | null;
   codeEl: HTMLElement | null;
   codeRoot: HTMLElement | null;
+  rowEl: HTMLElement | null;
   stageEl: HTMLElement | null;
+  controlsRightEl: HTMLElement | null;
+  mobileActionsEl: HTMLElement | null;
   statusEl: HTMLElement | null;
   hintPanel: HTMLElement | null;
   hintBtn: HTMLButtonElement | null;
@@ -117,7 +120,7 @@ interface ProgramTemplateResult {
 
 function initProgramStatusGap(root: HTMLElement | null): void {
   if (!root) return;
-  const bar = root.querySelector(".controls-bar") as HTMLElement | null;
+  const bar = root.querySelector(".controls-main") as HTMLElement | null;
   const left = root.querySelector(".controls-left") as HTMLElement | null;
   const right = root.querySelector(".controls-right") as HTMLElement | null;
   const gap = root.querySelector(
@@ -165,8 +168,17 @@ function collectProgramElements(root: ParentNode = document): ProgramElements {
     codeRoot: root.querySelector(
       '[data-role="program-root"]',
     ) as HTMLElement | null,
+    rowEl: root.querySelector(
+      '[data-role="program-row"]',
+    ) as HTMLElement | null,
     stageEl: root.querySelector(
       '[data-role="program-stage"]',
+    ) as HTMLElement | null,
+    controlsRightEl: root.querySelector(
+      '[data-role="program-controls-right"]',
+    ) as HTMLElement | null,
+    mobileActionsEl: root.querySelector(
+      '[data-role="program-mobile-actions"]',
     ) as HTMLElement | null,
     statusEl: root.querySelector(
       '[data-role="program-status"]',
@@ -213,6 +225,7 @@ function ensureProgramLayout(): ProgramElements {
   if (existing) return collectProgramElements();
 
   const { main } = ensureBaseLayout();
+  main.classList.add("main-panelized");
   if (resolvedTitle) {
     const heading = document.createElement("h1");
     heading.className = "page-title";
@@ -226,30 +239,36 @@ function ensureProgramLayout(): ProgramElements {
 
   const section = document.createElement("section");
   section.dataset.role = "program-root";
+  section.classList.add("panel-shell");
   const actionBar = document.createElement("div");
-  actionBar.className = "controls-bar";
+  actionBar.className = "controls-bar controls-bar-program";
+  const controlsMain = document.createElement("div");
+  controlsMain.className = "controls-main panel panel-controls";
   const leftControls = document.createElement("div");
   leftControls.className = "controls-row controls-left";
   const rightControls = document.createElement("div");
   rightControls.className = "controls-row controls-right";
-  actionBar.appendChild(leftControls);
-  actionBar.appendChild(rightControls);
+  rightControls.dataset.role = "program-controls-right";
+  controlsMain.appendChild(leftControls);
+  controlsMain.appendChild(rightControls);
+  actionBar.appendChild(controlsMain);
   actionBar.appendChild(instructionsEl);
   section.appendChild(actionBar);
   const row = document.createElement("div");
-  row.className = "row";
+  row.className = "row panel-row";
+  row.dataset.role = "program-row";
   section.appendChild(row);
   main.appendChild(section);
 
   const codePanel = document.createElement("div");
-  codePanel.className = "panel";
+  codePanel.className = "panel panel-scroll";
   codePanel.dataset.role = "program-code-panel";
   const codeTitle = document.createElement("div");
   codeTitle.className = "panel-title code-title";
   codeTitle.textContent = "Code";
   const codeEl = document.createElement("div");
   codeEl.dataset.role = "program-code";
-  codeEl.className = "codepane";
+  codeEl.className = "codepane panel-body";
   const prevBtn = document.createElement("button");
   prevBtn.textContent = "Back ◀";
   prevBtn.dataset.stepper = "prev";
@@ -262,12 +281,16 @@ function ensureProgramLayout(): ProgramElements {
   codePanel.appendChild(codeEl);
 
   const statePanel = document.createElement("div");
-  statePanel.className = "panel program-state-panel";
+  statePanel.className = "panel program-state-panel panel-scroll";
+  const mobileActions = document.createElement("div");
+  mobileActions.className = "panel program-mobile-actions";
+  mobileActions.dataset.role = "program-mobile-actions";
   const stateTitle = document.createElement("div");
   stateTitle.className = "panel-title";
   stateTitle.textContent = "Program state";
   const stageEl = document.createElement("div");
   stageEl.dataset.role = "program-stage";
+  stageEl.className = "panel-body";
   const stateControls = document.createElement("div");
   stateControls.className = "controls";
   const checkBtn = document.createElement("button");
@@ -294,7 +317,7 @@ function ensureProgramLayout(): ProgramElements {
   statusGap.dataset.role = "program-status-gap";
   statusGap.className = "controls-gap";
   statusGap.appendChild(statusEl);
-  actionBar.appendChild(statusGap);
+  controlsMain.appendChild(statusGap);
   rightControls.appendChild(checkBtn);
   rightControls.appendChild(hintBtn);
   rightControls.appendChild(addBtn);
@@ -308,13 +331,17 @@ function ensureProgramLayout(): ProgramElements {
   statePanel.appendChild(stateControls);
 
   row.appendChild(codePanel);
+  row.appendChild(mobileActions);
   row.appendChild(statePanel);
 
   return {
     instructionsEl,
     codeEl,
     codeRoot: section,
+    rowEl: row,
     stageEl,
+    controlsRightEl: rightControls,
+    mobileActionsEl: mobileActions,
     statusEl,
     hintPanel,
     hintBtn,
@@ -356,7 +383,10 @@ function createProgramTemplate(
     instructionsEl,
     codeEl,
     codeRoot,
+    rowEl,
     stageEl,
+    controlsRightEl,
+    mobileActionsEl,
     statusEl,
     hintPanel,
     hintBtn,
@@ -364,6 +394,51 @@ function createProgramTemplate(
     addBtn,
     resetBtn,
   } = ensureProgramLayout();
+
+  function placeActionButtonsForViewport() {
+    const mobileMode = isMobileViewport() && !!mobileActionsEl;
+    const target = mobileMode ? mobileActionsEl : controlsRightEl;
+    if (!target) return;
+    [checkBtn, hintBtn, addBtn, resetBtn].forEach((btn) => {
+      if (btn && btn.parentElement !== target) target.appendChild(btn);
+    });
+    if (hintPanel) {
+      if (mobileMode && rowEl && mobileActionsEl) {
+        if (
+          hintPanel.parentElement !== rowEl ||
+          hintPanel.previousElementSibling !== mobileActionsEl
+        ) {
+          rowEl.insertBefore(hintPanel, mobileActionsEl.nextSibling);
+        }
+      } else if (codeRoot) {
+        const actionBar = codeRoot.querySelector(".controls-bar");
+        if (actionBar instanceof HTMLElement) {
+          if (instructionsEl && instructionsEl.parentElement === actionBar) {
+            if (
+              hintPanel.parentElement !== actionBar ||
+              hintPanel.nextElementSibling !== instructionsEl
+            ) {
+              actionBar.insertBefore(hintPanel, instructionsEl);
+            }
+          } else if (hintPanel.parentElement !== actionBar) {
+            actionBar.appendChild(hintPanel);
+          }
+        }
+      }
+    }
+  }
+
+  function updateMobileActionsVisibility() {
+    if (!mobileActionsEl) return;
+    const hasVisibleAction = [checkBtn, hintBtn, addBtn, resetBtn].some(
+      (btn) => !!btn && !btn.classList.contains("hidden"),
+    );
+    mobileActionsEl.classList.toggle("hidden", !hasVisibleAction);
+  }
+  placeActionButtonsForViewport();
+  updateMobileActionsVisibility();
+  window.addEventListener("resize", placeActionButtonsForViewport);
+
   bindBtnRefPulse(codeRoot || document);
   initProgramStatusGap(codeRoot);
 
@@ -1943,6 +2018,33 @@ function createProgramTemplate(
       strikeRanges,
       strikeFragments,
     });
+    ensureCodeLineVisible(key);
+  }
+
+  function ensureCodeLineVisible(lineIndex: number) {
+    if (!codeEl) return;
+    if (!Number.isFinite(lineIndex)) return;
+    if (lineIndex < 0 || lineIndex >= lineList.length) return;
+    const lines = codeEl.querySelectorAll(".line");
+    const lineEl = lines[lineIndex] as HTMLElement | undefined;
+    if (!lineEl) return;
+    const container = codeEl as HTMLElement;
+    const containerRect = container.getBoundingClientRect();
+    const lineRect = lineEl.getBoundingClientRect();
+    const lineTop = lineRect.top - containerRect.top + container.scrollTop;
+    const lineBottom = lineTop + lineRect.height;
+    const viewTop = container.scrollTop;
+    const viewBottom = viewTop + container.clientHeight;
+    if (lineTop < viewTop) {
+      container.scrollTop = Math.max(0, Math.floor(lineTop));
+      return;
+    }
+    if (lineBottom > viewBottom) {
+      container.scrollTop = Math.max(
+        0,
+        Math.ceil(lineBottom - container.clientHeight),
+      );
+    }
   }
 
   function renderStage() {
@@ -2193,6 +2295,7 @@ function createProgramTemplate(
           branchStepActive,
       );
     if (resetBtn) resetBtn.classList.add("hidden");
+    updateMobileActionsVisibility();
     updateInstructions();
     if (normalEditable && resetBtn) updateResetVisibility(key);
   }
