@@ -34,64 +34,19 @@ export type ExprNode =
       left: ExprNode;
       right: ExprNode;
     };
-export type AssignRhs =
-  | { kind: "num"; value: string }
-  | { kind: "var"; name: string }
-  | { kind: "ref"; name: string }
-  | { kind: "deref"; name: string; depth: number }
-  | { kind: "unary"; name: string; ops: string[] }
-  | { kind: "expr"; expr: ExprNode; hasVar: boolean };
 export type Statement =
   | { kind: "blockStart" }
   | { kind: "blockEnd" }
   | { kind: "if"; expr: ExprNode; hasVar: boolean }
+  | { kind: "else" }
   | { kind: "decl"; name: string; type: string }
-  | { kind: "assign"; name: string; value: string; valueKind: "num" }
-  | {
-      kind: "assign";
-      name: string;
-      valueKind: "expr";
-      expr: ExprNode;
-      hasVar: boolean;
-    }
-  | { kind: "assignVar"; name: string; src: string }
-  | { kind: "assignRef"; name: string; ref: string }
-  | { kind: "assignDeref"; name: string; value: string; depth?: number }
-  | { kind: "assignDerefVar"; name: string; src: string; depth?: number }
-  | { kind: "assignDerefRef"; name: string; ref: string; depth?: number }
-  | { kind: "assignFromDeref"; name: string; ptr: string; depth?: number }
-  | { kind: "assignUnary"; name: string; ops: string[]; rhs: AssignRhs }
-  | { kind: "assignUnaryRhs"; name: string; src: string; ops: string[] }
+  | { kind: "assign"; lhs: ExprNode; rhs: ExprNode; hasVar: boolean }
   | {
       kind: "declAssign";
       name: string;
       declType?: string;
-      value: string;
-      valueKind: "num";
-    }
-  | {
-      kind: "declAssign";
-      name: string;
-      declType?: string;
-      valueKind: "expr";
       expr: ExprNode;
       hasVar: boolean;
-    }
-  | { kind: "declAssignVar"; name: string; src: string; declType?: string }
-  | { kind: "declAssignRef"; name: string; ref: string; declType?: string }
-  | {
-      kind: "declAssignDeref";
-      name: string;
-      ptr: string;
-      depth?: number;
-      declType?: string;
-    }
-  | {
-      kind: "declAssignUnary";
-      name: string;
-      src: string;
-      ops: string[];
-      declType?: string;
     };
 export interface Token {
   type: "kw" | "ident" | "number" | "sym" | "unknown";
@@ -129,6 +84,11 @@ export type IfBlock = {
   closeIndex: number;
   trueTarget: number;
   falseTarget: number;
+  elseIndex?: number | null;
+  elseOpenIndex?: number | null;
+  elseCloseIndex?: number | null;
+  elseTarget?: number | null;
+  afterIndex: number;
   expr: ExprNode;
   hasVar: boolean;
 };
@@ -205,14 +165,9 @@ export function createSimpleSimulator(
   opts: {
     allowVarAssign?: boolean;
     requireSourceValue?: boolean;
-    allowPointers?: boolean;
   } = {},
 ): SimpleSimulator {
-  const {
-    allowVarAssign = false,
-    requireSourceValue = false,
-    allowPointers = false,
-  } = opts;
+  const { allowVarAssign = false, requireSourceValue = false } = opts;
 
   type DeclaredNames = Set<string>;
   type ScopeStack = Array<Set<string>>;
@@ -221,7 +176,6 @@ export function createSimpleSimulator(
     nextIndex: number;
     hasVar: boolean;
   };
-  type UnaryLhs = { ops: string[]; name: string; idx: number };
   type EvalError = {
     error: string | { text: string; html: string };
     kind: "compile" | "ub";
@@ -441,16 +395,19 @@ export function createSimpleSimulator(
       if (/[0-9]/.test(ch)) {
         const startCol = col;
         let j = i;
+        let isDecimal = false;
         if (src[j] === "0" && (src[j + 1] === "x" || src[j + 1] === "X")) {
           j += 2;
           while (j < src.length && /[0-9a-fA-F]/.test(src[j])) j++;
         } else {
           while (j < src.length && /[0-9]/.test(src[j])) j++;
           if (src[j] === ".") {
+            isDecimal = true;
             j++;
             while (j < src.length && /[0-9]/.test(src[j])) j++;
           }
           if (src[j] === "e" || src[j] === "E") {
+            isDecimal = true;
             let k = j + 1;
             if (src[k] === "+" || src[k] === "-") k++;
             const expStart = k;
@@ -459,6 +416,9 @@ export function createSimpleSimulator(
               j = k;
             }
           }
+        }
+        if (!isDecimal && (src[j] === "l" || src[j] === "L")) {
+          j++;
         }
         tokens.push({
           type: "number",
@@ -549,7 +509,6 @@ export function createSimpleSimulator(
     )
       return null;
     if (stars === 0) return baseType;
-    if (!allowPointers) return null;
     return `${baseType}${"*".repeat(stars)}`;
   }
 
@@ -574,8 +533,23 @@ export function createSimpleSimulator(
   const INT64_MIN = -9223372036854775808n;
   const INT64_MAX = 9223372036854775807n;
 
+  function stripIntegerSuffix(value: string): string {
+    const raw = value.trim();
+    if (!raw) return raw;
+    const last = raw[raw.length - 1];
+    if (last === "l" || last === "L") return raw.slice(0, -1);
+    return raw;
+  }
+
+  function hasLongSuffix(value: string): boolean {
+    const raw = value.trim();
+    if (!raw) return false;
+    const last = raw[raw.length - 1];
+    return last === "l" || last === "L";
+  }
+
   function parseIntegerLiteral(value: string): bigint | null {
-    const raw = String(value ?? "").trim();
+    const raw = stripIntegerSuffix(value);
     if (!raw) return null;
     if (raw.startsWith("0x") || raw.startsWith("0X")) {
       const digits = raw.slice(2);
@@ -641,6 +615,15 @@ export function createSimpleSimulator(
           kind: "compile",
         };
       }
+      if (base !== "double") {
+        const truncated = Math.trunc(parsed);
+        try {
+          const asInt = BigInt(truncated);
+          return checkIntegerRange(asInt, base) || null;
+        } catch {
+          return integerOverflowError(base);
+        }
+      }
       return null;
     }
     if (base === "double") return null;
@@ -648,7 +631,10 @@ export function createSimpleSimulator(
     if (base === "long") {
       return status === "compile" ? numericLiteralError(status) : null;
     }
-    if (base === "int") return numericLiteralError(status);
+    if (base === "int") {
+      if (status === "compile") return numericLiteralError(status);
+      return null;
+    }
     return null;
   }
 
@@ -693,6 +679,17 @@ export function createSimpleSimulator(
     if (base === "int") return 32;
     if (base === "long") return 64;
     return null;
+  }
+
+  function wrapIntegerToBase(value: bigint, base: string): bigint | null {
+    const width = bitWidthForBase(base);
+    if (!width) return null;
+    const modulo = 1n << BigInt(width);
+    let wrapped = value % modulo;
+    if (wrapped < 0n) wrapped += modulo;
+    const signBit = 1n << BigInt(width - 1);
+    if (wrapped >= signBit) wrapped -= modulo;
+    return wrapped;
   }
 
   function isRefCompatible(targetType: string, refType: string): boolean {
@@ -741,7 +738,7 @@ export function createSimpleSimulator(
           if (tok.value === "+" || tok.value === "-" || tok.value === "~") {
             continue;
           }
-          if (allowPointers && (tok.value === "*" || tok.value === "&")) {
+          if (tok.value === "*" || tok.value === "&") {
             continue;
           }
         }
@@ -793,7 +790,6 @@ export function createSimpleSimulator(
       tokens[idx].type === "sym" &&
       tokens[idx].value === "*"
     ) {
-      if (!allowPointers) return false;
       stars++;
       idx++;
     }
@@ -813,113 +809,15 @@ export function createSimpleSimulator(
     declaredNames: DeclaredNames,
   ): boolean {
     if (!tokens.length) return false;
-    if (tokens[0].type !== "ident") return false;
-    const name = tokens[0].value;
-    if (tokens.length === 1) return hasDeclaredPrefix(name, declaredNames);
-    if (tokens[1].type !== "sym" || tokens[1].value !== "=") return false;
-    if (!declaredNames?.has(name)) return false;
-    if (tokens.length === 2) return true;
-    const t2 = tokens[2];
-    if (
-      t2.type === "sym" &&
-      (t2.value === "&" || t2.value === "*") &&
-      allowPointers
-    ) {
-      let j = 2;
-      while (
-        j < tokens.length &&
-        tokens[j].type === "sym" &&
-        (tokens[j].value === "*" || tokens[j].value === "&")
-      )
-        j++;
-      if (j === tokens.length) return true;
-      if (tokens[j].type !== "ident") return false;
-      return (
-        j === tokens.length - 1 &&
-        hasDeclaredPrefix(tokens[j].value, declaredNames)
-      );
-    }
-    return isExpressionPrefix(tokens.slice(2), { allowVars: allowVarAssign });
-  }
-
-  function isUnaryAssignPrefix(
-    tokens: Token[],
-    declaredNames: DeclaredNames,
-  ): boolean {
-    if (!allowPointers) return false;
-    if (!tokens.length) return false;
-    let idx = 0;
-    while (
-      idx < tokens.length &&
-      tokens[idx].type === "sym" &&
-      (tokens[idx].value === "*" || tokens[idx].value === "&")
-    )
-      idx++;
-    if (idx === 0) return false;
-    if (idx === tokens.length) return true;
-    if (tokens[idx].type !== "ident") return false;
-    const name = tokens[idx].value;
-    if (idx === tokens.length - 1)
-      return hasDeclaredPrefix(name, declaredNames);
-    idx++;
-    if (tokens[idx].type !== "sym" || tokens[idx].value !== "=") return false;
-    idx++;
-    if (idx >= tokens.length) return true;
-    const rhs = tokens[idx];
-    if (
-      rhs.type === "sym" &&
-      (rhs.value === "&" || rhs.value === "*") &&
-      allowPointers
-    ) {
-      let j = idx;
-      while (
-        j < tokens.length &&
-        tokens[j].type === "sym" &&
-        (tokens[j].value === "*" || tokens[j].value === "&")
-      )
-        j++;
-      if (j === tokens.length) return true;
-      if (tokens[j].type !== "ident") return false;
-      return (
-        j === tokens.length - 1 &&
-        hasDeclaredPrefix(tokens[j].value, declaredNames)
-      );
-    }
-    return isExpressionPrefix(tokens.slice(idx), {
-      allowVars: allowVarAssign,
-    });
-  }
-
-  function isDerefPrefix(
-    tokens: Token[],
-    declaredNames: DeclaredNames,
-  ): boolean {
-    if (!allowPointers) return false;
-    if (!tokens.length) return false;
-    let idx = 0;
-    while (
-      idx < tokens.length &&
-      tokens[idx].type === "sym" &&
-      tokens[idx].value === "*"
-    )
-      idx++;
-    if (idx === 0) return false;
-    if (idx === tokens.length) return true;
-    if (tokens[idx].type !== "ident") return false;
-    const name = tokens[idx].value;
-    if (idx === tokens.length - 1)
-      return hasDeclaredPrefix(name, declaredNames);
-    idx++;
-    if (tokens[idx].type !== "sym" || tokens[idx].value !== "=") return false;
-    if (!declaredNames?.has(name)) return false;
-    idx++;
-    if (idx >= tokens.length) return true;
-    const rhs = tokens[idx];
-    if (rhs.type === "sym" && rhs.value === "&" && allowPointers) {
-      if (idx === tokens.length - 1) return true;
-      return idx === tokens.length - 2 && tokens[idx + 1].type === "ident";
-    }
-    return isExpressionPrefix(tokens.slice(idx), {
+    const eqIndex = tokens.findIndex(
+      (tok) => tok.type === "sym" && tok.value === "=",
+    );
+    if (eqIndex === -1) return false;
+    if (eqIndex === 0) return false;
+    const lhsTokens = tokens.slice(0, eqIndex);
+    if (!isExpressionPrefix(lhsTokens, { allowVars: true })) return false;
+    if (eqIndex === tokens.length - 1) return true;
+    return isExpressionPrefix(tokens.slice(eqIndex + 1), {
       allowVars: allowVarAssign,
     });
   }
@@ -953,6 +851,9 @@ export function createSimpleSimulator(
   ): boolean {
     if (!tokens.length) return false;
     if (tokens.some((t) => t.type === "unknown")) return false;
+    if (tokens[0].type === "kw" && tokens[0].value === "else") {
+      return tokens.length === 1;
+    }
     if (tokens.length === 1) {
       const t0 = tokens[0];
       if (
@@ -972,14 +873,12 @@ export function createSimpleSimulator(
           return true;
         return hasDeclaredPrefix(t0.value, declaredNames);
       }
-      if (allowPointers && t0.type === "sym" && t0.value === "*") return true;
+    if (t0.type === "sym" && t0.value === "*") return true;
     }
     return (
       isIfPrefix(tokens) ||
       isDeclPrefix(tokens) ||
-      isAssignPrefix(tokens, declaredNames) ||
-      isDerefPrefix(tokens, declaredNames) ||
-      isUnaryAssignPrefix(tokens, declaredNames)
+      isAssignPrefix(tokens, declaredNames)
     );
   }
 
@@ -1032,7 +931,7 @@ export function createSimpleSimulator(
         (tok.value === "+" ||
           tok.value === "-" ||
           tok.value === "~" ||
-          (allowPointers && (tok.value === "*" || tok.value === "&")))
+          (tok.value === "*" || tok.value === "&"))
       ) {
         idx++;
         const expr = parseUnary();
@@ -1318,7 +1217,11 @@ export function createSimpleSimulator(
               kind: "compile",
             };
           }
-          const literalBase = literalStatus === "ub" ? "long" : "int";
+          const literalBase = hasLongSuffix(node.value)
+            ? "long"
+            : literalStatus === "ub"
+              ? "long"
+              : "int";
           const intValue = parseIntegerLiteral(node.value);
           if (intValue == null) {
             return {
@@ -1335,9 +1238,9 @@ export function createSimpleSimulator(
         }
       }
       if (node.kind === "var") {
-        if (!allowVars)
+      if (!allowVars)
           return {
-            error: "Assignments should use a number.",
+            error: "Assignments should not use variables yet.",
             kind: "compile",
           };
         const box = by[node.name];
@@ -1352,6 +1255,7 @@ export function createSimpleSimulator(
         const rhs = evalNode(node.expr);
         if (isEvalError(rhs)) return rhs;
         const rhsDepth = rhs.depth ?? 0;
+        
         if (node.op === "&") {
           const label = `&${rhs.label || ""}`;
           if (rhs.kind !== "lvalue" || !rhs.address) {
@@ -1385,9 +1289,7 @@ export function createSimpleSimulator(
               kind: "ub",
             };
           }
-          const target = state.find(
-            (b) => String(b.address ?? "") === String(ptrVal),
-          );
+          const target = state.find((b) => (b.address ?? "") === ptrVal);
           if (!target) {
             return {
               error: `${label} doesn't point to a known variable.`,
@@ -1701,7 +1603,10 @@ export function createSimpleSimulator(
     base: string,
     targetType: string,
     nanSign?: -1 | 1,
-  ): { value: bigint | number; base: string; nanSign?: -1 | 1 } | null {
+  ):
+    | { value: bigint | number; base: string; nanSign?: -1 | 1 }
+    | EvalError
+    | null {
     const { base: targetBase, depth } = parseType(targetType);
     if (!targetBase || depth !== 0) return null;
     if (targetBase === "double") {
@@ -1714,120 +1619,121 @@ export function createSimpleSimulator(
       const nextNanSign = Number.isNaN(num) ? (nanSign ?? 1) : undefined;
       return { value: num, base: "double", nanSign: nextNanSign };
     }
+    if (targetBase !== "int" && targetBase !== "long") return null;
     let numValue: number;
     if (base === "double") {
       const num = typeof value === "bigint" ? Number(value) : value;
-      if (!Number.isFinite(num)) return null;
+      if (!Number.isFinite(num)) return integerOverflowError(targetBase);
       numValue = Math.trunc(num);
     } else if (typeof value === "bigint") {
+      if (targetBase === "int") {
+        const wrapped = wrapIntegerToBase(value, targetBase);
+        return { value: wrapped ?? value, base: targetBase };
+      }
+      const overflow = checkIntegerRange(value, targetBase);
+      if (overflow) return overflow;
       return { value, base: targetBase };
     } else {
       numValue = Math.trunc(value);
     }
     try {
-      return { value: BigInt(numValue), base: targetBase };
+      const asInt = BigInt(numValue);
+      const overflow = checkIntegerRange(asInt, targetBase);
+      if (overflow) return overflow;
+      return { value: asInt, base: targetBase };
     } catch {
       return null;
     }
   }
 
-  function assignScalarFromExpr(
-    boxes: BoxState[],
-    targetName: string,
+  function convertAssignmentValue(
+    evaluated: EvalResult,
     targetType: string,
+    requireValue: boolean,
+  ):
+    | { value: string; nanSign?: -1 | 1 }
+    | EvalError
+    | { kind: "type-mismatch"; expectedType: string } {
+    if (isEvalError(evaluated)) return evaluated;
+    const { base: targetBase, depth: targetDepth } = parseType(targetType);
+    if (!targetBase || !Number.isFinite(targetDepth)) {
+      return { error: "That assignment is not valid here.", kind: "compile" };
+    }
+    if (targetDepth === 0) {
+      const scalar = coerceScalarResult(evaluated, requireValue);
+      if (isScalarError(scalar)) return scalar;
+      const converted = convertScalarForAssignment(
+        scalar.value,
+        scalar.base,
+        targetType,
+        scalar.nanSign,
+      );
+      if (!converted) {
+        return { error: "That assignment is not valid here.", kind: "compile" };
+      }
+      if ("error" in converted) return converted;
+      return {
+        value: formatValueForType(converted.value, targetType, {
+          nanSign: converted.nanSign,
+        }),
+        nanSign: converted.nanSign,
+      };
+    }
+    const evalDepth =
+      Number.isFinite(evaluated.depth) && evaluated.depth !== undefined
+        ? evaluated.depth
+        : 0;
+    const evalBase = evaluated.base || "int";
+    if (evalDepth !== targetDepth || evalBase !== targetBase) {
+      const expectedType =
+        makePointerType(evalDepth, evalBase) || `int${"*".repeat(evalDepth)}`;
+      return { kind: "type-mismatch", expectedType };
+    }
+    if (requireValue && String(evaluated.value ?? "") === "") {
+      const label = evaluated.label || "That value";
+      return { error: `${label} doesn't have a value yet.`, kind: "ub" };
+    }
+    return {
+      value: formatValueForType(evaluated.value, targetType, {
+        nanSign: evaluated.nanSign,
+      }),
+      nanSign: evaluated.nanSign,
+    };
+  }
+
+  function validateAssignmentExpr(
+    state: BoxState[],
+    targetType: string,
+    targetName: string,
     expr: ExprNode,
-    allowVars: boolean = allowVarAssign,
-  ): BoxState[] | null {
-    const { depth } = parseType(targetType);
-    if (Number.isFinite(depth) && depth > 0) return null;
-    const evaluated = evaluateExpression(expr, boxes, {
+    { allowVars = allowVarAssign }: { allowVars?: boolean } = {},
+  ): EvalError | null {
+    const evaluated = evaluateExpressionRaw(expr, state, {
       allowVars,
       targetType,
     });
-    if (isScalarError(evaluated)) return null;
-    const converted = convertScalarForAssignment(
-      evaluated.value!,
-      evaluated.base,
+    const converted = convertAssignmentValue(
+      evaluated,
       targetType,
-      evaluated.nanSign,
+      requireSourceValue,
     );
-    if (!converted) return null;
-    const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    const target = by[targetName];
-    if (!target) return null;
-    target.value = formatValueForType(converted.value, targetType, {
-      nanSign: converted.nanSign,
-    });
-    return boxes;
+    if ("kind" in converted && converted.kind === "type-mismatch") {
+      return typeMismatchError(targetName, converted.expectedType);
+    }
+    if ("error" in converted) return converted;
+    return null;
   }
 
   function parseAssignRhs(
     tokens: Token[],
     idx: number,
     { allowVar }: { allowVar?: boolean } = {},
-  ): AssignRhs | null {
+  ): ExprParseResult | null {
     if (idx >= tokens.length) return null;
     const allowVars = allowVar ?? allowVarAssign;
-    const rhs = tokens[idx];
-    if (rhs.type === "number" && idx === tokens.length - 1) {
-      return { kind: "num", value: rhs.value };
-    }
-    if (rhs.type === "ident" && allowVars && idx === tokens.length - 1) {
-      return { kind: "var", name: rhs.value };
-    }
-    if (rhs.type === "sym" && rhs.value === "&" && allowPointers) {
-      const next = tokens[idx + 1];
-      if (next?.type === "ident" && idx + 2 === tokens.length) {
-        return { kind: "ref", name: next.value };
-      }
-    }
-    if (
-      rhs.type === "sym" &&
-      (rhs.value === "*" || rhs.value === "&") &&
-      allowPointers
-    ) {
-      let j = idx;
-      let depth = 0;
-      while (
-        j < tokens.length &&
-        tokens[j].type === "sym" &&
-        (tokens[j].value === "*" || tokens[j].value === "&")
-      ) {
-        depth++;
-        j++;
-      }
-      if (depth > 0 && tokens[j]?.type === "ident" && j + 1 === tokens.length) {
-        const ops = tokens.slice(idx, j).map((tok) => String(tok.value));
-        if (ops.every((op) => op === "*")) {
-          return { kind: "deref", name: tokens[j].value, depth };
-        }
-        return { kind: "unary", name: tokens[j].value, ops };
-      }
-    }
     const parsed = parseExpressionTokens(tokens, idx, { allowVars });
-    if (parsed && parsed.nextIndex === tokens.length) {
-      return { kind: "expr", expr: parsed.expr, hasVar: parsed.hasVar };
-    }
-    return null;
-  }
-
-  function parseUnaryLhs(tokens: Token[]): UnaryLhs | null {
-    if (!allowPointers) return null;
-    if (!tokens.length) return null;
-    let idx = 0;
-    const ops: string[] = [];
-    while (
-      idx < tokens.length &&
-      tokens[idx].type === "sym" &&
-      (tokens[idx].value === "*" || tokens[idx].value === "&")
-    ) {
-      ops.push(tokens[idx].value);
-      idx++;
-    }
-    if (!ops.length) return null;
-    if (idx >= tokens.length || tokens[idx].type !== "ident") return null;
-    const name = tokens[idx].value;
-    return { ops, name, idx: idx + 1 };
+    if (!parsed || parsed.nextIndex !== tokens.length) return null;
+    return { expr: parsed.expr, hasVar: parsed.hasVar, nextIndex: parsed.nextIndex };
   }
 
   function parseIfHeaderTokens(
@@ -1867,6 +1773,13 @@ export function createSimpleSimulator(
       if (tokens[0].value === "{") return { kind: "blockStart" };
       if (tokens[0].value === "}") return { kind: "blockEnd" };
     }
+    if (
+      tokens.length === 1 &&
+      tokens[0].type === "kw" &&
+      tokens[0].value === "else"
+    ) {
+      return { kind: "else" };
+    }
     const ifParsed = parseIfHeaderTokens(tokens);
     if (ifParsed) {
       return { kind: "if", expr: ifParsed.expr, hasVar: ifParsed.hasVar };
@@ -1882,7 +1795,6 @@ export function createSimpleSimulator(
         tokens[idx].type === "sym" &&
         tokens[idx].value === "*"
       ) {
-        if (!allowPointers) return null;
         stars++;
         idx++;
       }
@@ -1901,641 +1813,91 @@ export function createSimpleSimulator(
         allowVar: allowVarAssign,
       });
       if (!rhs) return null;
-      if (rhs.kind === "num") {
-        return {
-          kind: "declAssign",
-          name,
-          value: rhs.value,
-          valueKind: "num",
-          declType,
-        };
-      }
-      if (rhs.kind === "var") {
-        return { kind: "declAssignVar", name, src: rhs.name, declType };
-      }
-      if (rhs.kind === "expr") {
-        return {
-          kind: "declAssign",
-          name,
-          valueKind: "expr",
-          expr: rhs.expr,
-          hasVar: rhs.hasVar,
-          declType,
-        };
-      }
-      if (rhs.kind === "ref") {
-        if (!allowPointers) return null;
-        if (!isPointerType(declType)) return null;
-        return { kind: "declAssignRef", name, ref: rhs.name, declType };
-      }
-      if (rhs.kind === "deref") {
-        if (!allowPointers) return null;
-        return {
-          kind: "declAssignDeref",
-          name,
-          ptr: rhs.name,
-          depth: rhs.depth,
-          declType,
-        };
-      }
-      if (rhs.kind === "unary") {
-        if (!allowPointers) return null;
-        return {
-          kind: "declAssignUnary",
-          name,
-          src: rhs.name,
-          ops: rhs.ops,
-          declType,
-        };
-      }
-      return null;
+      return {
+        kind: "declAssign",
+        name,
+        declType,
+        expr: rhs.expr,
+        hasVar: rhs.hasVar,
+      };
     }
-    const unary = parseUnaryLhs(tokens);
-    if (unary) {
-      let idx = unary.idx;
-      if (
-        idx >= tokens.length ||
-        tokens[idx].type !== "sym" ||
-        tokens[idx].value !== "="
-      )
-        return null;
-      idx++;
-      const rhs = parseAssignRhs(tokens, idx, { allowVar: allowVarAssign });
+    if (tokens.length >= 3) {
+      const eqIndex = tokens.findIndex(
+        (tok) => tok.type === "sym" && tok.value === "=",
+      );
+      if (eqIndex <= 0 || eqIndex >= tokens.length - 1) return null;
+      const lhsTokens = tokens.slice(0, eqIndex);
+      const rhs = parseAssignRhs(tokens, eqIndex + 1, {
+        allowVar: allowVarAssign,
+      });
       if (!rhs) return null;
-      return { kind: "assignUnary", name: unary.name, ops: unary.ops, rhs };
-    }
-    if (
-      tokens.length >= 3 &&
-      tokens[0].type === "ident" &&
-      tokens[1].type === "sym" &&
-      tokens[1].value === "="
-    ) {
-      const rhs = parseAssignRhs(tokens, 2, { allowVar: allowVarAssign });
-      if (!rhs) return null;
-      if (rhs.kind === "num") {
-        return {
-          kind: "assign",
-          name: tokens[0].value,
-          value: rhs.value,
-          valueKind: "num",
-        };
-      }
-      if (rhs.kind === "var") {
-        return { kind: "assignVar", name: tokens[0].value, src: rhs.name };
-      }
-      if (rhs.kind === "expr") {
-        return {
-          kind: "assign",
-          name: tokens[0].value,
-          valueKind: "expr",
-          expr: rhs.expr,
-          hasVar: rhs.hasVar,
-        };
-      }
-      if (rhs.kind === "ref") {
-        return { kind: "assignRef", name: tokens[0].value, ref: rhs.name };
-      }
-      if (rhs.kind === "deref") {
-        return {
-          kind: "assignFromDeref",
-          name: tokens[0].value,
-          ptr: rhs.name,
-          depth: rhs.depth,
-        };
-      }
-      if (rhs.kind === "unary") {
-        return {
-          kind: "assignUnaryRhs",
-          name: tokens[0].value,
-          src: rhs.name,
-          ops: rhs.ops,
-        };
-      }
-      return null;
+      const lhsParsed = parseExpressionTokens(lhsTokens, 0, {
+        allowVars: true,
+      });
+      if (!lhsParsed || lhsParsed.nextIndex !== lhsTokens.length) return null;
+      return {
+        kind: "assign",
+        lhs: lhsParsed.expr,
+        rhs: rhs.expr,
+        hasVar: rhs.hasVar || lhsParsed.hasVar,
+      };
     }
     return null;
   }
 
-  function applyAssignVar(
-    state: BoxState[],
-    stmt: Extract<Statement, { kind: "assignVar" | "declAssignVar" }>,
-  ): BoxState[] | null {
-    const boxes = cloneBoxes(state);
-    const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    const target = by[stmt.name];
-    const source = by[stmt.src];
-    if (!target || !source) return null;
-    const { base: targetBase, depth: targetDepth } = parseType(target.type);
-    const { base: sourceBase, depth: sourceDepth } = parseType(source.type);
-    const sameType = target.type === source.type;
-    const isScalar =
-      targetBase &&
-      sourceBase &&
-      targetBase === sourceBase &&
-      targetDepth === 0 &&
-      sourceDepth === 0;
-    const isPtr = sameType && isPointerType(target.type);
-    if (targetDepth === 0 && sourceDepth === 0) {
-      return assignScalarFromExpr(boxes, stmt.name, target.type, {
-        kind: "var",
-        name: stmt.src,
-      });
-    }
-    if (!isScalar && !isPtr) return null;
-    if (requireSourceValue && String(source.value ?? "") === "") return null;
-    target.value = String(source.value ?? "");
-    return boxes;
-  }
-
-  function applyAssignExpr(
-    state: BoxState[],
-    stmt: Extract<
-      Statement,
-      | { kind: "assign"; valueKind: "expr" }
-      | { kind: "declAssign"; valueKind: "expr" }
-    >,
+  function applyAssignmentToTarget(
+    boxes: BoxState[],
+    target: BoxState,
+    targetType: string,
+    expr: ExprNode,
     { allowVars = allowVarAssign }: { allowVars?: boolean } = {},
   ): BoxState[] | null {
-    const boxes = cloneBoxes(state);
-    const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    const target = by[stmt.name];
-    if (!target) return null;
-    const { depth } = parseType(target.type);
-    if (Number.isFinite(depth) && depth > 0) return null;
-    return assignScalarFromExpr(
-      boxes,
-      stmt.name,
-      target.type,
-      stmt.expr as ExprNode,
+    const evaluated = evaluateExpressionRaw(expr, boxes, {
       allowVars,
-    );
-  }
-
-  function applyAssignRef(
-    state: BoxState[],
-    stmt: Extract<Statement, { kind: "assignRef" | "declAssignRef" }>,
-  ): BoxState[] | null {
-    const boxes = cloneBoxes(state);
-    const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    const target = by[stmt.name];
-    const refBox = by[stmt.ref];
-    if (!target || !refBox || !refBox.address) return null;
-    if (!isRefCompatible(target.type, refBox.type)) return null;
-    target.value = String(refBox.address);
-    return boxes;
-  }
-
-  function resolveDerefTarget(
-    state: BoxState[],
-    ptrName: string,
-    depth: number,
-  ): { target?: BoxState; error?: string } {
-    const by = Object.fromEntries(state.map((b) => [b.name, b]));
-    const ptr = by[ptrName];
-    if (!ptr) return { error: "missing" };
-    let current = ptr;
-    for (let i = 0; i < depth; i++) {
-      if (!isPointerType(current.type)) return { error: "type" };
-      if (String(current.value ?? "") === "") return { error: "empty" };
-      const next = state.find((b) => b.address === String(current.value));
-      if (!next) return { error: "unknown" };
-      current = next;
-    }
-    return { target: current };
-  }
-
-  function applyAssignDeref(
-    state: BoxState[],
-    stmt: Extract<
-      Statement,
-      { kind: "assignDeref" | "assignDerefVar" | "assignDerefRef" }
-    >,
-  ): BoxState[] | null {
-    const boxes = cloneBoxes(state);
-    const { target } = resolveDerefTarget(boxes, stmt.name, stmt.depth || 1);
-    if (!target) return null;
-    const { base: targetBase, depth: targetDepth } = parseType(target.type);
-    if (!Number.isFinite(targetDepth)) return null;
-    if (stmt.kind === "assignDeref") {
-      if (targetDepth !== 0) return null;
-      return assignScalarFromExpr(boxes, target.name, target.type, {
-        kind: "num",
-        value: stmt.value,
-      });
-    } else if (stmt.kind === "assignDerefVar") {
-      if (targetDepth === 0) {
-        return assignScalarFromExpr(boxes, target.name, target.type, {
-          kind: "var",
-          name: stmt.src,
-        });
-      }
-      const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-      const source = by[stmt.src];
-      if (!source) return null;
-      if (requireSourceValue && String(source.value ?? "") === "") return null;
-      const { base: sourceBase, depth: sourceDepth } = parseType(source.type);
-      if (
-        !sourceBase ||
-        !targetBase ||
-        sourceBase !== targetBase ||
-        sourceDepth !== targetDepth
-      )
-        return null;
-      target.value = String(source.value ?? "");
-    } else if (stmt.kind === "assignDerefRef") {
-      if (targetDepth === 0) return null;
-      const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-      const refBox = by[stmt.ref];
-      if (!refBox || !refBox.address) return null;
-      if (!isRefCompatible(target.type, refBox.type)) return null;
-      target.value = String(refBox.address);
-    }
-    return boxes;
-  }
-
-  function resolveUnaryLvalue(
-    state: BoxState[],
-    ops: string[],
-    name: string,
-  ): {
-    target?: BoxState;
-    label?: string;
-    type?: string;
-    error?: string;
-    name?: string;
-  } {
-    const by = Object.fromEntries(state.map((b) => [b.name, b]));
-    const base = by[name];
-    if (!base) return { error: "missing", name };
-    const nanSignForType = (
-      value: BoxValue,
-      type: string,
-    ): -1 | 1 | undefined => {
-      const { base } = parseType(type);
-      if (base !== "double") return undefined;
-      const parsed = parseDoubleValueWithSign(value);
-      return parsed?.nanSign;
-    };
-    let current: UnaryResult = {
-      kind: "lvalue",
-      type: base.type,
-      value: base.value,
-      address: base.address ?? "",
-      box: base,
-      nanSign: nanSignForType(base.value, base.type),
-    };
-    let label = name;
-    for (let i = ops.length - 1; i >= 0; i--) {
-      const op = ops[i];
-      if (op === "&") {
-        const nextLabel = `&${label}`;
-        if (current.kind !== "lvalue" || !current.address) {
-          return { error: "not_lvalue", label: nextLabel };
-        }
-        const { base, depth } = parseType(current.type);
-        const nextDepth = Number.isFinite(depth) ? depth + 1 : 1;
-        current = {
-          kind: "rvalue",
-          type: makePointerType(nextDepth, base || "int") || "int*",
-          value: String(current.address),
-          address: "",
-          box: null,
-          nanSign: undefined,
-        };
-        label = nextLabel;
-        continue;
-      }
-      if (op === "*") {
-        const nextLabel = `*${label}`;
-        const { base, depth } = parseType(current.type);
-        if (!Number.isFinite(depth) || depth < 1) {
-          return { error: "not_deref", label: nextLabel };
-        }
-        const ptrVal: string = String(current.value ?? "").trim();
-        if (ptrVal === "") {
-          return { error: "empty", label };
-        }
-        const target: BoxState | undefined = state.find(
-          (b) => String(b.address ?? "") === String(ptrVal),
-        );
-        if (!target) return { error: "unknown", label: nextLabel };
-        current = {
-          kind: "lvalue",
-          type: makePointerType(depth - 1, base || "int") || "int",
-          value: target.value,
-          address: target.address ?? "",
-          box: target,
-          nanSign: nanSignForType(target.value, target.type),
-        };
-        label = nextLabel;
-      }
-    }
-    if (current.kind !== "lvalue" || !current.box) {
-      return { error: "not_lvalue", label };
-    }
-    return { target: current.box, label, type: current.type };
-  }
-
-  function resolveUnaryExpr(
-    state: BoxState[],
-    ops: string[],
-    name: string,
-  ): { result?: UnaryResult; label?: string; error?: string; name?: string } {
-    const by = Object.fromEntries(state.map((b) => [b.name, b]));
-    const base = by[name];
-    if (!base) return { error: "missing", name };
-    const nanSignForType = (
-      value: BoxValue,
-      type: string,
-    ): -1 | 1 | undefined => {
-      const { base } = parseType(type);
-      if (base !== "double") return undefined;
-      const parsed = parseDoubleValueWithSign(value);
-      return parsed?.nanSign;
-    };
-    let current: UnaryResult = {
-      kind: "lvalue",
-      type: base.type,
-      value: base.value,
-      address: base.address ?? "",
-      box: base,
-      refBox: null,
-      nanSign: nanSignForType(base.value, base.type),
-    };
-    let label = name;
-    for (let i = ops.length - 1; i >= 0; i--) {
-      const op = ops[i];
-      if (op === "&") {
-        const nextLabel = `&${label}`;
-        if (current.kind !== "lvalue" || !current.address) {
-          return { error: "not_lvalue", label: nextLabel };
-        }
-        const { base, depth } = parseType(current.type);
-        const nextDepth = Number.isFinite(depth) ? depth + 1 : 1;
-        current = {
-          kind: "rvalue",
-          type: makePointerType(nextDepth, base || "int") || "int*",
-          value: String(current.address),
-          address: "",
-          box: null,
-          refBox: current.box,
-          nanSign: undefined,
-        };
-        label = nextLabel;
-        continue;
-      }
-      if (op === "*") {
-        const nextLabel = `*${label}`;
-        const { base, depth } = parseType(current.type);
-        if (!Number.isFinite(depth) || depth < 1) {
-          return { error: "not_deref", label: nextLabel };
-        }
-        const ptrVal: string = String(current.value ?? "").trim();
-        if (ptrVal === "") {
-          return { error: "empty", label };
-        }
-        const target: BoxState | undefined = state.find(
-          (b) => String(b.address ?? "") === String(ptrVal),
-        );
-        if (!target) return { error: "unknown", label: nextLabel };
-        current = {
-          kind: "lvalue",
-          type: makePointerType(depth - 1, base || "int") || "int",
-          value: target.value,
-          address: target.address ?? "",
-          box: target,
-          refBox: null,
-          nanSign: nanSignForType(target.value, target.type),
-        };
-        label = nextLabel;
-      }
-    }
-    return { result: current, label };
-  }
-
-  function minBaseDepthForOps(ops: string[]): number {
-    let delta = 0;
-    let required = 0;
-    for (let i = ops.length - 1; i >= 0; i--) {
-      const op = ops[i];
-      if (op === "&") {
-        delta += 1;
-      } else if (op === "*") {
-        required = Math.max(required, 1 - delta);
-        delta -= 1;
-      }
-    }
-    return Math.max(0, required);
-  }
-
-  function validateUnaryRhs(
-    state: BoxState[],
-    targetType: string,
-    targetName: string,
-    ops: string[],
-    src: string,
-  ): EvalError | null {
-    const by = Object.fromEntries(state.map((b) => [b.name, b]));
-    const base = by[src];
-    const minDepth = minBaseDepthForOps(ops || []);
-    const { base: srcBase } = parseType(base?.type);
-    const requiredBaseType =
-      makePointerType(minDepth, srcBase || "int") ||
-      `int${"*".repeat(minDepth)}`;
-    if (!base) {
-      return {
-        error: `You can't use ${src} before declaring it.`,
-        kind: "compile",
-      };
-    }
-    const baseDepth = pointerDepth(base.type);
-    if (
-      baseDepth == null ||
-      !Number.isFinite(baseDepth) ||
-      baseDepth < minDepth
-    ) {
-      return typeMismatchError(src, requiredBaseType);
-    }
-    const resolved = resolveUnaryExpr(state, ops, src);
-    if (resolved?.error === "empty") {
-      return {
-        error: `${resolved.label} doesn't have a value yet, so it can't be dereferenced.`,
-        kind: "ub",
-      };
-    }
-    if (resolved?.error === "unknown") {
-      return {
-        error: `${resolved.label} doesn't point to a known variable.`,
-        kind: "ub",
-      };
-    }
-    if (resolved?.error === "not_deref") {
-      return {
-        error: `${resolved.label} is not a valid dereference.`,
-        kind: "compile",
-      };
-    }
-    if (resolved?.error === "not_lvalue") {
-      return { error: "That assignment is not valid here.", kind: "compile" };
-    }
-    const result = resolved?.result;
-    if (!result) {
-      return { error: "That assignment is not valid here.", kind: "compile" };
-    }
-    const { base: targetBase, depth: targetDepth } = parseType(targetType);
-    const { base: resultBase, depth: resultDepth } = parseType(result.type);
-    if (
-      !targetBase ||
-      !resultBase ||
-      !Number.isFinite(targetDepth) ||
-      !Number.isFinite(resultDepth)
-    ) {
-      return { error: "That assignment is not valid here.", kind: "compile" };
-    }
-    if (targetBase !== resultBase || targetDepth !== resultDepth) {
-      return typeMismatchError(
-        targetName,
-        makePointerType(resultDepth, resultBase) ||
-          `int${"*".repeat(resultDepth)}`,
-      );
-    }
-    if (result.kind === "lvalue") {
-      if (requireSourceValue && String(result.value ?? "") === "") {
-        return {
-          error: `${resolved.label} doesn't have a value yet.`,
-          kind: "ub",
-        };
-      }
-    }
-    return null;
-  }
-
-  function applyAssignUnary(
-    state: BoxState[],
-    stmt: Extract<Statement, { kind: "assignUnary" }>,
-  ): BoxState[] | null {
-    const boxes = cloneBoxes(state);
-    const resolved = resolveUnaryLvalue(boxes, stmt.ops, stmt.name);
-    if (!resolved?.target) return null;
-    const targetName = resolved.target.name;
-    if (stmt.rhs.kind === "num") {
-      return applyStatement(
-        boxes,
-        {
-          kind: "assign",
-          name: targetName,
-          value: stmt.rhs.value,
-          valueKind: "num",
-        },
-        {},
-      );
-    }
-    if (stmt.rhs.kind === "var") {
-      return applyAssignVar(boxes, {
-        kind: "assignVar",
-        name: targetName,
-        src: stmt.rhs.name,
-      });
-    }
-    if (stmt.rhs.kind === "ref") {
-      return applyAssignRef(boxes, {
-        kind: "assignRef",
-        name: targetName,
-        ref: stmt.rhs.name,
-      });
-    }
-    if (stmt.rhs.kind === "deref") {
-      return applyAssignFromDeref(boxes, {
-        kind: "assignFromDeref",
-        name: targetName,
-        ptr: stmt.rhs.name,
-        depth: stmt.rhs.depth,
-      });
-    }
-    if (stmt.rhs.kind === "unary") {
-      return applyAssignUnaryRhs(boxes, {
-        kind: "assignUnaryRhs",
-        name: targetName,
-        src: stmt.rhs.name,
-        ops: stmt.rhs.ops,
-      });
-    }
-    if (stmt.rhs.kind === "expr") {
-      const targetType = resolved.target?.type || "int";
-      return assignScalarFromExpr(boxes, targetName, targetType, stmt.rhs.expr);
-    }
-    return null;
-  }
-
-  function applyAssignUnaryRhs(
-    state: BoxState[],
-    stmt: Extract<Statement, { kind: "assignUnaryRhs" | "declAssignUnary" }>,
-  ): BoxState[] | null {
-    const boxes = cloneBoxes(state);
-    const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    const target = by[stmt.name];
-    if (!target) return null;
-    const { depth: targetDepth } = parseType(target.type);
-    if (targetDepth === 0) {
-      const expr = buildUnaryExpr(stmt.ops || [], stmt.src);
-      return assignScalarFromExpr(boxes, stmt.name, target.type, expr);
-    }
-    const resolved = resolveUnaryExpr(boxes, stmt.ops, stmt.src);
-    if (!resolved?.result) return null;
-    const result = resolved.result;
-    const { base: targetBase } = parseType(target.type);
-    const { base: resultBase, depth: resultDepth } = parseType(result.type);
-    if (
-      !targetBase ||
-      !resultBase ||
-      !Number.isFinite(targetDepth) ||
-      !Number.isFinite(resultDepth)
-    )
-      return null;
-    if (targetBase !== resultBase || targetDepth !== resultDepth) return null;
-    const value = result.kind === "lvalue" ? result.box?.value : result.value;
-    if (requireSourceValue && String(value ?? "") === "") return null;
-    target.value = formatValueForType(value ?? "", target.type, {
-      nanSign: result.nanSign,
+      targetType,
     });
+    const converted = convertAssignmentValue(
+      evaluated,
+      targetType,
+      requireSourceValue,
+    );
+    if (
+      !converted ||
+      "error" in converted ||
+      ("kind" in converted && converted.kind === "type-mismatch")
+    )
+      return null;
+    target.value = converted.value;
     return boxes;
   }
 
-  function applyAssignFromDeref(
+  function resolveAssignmentTarget(
     state: BoxState[],
-    stmt: Extract<Statement, { kind: "assignFromDeref" | "declAssignDeref" }>,
-  ): BoxState[] | null {
-    const boxes = cloneBoxes(state);
-    const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
-    const target = by[stmt.name];
-    if (!target) return null;
-    const { depth: targetDepth } = parseType(target.type);
-    if (targetDepth === 0) {
-      const expr = buildUnaryExpr(
-        new Array(stmt.depth || 1).fill("*"),
-        stmt.ptr,
-      );
-      return assignScalarFromExpr(boxes, stmt.name, target.type, expr);
+    lhs: ExprNode,
+  ):
+    | { target: BoxState; targetType: string }
+    | EvalError {
+    const evaluated = evaluateExpressionRaw(lhs, state, {
+      allowVars: true,
+      targetType: "int",
+    });
+    if (isEvalError(evaluated)) return evaluated;
+    if (evaluated.kind !== "lvalue") {
+      return { error: "That assignment is not valid here.", kind: "compile" };
     }
-    const { target: source } = resolveDerefTarget(
-      boxes,
-      stmt.ptr,
-      stmt.depth || 1,
+    const { base, depth } = evaluated;
+    const targetType =
+      makePointerType(
+        Number.isFinite(depth) ? depth : 0,
+        base || "int",
+      ) || "int";
+    const target = state.find(
+      (b) => (b.address ?? "") === (evaluated.address ?? ""),
     );
-    if (!source) return null;
-    const { base: targetBase } = parseType(target.type);
-    const { base: sourceBase, depth: sourceDepth } = parseType(source.type);
-    if (
-      !targetBase ||
-      !sourceBase ||
-      !Number.isFinite(targetDepth) ||
-      !Number.isFinite(sourceDepth)
-    )
-      return null;
-    if (targetBase !== sourceBase || targetDepth !== sourceDepth) return null;
-    if (requireSourceValue && String(source.value ?? "") === "") return null;
-    target.value = String(source.value ?? "");
-    return boxes;
+    if (!target) {
+      return { error: "That assignment is not valid here.", kind: "compile" };
+    }
+    return { target, targetType };
   }
 
   function applyStatement(
@@ -2563,15 +1925,16 @@ export function createSimpleSimulator(
       }
       return boxes;
     }
-    if (stmt.kind === "assign" && stmt.valueKind === "num") {
-      const target = by[stmt.name];
-      if (!target) return null;
-      const { base, depth } = parseType(target.type);
-      if (!base || depth !== 0) return null;
-      return assignScalarFromExpr(boxes, stmt.name, target.type, {
-        kind: "num",
-        value: stmt.value,
-      });
+    if (stmt.kind === "assign") {
+      const resolved = resolveAssignmentTarget(boxes, stmt.lhs);
+      if ("error" in resolved) return null;
+      return applyAssignmentToTarget(
+        boxes,
+        resolved.target,
+        resolved.target.type,
+        stmt.rhs,
+        { allowVars: allowVarAssign },
+      );
     }
     if (stmt.kind === "declAssign") {
       const declType = stmt.declType || "int";
@@ -2584,95 +1947,11 @@ export function createSimpleSimulator(
           address: alloc(declType),
         });
       }
-      if (stmt.valueKind === "expr") {
-        return applyAssignExpr(boxes, stmt, { allowVars: allowVarAssign });
-      }
-      return assignScalarFromExpr(boxes, stmt.name, declType, {
-        kind: "num",
-        value: stmt.value,
+      const target = by[stmt.name] || boxes.find((b) => b.name === stmt.name);
+      if (!target) return null;
+      return applyAssignmentToTarget(boxes, target, declType, stmt.expr, {
+        allowVars: allowVarAssign,
       });
-    }
-    if (stmt.kind === "declAssignVar") {
-      const declType = stmt.declType || "int";
-      if (by[stmt.name] && !allowRedeclare) return null;
-      if (!by[stmt.name]) {
-        boxes.push({
-          name: stmt.name,
-          type: declType,
-          value: "",
-          address: alloc(declType),
-        });
-      }
-      return applyAssignVar(boxes, stmt);
-    }
-    if (stmt.kind === "declAssignRef") {
-      const declType = stmt.declType || "int*";
-      if (by[stmt.name] && !allowRedeclare) return null;
-      if (!by[stmt.name]) {
-        boxes.push({
-          name: stmt.name,
-          type: declType,
-          value: "",
-          address: alloc(declType),
-        });
-      }
-      return applyAssignRef(boxes, stmt);
-    }
-    if (stmt.kind === "declAssignDeref") {
-      const declType = stmt.declType || "int";
-      if (by[stmt.name] && !allowRedeclare) return null;
-      if (!by[stmt.name]) {
-        boxes.push({
-          name: stmt.name,
-          type: declType,
-          value: "",
-          address: alloc(declType),
-        });
-      }
-      return applyAssignFromDeref(boxes, stmt);
-    }
-    if (stmt.kind === "declAssignUnary") {
-      const declType = stmt.declType || "int";
-      if (by[stmt.name] && !allowRedeclare) return null;
-      if (!by[stmt.name]) {
-        boxes.push({
-          name: stmt.name,
-          type: declType,
-          value: "",
-          address: alloc(declType),
-        });
-      }
-      return applyAssignUnaryRhs(boxes, {
-        kind: "assignUnaryRhs",
-        name: stmt.name,
-        src: stmt.src,
-        ops: stmt.ops,
-      });
-    }
-    if (stmt.kind === "assignVar") {
-      return applyAssignVar(state, stmt);
-    }
-    if (stmt.kind === "assign" && stmt.valueKind === "expr") {
-      return applyAssignExpr(state, stmt, { allowVars: allowVarAssign });
-    }
-    if (stmt.kind === "assignRef") {
-      return applyAssignRef(state, stmt);
-    }
-    if (stmt.kind === "assignUnary") {
-      return applyAssignUnary(state, stmt);
-    }
-    if (stmt.kind === "assignUnaryRhs") {
-      return applyAssignUnaryRhs(state, stmt);
-    }
-    if (stmt.kind === "assignFromDeref") {
-      return applyAssignFromDeref(state, stmt);
-    }
-    if (
-      stmt.kind === "assignDeref" ||
-      stmt.kind === "assignDerefVar" ||
-      stmt.kind === "assignDerefRef"
-    ) {
-      return applyAssignDeref(state, stmt);
     }
     return null;
   }
@@ -2705,7 +1984,7 @@ export function createSimpleSimulator(
       return 'If statements should look like "if (condition) { ... }".';
     }
     if (tokens[0].type === "kw" && tokens[0].value === "else") {
-      return "Else statements are not supported yet.";
+      return 'Else statements should look like "else { ... }".';
     }
     if (tokens[0].type === "kw") {
       const baseType = tokens[0].value;
@@ -2739,9 +2018,6 @@ export function createSimpleSimulator(
         return "A declaration needs a variable name.";
       return 'Declarations should look like "int name;" or "long name;" or "double name;" or "int name = value;".';
     }
-    if (allowPointers && tokens[0].type === "sym" && tokens[0].value === "*") {
-      return 'Assignments through pointers should look like "*name = value;".';
-    }
     if (tokens[0].type === "ident") {
       const name = tokens[0].value;
       if (tokens[1]?.type === "ident") {
@@ -2750,17 +2026,17 @@ export function createSimpleSimulator(
       if (!hasDeclaredPrefix(name, seenDecl))
         return `You can't use ${name} before declaring it.`;
       if (tokens.length === 1)
-        return 'Assignments should look like "name = value;".';
+        return 'Assignments should look like "expression = expression;".';
       if (tokens[1].type !== "sym" || tokens[1].value !== "=")
         return 'Assignments should use "=".';
       if (tokens.length === 2) return "Assignment needs a value on the right.";
       const rhs = tokens[2];
       if (rhs.type === "ident" && !allowVarAssign)
-        return "Assignments should use a number.";
+        return "Assignments should not use variables yet.";
       if (rhs.type === "ident" && !hasDeclaredPrefix(rhs.value, seenDecl)) {
         return `You can't use ${rhs.value} before declaring it.`;
       }
-      return 'Assignments should look like "name = value;".';
+      return 'Assignments should look like "expression = expression;".';
     }
     return "Line should be a declaration or assignment.";
   }
@@ -2788,6 +2064,9 @@ export function createSimpleSimulator(
     if (parsed.kind === "blockStart" || parsed.kind === "blockEnd") {
       return { parsed, next: state };
     }
+    if (parsed.kind === "else") {
+      return { parsed, next: state };
+    }
     if (parsed.kind === "if") {
       const result = evaluateCondition(parsed.expr, state);
       if ("error" in result) {
@@ -2795,591 +2074,34 @@ export function createSimpleSimulator(
       }
       return { parsed, next: state };
     }
-    if (
-      parsed.kind === "decl" ||
-      parsed.kind === "declAssign" ||
-      parsed.kind === "declAssignVar" ||
-      parsed.kind === "declAssignRef" ||
-      parsed.kind === "declAssignDeref" ||
-      parsed.kind === "declAssignUnary"
-    ) {
+    if (parsed.kind === "decl" || parsed.kind === "declAssign") {
       if (seenDecl.has(parsed.name))
         return {
           error: `You already declared ${parsed.name}.`,
           kind: "compile",
         };
-      if (parsed.kind === "declAssignVar") {
-        const by = Object.fromEntries(state.map((b) => [b.name, b]));
-        if (!by[parsed.src]) {
-          return {
-            error: `You can't use ${parsed.src} before declaring it.`,
-            kind: "compile",
-          };
-        }
-        if (requireSourceValue && String(by[parsed.src].value ?? "") === "") {
-          return {
-            error: `${parsed.src} doesn't have a value yet.`,
-            kind: "ub",
-          };
-        }
-      }
-      if (parsed.kind === "declAssignRef") {
-        const by = Object.fromEntries(state.map((b) => [b.name, b]));
-        const refBox = by[parsed.ref];
-        if (!refBox) {
-          return {
-            error: `You can't use ${parsed.ref} before declaring it.`,
-            kind: "compile",
-          };
-        }
-        if (!isRefCompatible(parsed.declType || "int*", refBox.type)) {
-          const expected = expectedPointerTypeForRef(refBox.type);
-          if (expected) return typeMismatchError(parsed.name, expected);
-          return {
-            error: "That assignment is not valid here.",
-            kind: "compile",
-          };
-        }
-      }
-      if (parsed.kind === "declAssign" && parsed.valueKind === "num") {
-        const err = numericLiteralErrorForType(
-          parsed.value,
-          parsed.declType || "int",
-        );
-        if (err) return err;
-      }
-      if (parsed.kind === "declAssign" && parsed.valueKind === "expr") {
-        const { depth } = parseType(parsed.declType || "int");
-        if (Number.isFinite(depth) && depth > 0) {
-          return {
-            error: "Pointer arithmetic is not supported here.",
-            kind: "compile",
-          };
-        }
-        const evaluated = evaluateExpression(parsed.expr, state, {
-          allowVars: allowVarAssign,
-          targetType: parsed.declType || "int",
-        });
-        if (evaluated.error) return evaluated;
-      }
-      if (parsed.kind === "declAssignDeref") {
-        const by = Object.fromEntries(state.map((b) => [b.name, b]));
-        const ptr = by[parsed.ptr];
-        if (!ptr) {
-          return {
-            error: `You can't use ${parsed.ptr} before declaring it.`,
-            kind: "compile",
-          };
-        }
-        const depth = parsed.depth || 1;
-        const { base: ptrBase, depth: ptrDepth } = parseType(ptr.type);
-        const { base: declBase, depth: declDepth } = parseType(
-          parsed.declType || "int",
-        );
-        if (!ptrBase || !declBase) {
-          return typeMismatchError(
-            parsed.ptr,
-            makePointerType(depth) || `int${"*".repeat(depth)}`,
-          );
-        }
-        if (!Number.isFinite(ptrDepth) || ptrDepth < depth) {
-          return typeMismatchError(
-            parsed.ptr,
-            makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
-          );
-        }
-        const resultDepth = ptrDepth - depth;
-        if (declBase !== ptrBase || declDepth !== resultDepth) {
-          return typeMismatchError(
-            parsed.name,
-            makePointerType(resultDepth, ptrBase) ||
-              `int${"*".repeat(resultDepth)}`,
-          );
-        }
-        let current = ptr;
-        const derefLabel = `${"*".repeat(depth)}${parsed.ptr}`;
-        for (let i = 0; i < depth; i++) {
-          if (!isPointerType(current.type)) {
-            return typeMismatchError(
-              parsed.ptr,
-              makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
-            );
-          }
-          if (String(current.value ?? "") === "") {
-            return {
-              error: `${derefLabel} doesn't have a value yet.`,
-              kind: "ub",
-            };
-          }
-          const next = state.find((b) => b.address === String(current.value));
-          if (!next) {
-            return {
-              error: `${parsed.ptr} doesn't point to a known variable.`,
-              kind: "ub",
-            };
-          }
-          current = next;
-        }
-        if (requireSourceValue && String(current.value ?? "") === "") {
-          return {
-            error: `${derefLabel} doesn't have a value yet.`,
-            kind: "ub",
-          };
-        }
-      }
-      if (parsed.kind === "declAssignUnary") {
-        const err = validateUnaryRhs(
+      if (parsed.kind === "declAssign") {
+        const targetType = parsed.declType || "int";
+        const err = validateAssignmentExpr(
           state,
-          parsed.declType || "int",
+          targetType,
           parsed.name,
-          parsed.ops,
-          parsed.src,
+          parsed.expr,
+          { allowVars: allowVarAssign },
         );
         if (err) return err;
       }
     } else if (parsed.kind === "assign") {
-      if (!seenDecl.has(parsed.name)) {
-        return missingDeclError(parsed.name, "int");
-      }
-      const by = Object.fromEntries(state.map((b) => [b.name, b]));
-      if (parsed.valueKind === "expr") {
-        const target = by[parsed.name];
-        const { depth } = parseType(target?.type || "int");
-        if (Number.isFinite(depth) && depth > 0) {
-          return {
-            error: "Pointer arithmetic is not supported here.",
-            kind: "compile",
-          };
-        }
-        const evaluated = evaluateExpression(parsed.expr, state, {
-          allowVars: allowVarAssign,
-          targetType: target?.type || "int",
-        });
-        if (evaluated.error) return evaluated;
-      } else {
-        const err = numericLiteralErrorForType(
-          parsed.value,
-          by[parsed.name]?.type || "int",
-        );
-        if (err) return err;
-      }
-    } else if (parsed.kind === "assignVar") {
-      const by = Object.fromEntries(state.map((b) => [b.name, b]));
-      if (!by[parsed.name]) {
-        const typeLabel = by[parsed.src]?.type || "int";
-        return missingDeclError(parsed.name, typeLabel);
-      }
-      if (!by[parsed.src]) {
-        return {
-          error: `You can't use ${parsed.src} before declaring it.`,
-          kind: "compile",
-        };
-      }
-      if (requireSourceValue && String(by[parsed.src].value ?? "") === "") {
-        return {
-          error: `${parsed.src} doesn't have a value yet.`,
-          kind: "ub",
-        };
-      }
-    } else if (parsed.kind === "assignUnary") {
-      const by = Object.fromEntries(state.map((b) => [b.name, b]));
-      const base = by[parsed.name];
-      const minDepth = minBaseDepthForOps(parsed.ops || []);
-      const { base: baseType } = parseType(base?.type);
-      const requiredBaseType =
-        makePointerType(minDepth, baseType || "int") ||
-        `int${"*".repeat(minDepth)}`;
-      if (!base) {
-        return missingDeclError(parsed.name, requiredBaseType);
-      }
-      const baseDepth = pointerDepth(base.type);
-      if (
-        baseDepth == null ||
-        !Number.isFinite(baseDepth) ||
-        baseDepth < minDepth
-      ) {
-        return typeMismatchError(parsed.name, requiredBaseType);
-      }
-      const resolved = resolveUnaryLvalue(state, parsed.ops, parsed.name);
-      if (resolved?.error === "empty") {
-        return {
-          error: `${resolved.label} doesn't have a value yet, so it can't be dereferenced.`,
-          kind: "ub",
-        };
-      }
-      if (resolved?.error === "unknown") {
-        return {
-          error: `${resolved.label} doesn't point to a known variable.`,
-          kind: "ub",
-        };
-      }
-      if (resolved?.error === "not_deref") {
-        return {
-          error: `${resolved.label} is not a valid dereference.`,
-          kind: "compile",
-        };
-      }
-      if (resolved?.error === "not_lvalue") {
-        return {
-          error: "That assignment is not valid here.",
-          kind: "compile",
-        };
-      }
-      const target = resolved?.target;
-      if (!target) {
-        return {
-          error: "That assignment is not valid here.",
-          kind: "compile",
-        };
-      }
-      if (parsed.rhs.kind === "num") {
-        const err = numericLiteralErrorForType(parsed.rhs.value, target.type);
-        if (err) return err;
-      } else if (parsed.rhs.kind === "var") {
-        const source = by[parsed.rhs.name];
-        if (!source) {
-          return {
-            error: `You can't use ${parsed.rhs.name} before declaring it.`,
-            kind: "compile",
-          };
-        }
-        if (requireSourceValue && String(source.value ?? "") === "") {
-          return {
-            error: `${parsed.rhs.name} doesn't have a value yet.`,
-            kind: "ub",
-          };
-        }
-        const { base: targetBase, depth: targetDepth } = parseType(target.type);
-        const { base: sourceBase, depth: sourceDepth } = parseType(source.type);
-        const sameType = target.type === source.type;
-        const isScalar =
-          targetBase &&
-          sourceBase &&
-          targetBase === sourceBase &&
-          targetDepth === 0 &&
-          sourceDepth === 0;
-        const isPtr = sameType && isPointerType(target.type);
-        if (!isScalar && !isPtr) {
-          return typeMismatchError(target.name, source.type);
-        }
-      } else if (parsed.rhs.kind === "ref") {
-        const refBox = by[parsed.rhs.name];
-        if (!refBox) {
-          return {
-            error: `You can't use ${parsed.rhs.name} before declaring it.`,
-            kind: "compile",
-          };
-        }
-        if (!isPointerType(target.type)) {
-          const expected = expectedPointerTypeForRef(refBox.type) || "int*";
-          return typeMismatchError(target.name, expected);
-        }
-        if (!isRefCompatible(target.type, refBox.type)) {
-          const expected = expectedPointerTypeForRef(refBox.type);
-          if (expected) return typeMismatchError(target.name, expected);
-          return {
-            error: "That assignment is not valid here.",
-            kind: "compile",
-          };
-        }
-      } else if (parsed.rhs.kind === "deref") {
-        const ptr = by[parsed.rhs.name];
-        if (!ptr) {
-          return {
-            error: `You can't use ${parsed.rhs.name} before declaring it.`,
-            kind: "compile",
-          };
-        }
-        const depth = parsed.rhs.depth || 1;
-        const { base: ptrBase, depth: ptrDepth } = parseType(ptr.type);
-        const { base: targetBase, depth: targetDepth } = parseType(target.type);
-        if (!ptrBase || !targetBase) {
-          return typeMismatchError(
-            parsed.rhs.name,
-            makePointerType(depth) || `int${"*".repeat(depth)}`,
-          );
-        }
-        if (!Number.isFinite(ptrDepth) || ptrDepth < depth) {
-          return typeMismatchError(
-            parsed.rhs.name,
-            makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
-          );
-        }
-        const resultDepth = ptrDepth - depth;
-        if (targetBase !== ptrBase || targetDepth !== resultDepth) {
-          return typeMismatchError(
-            target.name,
-            makePointerType(resultDepth, ptrBase) ||
-              `int${"*".repeat(resultDepth)}`,
-          );
-        }
-        let current = ptr;
-        const derefLabel = `${"*".repeat(depth)}${parsed.rhs.name}`;
-        for (let i = 0; i < depth; i++) {
-          if (!isPointerType(current.type)) {
-            return typeMismatchError(
-              parsed.rhs.name,
-              makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
-            );
-          }
-          if (String(current.value ?? "") === "") {
-            return {
-              error: `${derefLabel} doesn't have a value yet.`,
-              kind: "ub",
-            };
-          }
-          const next = state.find((b) => b.address === String(current.value));
-          if (!next) {
-            return {
-              error: `${parsed.rhs.name} doesn't point to a known variable.`,
-              kind: "ub",
-            };
-          }
-          current = next;
-        }
-        if (requireSourceValue && String(current.value ?? "") === "") {
-          return {
-            error: `${derefLabel} doesn't have a value yet.`,
-            kind: "ub",
-          };
-        }
-      } else if (parsed.rhs.kind === "unary") {
-        const err = validateUnaryRhs(
-          state,
-          target.type,
-          target.name,
-          parsed.rhs.ops,
-          parsed.rhs.name,
-        );
-        if (err) return err;
-      } else if (parsed.rhs.kind === "expr") {
-        const { depth } = parseType(target.type);
-        if (Number.isFinite(depth) && depth > 0) {
-          return {
-            error: "Pointer arithmetic is not supported here.",
-            kind: "compile",
-          };
-        }
-        const evaluated = evaluateExpression(parsed.rhs.expr, state, {
-          allowVars: allowVarAssign,
-          targetType: target.type,
-        });
-        if (evaluated.error) return evaluated;
-      }
-    } else if (parsed.kind === "assignUnaryRhs") {
-      const by = Object.fromEntries(state.map((b) => [b.name, b]));
-      const target = by[parsed.name];
-      if (!target) {
-        const typeLabel = "int";
-        return missingDeclError(parsed.name, typeLabel);
-      }
-      const err = validateUnaryRhs(
+      const resolved = resolveAssignmentTarget(state, parsed.lhs);
+      if ("error" in resolved) return resolved;
+      const err = validateAssignmentExpr(
         state,
-        target.type,
-        target.name,
-        parsed.ops,
-        parsed.src,
+        resolved.target.type,
+        resolved.target.name,
+        parsed.rhs,
+        { allowVars: allowVarAssign },
       );
       if (err) return err;
-    } else if (parsed.kind === "assignRef") {
-      const by = Object.fromEntries(state.map((b) => [b.name, b]));
-      if (!by[parsed.name]) {
-        const refType = by[parsed.ref]?.type || "int";
-        const typeLabel = expectedPointerTypeForRef(refType) || "int*";
-        return missingDeclError(parsed.name, typeLabel);
-      }
-      const refBox = by[parsed.ref];
-      if (!refBox) {
-        return {
-          error: `You can't use ${parsed.ref} before declaring it.`,
-          kind: "compile",
-        };
-      }
-      if (!isPointerType(by[parsed.name].type)) {
-        const expected = expectedPointerTypeForRef(refBox.type) || "int*";
-        return typeMismatchError(parsed.name, expected);
-      }
-      if (!isRefCompatible(by[parsed.name].type, refBox.type)) {
-        const expected = expectedPointerTypeForRef(refBox.type);
-        if (expected) return typeMismatchError(parsed.name, expected);
-        return {
-          error: "That assignment is not valid here.",
-          kind: "compile",
-        };
-      }
-    } else if (
-      parsed.kind === "assignDeref" ||
-      parsed.kind === "assignDerefVar" ||
-      parsed.kind === "assignDerefRef"
-    ) {
-      const by = Object.fromEntries(state.map((b) => [b.name, b]));
-      const ptr = by[parsed.name];
-      const depth = parsed.depth || 1;
-      if (!ptr) {
-        return missingDeclError(
-          parsed.name,
-          makePointerType(depth) || `int${"*".repeat(depth)}`,
-        );
-      }
-      const { base: ptrBase, depth: ptrDepth } = parseType(ptr.type);
-      if (!ptrBase || !Number.isFinite(ptrDepth) || ptrDepth < depth) {
-        return typeMismatchError(
-          parsed.name,
-          makePointerType(depth, ptrBase || "int") || `int${"*".repeat(depth)}`,
-        );
-      }
-      let expectedPtrDepth = depth;
-      if (parsed.kind === "assignDerefVar") {
-        if (!by[parsed.src]) {
-          return {
-            error: `You can't use ${parsed.src} before declaring it.`,
-            kind: "compile",
-          };
-        }
-        const { base: srcBase, depth: srcDepth } = parseType(
-          by[parsed.src].type,
-        );
-        if (!srcBase || srcBase !== ptrBase) {
-          return typeMismatchError(
-            parsed.src,
-            makePointerType(ptrDepth - depth, ptrBase) ||
-              `int${"*".repeat(ptrDepth - depth)}`,
-          );
-        }
-        expectedPtrDepth = Number.isFinite(srcDepth) ? depth + srcDepth : depth;
-      }
-      if (parsed.kind === "assignDerefRef") {
-        if (!by[parsed.ref]) {
-          return {
-            error: `You can't use ${parsed.ref} before declaring it.`,
-            kind: "compile",
-          };
-        }
-        const { base: refBase, depth: refDepth } = parseType(
-          by[parsed.ref].type,
-        );
-        if (!refBase || refBase !== ptrBase) {
-          return typeMismatchError(
-            parsed.ref,
-            makePointerType(ptrDepth - depth, ptrBase) ||
-              `int${"*".repeat(ptrDepth - depth)}`,
-          );
-        }
-        expectedPtrDepth = Number.isFinite(refDepth)
-          ? depth + refDepth + 1
-          : depth + 1;
-      }
-      if (ptrDepth !== expectedPtrDepth) {
-        return typeMismatchError(
-          parsed.name,
-          makePointerType(expectedPtrDepth, ptrBase) ||
-            `int${"*".repeat(expectedPtrDepth)}`,
-        );
-      }
-      let current = ptr;
-      for (let i = 0; i < depth; i++) {
-        if (!isPointerType(current.type)) {
-          return typeMismatchError(
-            parsed.name,
-            makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
-          );
-        }
-        if (String(current.value ?? "") === "") {
-          return {
-            error: `${parsed.name} doesn't have a value yet.`,
-            kind: "ub",
-          };
-        }
-        const next = state.find((b) => b.address === String(current.value));
-        if (!next) {
-          return {
-            error: `${parsed.name} doesn't point to a known variable.`,
-            kind: "ub",
-          };
-        }
-        current = next;
-      }
-      if (parsed.kind === "assignDerefVar") {
-        if (requireSourceValue && String(by[parsed.src].value ?? "") === "") {
-          return {
-            error: `${parsed.src} doesn't have a value yet.`,
-            kind: "ub",
-          };
-        }
-      }
-      if (parsed.kind === "assignDeref") {
-        const { target } = resolveDerefTarget(state, parsed.name, depth);
-        if (target) {
-          const err = numericLiteralErrorForType(parsed.value, target.type);
-          if (err) return err;
-        }
-      }
-    } else if (parsed.kind === "assignFromDeref") {
-      const by = Object.fromEntries(state.map((b) => [b.name, b]));
-      const target = by[parsed.name];
-      if (!target) {
-        return missingDeclError(parsed.name, "int");
-      }
-      const ptr = by[parsed.ptr];
-      if (!ptr) {
-        return {
-          error: `You can't use ${parsed.ptr} before declaring it.`,
-          kind: "compile",
-        };
-      }
-      const depth = parsed.depth || 1;
-      const { base: ptrBase, depth: ptrDepth } = parseType(ptr.type);
-      const { base: targetBase, depth: targetDepth } = parseType(target.type);
-      if (!ptrBase || !targetBase) {
-        return typeMismatchError(
-          parsed.ptr,
-          makePointerType(depth) || `int${"*".repeat(depth)}`,
-        );
-      }
-      if (!Number.isFinite(ptrDepth) || ptrDepth < depth) {
-        return typeMismatchError(
-          parsed.ptr,
-          makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
-        );
-      }
-      const resultDepth = ptrDepth - depth;
-      if (targetBase !== ptrBase || targetDepth !== resultDepth) {
-        return typeMismatchError(
-          parsed.name,
-          makePointerType(resultDepth, ptrBase) ||
-            `int${"*".repeat(resultDepth)}`,
-        );
-      }
-      let current = ptr;
-      const derefLabel = `${"*".repeat(depth)}${parsed.ptr}`;
-      for (let i = 0; i < depth; i++) {
-        if (!isPointerType(current.type)) {
-          return typeMismatchError(
-            parsed.ptr,
-            makePointerType(depth, ptrBase) || `int${"*".repeat(depth)}`,
-          );
-        }
-        if (String(current.value ?? "") === "") {
-          return {
-            error: `${derefLabel} doesn't have a value yet.`,
-            kind: "ub",
-          };
-        }
-        const next = state.find((b) => b.address === String(current.value));
-        if (!next) {
-          return {
-            error: `${parsed.ptr} doesn't point to a known variable.`,
-            kind: "ub",
-          };
-        }
-        current = next;
-      }
-      if (requireSourceValue && String(current.value ?? "") === "") {
-        return {
-          error: `${derefLabel} doesn't have a value yet.`,
-          kind: "ub",
-        };
-      }
     }
     const next = applyStatement(state, parsed, {
       alloc,
@@ -3447,6 +2169,12 @@ export function createSimpleSimulator(
     return tok.value === "{" || tok.value === "}";
   }
 
+  function isElsePart(part: StatementPart | null): boolean {
+    if (!part?.tokens?.length || part.tokens.length !== 1) return false;
+    const tok = part.tokens[0];
+    return tok.type === "kw" && tok.value === "else";
+  }
+
   function buildIfStatementMap(
     parts: StatementPart[],
     opts: { lastLine?: number } = {},
@@ -3454,6 +2182,7 @@ export function createSimpleSimulator(
     const map = new Map<number, IfBlock>();
     const errors = new Map<number, string>();
     const incomplete = new Set<number>();
+    const usedElse = new Set<number>();
     const fallbackLastLine =
       parts.length > 0
         ? Number.isFinite(parts[parts.length - 1]?.endLine)
@@ -3500,8 +2229,55 @@ export function createSimpleSimulator(
       if (closeIndex > openIndex + 1) {
         trueTarget = openIndex + 1;
       }
+      let elseIndex: number | null = null;
+      let elseOpenIndex: number | null = null;
+      let elseCloseIndex: number | null = null;
+      let elseTarget: number | null = null;
+      let afterIndex = closeIndex + 1;
+      const possibleElseIndex = closeIndex + 1;
+      const possibleElse = parts[possibleElseIndex];
+      if (isElsePart(possibleElse)) {
+        elseIndex = possibleElseIndex;
+        usedElse.add(possibleElseIndex);
+        const elseOpenPart = parts[possibleElseIndex + 1];
+        if (!elseOpenPart || !isBracePart(elseOpenPart, "{")) {
+          errors.set(
+            possibleElse?.endLine ?? headerEndLine,
+            "Else statements must use braces.",
+          );
+          continue;
+        }
+        elseOpenIndex = possibleElseIndex + 1;
+        let elseDepth = 0;
+        let foundElseClose: number | null = null;
+        for (let j = elseOpenIndex; j < parts.length; j++) {
+          const probe = parts[j];
+          if (isBracePart(probe, "{")) {
+            elseDepth++;
+            continue;
+          }
+          if (isBracePart(probe, "}")) {
+            elseDepth--;
+            if (elseDepth === 0) {
+              foundElseClose = j;
+              break;
+            }
+          }
+        }
+        if (foundElseClose == null) {
+          incomplete.add(lastLine);
+          continue;
+        }
+        elseCloseIndex = foundElseClose;
+        afterIndex = elseCloseIndex + 1;
+        elseTarget = elseOpenIndex;
+        if (elseCloseIndex > elseOpenIndex + 1) {
+          elseTarget = elseOpenIndex + 1;
+        }
+      }
       const falseTarget =
-        closeIndex + 1 < parts.length ? closeIndex + 1 : parts.length;
+        elseTarget ??
+        (afterIndex < parts.length ? afterIndex : parts.length);
       map.set(i, {
         headerIndex: i,
         headerStartLine,
@@ -3510,10 +2286,21 @@ export function createSimpleSimulator(
         closeIndex,
         trueTarget,
         falseTarget,
+        elseIndex,
+        elseOpenIndex,
+        elseCloseIndex,
+        elseTarget,
+        afterIndex,
         expr: ifParsed.expr,
         hasVar: ifParsed.hasVar,
       });
     }
+    parts.forEach((part, idx) => {
+      if (!isElsePart(part)) return;
+      if (usedElse.has(idx)) return;
+      const line = Number.isFinite(part.endLine) ? part.endLine : lastLine;
+      errors.set(line, "Else statements must follow an if statement.");
+    });
     return { map, errors, incomplete };
   }
 
@@ -3577,12 +2364,12 @@ export function createSimpleSimulator(
   }
 
   function findMissingSemicolonLines(text: string): number[] {
-    const lines = String(text ?? "").split(/\r?\n/);
+    const lines = text.split(/\r?\n/);
     const missing: number[] = [];
     const patched: string[] = [];
     let inBlock = false;
     lines.forEach((line, idx) => {
-      const raw = String(line ?? "");
+      const raw = line;
       let i = 0;
       let lastCodeIndex = -1;
       let sawCode = false;
@@ -3624,6 +2411,14 @@ export function createSimpleSimulator(
         return;
       }
       if (/^if\b/.test(clean)) {
+        patched.push(raw);
+        return;
+      }
+      if (/^}\s*else\b/.test(clean)) {
+        patched.push(raw);
+        return;
+      }
+      if (/^else\b/.test(clean)) {
         patched.push(raw);
         return;
       }
@@ -3766,11 +2561,7 @@ export function createSimpleSimulator(
         if (!commit) return;
         if (
           result.parsed.kind === "decl" ||
-          result.parsed.kind === "declAssign" ||
-          result.parsed.kind === "declAssignVar" ||
-          result.parsed.kind === "declAssignRef" ||
-          result.parsed.kind === "declAssignDeref" ||
-          result.parsed.kind === "declAssignUnary"
+          result.parsed.kind === "declAssign"
         ) {
           addDeclaredName(scopes, declared, result.parsed.name);
         }
@@ -3890,6 +2681,13 @@ export function createSimpleSimulator(
     const declared = new Set<string>();
     const scopes: ScopeStack = [new Set<string>()];
     const ifBlocks = buildIfStatementMap(parts);
+    const ifDecisions = new Map<number, boolean>();
+    const elseLookup = new Map<number, IfBlock>();
+    ifBlocks.map.forEach((block) => {
+      if (block.elseIndex != null) {
+        elseLookup.set(block.elseIndex, block);
+      }
+    });
     let i = 0;
     while (i < parts.length) {
       if (stop !== null && i >= stop) break;
@@ -3905,13 +2703,33 @@ export function createSimpleSimulator(
         if (!block) return null;
         const result = evaluateCondition(parsed.expr, state);
         if ("error" in result) return null;
+        ifDecisions.set(block.headerIndex, result.value);
         if (result.value) {
           i += 1;
           continue;
         }
         if (stop !== null && stop <= block.closeIndex) break;
+        if (block.elseOpenIndex != null) {
+          i = block.elseOpenIndex;
+          continue;
+        }
         i = block.closeIndex + 1;
         continue;
+      }
+      if (parsed.kind === "else") {
+        const block = elseLookup.get(i);
+        if (!block) return null;
+        const decision = ifDecisions.get(block.headerIndex);
+        if (decision == null) return null;
+        if (decision) {
+          i = block.afterIndex;
+          continue;
+        }
+        if (block.elseOpenIndex != null) {
+          i = block.elseOpenIndex;
+          continue;
+        }
+        return null;
       }
       if (parsed.kind === "blockStart" || parsed.kind === "blockEnd") {
         if (parsed.kind === "blockStart") {
@@ -3926,14 +2744,7 @@ export function createSimpleSimulator(
         continue;
       }
       if (!part.hasSemicolon) return null;
-      if (
-        parsed.kind === "decl" ||
-        parsed.kind === "declAssign" ||
-        parsed.kind === "declAssignVar" ||
-        parsed.kind === "declAssignRef" ||
-        parsed.kind === "declAssignDeref" ||
-        parsed.kind === "declAssignUnary"
-      ) {
+      if (parsed.kind === "decl" || parsed.kind === "declAssign") {
         if (declared.has(parsed.name)) return null;
       }
       const next = applyStatement(state, parsed, {
@@ -3941,14 +2752,7 @@ export function createSimpleSimulator(
         allowRedeclare: false,
       });
       if (!next) return null;
-      if (
-        parsed.kind === "decl" ||
-        parsed.kind === "declAssign" ||
-        parsed.kind === "declAssignVar" ||
-        parsed.kind === "declAssignRef" ||
-        parsed.kind === "declAssignDeref" ||
-        parsed.kind === "declAssignUnary"
-      ) {
+      if (parsed.kind === "decl" || parsed.kind === "declAssign") {
         addDeclaredName(scopes, declared, parsed.name);
       }
       state = next;
@@ -3971,6 +2775,13 @@ export function createSimpleSimulator(
     const declared = new Set<string>();
     const scopes: ScopeStack = [new Set<string>()];
     const ifBlocks = buildIfStatementMap(parts);
+    const ifDecisions = new Map<number, boolean>();
+    const elseLookup = new Map<number, IfBlock>();
+    ifBlocks.map.forEach((block) => {
+      if (block.elseIndex != null) {
+        elseLookup.set(block.elseIndex, block);
+      }
+    });
     let i = 0;
     while (i < parts.length) {
       if (stop !== null && i >= stop) break;
@@ -3991,13 +2802,33 @@ export function createSimpleSimulator(
         if ("error" in condition) {
           return { kind: condition.kind || "compile" };
         }
+        ifDecisions.set(block.headerIndex, condition.value);
         if (condition.value) {
           i += 1;
           continue;
         }
         if (stop !== null && stop <= block.closeIndex) break;
+        if (block.elseOpenIndex != null) {
+          i = block.elseOpenIndex;
+          continue;
+        }
         i = block.closeIndex + 1;
         continue;
+      }
+      if (parsed.kind === "else") {
+        const block = elseLookup.get(i);
+        if (!block) return { kind: "compile" };
+        const decision = ifDecisions.get(block.headerIndex);
+        if (decision == null) return { kind: "compile" };
+        if (decision) {
+          i = block.afterIndex;
+          continue;
+        }
+        if (block.elseOpenIndex != null) {
+          i = block.elseOpenIndex;
+          continue;
+        }
+        return { kind: "compile" };
       }
       if (parsed.kind === "blockStart") {
         scopes.push(new Set<string>());
@@ -4012,14 +2843,7 @@ export function createSimpleSimulator(
         continue;
       }
       if (!part.hasSemicolon) return { kind: "compile" };
-      if (
-        parsed.kind === "decl" ||
-        parsed.kind === "declAssign" ||
-        parsed.kind === "declAssignVar" ||
-        parsed.kind === "declAssignRef" ||
-        parsed.kind === "declAssignDeref" ||
-        parsed.kind === "declAssignUnary"
-      ) {
+      if (parsed.kind === "decl" || parsed.kind === "declAssign") {
         addDeclaredName(scopes, declared, parsed.name);
       }
       state = result.next;

@@ -4,6 +4,7 @@ import {
   cloneBoxes,
   createSimpleSimulator,
   createStepper,
+  bindBtnRefPulse,
   disableBoxEditing,
   ensureBaseLayout,
   flashStatus,
@@ -27,6 +28,7 @@ import {
 } from "./shared-core.js";
 import type {
   BoxState,
+  IfBlock,
   Part,
   Parts,
   StatementContext,
@@ -113,6 +115,45 @@ interface ProgramTemplateResult {
   pager: Stepper;
 }
 
+function initProgramStatusGap(root: HTMLElement | null): void {
+  if (!root) return;
+  const bar = root.querySelector(".controls-bar") as HTMLElement | null;
+  const left = root.querySelector(".controls-left") as HTMLElement | null;
+  const right = root.querySelector(".controls-right") as HTMLElement | null;
+  const gap = root.querySelector(
+    '[data-role="program-status-gap"]',
+  ) as HTMLElement | null;
+  if (!bar || !left || !right || !gap) return;
+
+  let raf = 0;
+  const update = () => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      const barRect = bar.getBoundingClientRect();
+      const leftRect = left.getBoundingClientRect();
+      const rightRect = right.getBoundingClientRect();
+      const leftEdge = Math.max(0, leftRect.right - barRect.left);
+      const rightEdge = Math.max(0, rightRect.left - barRect.left);
+      const gapPad = 6;
+      const width = Math.max(0, rightEdge - leftEdge);
+      gap.style.left = `${leftEdge}px`;
+      gap.style.width = `${Math.max(0, width - gapPad)}px`;
+      gap.style.top = `${rightRect.top - barRect.top}px`;
+      gap.style.height = `${rightRect.height}px`;
+    });
+  };
+
+  update();
+  if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => update());
+    ro.observe(bar);
+    ro.observe(left);
+    ro.observe(right);
+  }
+  window.addEventListener("resize", update);
+}
+
 function collectProgramElements(root: ParentNode = document): ProgramElements {
   return {
     instructionsEl: root.querySelector(
@@ -122,7 +163,7 @@ function collectProgramElements(root: ParentNode = document): ProgramElements {
       '[data-role="program-code"]',
     ) as HTMLElement | null,
     codeRoot: root.querySelector(
-      '[data-role="program-code-panel"]',
+      '[data-role="program-root"]',
     ) as HTMLElement | null,
     stageEl: root.querySelector(
       '[data-role="program-stage"]',
@@ -182,9 +223,19 @@ function ensureProgramLayout(): ProgramElements {
   const instructionsEl = document.createElement("p");
   instructionsEl.dataset.role = "program-instructions";
   instructionsEl.className = "intro";
-  main.appendChild(instructionsEl);
 
   const section = document.createElement("section");
+  section.dataset.role = "program-root";
+  const actionBar = document.createElement("div");
+  actionBar.className = "controls-bar";
+  const leftControls = document.createElement("div");
+  leftControls.className = "controls-row controls-left";
+  const rightControls = document.createElement("div");
+  rightControls.className = "controls-row controls-right";
+  actionBar.appendChild(leftControls);
+  actionBar.appendChild(rightControls);
+  actionBar.appendChild(instructionsEl);
+  section.appendChild(actionBar);
   const row = document.createElement("div");
   row.className = "row";
   section.appendChild(row);
@@ -199,19 +250,16 @@ function ensureProgramLayout(): ProgramElements {
   const codeEl = document.createElement("div");
   codeEl.dataset.role = "program-code";
   codeEl.className = "codepane";
-  const codeControls = document.createElement("div");
-  codeControls.className = "controls";
   const prevBtn = document.createElement("button");
   prevBtn.textContent = "Back ◀";
   prevBtn.dataset.stepper = "prev";
   const nextBtn = document.createElement("button");
   nextBtn.textContent = "Run line 1 ▶";
   nextBtn.dataset.stepper = "next";
-  codeControls.appendChild(prevBtn);
-  codeControls.appendChild(nextBtn);
+  leftControls.appendChild(prevBtn);
+  leftControls.appendChild(nextBtn);
   codePanel.appendChild(codeTitle);
   codePanel.appendChild(codeEl);
-  codePanel.appendChild(codeControls);
 
   const statePanel = document.createElement("div");
   statePanel.className = "panel program-state-panel";
@@ -241,19 +289,23 @@ function ensureProgramLayout(): ProgramElements {
   resetBtn.textContent = "Reset";
   const statusEl = document.createElement("span");
   statusEl.dataset.role = "program-status";
-  statusEl.className = "muted";
-  stateControls.appendChild(checkBtn);
-  stateControls.appendChild(hintBtn);
-  stateControls.appendChild(addBtn);
-  stateControls.appendChild(resetBtn);
-  stateControls.appendChild(statusEl);
+  statusEl.className = "muted controls-status";
+  const statusGap = document.createElement("div");
+  statusGap.dataset.role = "program-status-gap";
+  statusGap.className = "controls-gap";
+  statusGap.appendChild(statusEl);
+  actionBar.appendChild(statusGap);
+  rightControls.appendChild(checkBtn);
+  rightControls.appendChild(hintBtn);
+  rightControls.appendChild(addBtn);
+  rightControls.appendChild(resetBtn);
   const hintPanel = document.createElement("div");
   hintPanel.dataset.role = "program-hint";
   hintPanel.className = "hint-inline hidden";
+  actionBar.insertBefore(hintPanel, instructionsEl);
   statePanel.appendChild(stateTitle);
   statePanel.appendChild(stageEl);
   statePanel.appendChild(stateControls);
-  statePanel.appendChild(hintPanel);
 
   row.appendChild(codePanel);
   row.appendChild(statePanel);
@@ -261,7 +313,7 @@ function ensureProgramLayout(): ProgramElements {
   return {
     instructionsEl,
     codeEl,
-    codeRoot: codePanel,
+    codeRoot: section,
     stageEl,
     statusEl,
     hintPanel,
@@ -298,7 +350,6 @@ function createProgramTemplate(
   const simulator = createSimpleSimulator({
     allowVarAssign: true,
     requireSourceValue: true,
-    allowPointers: true,
   });
 
   const {
@@ -313,6 +364,8 @@ function createProgramTemplate(
     addBtn,
     resetBtn,
   } = ensureProgramLayout();
+  bindBtnRefPulse(codeRoot || document);
+  initProgramStatusGap(codeRoot);
 
   if (
     initialInstructions !== undefined &&
@@ -377,6 +430,12 @@ function createProgramTemplate(
     }
     return false;
   };
+  const isElsePart = (part: StatementPart | null): boolean => {
+    const tokens = part?.tokens;
+    if (!tokens || tokens.length !== 1) return false;
+    const first = tokens[0];
+    return first.type === "kw" && first.value === "else";
+  };
   const isOpenBracePart = (part: StatementPart | null): boolean => {
     if (!part?.tokens?.length || part.tokens.length !== 1) return false;
     const tok = part.tokens[0];
@@ -437,8 +496,10 @@ function createProgramTemplate(
         const incompleteHeader = headerIndices.some((idx) => {
           const block = ifBlocks.map.get(idx);
           if (!block) return true;
-          const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
-            ? parts[block.closeIndex]!.endLine
+          const closeIndex =
+            block.elseCloseIndex != null ? block.elseCloseIndex : block.closeIndex;
+          const closeLine = Number.isFinite(parts[closeIndex]?.endLine)
+            ? parts[closeIndex]!.endLine
             : block.headerEndLine;
           if (!Number.isFinite(closeLine)) return true;
           return stepStartLine + closeLine > stepEndLine;
@@ -455,6 +516,7 @@ function createProgramTemplate(
       if (part?.tokens?.length && !part.hasSemicolon) {
         if (ifBlocks.map.has(partIndex)) continue;
         if (isIfHeaderPart(part)) continue;
+        if (isElsePart(part)) continue;
         failConfig(
           `Step ${index + 1} contains an incomplete statement. Each step must be runnable on its own.`,
         );
@@ -616,6 +678,113 @@ function createProgramTemplate(
     return selected;
   }
 
+  function clampBoundaryLine(line: number): number {
+    if (!Number.isFinite(line)) return line;
+    return Math.max(0, Math.min(totalLines, line));
+  }
+
+  function lineAfterHeader(block: IfBlock): number | null {
+    if (Number.isFinite(block.headerEndLine)) {
+      return clampBoundaryLine(block.headerEndLine + 1);
+    }
+    const truePart = parts[block.trueTarget];
+    if (Number.isFinite(truePart?.startLine)) {
+      return clampBoundaryLine(truePart!.startLine);
+    }
+    return null;
+  }
+
+
+  function lineAfterClose(block: IfBlock): number | null {
+    const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+      ? parts[block.closeIndex]!.endLine
+      : block.headerEndLine;
+    if (!Number.isFinite(closeLine)) return null;
+    return clampBoundaryLine(closeLine + 1);
+  }
+
+  function branchEntryLine(
+    block: IfBlock,
+    branch: "true" | "false",
+  ): number | null {
+    if (branch === "true") return lineAfterHeader(block);
+    return lineAfterClose(block);
+  }
+
+  function enclosingIfBlockForLine(
+    lineIndex: number,
+  ): {
+    block: IfBlock;
+    ifCloseLine: number;
+    elseCloseLine: number | null;
+    blockEndLine: number;
+  } | null {
+    if (!Number.isFinite(lineIndex)) return null;
+    let chosen: {
+      block: IfBlock;
+      ifCloseLine: number;
+      elseCloseLine: number | null;
+      blockEndLine: number;
+    } | null = null;
+    for (const block of ifBlocks.map.values()) {
+      const ifCloseLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+        ? parts[block.closeIndex]!.endLine
+        : block.headerEndLine;
+      if (!Number.isFinite(ifCloseLine)) continue;
+      const elseCloseLine =
+        block.elseCloseIndex != null &&
+        Number.isFinite(parts[block.elseCloseIndex]?.endLine)
+          ? parts[block.elseCloseIndex]!.endLine
+          : null;
+      const blockEndLine =
+        typeof elseCloseLine === "number" ? elseCloseLine : ifCloseLine;
+      if (lineIndex <= block.headerEndLine) continue;
+      if (lineIndex > blockEndLine) continue;
+      const span = blockEndLine - block.headerStartLine;
+      if (!chosen || span < chosen.blockEndLine - chosen.block.headerStartLine) {
+        chosen = { block, ifCloseLine, elseCloseLine, blockEndLine };
+      }
+    }
+    return chosen;
+  }
+
+  function clampToBranchClose(
+    current: number,
+    candidate: number,
+    rangeEnd?: number | null,
+  ): number {
+    if (!Number.isFinite(current) || !Number.isFinite(candidate))
+      return candidate;
+    const enclosing = enclosingIfBlockForLine(current);
+    if (!enclosing) return candidate;
+    const { block, ifCloseLine, elseCloseLine } = enclosing;
+    const currentState = stateBeforePart(block.headerIndex);
+    const condition = simulator.evaluateCondition(block.expr, currentState);
+    if ("error" in condition) return candidate;
+    const closeLine = condition.value
+      ? ifCloseLine
+      : block.elseIndex != null
+        ? elseCloseLine ?? ifCloseLine
+        : ifCloseLine;
+    if (
+      typeof closeLine === "number" &&
+      Number.isFinite(closeLine) &&
+      current < closeLine &&
+      candidate > closeLine
+    ) {
+      if (
+        Number.isFinite(rangeEnd) &&
+        rangeEnd === closeLine &&
+        candidate === closeLine + 1
+      ) {
+        return candidate;
+      }
+      return Math.min(totalLines, closeLine);
+    }
+    return candidate;
+  }
+
+
   function normalizedStatementRange(
     lineIndex: number,
   ): { start: number; end: number } | null {
@@ -636,11 +805,12 @@ function createProgramTemplate(
   function runRangeForBoundary(
     boundary: number,
   ): { start: number; end: number } | null {
-    const groupRange = groupForLine(boundary);
+    const lineIndex = Math.max(0, boundary);
+    const groupRange = groupForLine(lineIndex);
     if (groupRange && groupRange.endLine > groupRange.startLine) {
       return { start: groupRange.startLine, end: groupRange.endLine };
     }
-    const range = normalizedStatementRange(boundary);
+    const range = normalizedStatementRange(lineIndex);
     if (range && range.end > range.start) return range;
     return null;
   }
@@ -710,21 +880,9 @@ function createProgramTemplate(
     if (headerIndex == null) return null;
     const block = ifBlocks.map.get(headerIndex);
     if (!block) return null;
-    const truePart = parts[block.trueTarget];
-    const trueLine = Number.isFinite(truePart?.startLine)
-      ? truePart!.startLine
-      : block.headerEndLine;
-    const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
-      ? parts[block.closeIndex]!.endLine
-      : block.headerEndLine;
-    let falseLine = closeLine + 1;
-    const falsePart = parts[block.falseTarget];
-    if (falsePart && Number.isFinite(falsePart.startLine)) {
-      falseLine = falsePart.startLine;
-    }
+    const trueLine = branchEntryLine(block, "true");
+    const falseLine = branchEntryLine(block, "false");
     const maxLine = Math.max(0, totalLines);
-    const trueTarget = Math.max(0, Math.min(maxLine, trueLine));
-    const falseTarget = Math.max(0, Math.min(maxLine, falseLine));
     const targets: number[] = [];
     const targetMap = new Map<number, number>();
     const addTarget = (boundaryIndex: number) => {
@@ -733,13 +891,22 @@ function createProgramTemplate(
       if (!targets.includes(boundaryIndex)) targets.push(boundaryIndex);
       targetMap.set(boundaryIndex, boundaryIndex);
     };
-    addTarget(trueTarget);
-    addTarget(falseTarget);
+    if (Number.isFinite(trueLine)) {
+      const trueTarget = Math.max(0, Math.min(maxLine, trueLine!));
+      addTarget(trueTarget);
+    }
+    if (Number.isFinite(falseLine)) {
+      const falseTarget = Math.max(0, Math.min(maxLine, falseLine!));
+      addTarget(falseTarget);
+    }
     let expected: number | null = null;
     const currentState = stateBeforePart(headerIndex);
     const condition = simulator.evaluateCondition(block.expr, currentState);
     if (!("error" in condition)) {
-      expected = condition.value ? trueTarget : falseTarget;
+      const nextLine = condition.value ? trueLine : falseLine;
+      if (Number.isFinite(nextLine)) {
+        expected = Math.max(0, Math.min(maxLine, nextLine!));
+      }
     }
     return {
       rangeStart: step.startLine,
@@ -786,6 +953,80 @@ function createProgramTemplate(
     return Array.isArray(result) ? result : [];
   }
 
+  function branchSkipLineForBoundary(boundary: number): number | null {
+    if (!Number.isFinite(boundary)) return null;
+    for (const block of ifBlocks.map.values()) {
+      if (block.elseIndex == null) continue;
+      const ifCloseLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+        ? parts[block.closeIndex]!.endLine
+        : block.headerEndLine;
+      if (!Number.isFinite(ifCloseLine)) continue;
+      const elseCloseLine =
+        block.elseCloseIndex != null &&
+        Number.isFinite(parts[block.elseCloseIndex]?.endLine)
+          ? parts[block.elseCloseIndex]!.endLine
+          : null;
+      const fallbackClose =
+        typeof elseCloseLine === "number" ? elseCloseLine : ifCloseLine;
+      const afterPart = parts[block.afterIndex];
+      const afterLine = Number.isFinite(afterPart?.startLine)
+        ? afterPart!.startLine
+        : fallbackClose + 1;
+      if (afterLine !== boundary) continue;
+      const currentState = stateBeforePart(block.headerIndex);
+      const condition = simulator.evaluateCondition(block.expr, currentState);
+      if ("error" in condition) continue;
+      if (condition.value) return ifCloseLine;
+      return null;
+    }
+    return null;
+  }
+
+  function skipElseBoundaryForLine(boundary: number): number | null {
+    if (!Number.isFinite(boundary)) return null;
+    const lineIndex = boundary;
+    for (const block of ifBlocks.map.values()) {
+      if (block.elseIndex == null || block.elseCloseIndex == null) continue;
+      const ifCloseLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+        ? parts[block.closeIndex]!.endLine
+        : block.headerEndLine;
+      const elseStartLine = Number.isFinite(parts[block.elseIndex]?.startLine)
+        ? parts[block.elseIndex]!.startLine
+        : null;
+      const elseOpenLine = Number.isFinite(
+        parts[block.elseOpenIndex ?? -1]?.startLine,
+      )
+        ? parts[block.elseOpenIndex ?? -1]!.startLine
+        : null;
+      const elseCloseLine = Number.isFinite(parts[block.elseCloseIndex]?.endLine)
+        ? parts[block.elseCloseIndex]!.endLine
+        : null;
+      if (elseStartLine == null || elseCloseLine == null) continue;
+      let skipStartLine = elseStartLine;
+      if (
+        typeof ifCloseLine === "number" &&
+        Number.isFinite(ifCloseLine) &&
+        elseStartLine === ifCloseLine
+      ) {
+        const base = Number.isFinite(elseOpenLine)
+          ? elseOpenLine!
+          : elseStartLine;
+        skipStartLine = base + 1;
+      }
+      if (lineIndex < skipStartLine || lineIndex > elseCloseLine) continue;
+      const currentState = stateBeforePart(block.headerIndex);
+      const condition = simulator.evaluateCondition(block.expr, currentState);
+      if ("error" in condition) continue;
+      if (!condition.value) return null;
+      const afterPart = parts[block.afterIndex];
+      const afterLine = Number.isFinite(afterPart?.startLine)
+        ? afterPart!.startLine
+        : Math.min(totalLines, elseCloseLine + 1);
+      return clampBoundaryLine(afterLine);
+    }
+    return null;
+  }
+
   function getExpectedState(boundary: number): BoxState[] {
     const stopIndex = stopIndexForBoundary(boundary);
     const alloc = allocFactory();
@@ -806,10 +1047,10 @@ function createProgramTemplate(
     if (!Array.isArray(list)) return [];
     return list
       .map((b) => ({
-        name: String(b.name || "").trim(),
-        type: String(b.type || "").trim(),
-        value: normalizeZeroDisplay(String(b.value ?? "").trim()),
-        address: String(b.address ?? "").trim(),
+        name: (b.name || "").trim(),
+        type: (b.type || "").trim(),
+        value: normalizeZeroDisplay((b.value ?? "").trim()),
+        address: (b.address ?? "").trim(),
       }))
       .sort((a, b) => {
         if (a.name === b.name) return a.address.localeCompare(b.address);
@@ -968,7 +1209,7 @@ function createProgramTemplate(
       ["$newVariableButton", "$b{+ New variable}"],
       ["$showAliasesButton", "$b{Show aliases}"],
     ];
-    let out = String(text ?? "");
+    let out = text;
     replacements.forEach(([needle, value]) => {
       out = out.split(needle).join(value);
     });
@@ -1020,6 +1261,22 @@ function createProgramTemplate(
       const end = branchInfo.rangeEnd + 1;
       return formatRunLabel(start, end, true, "Branch from");
     }
+    const afterSkippedElse = branchSkipLineForBoundary(boundary);
+    if (Number.isFinite(afterSkippedElse)) {
+      const lineNumber = Math.max(1, Math.min(totalLines, boundary + 1));
+      return `${verb} line ${lineNumber} ▶`;
+    }
+    const skipElseBoundary = skipElseBoundaryForLine(boundary);
+    if (
+      Number.isFinite(skipElseBoundary) &&
+      skipElseBoundary !== boundary
+    ) {
+      const lineNumber = Math.max(
+        1,
+        Math.min(totalLines, skipElseBoundary! + 1),
+      );
+      return `${verb} line ${lineNumber} ▶`;
+    }
     const range = runRangeForBoundary(boundary);
     if (range) {
       const start = range.start + 1;
@@ -1033,13 +1290,85 @@ function createProgramTemplate(
   function nextBoundaryForLine(current: number): number {
     if (!Number.isFinite(current)) return current + 1;
     if (current >= totalLines) return totalLines;
+    const skipElseBoundary = skipElseBoundaryForLine(current);
+    if (
+      Number.isFinite(skipElseBoundary) &&
+      skipElseBoundary !== current
+    ) {
+      return skipElseBoundary!;
+    }
+    const logNext = null;
+    const closeBlock = (() => {
+      for (const block of ifBlocks.map.values()) {
+        const ifCloseLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+          ? parts[block.closeIndex]!.endLine
+          : null;
+        const elseCloseLine =
+          block.elseCloseIndex != null &&
+          Number.isFinite(parts[block.elseCloseIndex]?.endLine)
+            ? parts[block.elseCloseIndex]!.endLine
+            : null;
+        if (ifCloseLine === current || elseCloseLine === current) {
+          return { block, ifCloseLine, elseCloseLine };
+        }
+      }
+      return null;
+    })();
+    if (closeBlock) {
+      const { block, ifCloseLine, elseCloseLine } = closeBlock;
+      const currentState = stateBeforePart(block.headerIndex);
+      const condition = simulator.evaluateCondition(block.expr, currentState);
+      if (!("error" in condition)) {
+        const afterPart = parts[block.afterIndex];
+        const fallbackClose =
+          block.elseCloseIndex != null && elseCloseLine != null
+            ? elseCloseLine
+            : ifCloseLine;
+        const safeFallbackClose =
+          typeof fallbackClose === "number" && Number.isFinite(fallbackClose)
+            ? fallbackClose
+            : current;
+        const afterLine = Number.isFinite(afterPart?.startLine)
+          ? afterPart!.startLine
+          : Math.min(totalLines, safeFallbackClose + 1);
+        if (
+          block.elseIndex != null &&
+          ifCloseLine === current &&
+          condition.value
+        ) {
+          return clampToBranchClose(
+            current,
+            Math.min(totalLines, Math.max(0, afterLine)),
+          );
+        }
+        if (elseCloseLine === current && !condition.value) {
+          return clampToBranchClose(
+            current,
+            Math.min(totalLines, Math.max(0, afterLine)),
+          );
+        }
+      }
+    }
     const range = simulator.statementRangeForLine(statementMap, current);
     const rangeStart =
       typeof range?.startLine === "number" ? range.startLine : current;
     const rangeEnd =
       typeof range?.endLine === "number" ? range.endLine : current;
+    void logNext;
     const groupRange = groupForLine(current);
     const branchStep = !!branchStepInfo(current);
+    if (
+      groupRange &&
+      !branchStep &&
+      Number.isFinite(groupRange.endLine) &&
+      groupRange.endLine > current
+    ) {
+      return clampToBranchClose(
+        current,
+        Math.min(totalLines, groupRange.endLine + 1),
+        groupRange.endLine,
+      );
+    }
     const headerIndex = headerIndexForLine(rangeStart);
     if (headerIndex == null) {
       if (
@@ -1047,11 +1376,22 @@ function createProgramTemplate(
         Number.isFinite(groupRange.endLine) &&
         groupRange.endLine > current
       ) {
-        return Math.min(totalLines, groupRange.endLine + 1);
+        return clampToBranchClose(
+          current,
+          Math.min(totalLines, groupRange.endLine + 1),
+          groupRange.endLine,
+        );
       }
       if (Number.isFinite(rangeEnd) && rangeEnd > current)
-        return Math.min(totalLines, rangeEnd + 1);
-      return Math.min(totalLines, current + 1);
+        return clampToBranchClose(
+          current,
+          Math.min(totalLines, rangeEnd + 1),
+          rangeEnd,
+        );
+      return clampToBranchClose(
+        current,
+        Math.min(totalLines, current + 1),
+      );
     }
     const block = ifBlocks.map.get(headerIndex);
     if (!block) {
@@ -1060,39 +1400,105 @@ function createProgramTemplate(
         Number.isFinite(groupRange.endLine) &&
         groupRange.endLine > current
       ) {
-        return Math.min(totalLines, groupRange.endLine + 1);
+        return clampToBranchClose(
+          current,
+          Math.min(totalLines, groupRange.endLine + 1),
+          groupRange.endLine,
+        );
       }
       if (Number.isFinite(rangeEnd) && rangeEnd > current)
-        return Math.min(totalLines, rangeEnd + 1);
-      return Math.min(totalLines, current + 1);
+        return clampToBranchClose(
+          current,
+          Math.min(totalLines, rangeEnd + 1),
+          rangeEnd,
+        );
+      return clampToBranchClose(
+        current,
+        Math.min(totalLines, current + 1),
+      );
     }
     const currentState = stateBeforePart(headerIndex);
     const condition = simulator.evaluateCondition(block.expr, currentState);
+    const ifCloseLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+      ? parts[block.closeIndex]!.endLine
+      : block.headerEndLine;
+    const elseCloseLine =
+      block.elseCloseIndex != null &&
+      Number.isFinite(parts[block.elseCloseIndex]?.endLine)
+        ? parts[block.elseCloseIndex]!.endLine
+        : null;
     if ("error" in condition || condition.value) {
-      if (branchStep) {
-        const truePart = parts[block.trueTarget];
-        const trueLine = Number.isFinite(truePart?.startLine)
-          ? truePart!.startLine
-          : block.headerEndLine;
-        if (Number.isFinite(trueLine))
-          return Math.min(totalLines, Math.max(0, trueLine));
+      let effectiveRangeEnd = rangeEnd;
+      if (
+        Number.isFinite(ifCloseLine) &&
+        Number.isFinite(effectiveRangeEnd) &&
+        current < ifCloseLine &&
+        effectiveRangeEnd > ifCloseLine
+      ) {
+        effectiveRangeEnd = ifCloseLine;
       }
       if (
         groupRange &&
         Number.isFinite(groupRange.endLine) &&
         groupRange.endLine > current
       ) {
-        return Math.min(totalLines, groupRange.endLine + 1);
+        return clampToBranchClose(
+          current,
+          Math.min(totalLines, groupRange.endLine + 1),
+          groupRange.endLine,
+        );
       }
-      if (Number.isFinite(rangeEnd) && rangeEnd > current)
-        return Math.min(totalLines, rangeEnd + 1);
-      return Math.min(totalLines, current + 1);
+      const trueLine = branchEntryLine(block, "true");
+      if (Number.isFinite(trueLine))
+        return clampToBranchClose(
+          current,
+          Math.min(totalLines, Math.max(0, trueLine!)),
+        );
+      if (Number.isFinite(effectiveRangeEnd) && effectiveRangeEnd > current)
+        return clampToBranchClose(
+          current,
+          Math.min(totalLines, effectiveRangeEnd + 1),
+          effectiveRangeEnd,
+        );
+      return clampToBranchClose(
+        current,
+        Math.min(totalLines, current + 1),
+      );
     }
-    const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
-      ? parts[block.closeIndex]!.endLine
-      : block.headerEndLine;
-    if (!Number.isFinite(closeLine)) return Math.min(totalLines, current + 1);
-    return Math.min(totalLines, closeLine + 1);
+    if (block.elseIndex != null) {
+      const falseLine = branchEntryLine(block, "false");
+      if (Number.isFinite(falseLine))
+        return clampToBranchClose(
+          current,
+          Math.min(totalLines, Math.max(0, falseLine!)),
+        );
+    }
+    let effectiveRangeEnd = rangeEnd;
+    if (
+      typeof elseCloseLine === "number" &&
+      Number.isFinite(elseCloseLine) &&
+      Number.isFinite(effectiveRangeEnd) &&
+      current < elseCloseLine &&
+      effectiveRangeEnd > elseCloseLine
+    ) {
+      effectiveRangeEnd = elseCloseLine;
+    }
+    if (Number.isFinite(effectiveRangeEnd) && effectiveRangeEnd > current)
+      return clampToBranchClose(
+        current,
+        Math.min(totalLines, effectiveRangeEnd + 1),
+        effectiveRangeEnd,
+      );
+    const closeLine = lineAfterClose(block);
+    if (!Number.isFinite(closeLine))
+      return clampToBranchClose(
+        current,
+        Math.min(totalLines, current + 1),
+      );
+    return clampToBranchClose(
+      current,
+      Math.min(totalLines, closeLine!),
+    );
   }
 
   function prevBoundaryForLine(current: number): number {
@@ -1275,7 +1681,7 @@ function createProgramTemplate(
       }
       const mismatch = !boxValueMatchesSpec(simulator, act, exp).ok;
       if (mismatch) {
-        const expVal = String(exp.value ?? "").trim();
+        const expVal = (exp.value ?? "").trim();
         const label =
           expVal === "" ? "empty" : `$v{${normalizeZeroDisplay(expVal)}}`;
         const baselineBox = baselineByName.get(name);
@@ -1370,10 +1776,21 @@ function createProgramTemplate(
       branchSelectable && branchInfo ? branchInfo.expected : null;
     if (progress) {
       const range = executedRangeForBoundary(key);
+      const hasMultiLineRange =
+        !!range &&
+        Number.isFinite(range.start) &&
+        Number.isFinite(range.end) &&
+        range.end > range.start;
       if (range) {
         progressRange = [range.start, range.end];
         progressIndex = range.end;
         doneBoundary = range.start;
+      }
+      const branchSkipLine = branchSkipLineForBoundary(key);
+      if (Number.isFinite(branchSkipLine) && !hasMultiLineRange) {
+        progressRange = [branchSkipLine!, branchSkipLine!];
+        progressIndex = branchSkipLine!;
+        doneBoundary = branchSkipLine!;
       }
     } else if (
       branchStepEditable &&
@@ -1388,45 +1805,131 @@ function createProgramTemplate(
       }
     }
     let strikeRanges: Array<[number, number]> = [];
-    const prevBoundary = prevBoundaryForLine(key);
-    if (prevBoundary >= 0 && prevBoundary < key) {
-      const headerIndex = headerIndexForLine(prevBoundary);
-      if (headerIndex != null) {
-        const block = ifBlocks.map.get(headerIndex);
-        if (block) {
-          const currentState = stateBeforePart(headerIndex);
-          const condition = simulator.evaluateCondition(block.expr, currentState);
-          if (!("error" in condition) && !condition.value) {
-            const headerStep = stepByStartLine.get(block.headerStartLine);
-            const allowStrike =
-              !headerStep?.editable ||
-              !headerStep.ifHeaderOnly ||
-              !!state.branchPasses[headerStep.startLine];
-            if (allowStrike) {
-              const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
-                ? parts[block.closeIndex]!.endLine
-                : block.headerEndLine;
-              const openLine = Number.isFinite(parts[block.openIndex]?.startLine)
-                ? parts[block.openIndex]!.startLine
-                : block.headerEndLine;
-              if (Number.isFinite(openLine) && Number.isFinite(closeLine)) {
-                const range: [number, number] = [openLine, closeLine];
-                strikeRanges.push(range);
-                state.lastSkippedRanges.push(range);
-              }
-            }
-          }
-        }
+    let strikeFragments: Array<{ line: number; start: number; end: number }> =
+      [];
+    const elseColumnForLine = (lineIndex: number, block: IfBlock): number => {
+      const rawLine = lineList[lineIndex] || "";
+      const elseTok = parts[block.elseIndex ?? -1]?.tokens?.[0];
+      if (Number.isFinite(elseTok?.col)) {
+        const col = Number(elseTok!.col);
+        if (col >= 0 && col <= rawLine.length) return col;
       }
-    }
-    if (state.lastSkippedRanges.length) {
-      state.lastSkippedRanges = state.lastSkippedRanges.filter(
-        ([start]) => key > start,
-      );
-    }
-    if (state.lastSkippedRanges.length) {
-      strikeRanges = strikeRanges.concat(state.lastSkippedRanges);
-    }
+      const direct = rawLine.indexOf("else");
+      if (direct >= 0) return direct;
+      const match = rawLine.search(/\belse\b/);
+      if (match >= 0) return match;
+      const braceIdx = rawLine.indexOf("}");
+      if (braceIdx >= 0) {
+        let col = braceIdx + 1;
+        while (col < rawLine.length && /\s/.test(rawLine[col])) col += 1;
+        return col < rawLine.length ? col : -1;
+      }
+      return -1;
+    };
+    ifBlocks.map.forEach((block) => {
+      if (key <= block.headerEndLine) return;
+      const headerStep = stepByStartLine.get(block.headerStartLine);
+      if (
+        headerStep?.editable &&
+        !state.passes[headerStep.boundary] &&
+        key <= headerStep.boundary
+      ) {
+        return;
+      }
+      const allowStrike =
+        !headerStep?.editable ||
+        !headerStep.ifHeaderOnly ||
+        !!state.branchPasses[headerStep.startLine];
+      if (!allowStrike) return;
+      const currentState = stateBeforePart(block.headerIndex);
+      const condition = simulator.evaluateCondition(block.expr, currentState);
+      if ("error" in condition) return;
+      const headerLine = block.headerStartLine;
+      const headerText = lineList[headerLine] || "";
+      if (headerText.includes("else")) {
+        const elseCol = elseColumnForLine(headerLine, block);
+        if (Number.isFinite(elseCol) && elseCol >= 0) {
+          strikeFragments.push({
+            line: headerLine,
+            start: condition.value ? elseCol : 0,
+            end: condition.value ? headerText.length : elseCol,
+          });
+        }
+        return;
+      }
+      const ifCloseLine = Number.isFinite(parts[block.closeIndex]?.endLine)
+        ? parts[block.closeIndex]!.endLine
+        : block.headerEndLine;
+      const ifOpenLine = Number.isFinite(parts[block.openIndex]?.startLine)
+        ? parts[block.openIndex]!.startLine
+        : block.headerEndLine;
+      if (!condition.value) {
+        if (
+          block.elseIndex != null &&
+          block.elseOpenIndex != null &&
+          ifCloseLine ===
+            (Number.isFinite(parts[block.elseIndex]?.startLine)
+              ? parts[block.elseIndex]!.startLine
+              : ifCloseLine)
+        ) {
+          const elseTok = parts[block.elseIndex]?.tokens?.[0];
+          const elseCol = elseColumnForLine(ifCloseLine, block);
+          if (Number.isFinite(elseCol) && elseCol >= 0) {
+            strikeFragments.push({
+              line: ifCloseLine,
+              start: 0,
+              end: elseCol,
+            });
+          }
+          if (
+            Number.isFinite(ifOpenLine) &&
+            Number.isFinite(ifCloseLine) &&
+            ifCloseLine > ifOpenLine
+          ) {
+            strikeRanges.push([ifOpenLine, ifCloseLine - 1]);
+          }
+        } else if (Number.isFinite(ifOpenLine) && Number.isFinite(ifCloseLine)) {
+          strikeRanges.push([ifOpenLine, ifCloseLine]);
+        }
+        return;
+      }
+      if (block.elseIndex == null || block.elseCloseIndex == null) return;
+      const rawElseStart = Number.isFinite(
+        parts[block.elseOpenIndex ?? block.elseIndex]?.startLine,
+      )
+        ? parts[block.elseOpenIndex ?? block.elseIndex]!.startLine
+        : ifCloseLine;
+      const elseStartLine =
+        rawElseStart === ifCloseLine ? rawElseStart + 1 : rawElseStart;
+      const elseCloseLine = Number.isFinite(
+        parts[block.elseCloseIndex]?.endLine,
+      )
+        ? parts[block.elseCloseIndex]!.endLine
+        : elseStartLine;
+      if (
+        Number.isFinite(elseStartLine) &&
+        Number.isFinite(elseCloseLine) &&
+        elseStartLine <= elseCloseLine
+      ) {
+        const lineHasElse = (lineList[ifCloseLine] || "").includes("else");
+        const sameLine = lineHasElse || elseStartLine === ifCloseLine;
+        if (sameLine) {
+          const elseCol = elseColumnForLine(ifCloseLine, block);
+          if (Number.isFinite(elseCol) && elseCol >= 0) {
+            strikeFragments.push({
+              line: ifCloseLine,
+              start: elseCol,
+              end: (lineList[ifCloseLine] || "").length,
+            });
+          }
+          if (elseCloseLine > ifCloseLine) {
+            strikeRanges.push([ifCloseLine + 1, elseCloseLine]);
+          }
+          return;
+        }
+        strikeRanges.push([elseStartLine, elseCloseLine]);
+      }
+    });
     renderCodePane(codeEl, lineList, key, {
       progress,
       progressRange,
@@ -1438,6 +1941,7 @@ function createProgramTemplate(
       suppressProgressMid: branchStepEditable && branchSelectionActive,
       boundaryTargets: branchSelectable,
       strikeRanges,
+      strikeFragments,
     });
   }
 
@@ -1478,7 +1982,7 @@ function createProgramTemplate(
             name: b.name,
             editable: false,
           });
-          if (String(b.value ?? "") === "")
+          if ((b.value ?? "") === "")
             node.querySelector(".value")?.classList.add("placeholder", "muted");
           grid.appendChild(node);
         });
@@ -1628,6 +2132,7 @@ function createProgramTemplate(
       branchSelectionTarget = null;
       branchSelectionBoundary = null;
     }
+    const debugBoundary = state.boundary >= 35 && state.boundary <= 50;
     renderCodePaneForBoundary();
     renderStage();
     hideHint();
@@ -1768,11 +2273,32 @@ function createProgramTemplate(
           flashStatus(statusEl);
           return;
         }
-      if (branchSelectionTarget !== branchInfo.expected) {
+        if (branchSelectionTarget !== branchInfo.expected) {
         setStatus("incorrect", "err");
         flashStatus(statusEl);
         return;
       }
+        if (branchInfo.expected != null) {
+          const expectedBoundary = branchInfo.expected;
+          const expectedLine = expectedBoundary - 1;
+          const expectedStep = stepEndingAtBoundary(expectedBoundary);
+          const expectedPart = parts.find(
+            (part) =>
+              part.startLine === expectedLine &&
+              part.endLine === expectedLine,
+          );
+          const isElseHeader =
+            expectedPart?.tokens?.length === 1 &&
+            expectedPart.tokens[0]?.type === "kw" &&
+            expectedPart.tokens[0]?.value === "else";
+          if (isElseHeader && expectedStep && !expectedStep.editable) {
+            state.passes[expectedBoundary] = true;
+            ensureBaseline(
+              expectedBoundary,
+              defaultsForBoundary(expectedBoundary),
+            );
+          }
+        }
         if (branchStep) {
           state.branchPasses[branchStep.startLine] = true;
           state.passes[key] = true;
@@ -1813,10 +2339,15 @@ function createProgramTemplate(
       if (hintBtn) hintBtn.classList.add("hidden");
       if (addBtn) addBtn.classList.add("hidden");
       if (resetBtn) resetBtn.classList.add("hidden");
+      const skipBoundary = skipElseBoundaryForLine(key);
+      if (
+        Number.isFinite(skipBoundary) &&
+        skipBoundary !== key
+      ) {
+        state.boundary = skipBoundary!;
+      }
       pager.pulseNext();
-      updateInstructions();
-      renderCodePaneForBoundary();
-      renderStage();
+      render();
       pager.update();
     });
   }
@@ -1900,6 +2431,22 @@ function createProgramTemplate(
         const end = branchInfo.rangeEnd + 1;
         return formatRunLabel(start, end, false, "Branch from");
       }
+      const afterSkippedElse = branchSkipLineForBoundary(boundary);
+      if (Number.isFinite(afterSkippedElse)) {
+        const lineNumber = Math.max(1, Math.min(totalLines, boundary + 1));
+        return `${verb} line ${lineNumber}`;
+      }
+      const skipElseBoundary = skipElseBoundaryForLine(boundary);
+      if (
+        Number.isFinite(skipElseBoundary) &&
+        skipElseBoundary !== boundary
+      ) {
+        const lineNumber = Math.max(
+          1,
+          Math.min(totalLines, skipElseBoundary! + 1),
+        );
+        return `${verb} line ${lineNumber}`;
+      }
       const range = runRangeForBoundary(boundary);
       if (range) {
         const start = range.start + 1;
@@ -1925,6 +2472,14 @@ function createProgramTemplate(
         }
       }
       const next = nextBoundaryForLine(current);
+      if (
+        stepNext > current &&
+        stepNext <= next &&
+        editableSet.has(stepNext) &&
+        !state.passes[stepNext]
+      ) {
+        return stepNext;
+      }
       const editStep = stepEndingAtBoundary(current);
       if (editStep?.ifHeaderOnly && editStep.editable) {
         const solved = !!state.branchPasses[editStep.startLine];

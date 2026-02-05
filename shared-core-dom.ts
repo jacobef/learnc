@@ -5,13 +5,11 @@ import {
   formatDoubleDefault,
   formatDoubleExact,
   formatDoubleStorage,
-  formatValueForType,
   getPointerDepth,
   normalizeZeroDisplay,
   parseDoubleValueWithSign,
   parseType,
   randAddr,
-  typeInfo,
 } from "./shared-core-utils.js";
 
 export interface NavItem {
@@ -30,6 +28,7 @@ export interface RenderCodePaneOptions {
   boundaryTargets?: boolean;
   strikeRange?: [number, number] | { start: number; end: number };
   strikeRanges?: Array<[number, number] | { start: number; end: number }>;
+  strikeFragments?: Array<{ line: number; start: number; end: number }>;
 }
 export interface TokenPart {
   kind: "tok";
@@ -474,6 +473,10 @@ function renderCodePane(
   let progressRangeStart: number | null = null;
   let progressRangeEnd: number | null = null;
   let strikeRanges: Array<[number, number]> = [];
+  const strikeFragmentsByLine = new Map<
+    number,
+    Array<{ start: number; end: number }>
+  >();
   let doneBoundary = boundary;
   if (
     typeof opts.doneBoundary === "number" &&
@@ -526,18 +529,40 @@ function renderCodePane(
       progressIndex = boundary - 1;
     }
   }
-  const appendStrike = (range: [number, number] | { start: number; end: number }) => {
-    let start = Number(Array.isArray(range) ? range[0] : range.start);
-    let end = Number(Array.isArray(range) ? range[1] : range.end);
+  const appendStrike = (
+    range: [number, number] | { start: number; end: number },
+  ) => {
+    const rawStart = Number(Array.isArray(range) ? range[0] : range.start);
+    const rawEnd = Number(Array.isArray(range) ? range[1] : range.end);
+    let start = rawStart;
+    let end = rawEnd;
     if (!Number.isFinite(start) || !Number.isFinite(end)) return;
     const maxIndex = Math.max(0, lines.length - 1);
-    start = Math.max(0, Math.min(maxIndex, Math.min(start, end)));
-    end = Math.max(0, Math.min(maxIndex, Math.max(start, end)));
+    const min = Math.min(start, end);
+    const max = Math.max(start, end);
+    start = Math.max(0, Math.min(maxIndex, min));
+    end = Math.max(0, Math.min(maxIndex, max));
     strikeRanges.push([start, end]);
   };
   if (opts.strikeRange) appendStrike(opts.strikeRange);
   if (Array.isArray(opts.strikeRanges)) {
     opts.strikeRanges.forEach((range) => appendStrike(range));
+  }
+  if (Array.isArray(opts.strikeFragments)) {
+    opts.strikeFragments.forEach((frag) => {
+      if (!frag || !Number.isFinite(frag.line)) return;
+      const line = Math.max(0, Math.min(lines.length - 1, frag.line));
+      const text = lines[line] ?? "";
+      const max = text.length;
+      let start = Math.max(0, Math.min(max, Number(frag.start)));
+      let end = Math.max(0, Math.min(max, Number(frag.end)));
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+      if (end < start) [start, end] = [end, start];
+      if (end <= start) return;
+      const list = strikeFragmentsByLine.get(line) || [];
+      list.push({ start, end });
+      strikeFragmentsByLine.set(line, list);
+    });
   }
   if (doneBoundary === 0 && !hideBoundary) addBoundary();
   if (selectableBoundaries && selectableBoundaries.has(0)) {
@@ -547,7 +572,34 @@ function renderCodePane(
     const lr = el('<div class="line"></div>');
     const ln = el(`<div class="ln">${i + 1}</div>`);
     const src = el('<div class="src"></div>');
-    src.textContent = lines[i];
+    const rawLine = lines[i];
+    const fragments = strikeFragmentsByLine.get(i);
+    const hasFragments = !!(fragments && fragments.length);
+    if (hasFragments) {
+      const sorted = fragments
+        .slice()
+        .sort((a, b) => a.start - b.start);
+      let cursor = 0;
+      sorted.forEach(({ start, end }) => {
+        if (start > cursor) {
+          src.appendChild(
+            document.createTextNode(rawLine.slice(cursor, start)),
+          );
+        }
+        if (end > start) {
+          const span = document.createElement("span");
+          span.className = "skipped-fragment";
+          span.textContent = rawLine.slice(start, end);
+          src.appendChild(span);
+        }
+        cursor = Math.max(cursor, end);
+      });
+      if (cursor < rawLine.length) {
+        src.appendChild(document.createTextNode(rawLine.slice(cursor)));
+      }
+    } else {
+      src.textContent = rawLine;
+    }
     if (i < doneBoundary) lr.classList.add("done");
     const inProgressRange =
       progressRangeStart !== null &&
@@ -558,7 +610,7 @@ function renderCodePane(
     const inStrikeRange = strikeRanges.some(
       ([start, end]) => i >= start && i <= end,
     );
-    if (inStrikeRange) lr.classList.add("skipped");
+    if (inStrikeRange && !hasFragments) lr.classList.add("skipped");
     if (i === progressIndex) lr.classList.add("progress-mid");
     lr.appendChild(ln);
     lr.appendChild(src);
@@ -667,10 +719,10 @@ function vbox({
 } = {}): HTMLElement {
   const parsedType = parseType(type || "int");
   const isDoubleScalar = parsedType.base === "double" && parsedType.depth === 0;
-  const rawValue = String(value ?? "");
+  const rawValue = value ?? "";
   const emptyDisplay = rawValue === "";
   const displayValue = emptyDisplay ? "" : normalizeZeroDisplay(rawValue);
-  const resolvedName = name !== undefined && name !== null ? String(name) : "";
+  const resolvedName = name ?? "";
   const namesList = resolvedName ? [resolvedName] : [""];
   const valueClasses = `value ${editable ? "editable" : ""} ${emptyDisplay ? "placeholder muted" : ""}`;
   const typeClasses = `type ${allowTypeEdit ? "editable" : ""}`;
@@ -918,7 +970,7 @@ function readBoxState(root: Element | null): BoxState | null {
 
 function boxAddress(box: BoxState | null | undefined): string {
   const raw = box?.address ?? "";
-  return String(raw ?? "").trim();
+  return raw.trim();
 }
 
 function collectStageBoxes(root: Element | null): BoxState[] {
@@ -940,7 +992,7 @@ function pointerTargetBox(
   if (!box) return null;
   const depth = getPointerDepth(box.type);
   if (!Number.isFinite(depth) || depth < 1) return null;
-  const raw = String(box.value ?? "").trim();
+  const raw = (box.value ?? "").trim();
   if (raw === "") return null;
   const target = byAddr.get(raw) || null;
   if (!target) return null;
@@ -1281,7 +1333,7 @@ function restoreWorkspace(
         showDoubleExact: st.showDoubleExact ?? null,
       });
       if (allowDelete) node.dataset.allowDelete = "true";
-      if (String(st.value ?? "") === "")
+      if ((st.value ?? "") === "")
         node.querySelector(".value")?.classList.add("placeholder", "muted");
       wrap.appendChild(node);
     });
@@ -1303,7 +1355,7 @@ function restoreWorkspace(
         showDoubleExact: d.showDoubleExact ?? null,
       });
       if (allowDelete) node.dataset.allowDelete = "true";
-      if (String(d.value ?? "") === "")
+      if ((d.value ?? "") === "")
         node.querySelector(".value")?.classList.add("placeholder", "muted");
       wrap.appendChild(node);
     });
@@ -1324,7 +1376,7 @@ function parseStyledText(text: string): StyledSegment[] {
     b: "btn",
     i: "italic",
   };
-  const raw = String(text ?? "");
+  const raw = text;
   const out: StyledSegment[] = [];
   let i = 0;
   while (i < raw.length) {
@@ -1388,13 +1440,14 @@ function renderParts(panel: Element | null, parts: RenderParts) {
     });
   };
   const appendToken = (role: string, text: string) => {
-    const chunks = String(text ?? "").split("\n");
+    const chunks = text.split("\n");
     chunks.forEach((chunk, idx) => {
       if (idx > 0) panel.appendChild(document.createElement("br"));
       let node;
       if (role === "btn") {
         node = document.createElement("span");
         node.className = "btn-ref";
+        node.dataset.btnRef = chunk;
       } else if (role === "italic") {
         node = document.createElement("em");
         node.className = "tok-italic";
@@ -1434,6 +1487,46 @@ function renderParts(panel: Element | null, parts: RenderParts) {
     appendText(part);
   };
   list.forEach(appendPart);
+}
+
+function bindBtnRefPulse(root: ParentNode | null = document): void {
+  if (!root || (root as HTMLElement).dataset?.btnRefPulseBound === "1") return;
+  const host = root as HTMLElement;
+  if (host.dataset) host.dataset.btnRefPulseBound = "1";
+  const clear = () => {
+    document
+      .querySelectorAll("button.btn-ref-hover")
+      .forEach((btn) => btn.classList.remove("btn-ref-hover"));
+  };
+  host.addEventListener(
+    "mouseover",
+    (event) => {
+      const target = (event?.target as HTMLElement | null)?.closest?.(
+        ".btn-ref",
+      ) as HTMLElement | null;
+      if (!target) return;
+      const label = (target.dataset.btnRef || target.textContent || "").trim();
+      if (!label) return;
+      document.querySelectorAll("button").forEach((btn) => {
+        if (btn.textContent?.trim() === label)
+          btn.classList.add("btn-ref-hover");
+      });
+    },
+    true,
+  );
+  host.addEventListener(
+    "mouseout",
+    (event) => {
+      const target = (event?.target as HTMLElement | null)?.closest?.(
+        ".btn-ref",
+      ) as HTMLElement | null;
+      if (!target) return;
+      clear();
+    },
+    true,
+  );
+  const observer = new MutationObserver(() => clear());
+  observer.observe(document.body, { childList: true, subtree: true });
 }
 
 function setPartsContent(
@@ -1780,23 +1873,12 @@ if (document.readyState === "loading") {
   applyAutoTextDefaults(document);
 }
 
-initStepperTopControls();
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", initStepperTopControls, {
     once: true,
   });
-}
-
-function initInstructionWatcher() {
-  return;
-}
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", initInstructionWatcher, {
-    once: true,
-  });
 } else {
-  initInstructionWatcher();
+  initStepperTopControls();
 }
 
 function applySidebarStateFromUrl() {
@@ -1907,6 +1989,7 @@ export {
   getNavLabelForHref,
   isMobileViewport,
   isStepperTopVisible,
+  bindBtnRefPulse,
   makeAnswerBox,
   readBoxState,
   removeBoxDeleteButtons,

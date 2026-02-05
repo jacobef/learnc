@@ -55,13 +55,13 @@ randAddr.reset = function (seed = null) {
     nextAddr = seed;
 };
 export function normalizeZeroDisplay(value) {
-    const trimmed = String(value ?? "").trim();
+    const trimmed = value.trim();
     if (trimmed === "-0")
         return "0";
     return trimmed;
 }
 function stripTrailingZeros(value) {
-    const trimmed = String(value ?? "").trim();
+    const trimmed = value.trim();
     if (!trimmed.includes("."))
         return trimmed === "-0" ? "0" : trimmed;
     let out = trimmed.replace(/0+$/, "");
@@ -72,7 +72,7 @@ function stripTrailingZeros(value) {
     return out;
 }
 function ensureDoubleDecimal(value) {
-    const text = String(value ?? "");
+    const text = value;
     return text.includes(".") ? text : `${text}.0`;
 }
 export function formatDoubleDefault(value, nanSign) {
@@ -138,7 +138,7 @@ export function doubleDisplayIsExact(defaultText, exactText) {
     return defaultText === exactText;
 }
 export function normalizeSpecialFloatLiteral(value) {
-    const trimmed = String(value ?? "").trim();
+    const trimmed = value.trim();
     if (!trimmed)
         return null;
     const lower = trimmed.toLowerCase();
@@ -214,7 +214,7 @@ function isNumericLiteralTokens(tokens) {
     return false;
 }
 export function parseValueExpressionInput(evaluator, raw) {
-    const trimmed = String(raw ?? "").trim();
+    const trimmed = raw.trim();
     if (!trimmed)
         return { kind: "empty", trimmed: "" };
     const tokens = evaluator.tokenizeProgram(trimmed);
@@ -288,8 +288,8 @@ export function boxValueMatchesSpec(evaluator, actual, expected) {
     const targetType = String(expected.type || actual.type || "").trim();
     const actualRaw = actual.rawValue ?? actual.value ?? "";
     const expectedRaw = expected.value ?? "";
-    const actualTrimmed = String(actualRaw ?? "").trim();
-    const expectedTrimmed = String(expectedRaw ?? "").trim();
+    const actualTrimmed = (actualRaw ?? "").trim();
+    const expectedTrimmed = (expectedRaw ?? "").trim();
     if (actualTrimmed === "" || expectedTrimmed === "") {
         const ok = actualTrimmed === "" && expectedTrimmed === "";
         return { ok, normalized: "" };

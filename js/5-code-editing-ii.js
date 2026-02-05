@@ -2,15 +2,26 @@ import { createCodeEditorTemplate } from "./shared-code-editor.js";
 function firstRedeclaration(statements) {
     const seen = new Set();
     for (const stmt of statements) {
-        if (stmt.kind === "decl" ||
-            stmt.kind === "declAssign" ||
-            stmt.kind === "declAssignVar" ||
-            stmt.kind === "declAssignRef") {
+        if (stmt.kind === "decl" || stmt.kind === "declAssign") {
             if (seen.has(stmt.name))
                 return stmt.name;
             seen.add(stmt.name);
         }
     }
+    return null;
+}
+function assignedName(stmt) {
+    if (stmt.kind === "declAssign")
+        return stmt.name;
+    if (stmt.kind === "assign" && stmt.lhs.kind === "var")
+        return stmt.lhs.name;
+    return null;
+}
+function assignedExpr(stmt) {
+    if (stmt.kind === "declAssign")
+        return stmt.expr;
+    if (stmt.kind === "assign")
+        return stmt.rhs;
     return null;
 }
 createCodeEditorTemplate({
@@ -62,9 +73,7 @@ createCodeEditorTemplate({
         const hasTokens = tokens.some((t) => !(t.type === "sym" && t.value === ";"));
         const declNames = new Set(parsedStatements
             .filter((s) => s.kind === "decl" ||
-            s.kind === "declAssign" ||
-            s.kind === "declAssignVar" ||
-            s.kind === "declAssignRef")
+            s.kind === "declAssign")
             .map((s) => s.name));
         if (!hasTokens || !declNames.has("apple")) {
             return "You need to declare a variable named $n{apple}. Look at how variables were declared in the earlier programs.";
@@ -86,16 +95,22 @@ createCodeEditorTemplate({
             }
         }
         const appleAssign = parsedStatements.find((s) => (s.kind === "assign" || s.kind === "declAssign") &&
-            s.valueKind === "num" &&
-            s.name === "apple" &&
-            String(s.value) === "10");
+            (() => {
+                const expr = assignedExpr(s);
+                return (expr?.kind === "num" &&
+                    assignedName(s) === "apple" &&
+                    String(expr.value) === "10");
+            })());
         if (!appleAssign) {
             return "$n{apple} needs to end up with a value. Check the target final state.";
         }
         const berryAssign = parsedStatements.find((s) => (s.kind === "assign" || s.kind === "declAssign") &&
-            s.valueKind === "num" &&
-            s.name === "berry" &&
-            String(s.value) === "5");
+            (() => {
+                const expr = assignedExpr(s);
+                return (expr?.kind === "num" &&
+                    assignedName(s) === "berry" &&
+                    String(expr.value) === "5");
+            })());
         if (!berryAssign) {
             return "$n{berry} also needs to end up with a value. Check the target final state.";
         }

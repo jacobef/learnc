@@ -37,14 +37,21 @@ function ensureExpressionLayout() {
     const instructionsEl = document.createElement("p");
     instructionsEl.dataset.role = "expr-instructions";
     instructionsEl.className = "intro";
-    main.appendChild(instructionsEl);
     const continueBtn = document.createElement("button");
     continueBtn.type = "button";
     continueBtn.dataset.role = "expr-continue";
     continueBtn.textContent = "Continue";
-    main.appendChild(continueBtn);
     const section = document.createElement("section");
     section.dataset.role = "expr-section";
+    const actionBar = document.createElement("div");
+    actionBar.className = "controls-bar";
+    const leftControls = document.createElement("div");
+    leftControls.className = "controls-row controls-left";
+    const rightControls = document.createElement("div");
+    rightControls.className = "controls-row controls-right";
+    actionBar.appendChild(leftControls);
+    actionBar.appendChild(rightControls);
+    section.appendChild(actionBar);
     const stack = document.createElement("div");
     stack.className = "expr-eval-stack";
     section.appendChild(stack);
@@ -89,40 +96,36 @@ function ensureExpressionLayout() {
     useEnteredBtn.textContent = "Type box";
     toggleWrap.appendChild(useSelectedBtn);
     toggleWrap.appendChild(useEnteredBtn);
-    const controls = document.createElement("div");
-    controls.className = "controls";
     const prevBtn = document.createElement("button");
     prevBtn.dataset.stepper = "prev";
     prevBtn.textContent = "Back ◀";
     const checkBtn = document.createElement("button");
     checkBtn.dataset.role = "expr-check";
     checkBtn.textContent = "Check";
-    const controlsBreak = document.createElement("span");
-    controlsBreak.className = "controls-break";
     const nextBtn = document.createElement("button");
     nextBtn.dataset.stepper = "next";
     nextBtn.textContent = "Next ▶";
     const statusEl = document.createElement("span");
     statusEl.dataset.role = "expr-status";
     statusEl.className = "muted expr-check-inline";
-    controls.appendChild(checkBtn);
     const hintBtn = document.createElement("button");
     hintBtn.type = "button";
     hintBtn.dataset.role = "expr-hint-btn";
     hintBtn.textContent = "Hint";
-    controls.appendChild(hintBtn);
-    controls.appendChild(statusEl);
-    controls.appendChild(controlsBreak);
-    controls.appendChild(prevBtn);
-    controls.appendChild(nextBtn);
+    leftControls.appendChild(prevBtn);
+    leftControls.appendChild(nextBtn);
+    rightControls.appendChild(checkBtn);
+    rightControls.appendChild(hintBtn);
+    rightControls.appendChild(statusEl);
+    rightControls.appendChild(continueBtn);
     answerStack.appendChild(answerResult);
     answerStack.appendChild(answerSlot);
     answerStack.appendChild(toggleWrap);
-    answerStack.appendChild(controls);
     const hintPanel = document.createElement("div");
     hintPanel.dataset.role = "expr-hint";
     hintPanel.className = "hint-inline hidden";
-    answerStack.appendChild(hintPanel);
+    actionBar.appendChild(hintPanel);
+    actionBar.appendChild(instructionsEl);
     answerPanel.appendChild(answerTitle);
     answerPanel.appendChild(answerStack);
     const statePanel = document.createElement("div");
@@ -162,7 +165,6 @@ function createExpressionEvalTemplate(config) {
     const simulator = createSimpleSimulator({
         allowVarAssign: true,
         requireSourceValue: true,
-        allowPointers: true,
     });
     const state = {
         boundary: 0,
@@ -260,7 +262,7 @@ function createExpressionEvalTemplate(config) {
             name: box.name,
             editable: false,
         });
-        if (String(box.value ?? "") === "")
+        if ((box.value ?? "") === "")
             node.querySelector(".value")?.classList.add("placeholder", "muted");
         answerSlot.appendChild(node);
     }
@@ -302,7 +304,7 @@ function createExpressionEvalTemplate(config) {
                 name: box.name,
                 editable: false,
             });
-            if (String(box.value ?? "") === "")
+            if ((box.value ?? "") === "")
                 node.querySelector(".value")?.classList.add("placeholder", "muted");
             node.dataset.name = box.name;
             node.classList.add("quiz-selectable");
@@ -431,7 +433,7 @@ function createExpressionEvalTemplate(config) {
                     name: "",
                     editable: false,
                 });
-            if (match && String(match.value ?? "") === "") {
+            if (match && (match.value ?? "") === "") {
                 node.querySelector(".value")?.classList.add("placeholder", "muted");
             }
             if (!match)

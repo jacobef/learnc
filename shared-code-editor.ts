@@ -1,21 +1,13 @@
 import {
-  applyOtherNames,
-  cloneBoxes,
   createSimpleSimulator,
   createStepper,
   disableBoxEditing,
   ensureBaseLayout,
   flashStatus,
   getNavLabelForHref,
-  makeAnswerBox,
   randAddr,
-  readBoxState,
-  removeBoxDeleteButtons,
-  renderCodePane,
   renderParts,
   resolveActiveNavItem,
-  restoreWorkspace,
-  serializeWorkspace,
   setPartsContent,
   typeInfo,
   vbox,
@@ -44,6 +36,7 @@ interface CodeEditorElements {
   hintPanel: HTMLElement | null;
   hintBtn: HTMLButtonElement | null;
   checkBtn: HTMLButtonElement | null;
+  nextBtn: HTMLButtonElement | null;
   codeRoot: HTMLElement | null;
 }
 
@@ -112,8 +105,11 @@ function collectCodeEditorElements(
     checkBtn: root.querySelector(
       '[data-role="code-check"]',
     ) as HTMLButtonElement | null,
+    nextBtn: root.querySelector(
+      'button[data-stepper="next"]',
+    ) as HTMLButtonElement | null,
     codeRoot: root.querySelector(
-      '[data-role="code-panel"]',
+      '[data-role="code-root"]',
     ) as HTMLElement | null,
   };
 }
@@ -141,9 +137,18 @@ function ensureCodeEditorLayout({
   const instructionsEl = document.createElement("p");
   instructionsEl.dataset.role = "code-instructions";
   instructionsEl.className = "intro";
-  main.appendChild(instructionsEl);
 
   const section = document.createElement("section");
+  section.dataset.role = "code-root";
+  const actionBar = document.createElement("div");
+  actionBar.className = "controls-bar";
+  const leftControls = document.createElement("div");
+  leftControls.className = "controls-row controls-left";
+  const rightControls = document.createElement("div");
+  rightControls.className = "controls-row controls-right";
+  actionBar.appendChild(leftControls);
+  actionBar.appendChild(rightControls);
+  section.appendChild(actionBar);
   const row = document.createElement("div");
   row.className = "row";
   section.appendChild(row);
@@ -180,22 +185,17 @@ function ensureCodeEditorLayout({
   codeRow.appendChild(editorWrap);
   codeRow.appendChild(errorGutter);
   codePane.appendChild(codeRow);
-  const codeControls = document.createElement("div");
-  codeControls.className = "controls";
   const nextBtn = document.createElement("button");
   nextBtn.textContent = "Next Program ▶▶";
   nextBtn.dataset.stepper = "next";
-  codeControls.appendChild(nextBtn);
+  leftControls.appendChild(nextBtn);
   codePanel.appendChild(codeTitle);
   codePanel.appendChild(codePane);
-  codePanel.appendChild(codeControls);
 
   const statePanel = document.createElement("div");
   statePanel.className = "panel code-editor-panel";
   const stage = document.createElement("div");
   stage.dataset.role = "code-stage";
-  const stateControls = document.createElement("div");
-  stateControls.className = "controls";
   const checkBtn = document.createElement("button");
   checkBtn.dataset.role = "code-check";
   checkBtn.textContent = "Check";
@@ -207,15 +207,15 @@ function ensureCodeEditorLayout({
   const status = document.createElement("span");
   status.dataset.role = "code-status";
   status.className = "muted";
-  stateControls.appendChild(checkBtn);
-  stateControls.appendChild(hintBtn);
-  stateControls.appendChild(status);
+  rightControls.appendChild(checkBtn);
+  rightControls.appendChild(hintBtn);
+  rightControls.appendChild(status);
   const hintPanel = document.createElement("div");
   hintPanel.dataset.role = "code-hint";
   hintPanel.className = "hint-inline hidden";
+  actionBar.appendChild(hintPanel);
+  actionBar.appendChild(instructionsEl);
   statePanel.appendChild(stage);
-  statePanel.appendChild(stateControls);
-  statePanel.appendChild(hintPanel);
 
   row.appendChild(codePanel);
   row.appendChild(statePanel);
@@ -230,7 +230,8 @@ function ensureCodeEditorLayout({
     hintPanel,
     hintBtn,
     checkBtn,
-    codeRoot: codePanel,
+    nextBtn,
+    codeRoot: section,
   };
 }
 
@@ -269,6 +270,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     hintPanel,
     hintBtn,
     checkBtn,
+    nextBtn,
     codeRoot,
   } = ensureCodeEditorLayout({ textareaMinLines });
 
@@ -289,8 +291,8 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
   let pager: Stepper | null = null;
 
   function normalizeEditorText(text: string): string {
-    if (allowNewLines) return String(text ?? "");
-    const normalized = String(text ?? "").replace(/\r\n/g, "\n");
+    if (allowNewLines) return text;
+    const normalized = text.replace(/\r\n/g, "\n");
     return normalized.replace(/\n/g, " ");
   }
 
@@ -319,7 +321,6 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
   const simulator = createSimpleSimulator({
     allowVarAssign: true,
     requireSourceValue: true,
-    allowPointers: true,
   });
 
   function allocFactory(): (type?: string) => string {
@@ -570,7 +571,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
           name: b.name,
           editable: false,
         });
-        if (String(b.value ?? "") === "")
+        if ((b.value ?? "") === "")
           node.querySelector(".value")?.classList.add("placeholder", "muted");
         grid.appendChild(node);
       });
@@ -612,7 +613,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
       ["$backButton", "$b{Back ◀}"],
       ["$showAliasesButton", "$b{Show aliases}"],
     ];
-    let out = String(text ?? "");
+    let out = text;
     replacements.forEach(([needle, value]) => {
       out = out.split(needle).join(value);
     });
@@ -679,6 +680,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     if (!editable) {
       editor?.classList.add("readonly");
     }
+    if (nextBtn) nextBtn.disabled = !state.pass;
   }
 
   function evaluate(): CodeEditorResult {
@@ -781,8 +783,8 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
       checkBtn?.classList.add("hidden");
       hintBtn?.classList.add("hidden");
       pager?.pulseNext();
-      render();
       pager?.update();
+      render();
     });
   }
 
@@ -794,11 +796,11 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     getBoundary: () => 0,
     setBoundary: () => {},
     onAfterChange: render,
-    isStepLocked: () => !state.pass,
+    isStepLocked: () => false,
   });
 
-  render();
   pager.update();
+  render();
 }
 
 export { createCodeEditorTemplate };

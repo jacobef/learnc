@@ -61,7 +61,6 @@ const sandbox = {
 const simulator = createSimpleSimulator({
     allowVarAssign: true,
     requireSourceValue: true,
-    allowPointers: true,
 });
 function showExprError(message) {
     if (!exprError)
@@ -587,7 +586,7 @@ function renderExpression(outcome) {
             name: "",
             editable: false,
         });
-    if (match && String(match.value ?? "") === "") {
+    if (match && (match.value ?? "") === "") {
         node.querySelector(".value")?.classList.add("placeholder", "muted");
     }
     if (!match && !result.address)
@@ -697,7 +696,7 @@ function renderState(title, boxes, status = "ok") {
                 name: b.name,
                 editable: false,
             });
-            if (String(b.value ?? "") === "")
+            if ((b.value ?? "") === "")
                 node.querySelector(".value")?.classList.add("placeholder", "muted");
             grid.appendChild(node);
         });

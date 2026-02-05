@@ -10,7 +10,8 @@ function collectCodeEditorElements(root = document) {
         hintPanel: root.querySelector('[data-role="code-hint"]'),
         hintBtn: root.querySelector('[data-role="code-hint-btn"]'),
         checkBtn: root.querySelector('[data-role="code-check"]'),
-        codeRoot: root.querySelector('[data-role="code-panel"]'),
+        nextBtn: root.querySelector('button[data-stepper="next"]'),
+        codeRoot: root.querySelector('[data-role="code-root"]'),
     };
 }
 function ensureCodeEditorLayout({ textareaMinLines, }) {
@@ -32,8 +33,17 @@ function ensureCodeEditorLayout({ textareaMinLines, }) {
     const instructionsEl = document.createElement("p");
     instructionsEl.dataset.role = "code-instructions";
     instructionsEl.className = "intro";
-    main.appendChild(instructionsEl);
     const section = document.createElement("section");
+    section.dataset.role = "code-root";
+    const actionBar = document.createElement("div");
+    actionBar.className = "controls-bar";
+    const leftControls = document.createElement("div");
+    leftControls.className = "controls-row controls-left";
+    const rightControls = document.createElement("div");
+    rightControls.className = "controls-row controls-right";
+    actionBar.appendChild(leftControls);
+    actionBar.appendChild(rightControls);
+    section.appendChild(actionBar);
     const row = document.createElement("div");
     row.className = "row";
     section.appendChild(row);
@@ -69,21 +79,16 @@ function ensureCodeEditorLayout({ textareaMinLines, }) {
     codeRow.appendChild(editorWrap);
     codeRow.appendChild(errorGutter);
     codePane.appendChild(codeRow);
-    const codeControls = document.createElement("div");
-    codeControls.className = "controls";
     const nextBtn = document.createElement("button");
     nextBtn.textContent = "Next Program ▶▶";
     nextBtn.dataset.stepper = "next";
-    codeControls.appendChild(nextBtn);
+    leftControls.appendChild(nextBtn);
     codePanel.appendChild(codeTitle);
     codePanel.appendChild(codePane);
-    codePanel.appendChild(codeControls);
     const statePanel = document.createElement("div");
     statePanel.className = "panel code-editor-panel";
     const stage = document.createElement("div");
     stage.dataset.role = "code-stage";
-    const stateControls = document.createElement("div");
-    stateControls.className = "controls";
     const checkBtn = document.createElement("button");
     checkBtn.dataset.role = "code-check";
     checkBtn.textContent = "Check";
@@ -95,15 +100,15 @@ function ensureCodeEditorLayout({ textareaMinLines, }) {
     const status = document.createElement("span");
     status.dataset.role = "code-status";
     status.className = "muted";
-    stateControls.appendChild(checkBtn);
-    stateControls.appendChild(hintBtn);
-    stateControls.appendChild(status);
+    rightControls.appendChild(checkBtn);
+    rightControls.appendChild(hintBtn);
+    rightControls.appendChild(status);
     const hintPanel = document.createElement("div");
     hintPanel.dataset.role = "code-hint";
     hintPanel.className = "hint-inline hidden";
+    actionBar.appendChild(hintPanel);
+    actionBar.appendChild(instructionsEl);
     statePanel.appendChild(stage);
-    statePanel.appendChild(stateControls);
-    statePanel.appendChild(hintPanel);
     row.appendChild(codePanel);
     row.appendChild(statePanel);
     return {
@@ -116,7 +121,8 @@ function ensureCodeEditorLayout({ textareaMinLines, }) {
         hintPanel,
         hintBtn,
         checkBtn,
-        codeRoot: codePanel,
+        nextBtn,
+        codeRoot: section,
     };
 }
 function createCodeEditorTemplate(config) {
@@ -134,7 +140,7 @@ function createCodeEditorTemplate(config) {
     if (!Number.isFinite(textareaMinLines)) {
         failConfig("Code editor textareaMinLines must be a number.");
     }
-    const { instructionsEl, editor, lineNumbers, errorGutter, stage, status, hintPanel, hintBtn, checkBtn, codeRoot, } = ensureCodeEditorLayout({ textareaMinLines });
+    const { instructionsEl, editor, lineNumbers, errorGutter, stage, status, hintPanel, hintBtn, checkBtn, nextBtn, codeRoot, } = ensureCodeEditorLayout({ textareaMinLines });
     const measureEl = (() => {
         if (!editor || !editor.parentElement)
             return null;
@@ -152,8 +158,8 @@ function createCodeEditorTemplate(config) {
     let pager = null;
     function normalizeEditorText(text) {
         if (allowNewLines)
-            return String(text ?? "");
-        const normalized = String(text ?? "").replace(/\r\n/g, "\n");
+            return text;
+        const normalized = text.replace(/\r\n/g, "\n");
         return normalized.replace(/\n/g, " ");
     }
     function adjustSelectionForCarriageReturns(text, pos) {
@@ -179,7 +185,6 @@ function createCodeEditorTemplate(config) {
     const simulator = createSimpleSimulator({
         allowVarAssign: true,
         requireSourceValue: true,
-        allowPointers: true,
     });
     function allocFactory() {
         if (state.allocBase == null)
@@ -431,7 +436,7 @@ function createCodeEditorTemplate(config) {
                     name: b.name,
                     editable: false,
                 });
-                if (String(b.value ?? "") === "")
+                if ((b.value ?? "") === "")
                     node.querySelector(".value")?.classList.add("placeholder", "muted");
                 grid.appendChild(node);
             });
@@ -469,7 +474,7 @@ function createCodeEditorTemplate(config) {
             ["$backButton", "$b{Back ◀}"],
             ["$showAliasesButton", "$b{Show aliases}"],
         ];
-        let out = String(text ?? "");
+        let out = text;
         replacements.forEach(([needle, value]) => {
             out = out.split(needle).join(value);
         });
@@ -535,6 +540,8 @@ function createCodeEditorTemplate(config) {
         if (!editable) {
             editor?.classList.add("readonly");
         }
+        if (nextBtn)
+            nextBtn.disabled = !state.pass;
     }
     function evaluate() {
         const outcome = getProgramOutcome();
@@ -628,8 +635,8 @@ function createCodeEditorTemplate(config) {
             checkBtn?.classList.add("hidden");
             hintBtn?.classList.add("hidden");
             pager?.pulseNext();
-            render();
             pager?.update();
+            render();
         });
     }
     pager = createStepper({
@@ -640,9 +647,9 @@ function createCodeEditorTemplate(config) {
         getBoundary: () => 0,
         setBoundary: () => { },
         onAfterChange: render,
-        isStepLocked: () => !state.pass,
+        isStepLocked: () => false,
     });
-    render();
     pager.update();
+    render();
 }
 export { createCodeEditorTemplate };

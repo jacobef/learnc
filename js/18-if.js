@@ -57,7 +57,7 @@ createProgramTemplate({
             editable: false,
         },
         {
-            code: "if (5*0) {\n",
+            code: "if (5.0*0.0) {\n",
             editable: true,
             instructions: "Select the line boundary where execution will resume.",
         },
@@ -70,8 +70,9 @@ createProgramTemplate({
             editable: false,
         },
         {
-            code: "if (0 == -0) {\n",
+            code: "if (1 == --1) {\n",
             editable: true,
+            instructions: "Select the line boundary where execution will resume.",
         },
         {
             code: "  int stem = 1;\n",
@@ -100,7 +101,6 @@ createProgramTemplate({
             },
         },
     ],
-    next: "sandbox.html?finished=1",
-    isLast: true,
+    next: "19-else.html",
     workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

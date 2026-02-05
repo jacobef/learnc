@@ -97,7 +97,6 @@ const sandbox: SandboxState = {
 const simulator = createSimpleSimulator({
   allowVarAssign: true,
   requireSourceValue: true,
-  allowPointers: true,
 });
 
 function showExprError(message: string) {
@@ -677,7 +676,7 @@ function renderExpression(outcome: { kind: string; state: BoxState[] | null }) {
         name: "",
         editable: false,
       });
-  if (match && String(match.value ?? "") === "") {
+  if (match && (match.value ?? "") === "") {
     node.querySelector(".value")?.classList.add("placeholder", "muted");
   }
   if (!match && !result.address) node.classList.add("no-addr");
@@ -794,7 +793,7 @@ function renderState(
         name: b.name,
         editable: false,
       });
-      if (String(b.value ?? "") === "")
+      if ((b.value ?? "") === "")
         node.querySelector(".value")?.classList.add("placeholder", "muted");
       grid.appendChild(node);
     });

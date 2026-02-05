@@ -132,6 +132,9 @@ createProgramTemplate({
         ) {
           return "$n{copper}, $n{wood}, and $n{brick} were created outside of this block, so none of them should be removed yet.";
         }
+        if (ctx.basicHintTopicIs("value", "wood")) {
+          return "When a block ends, all variables created in that block are removed, but it doesn't undo the other effects of that block. Specifically, it shouldn't undo $c{wood = brick;}.";
+        }
         return ctx.basicHint;
       },
     },

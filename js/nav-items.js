@@ -18,6 +18,8 @@ const DEFAULT_NAV_ITEMS = [
     { href: "16-blocks.html", label: "16. Blocks" },
     { href: "17-comparisons.html", label: "17. Comparisons" },
     { href: "18-if.html", label: "18. If" },
+    { href: "19-else.html", label: "19. Else" },
+    { href: "20-abs.html", label: "20. Absolute Value" },
     { href: "sandbox.html", label: "Sandbox" },
 ];
 export { DEFAULT_NAV_ITEMS };

@@ -245,7 +245,7 @@ function renderBoxes(boxes) {
             name: b.name,
             editable: false,
         });
-        if (String(b.value ?? "") === "")
+        if ((b.value ?? "") === "")
             node.querySelector(".value")?.classList.add("placeholder", "muted");
         node.classList.add("quiz-selectable");
         node.dataset.name = b.name;

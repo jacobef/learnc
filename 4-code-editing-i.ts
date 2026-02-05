@@ -42,7 +42,7 @@ createCodeEditorTemplate({
     if (cloud.type !== "int") {
       return "$n{cloud}'s type should be $t{int}.";
     }
-    if (String(cloud.value || "") !== "") {
+    if (cloud.value !== "") {
       return "$n{cloud} should be empty—don't assign it a value.";
     }
     return "Keep the line to a simple declaration ending with a semicolon.";

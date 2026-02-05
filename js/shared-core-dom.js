@@ -349,6 +349,7 @@ function renderCodePane(root, lines, boundary, opts = {}) {
     let progressRangeStart = null;
     let progressRangeEnd = null;
     let strikeRanges = [];
+    const strikeFragmentsByLine = new Map();
     let doneBoundary = boundary;
     if (typeof opts.doneBoundary === "number" &&
         Number.isFinite(opts.doneBoundary)) {
@@ -392,19 +393,43 @@ function renderCodePane(root, lines, boundary, opts = {}) {
         }
     }
     const appendStrike = (range) => {
-        let start = Number(Array.isArray(range) ? range[0] : range.start);
-        let end = Number(Array.isArray(range) ? range[1] : range.end);
+        const rawStart = Number(Array.isArray(range) ? range[0] : range.start);
+        const rawEnd = Number(Array.isArray(range) ? range[1] : range.end);
+        let start = rawStart;
+        let end = rawEnd;
         if (!Number.isFinite(start) || !Number.isFinite(end))
             return;
         const maxIndex = Math.max(0, lines.length - 1);
-        start = Math.max(0, Math.min(maxIndex, Math.min(start, end)));
-        end = Math.max(0, Math.min(maxIndex, Math.max(start, end)));
+        const min = Math.min(start, end);
+        const max = Math.max(start, end);
+        start = Math.max(0, Math.min(maxIndex, min));
+        end = Math.max(0, Math.min(maxIndex, max));
         strikeRanges.push([start, end]);
     };
     if (opts.strikeRange)
         appendStrike(opts.strikeRange);
     if (Array.isArray(opts.strikeRanges)) {
         opts.strikeRanges.forEach((range) => appendStrike(range));
+    }
+    if (Array.isArray(opts.strikeFragments)) {
+        opts.strikeFragments.forEach((frag) => {
+            if (!frag || !Number.isFinite(frag.line))
+                return;
+            const line = Math.max(0, Math.min(lines.length - 1, frag.line));
+            const text = lines[line] ?? "";
+            const max = text.length;
+            let start = Math.max(0, Math.min(max, Number(frag.start)));
+            let end = Math.max(0, Math.min(max, Number(frag.end)));
+            if (!Number.isFinite(start) || !Number.isFinite(end))
+                return;
+            if (end < start)
+                [start, end] = [end, start];
+            if (end <= start)
+                return;
+            const list = strikeFragmentsByLine.get(line) || [];
+            list.push({ start, end });
+            strikeFragmentsByLine.set(line, list);
+        });
     }
     if (doneBoundary === 0 && !hideBoundary)
         addBoundary();
@@ -415,7 +440,33 @@ function renderCodePane(root, lines, boundary, opts = {}) {
         const lr = el('<div class="line"></div>');
         const ln = el(`<div class="ln">${i + 1}</div>`);
         const src = el('<div class="src"></div>');
-        src.textContent = lines[i];
+        const rawLine = lines[i];
+        const fragments = strikeFragmentsByLine.get(i);
+        const hasFragments = !!(fragments && fragments.length);
+        if (hasFragments) {
+            const sorted = fragments
+                .slice()
+                .sort((a, b) => a.start - b.start);
+            let cursor = 0;
+            sorted.forEach(({ start, end }) => {
+                if (start > cursor) {
+                    src.appendChild(document.createTextNode(rawLine.slice(cursor, start)));
+                }
+                if (end > start) {
+                    const span = document.createElement("span");
+                    span.className = "skipped-fragment";
+                    span.textContent = rawLine.slice(start, end);
+                    src.appendChild(span);
+                }
+                cursor = Math.max(cursor, end);
+            });
+            if (cursor < rawLine.length) {
+                src.appendChild(document.createTextNode(rawLine.slice(cursor)));
+            }
+        }
+        else {
+            src.textContent = rawLine;
+        }
         if (i < doneBoundary)
             lr.classList.add("done");
         const inProgressRange = progressRangeStart !== null &&
@@ -425,7 +476,7 @@ function renderCodePane(root, lines, boundary, opts = {}) {
         if (inProgressRange)
             lr.classList.add("progress-range");
         const inStrikeRange = strikeRanges.some(([start, end]) => i >= start && i <= end);
-        if (inStrikeRange)
+        if (inStrikeRange && !hasFragments)
             lr.classList.add("skipped");
         if (i === progressIndex)
             lr.classList.add("progress-mid");
@@ -523,10 +574,10 @@ function adjustValueOverflow(node) {
 function vbox({ address = "—", type = "int", value = "", name = "", editable = false, allowNameEdit = false, allowTypeEdit = false, showDoubleExact = false, } = {}) {
     const parsedType = parseType(type || "int");
     const isDoubleScalar = parsedType.base === "double" && parsedType.depth === 0;
-    const rawValue = String(value ?? "");
+    const rawValue = value ?? "";
     const emptyDisplay = rawValue === "";
     const displayValue = emptyDisplay ? "" : normalizeZeroDisplay(rawValue);
-    const resolvedName = name !== undefined && name !== null ? String(name) : "";
+    const resolvedName = name ?? "";
     const namesList = resolvedName ? [resolvedName] : [""];
     const valueClasses = `value ${editable ? "editable" : ""} ${emptyDisplay ? "placeholder muted" : ""}`;
     const typeClasses = `type ${allowTypeEdit ? "editable" : ""}`;
@@ -755,7 +806,7 @@ function readBoxState(root) {
 }
 function boxAddress(box) {
     const raw = box?.address ?? "";
-    return String(raw ?? "").trim();
+    return raw.trim();
 }
 function collectStageBoxes(root) {
     if (!root)
@@ -776,7 +827,7 @@ function pointerTargetBox(box, byAddr) {
     const depth = getPointerDepth(box.type);
     if (!Number.isFinite(depth) || depth < 1)
         return null;
-    const raw = String(box.value ?? "").trim();
+    const raw = (box.value ?? "").trim();
     if (raw === "")
         return null;
     const target = byAddr.get(raw) || null;
@@ -1061,7 +1112,7 @@ function restoreWorkspace(state, defaults, opts = {}) {
             });
             if (allowDelete)
                 node.dataset.allowDelete = "true";
-            if (String(st.value ?? "") === "")
+            if ((st.value ?? "") === "")
                 node.querySelector(".value")?.classList.add("placeholder", "muted");
             wrap.appendChild(node);
         });
@@ -1084,7 +1135,7 @@ function restoreWorkspace(state, defaults, opts = {}) {
             });
             if (allowDelete)
                 node.dataset.allowDelete = "true";
-            if (String(d.value ?? "") === "")
+            if ((d.value ?? "") === "")
                 node.querySelector(".value")?.classList.add("placeholder", "muted");
             wrap.appendChild(node);
         });
@@ -1101,7 +1152,7 @@ function parseStyledText(text) {
         b: "btn",
         i: "italic",
     };
-    const raw = String(text ?? "");
+    const raw = text;
     const out = [];
     let i = 0;
     while (i < raw.length) {
@@ -1165,7 +1216,7 @@ function renderParts(panel, parts) {
         });
     };
     const appendToken = (role, text) => {
-        const chunks = String(text ?? "").split("\n");
+        const chunks = text.split("\n");
         chunks.forEach((chunk, idx) => {
             if (idx > 0)
                 panel.appendChild(document.createElement("br"));
@@ -1173,6 +1224,7 @@ function renderParts(panel, parts) {
             if (role === "btn") {
                 node = document.createElement("span");
                 node.className = "btn-ref";
+                node.dataset.btnRef = chunk;
             }
             else if (role === "italic") {
                 node = document.createElement("em");
@@ -1216,6 +1268,38 @@ function renderParts(panel, parts) {
         appendText(part);
     };
     list.forEach(appendPart);
+}
+function bindBtnRefPulse(root = document) {
+    if (!root || root.dataset?.btnRefPulseBound === "1")
+        return;
+    const host = root;
+    if (host.dataset)
+        host.dataset.btnRefPulseBound = "1";
+    const clear = () => {
+        document
+            .querySelectorAll("button.btn-ref-hover")
+            .forEach((btn) => btn.classList.remove("btn-ref-hover"));
+    };
+    host.addEventListener("mouseover", (event) => {
+        const target = event?.target?.closest?.(".btn-ref");
+        if (!target)
+            return;
+        const label = (target.dataset.btnRef || target.textContent || "").trim();
+        if (!label)
+            return;
+        document.querySelectorAll("button").forEach((btn) => {
+            if (btn.textContent?.trim() === label)
+                btn.classList.add("btn-ref-hover");
+        });
+    }, true);
+    host.addEventListener("mouseout", (event) => {
+        const target = event?.target?.closest?.(".btn-ref");
+        if (!target)
+            return;
+        clear();
+    }, true);
+    const observer = new MutationObserver(() => clear());
+    observer.observe(document.body, { childList: true, subtree: true });
 }
 function setPartsContent(panel, parts) {
     if (!panel)
@@ -1523,22 +1607,13 @@ if (document.readyState === "loading") {
 else {
     applyAutoTextDefaults(document);
 }
-initStepperTopControls();
 if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", initStepperTopControls, {
         once: true,
     });
 }
-function initInstructionWatcher() {
-    return;
-}
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initInstructionWatcher, {
-        once: true,
-    });
-}
 else {
-    initInstructionWatcher();
+    initStepperTopControls();
 }
 function applySidebarStateFromUrl() {
     const params = new URLSearchParams(window.location.search);
@@ -1639,4 +1714,4 @@ function flashStatus(el) {
     void node.offsetWidth;
     node.classList.add("status-flash");
 }
-export { $, buildNav, createStepper, disableBoxEditing, ensureBaseLayout, flashStatus, getNavLabelForHref, isMobileViewport, isStepperTopVisible, makeAnswerBox, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, updateStepperTopControls, vbox, applyOtherNames, };
+export { $, buildNav, createStepper, disableBoxEditing, ensureBaseLayout, flashStatus, getNavLabelForHref, isMobileViewport, isStepperTopVisible, bindBtnRefPulse, makeAnswerBox, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, updateStepperTopControls, vbox, applyOtherNames, };
