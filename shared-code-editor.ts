@@ -160,7 +160,7 @@ function ensureCodeEditorLayout({
   main.appendChild(section);
 
   const codePanel = document.createElement("div");
-  codePanel.className = "panel code-editor-panel panel-scroll";
+  codePanel.className = "panel code-editor-panel panel-scroll code-panel-shell";
   codePanel.dataset.role = "code-panel";
   const codeTitle = document.createElement("div");
   codeTitle.className = "panel-title code-title";
@@ -197,11 +197,11 @@ function ensureCodeEditorLayout({
   codePanel.appendChild(codeTitle);
   codePanel.appendChild(codePane);
 
-  const statePanel = document.createElement("div");
-  statePanel.className = "panel code-editor-panel panel-scroll";
+  const stateCol = document.createElement("div");
+  stateCol.className = "code-editor-state-col";
   const stage = document.createElement("div");
   stage.dataset.role = "code-stage";
-  stage.className = "panel-body";
+  stage.className = "code-editor-state-stage";
   const checkBtn = document.createElement("button");
   checkBtn.dataset.role = "code-check";
   checkBtn.textContent = "Check";
@@ -221,10 +221,10 @@ function ensureCodeEditorLayout({
   hintPanel.className = "hint-inline hidden";
   actionBar.appendChild(hintPanel);
   actionBar.appendChild(instructionsEl);
-  statePanel.appendChild(stage);
+  stateCol.appendChild(stage);
 
   row.appendChild(codePanel);
-  row.appendChild(statePanel);
+  row.appendChild(stateCol);
 
   return {
     instructionsEl,
@@ -413,8 +413,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
       if (editor) lineNumbers.style.height = `${editor.clientHeight}px`;
     }
     if (errorGutter) {
-      const { invalid, incomplete, errorKinds, info } =
-        classifyLineStatuses(lines);
+      const { invalid, incomplete, errorKinds } = classifyLineStatuses(lines);
       const frag = document.createDocumentFragment();
       for (let i = 0; i < count; i++) {
         const cell = document.createElement("div");
@@ -428,42 +427,10 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
             kind === "ub"
               ? "Line causes undefined behavior"
               : "Line does not compile";
-          if (info?.has(i)) {
-            const infoMsg = info.get(i);
-            const title =
-              infoMsg && typeof infoMsg === "object" ? infoMsg.text : infoMsg;
-            const btn = document.createElement("button");
-            btn.type = "button";
-            btn.className = "error-info-btn";
-            btn.textContent = "i";
-            btn.title = title || "";
-            cell.appendChild(btn);
-          }
         } else if (incomplete.has(i)) {
           cell.classList.add("is-incomplete");
           cell.textContent = "...";
           cell.title = "Line is incomplete";
-          if (info?.has(i)) {
-            const infoMsg = info.get(i);
-            const title =
-              infoMsg && typeof infoMsg === "object" ? infoMsg.text : infoMsg;
-            const btn = document.createElement("button");
-            btn.type = "button";
-            btn.className = "error-info-btn";
-            btn.textContent = "i";
-            btn.title = title || "";
-            cell.appendChild(btn);
-          }
-        } else if (info?.has(i)) {
-          const infoMsg = info.get(i);
-          const title =
-            infoMsg && typeof infoMsg === "object" ? infoMsg.text : infoMsg;
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.className = "error-info-btn";
-          btn.textContent = "i";
-          btn.title = title || "";
-          cell.appendChild(btn);
         }
         frag.appendChild(cell);
       }
@@ -522,7 +489,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     const wrap = document.createElement("div");
     wrap.className = "state-panel";
     const heading = document.createElement("div");
-    heading.className = "state-heading";
+    heading.className = "panel-title state-heading";
     heading.textContent = title;
     wrap.appendChild(heading);
     const grid = document.createElement("div");

@@ -612,7 +612,7 @@ function renderState(title, boxes, status = "ok") {
     wrap.className = "state-panel";
     if (title) {
         const heading = document.createElement("div");
-        heading.className = "state-heading";
+        heading.className = "panel-title state-heading";
         heading.textContent = title;
         wrap.appendChild(heading);
     }
@@ -684,7 +684,10 @@ function renderState(title, boxes, status = "ok") {
             grid.appendChild(node);
         });
     }
-    wrap.appendChild(grid);
+    const body = document.createElement("div");
+    body.className = "state-panel-scroll-body";
+    body.appendChild(grid);
+    wrap.appendChild(body);
     return wrap;
 }
 function refreshOtherNames() {

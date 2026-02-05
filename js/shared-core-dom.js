@@ -11,6 +11,25 @@ function el(html) {
 function txt(n) {
     return (n?.textContent || "").trim();
 }
+function onDomReady(fn, { once = true } = {}) {
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", () => {
+            fn();
+        }, once ? { once: true } : undefined);
+        return;
+    }
+    fn();
+}
+function bootstrapWhenAvailable(init) {
+    if (init())
+        return;
+    const observer = new MutationObserver(() => {
+        if (!init())
+            return;
+        observer.disconnect();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+}
 function disableAutoText(el) {
     if (!el || el.nodeType !== 1)
         return;
@@ -26,7 +45,7 @@ function applyAutoTextDefaults(root = document) {
         .querySelectorAll('input[type="text"], input:not([type]), textarea, [contenteditable="true"]')
         .forEach((el) => disableAutoText(el));
 }
-const stepperTopState = new Map();
+const stepperTopState = new WeakMap();
 function findStepperControls(panel) {
     if (!panel)
         return null;
@@ -45,8 +64,9 @@ function findStepperControls(panel) {
 function ensureStepperTopControls(codepane) {
     if (!codepane)
         return null;
-    if (stepperTopState.has(codepane))
-        return stepperTopState.get(codepane) || null;
+    const existing = stepperTopState.get(codepane);
+    if (existing)
+        return existing;
     const panel = codepane.closest(".panel");
     if (!panel)
         return null;
@@ -70,38 +90,35 @@ function ensureStepperTopControls(codepane) {
     }
     const entry = {
         top,
-        update: null,
-        scheduled: false,
-        needsTop: null,
-        measure: null,
-        locked: false,
-        lockOnMeasure: true,
+        controls,
+        update: () => { },
+        measure: () => { },
+        rafId: null,
+        needsTop: false,
     };
     const measure = () => {
-        if (entry.locked || !document.body.contains(codepane))
+        if (!document.body.contains(codepane))
             return;
         const rect = codepane.getBoundingClientRect();
         const panelRect = panel.getBoundingClientRect();
         const viewHeight = window.innerHeight || document.documentElement.clientHeight || 0;
         const edgeEpsilon = 1;
-        const height = Math.max(panel.scrollHeight || 0, panelRect.height || 0, codepane.scrollHeight || 0, rect.height || 0);
-        if (height === 0 || viewHeight === 0)
+        const contentHeight = Math.max(panel.scrollHeight || 0, panelRect.height || 0, codepane.scrollHeight || 0, rect.height || 0);
+        if (contentHeight === 0 || viewHeight === 0)
             return;
-        const needsBottom = height >= viewHeight ||
+        const needsTop = contentHeight >= viewHeight ||
             panelRect.bottom > viewHeight - edgeEpsilon ||
             rect.bottom > viewHeight - edgeEpsilon;
-        entry.needsTop = needsBottom;
-        if (controls)
-            controls.classList.toggle("hidden", !needsBottom);
-        if (entry.lockOnMeasure)
-            entry.locked = true;
+        entry.needsTop = needsTop;
+        if (entry.controls) {
+            entry.controls.classList.toggle("hidden", !needsTop);
+        }
     };
     const update = () => {
-        if (entry.locked || entry.scheduled)
+        if (entry.rafId !== null)
             return;
-        entry.scheduled = true;
-        requestAnimationFrame(() => {
-            entry.scheduled = false;
+        entry.rafId = requestAnimationFrame(() => {
+            entry.rafId = null;
             measure();
         });
     };
@@ -130,11 +147,13 @@ function isStepperTopVisible(codepane) {
     const entry = ensureStepperTopControls(codepane);
     if (!entry)
         return false;
-    if (!entry.locked && typeof entry.measure === "function")
-        entry.measure();
+    entry.measure();
     return !!entry.needsTop;
 }
 const DEFAULT_NAV_ITEMS = NAV_ITEMS;
+function resolveNavItems(items) {
+    return Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
+}
 function normalizeNavHref(href = "") {
     const clean = String(href || "")
         .split("#")[0]
@@ -158,12 +177,12 @@ function currentNavHref() {
     return cleaned || "index.html";
 }
 function resolveActiveNavItem(items = DEFAULT_NAV_ITEMS, activeHref) {
-    const list = Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
+    const list = resolveNavItems(items);
     const current = normalizeNavHref(activeHref || currentNavHref());
     return list.find((item) => normalizeNavHref(item?.href || "") === current);
 }
 function buildNav(items = DEFAULT_NAV_ITEMS, { activeHref } = {}) {
-    const list = Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
+    const list = resolveNavItems(items);
     const current = normalizeNavHref(activeHref || currentNavHref());
     const nav = document.createElement("nav");
     nav.className = "tabs";
@@ -181,12 +200,33 @@ function buildNav(items = DEFAULT_NAV_ITEMS, { activeHref } = {}) {
     });
     return nav;
 }
+function findExistingLayoutNodes(wrap) {
+    const nav = (wrap?.querySelector("nav.tabs") ||
+        document.querySelector("nav.tabs"));
+    const main = (wrap?.querySelector(".main") ||
+        document.querySelector(".main"));
+    return { nav, main };
+}
+function ensureWrapConnected(wrap, nav, main) {
+    if (wrap.isConnected)
+        return;
+    const mount = document.body;
+    const firstScript = mount?.querySelector("script");
+    const anchor = main.parentElement === mount ? main : nav.parentElement === mount ? nav : null;
+    if (!mount)
+        return;
+    if (anchor)
+        mount.insertBefore(wrap, anchor);
+    else if (firstScript)
+        mount.insertBefore(wrap, firstScript);
+    else
+        mount.appendChild(wrap);
+}
 function ensureBaseLayout({ navItems, activeHref, } = {}) {
     let wrap = document.querySelector(".wrap");
-    let nav = (wrap?.querySelector("nav.tabs") ||
-        document.querySelector("nav.tabs"));
-    let main = (wrap?.querySelector(".main") ||
-        document.querySelector(".main"));
+    const existing = findExistingLayoutNodes(wrap);
+    let nav = existing.nav;
+    let main = existing.main;
     if (!wrap) {
         wrap = document.createElement("div");
         wrap.className = "wrap";
@@ -204,23 +244,7 @@ function ensureBaseLayout({ navItems, activeHref, } = {}) {
         main = document.createElement("div");
         main.className = "main";
     }
-    if (!wrap.isConnected) {
-        const mount = document.body;
-        const firstScript = mount?.querySelector("script");
-        const anchor = main?.parentElement === mount
-            ? main
-            : nav?.parentElement === mount
-                ? nav
-                : null;
-        if (mount) {
-            if (anchor)
-                mount.insertBefore(wrap, anchor);
-            else if (firstScript)
-                mount.insertBefore(wrap, firstScript);
-            else
-                mount.appendChild(wrap);
-        }
-    }
+    ensureWrapConnected(wrap, nav, main);
     if (nav.parentElement !== wrap) {
         wrap.appendChild(nav);
     }
@@ -232,8 +256,7 @@ function ensureBaseLayout({ navItems, activeHref, } = {}) {
     }
     document.body.classList.add("panel-layout");
     requestAnimationFrame(() => {
-        ensureNavSelectionVisible(nav);
-        bindNavScrollIndicators(nav);
+        centerActiveNavItem(nav);
     });
     return {
         wrap: wrap,
@@ -241,82 +264,33 @@ function ensureBaseLayout({ navItems, activeHref, } = {}) {
         main: main,
     };
 }
-function bindNavScrollIndicators(nav) {
-    if (!nav || nav.dataset.scrollIndicatorsBound === "true")
-        return;
-    nav.dataset.scrollIndicatorsBound = "true";
-    const update = () => {
-        adjustNavHeight(nav);
-        updateNavScrollIndicators(nav);
-    };
-    nav.addEventListener("scroll", update, { passive: true });
-    window.addEventListener("resize", update, { passive: true });
-    update();
-}
-function adjustNavHeight(nav) {
+function centerActiveNavItem(nav) {
     if (!nav)
         return;
-    const links = [...nav.querySelectorAll("a")];
-    if (!links.length)
+    const active = nav.querySelector("a.active");
+    if (!active)
         return;
-    const first = links[0];
-    if (!(first instanceof HTMLElement))
-        return;
-    const rect = first.getBoundingClientRect();
-    if (!rect.height)
-        return;
-    const style = window.getComputedStyle(first);
-    const marginTop = parseFloat(style.marginTop) || 0;
-    const marginBottom = parseFloat(style.marginBottom) || 0;
-    const itemHeight = rect.height + marginTop + marginBottom;
-    const maxHeight = window.innerHeight * 0.8;
-    const halfItem = itemHeight * 0.5;
-    const count = Math.max(0, Math.floor((maxHeight - halfItem) / itemHeight));
-    const roundedHeight = Math.max(halfItem, Math.min(maxHeight, count * itemHeight + halfItem));
-    const fullHeight = Math.min(maxHeight, nav.scrollHeight);
-    const activeIndex = links.findIndex((link) => link.classList.contains("active"));
-    const nearBottom = activeIndex >= links.length - 2;
-    const remainder = nav.scrollHeight - roundedHeight;
-    const targetHeight = nearBottom || remainder < itemHeight ? fullHeight : roundedHeight;
-    nav.style.height = `${Math.round(targetHeight)}px`;
-}
-function updateNavScrollIndicators(nav) {
-    if (!nav)
-        return;
+    const activeCenter = active.offsetTop + active.offsetHeight / 2;
+    const target = activeCenter - nav.clientHeight / 2;
     const maxScroll = Math.max(0, nav.scrollHeight - nav.clientHeight);
-    const top = Math.max(0, nav.scrollTop);
-    nav.classList.toggle("nav-scroll-top", top > 4);
-    nav.classList.toggle("nav-scroll-bottom", top < maxScroll - 4);
-}
-function ensureNavSelectionVisible(nav) {
-    if (!nav)
-        return;
-    const links = [...nav.querySelectorAll("a")];
-    if (!links.length)
-        return;
-    const activeIndex = links.findIndex((link) => link.classList.contains("active"));
-    if (activeIndex < 0)
-        return;
-    const active = links[activeIndex];
-    const next = links[activeIndex + 1] || active;
-    const nextNext = links[activeIndex + 2] || next;
-    const top = Math.min(active.offsetTop, next.offsetTop, nextNext.offsetTop);
-    const bottom = Math.max(active.offsetTop + active.offsetHeight, next.offsetTop + next.offsetHeight, nextNext.offsetTop + nextNext.offsetHeight);
-    const padding = 8;
-    const viewTop = nav.scrollTop;
-    const viewBottom = viewTop + nav.clientHeight;
-    if (top < viewTop + padding) {
-        nav.scrollTop = Math.max(0, top - padding);
-        return;
-    }
-    if (bottom > viewBottom - padding) {
-        nav.scrollTop = Math.max(0, bottom - nav.clientHeight + padding);
-    }
+    nav.scrollTop = Math.max(0, Math.min(maxScroll, target));
 }
 function initStepperTopControls() {
     document.querySelectorAll(".codepane").forEach((pane) => {
         updateStepperTopControls(pane);
     });
+}
+function clampLineIndex(index, maxIndex) {
+    return Math.max(0, Math.min(maxIndex, index));
+}
+function normalizeLineRange(range, maxIndex) {
+    const startRaw = Number(Array.isArray(range) ? range[0] : range.start);
+    const endRaw = Number(Array.isArray(range) ? range[1] : range.end);
+    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw))
+        return null;
+    const start = clampLineIndex(Math.min(startRaw, endRaw), maxIndex);
+    const end = clampLineIndex(Math.max(startRaw, endRaw), maxIndex);
+    return [start, end];
 }
 function renderCodePane(root, lines, boundary, opts = {}) {
     root.innerHTML = "";
@@ -358,28 +332,14 @@ function renderCodePane(root, lines, boundary, opts = {}) {
     }
     if (progress) {
         const range = opts.progressRange;
-        let rangeStart = null;
-        let rangeEnd = null;
-        if (Array.isArray(range) && range.length >= 2) {
-            rangeStart = Number(range[0]);
-            rangeEnd = Number(range[1]);
-        }
-        else if (range && typeof range === "object" && !Array.isArray(range)) {
-            rangeStart = Number(range.start);
-            rangeEnd = Number(range.end);
-        }
-        if (typeof rangeStart === "number" &&
-            typeof rangeEnd === "number" &&
-            Number.isFinite(rangeStart) &&
-            Number.isFinite(rangeEnd)) {
-            const start = Math.min(rangeStart, rangeEnd);
-            const end = Math.max(rangeStart, rangeEnd);
-            const maxIndex = Math.max(0, lines.length - 1);
-            progressRangeStart = Math.max(0, Math.min(maxIndex, start));
-            progressRangeEnd = Math.max(0, Math.min(maxIndex, end));
+        const maxIndex = Math.max(0, lines.length - 1);
+        const progressRange = range && typeof range === "object" ? normalizeLineRange(range, maxIndex) : null;
+        if (progressRange) {
+            progressRangeStart = progressRange[0];
+            progressRangeEnd = progressRange[1];
             if (typeof opts.progressIndex === "number" &&
                 Number.isFinite(opts.progressIndex)) {
-                progressIndex = Math.max(0, Math.min(lines.length - 1, opts.progressIndex));
+                progressIndex = clampLineIndex(opts.progressIndex, lines.length - 1);
             }
             else if (!opts.suppressProgressMid && progressRangeStart != null) {
                 progressIndex = progressRangeStart;
@@ -394,18 +354,10 @@ function renderCodePane(root, lines, boundary, opts = {}) {
         }
     }
     const appendStrike = (range) => {
-        const rawStart = Number(Array.isArray(range) ? range[0] : range.start);
-        const rawEnd = Number(Array.isArray(range) ? range[1] : range.end);
-        let start = rawStart;
-        let end = rawEnd;
-        if (!Number.isFinite(start) || !Number.isFinite(end))
+        const normalized = normalizeLineRange(range, Math.max(0, lines.length - 1));
+        if (!normalized)
             return;
-        const maxIndex = Math.max(0, lines.length - 1);
-        const min = Math.min(start, end);
-        const max = Math.max(start, end);
-        start = Math.max(0, Math.min(maxIndex, min));
-        end = Math.max(0, Math.min(maxIndex, max));
-        strikeRanges.push([start, end]);
+        strikeRanges.push(normalized);
     };
     if (opts.strikeRange)
         appendStrike(opts.strikeRange);
@@ -416,7 +368,7 @@ function renderCodePane(root, lines, boundary, opts = {}) {
         opts.strikeFragments.forEach((frag) => {
             if (!frag || !Number.isFinite(frag.line))
                 return;
-            const line = Math.max(0, Math.min(lines.length - 1, frag.line));
+            const line = clampLineIndex(frag.line, lines.length - 1);
             const text = lines[line] ?? "";
             const max = text.length;
             let start = Math.max(0, Math.min(max, Number(frag.start)));
@@ -1095,52 +1047,29 @@ function serializeWorkspace(target) {
 function restoreWorkspace(state, defaults, opts = {}) {
     const { editable = true, deletable = editable, allowNameEdit = null, allowTypeEdit = null, } = opts;
     const wrap = el('<div class="grid" data-role="workspace"></div>');
-    if (Array.isArray(state) && state.length) {
-        state.forEach((st) => {
-            const allowDelete = st.allowDelete !== null && st.allowDelete !== undefined
-                ? !!st.allowDelete
-                : deletable;
-            const node = makeAnswerBox({
-                name: st.name,
-                type: st.type,
-                value: st.rawValue ?? st.value,
-                address: st.address ?? null,
-                editable,
-                deletable: allowDelete,
-                allowNameEdit: allowNameEdit ?? st.nameEditable ?? st.allowNameEdit,
-                allowTypeEdit: allowTypeEdit ?? st.typeEditable ?? st.allowTypeEdit,
-                showDoubleExact: st.showDoubleExact ?? null,
-            });
-            if (allowDelete)
-                node.dataset.allowDelete = "true";
-            if ((st.value ?? "") === "")
-                node.querySelector(".value")?.classList.add("placeholder", "muted");
-            wrap.appendChild(node);
+    const source = Array.isArray(state) && state.length ? state : defaults || [];
+    source.forEach((box) => {
+        const allowDelete = box.allowDelete !== null && box.allowDelete !== undefined
+            ? !!box.allowDelete
+            : deletable;
+        const node = makeAnswerBox({
+            name: box.name,
+            type: box.type,
+            value: box.rawValue ?? box.value,
+            address: box.address ?? null,
+            editable,
+            deletable: allowDelete,
+            allowNameEdit: allowNameEdit ?? box.nameEditable ?? box.allowNameEdit,
+            allowTypeEdit: allowTypeEdit ?? box.typeEditable ?? box.allowTypeEdit,
+            showDoubleExact: box.showDoubleExact ?? null,
         });
-    }
-    else if (Array.isArray(defaults)) {
-        defaults.forEach((d) => {
-            const allowDelete = d.allowDelete !== null && d.allowDelete !== undefined
-                ? !!d.allowDelete
-                : deletable;
-            const node = makeAnswerBox({
-                name: d.name,
-                type: d.type,
-                value: d.rawValue ?? d.value,
-                address: d.address ?? null,
-                editable,
-                deletable: allowDelete,
-                allowNameEdit: allowNameEdit ?? d.nameEditable ?? d.allowNameEdit,
-                allowTypeEdit: allowTypeEdit ?? d.typeEditable ?? d.allowTypeEdit,
-                showDoubleExact: d.showDoubleExact ?? null,
-            });
-            if (allowDelete)
-                node.dataset.allowDelete = "true";
-            if ((d.value ?? "") === "")
-                node.querySelector(".value")?.classList.add("placeholder", "muted");
-            wrap.appendChild(node);
-        });
-    }
+        if (allowDelete)
+            node.dataset.allowDelete = "true";
+        if ((box.value ?? "") === "") {
+            node.querySelector(".value")?.classList.add("placeholder", "muted");
+        }
+        wrap.appendChild(node);
+    });
     return wrap;
 }
 function parseStyledText(text) {
@@ -1478,52 +1407,68 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
         },
     };
 }
-document.addEventListener("focusin", (e) => {
-    const t = e.target;
-    if (!t)
+function syncPlaceholderMutedState(node) {
+    if (!node || !node.classList?.contains("placeholder"))
         return;
-    disableAutoText(t);
-    if (t.classList?.contains("code-editable") &&
-        t.classList.contains("placeholder")) {
-        const placeholder = t.dataset?.placeholder || "";
-        if (txt(t) === placeholder) {
-            t.textContent = "";
-            t.classList.remove("placeholder", "muted");
+    if (txt(node) === "")
+        node.classList.add("muted");
+    else
+        node.classList.remove("muted");
+}
+function initEditableFieldHandlers() {
+    if (document.body.dataset.editableFieldHandlersReady === "1")
+        return;
+    document.body.dataset.editableFieldHandlersReady = "1";
+    document.addEventListener("focusin", (event) => {
+        const target = event.target;
+        if (!target)
+            return;
+        disableAutoText(target);
+        if (target.classList?.contains("code-editable") &&
+            target.classList.contains("placeholder")) {
+            const placeholder = target.dataset?.placeholder || "";
+            if (txt(target) === placeholder) {
+                target.textContent = "";
+                target.classList.remove("placeholder", "muted");
+            }
         }
-    }
-    if (t.classList?.contains("placeholder")) {
-        if (txt(t) === "") {
-            t.classList.add("muted");
+        syncPlaceholderMutedState(target);
+    });
+    document.addEventListener("input", (event) => {
+        const target = event.target;
+        syncPlaceholderMutedState(target);
+    });
+    document.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter")
+            return;
+        const target = event.target;
+        if (!target?.isContentEditable)
+            return;
+        if (target.classList?.contains("value") ||
+            target.classList?.contains("type") ||
+            target.classList?.contains("name-text")) {
+            event.preventDefault();
+            target.blur();
         }
-        else {
-            t.classList.remove("muted");
+    });
+    document.addEventListener("focusout", (event) => {
+        const target = event.target;
+        if (!target)
+            return;
+        if (target.classList?.contains("code-editable")) {
+            const placeholder = target.dataset?.placeholder || "";
+            if (!txt(target)) {
+                target.textContent = placeholder;
+                if (placeholder)
+                    target.classList.add("placeholder", "muted");
+            }
         }
-    }
-});
-document.addEventListener("input", (e) => {
-    const t = e.target;
-    if (!t)
-        return;
-    if (t.classList?.contains("placeholder")) {
-        if (txt(t) === "")
-            t.classList.add("muted");
-        else
-            t.classList.remove("muted");
-    }
-});
-document.addEventListener("keydown", (e) => {
-    if (e.key !== "Enter")
-        return;
-    const t = e.target;
-    if (!t?.isContentEditable)
-        return;
-    if (t.classList?.contains("value") ||
-        t.classList?.contains("type") ||
-        t.classList?.contains("name-text")) {
-        e.preventDefault();
-        t.blur();
-    }
-});
+        if (target.classList?.contains("placeholder") && txt(target) === "") {
+            target.textContent = "";
+            target.classList.add("muted");
+        }
+    });
+}
 function isTextInputActive(el) {
     if (!el)
         return false;
@@ -1550,23 +1495,6 @@ document.addEventListener("keydown", (e) => {
         return;
     e.preventDefault();
     btn.click();
-});
-document.addEventListener("focusout", (e) => {
-    const t = e.target;
-    if (!t)
-        return;
-    if (t.classList?.contains("code-editable")) {
-        const placeholder = t.dataset?.placeholder || "";
-        if (!txt(t)) {
-            t.textContent = placeholder;
-            if (placeholder)
-                t.classList.add("placeholder", "muted");
-        }
-    }
-    if (t.classList?.contains("placeholder") && txt(t) === "") {
-        t.textContent = "";
-        t.classList.add("muted");
-    }
 });
 function initScrollHint() {
     if (document.body?.classList?.contains("no-scroll-hint"))
@@ -1595,99 +1523,89 @@ function initScrollHint() {
     update();
 }
 function initProgramStateScrollHints() {
-    const bind = (panel) => {
-        if (panel.dataset.programStateScrollHintBound === "1")
+    const bound = new WeakMap();
+    const states = new Set();
+    const shouldShowScrollHint = (target) => {
+        const scrollable = Math.max(0, target.scrollHeight - target.clientHeight);
+        if (scrollable <= 10)
+            return false;
+        const boxes = [...target.querySelectorAll(".vbox")];
+        if (!boxes.length) {
+            const nearBottom = target.scrollTop >= scrollable - 6;
+            return !nearBottom;
+        }
+        const rows = boxes.map((box) => ({
+            top: box.offsetTop,
+            bottom: box.offsetTop + box.offsetHeight,
+        }));
+        const maxTop = Math.max(...rows.map((row) => row.top));
+        const bottomRow = rows.filter((row) => Math.abs(row.top - maxTop) <= 2);
+        if (!bottomRow.length) {
+            const nearBottom = target.scrollTop >= scrollable - 6;
+            return !nearBottom;
+        }
+        const rowTop = Math.min(...bottomRow.map((row) => row.top));
+        const rowBottom = Math.max(...bottomRow.map((row) => row.bottom));
+        const rowHeight = Math.max(1, rowBottom - rowTop);
+        const viewTop = target.scrollTop;
+        const viewBottom = viewTop + target.clientHeight;
+        const visibleTop = Math.max(viewTop, rowTop);
+        const visibleBottom = Math.min(viewBottom, rowBottom);
+        const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+        const visibleRatio = visibleHeight / rowHeight;
+        return visibleRatio < 0.5;
+    };
+    const bindPanel = (panel) => {
+        if (bound.has(panel))
             return;
-        panel.dataset.programStateScrollHintBound = "1";
         const target = panel.querySelector('[data-role="program-stage"], [data-role="expr-stage"], [data-role="sandbox-stage"], [data-role="quiz-stage"]') ||
             panel.querySelector(".panel-body");
         if (!target)
             return;
-        const btn = document.createElement("button");
-        btn.className = "panel-scroll-down-btn hidden";
-        btn.setAttribute("aria-label", "Scroll program state to bottom");
-        btn.type = "button";
-        btn.textContent = "↓";
-        panel.appendChild(btn);
-        const shouldShow = () => {
-            const scrollable = Math.max(0, target.scrollHeight - target.clientHeight);
-            if (scrollable <= 10)
-                return false;
-            const boxes = Array.from(target.querySelectorAll(".vbox"));
-            if (!boxes.length) {
-                const nearBottom = target.scrollTop >= scrollable - 6;
-                return !nearBottom;
-            }
-            const rows = boxes.map((box) => ({
-                top: box.offsetTop,
-                bottom: box.offsetTop + box.offsetHeight,
-            }));
-            const maxTop = Math.max(...rows.map((row) => row.top));
-            const epsilon = 2;
-            const bottomRow = rows.filter((row) => Math.abs(row.top - maxTop) <= epsilon);
-            if (!bottomRow.length) {
-                const nearBottom = target.scrollTop >= scrollable - 6;
-                return !nearBottom;
-            }
-            const rowTop = Math.min(...bottomRow.map((row) => row.top));
-            const rowBottom = Math.max(...bottomRow.map((row) => row.bottom));
-            const rowHeight = Math.max(1, rowBottom - rowTop);
-            const viewTop = target.scrollTop;
-            const viewBottom = viewTop + target.clientHeight;
-            const visibleTop = Math.max(viewTop, rowTop);
-            const visibleBottom = Math.min(viewBottom, rowBottom);
-            const visibleHeight = Math.max(0, visibleBottom - visibleTop);
-            const visibleRatio = visibleHeight / rowHeight;
-            return visibleRatio < 0.5;
-        };
+        let button = panel.querySelector(".panel-scroll-down-btn");
+        if (!button) {
+            button = document.createElement("button");
+            button.className = "panel-scroll-down-btn hidden";
+            button.type = "button";
+            button.textContent = "↓";
+            button.setAttribute("aria-label", "Scroll program state to bottom");
+            panel.appendChild(button);
+        }
         const update = () => {
-            btn.classList.toggle("hidden", !shouldShow());
+            button?.classList.toggle("hidden", !shouldShowScrollHint(target));
         };
         target.addEventListener("scroll", update, { passive: true });
-        window.addEventListener("resize", update, { passive: true });
-        const observer = new MutationObserver(update);
-        observer.observe(target, { childList: true, subtree: true });
-        btn.addEventListener("click", () => {
+        button.addEventListener("click", () => {
             target.scrollTo({ top: target.scrollHeight, behavior: "smooth" });
         });
+        const observer = new MutationObserver(update);
+        observer.observe(target, { childList: true, subtree: true });
+        const state = { panel, target, button, update };
+        bound.set(panel, state);
+        states.add(state);
         requestAnimationFrame(update);
     };
     const scan = () => {
         document
             .querySelectorAll(".program-state-panel")
-            .forEach((node) => bind(node));
+            .forEach((node) => bindPanel(node));
     };
+    const updateAll = () => {
+        for (const state of [...states]) {
+            if (!state.panel.isConnected || !state.target.isConnected) {
+                states.delete(state);
+                continue;
+            }
+            state.update();
+        }
+    };
+    window.addEventListener("resize", updateAll, { passive: true });
     scan();
-    const rootObserver = new MutationObserver(scan);
+    const rootObserver = new MutationObserver(() => {
+        scan();
+        updateAll();
+    });
     rootObserver.observe(document.body, { childList: true, subtree: true });
-}
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initScrollHint);
-}
-else {
-    initScrollHint();
-}
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initProgramStateScrollHints);
-}
-else {
-    initProgramStateScrollHints();
-}
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => {
-        applyAutoTextDefaults(document);
-    });
-}
-else {
-    applyAutoTextDefaults(document);
-}
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initStepperTopControls, {
-        once: true,
-    });
-}
-else {
-    initStepperTopControls();
 }
 function applySidebarStateFromUrl() {
     const params = new URLSearchParams(window.location.search);
@@ -1702,7 +1620,6 @@ function applySidebarStateFromUrl() {
             document.body.classList.add("sidebar-collapsed");
     }
 }
-applySidebarStateFromUrl();
 function initSidebarToggle() {
     if (document.body.dataset.sidebarToggleReady === "1")
         return true;
@@ -1759,26 +1676,15 @@ function initSidebarToggle() {
     document.body.dataset.sidebarToggleReady = "1";
     return true;
 }
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => {
-        if (initSidebarToggle())
-            return;
-        const observer = new MutationObserver(() => {
-            if (initSidebarToggle())
-                observer.disconnect();
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
-    }, { once: true });
-}
-else {
-    if (!initSidebarToggle()) {
-        const observer = new MutationObserver(() => {
-            if (initSidebarToggle())
-                observer.disconnect();
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
-    }
-}
+onDomReady(() => {
+    initEditableFieldHandlers();
+    applyAutoTextDefaults(document);
+    initScrollHint();
+    initProgramStateScrollHints();
+    initStepperTopControls();
+    applySidebarStateFromUrl();
+    bootstrapWhenAvailable(initSidebarToggle);
+});
 function flashStatus(el) {
     const node = el;
     if (!node)

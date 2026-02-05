@@ -9,7 +9,7 @@ import { ensureBaseLayout } from "./shared-core.js";
   main.appendChild(heading);
 
   const intro = document.createElement("div");
-  intro.className = "intro";
+  intro.className = "intro home-intro";
 
   const mainCopy = document.createElement("p");
   mainCopy.appendChild(
@@ -41,7 +41,7 @@ import { ensureBaseLayout } from "./shared-core.js";
   mobileNote.appendChild(document.createElement("br"));
 
   const updated = document.createElement("i");
-  updated.textContent = "Site last updated January 27, 2026";
+  updated.textContent = "Site last updated February 5, 2026";
 
   intro.appendChild(mainCopy);
   intro.appendChild(mobileNote);

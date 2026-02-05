@@ -53,10 +53,10 @@ createProgramTemplate({
         "Division drops the decimal part. -7 divided by 2 is -3.5, which becomes $v{-3}.\n\nTrivia, feel free to ignore: When used as negation (e.g. $c{-7}) as opposed to subtraction (e.g. $c{9-8}), the $c{-} operator has higher precedence than multiplication and division, so this is parsed as $c{(-7) / 2}, not $c{-(7 / 2)}. In this case it doesn't affect the final result, but in very rare cases that we'll encounter in much later programs, it does.",
     },
     {
-      code: "a = 1/2 + 3/4;\n",
+      code: "a = 1 / 2 + 3 / 4;\n",
       editable: false,
       instructions:
-        "The decimal part is dropped by each division itself, not at the end. Both $c{1/2} (0.5) and $c{3/4} (0.75) immediately round to 0, so this becomes $c{a = 0 + 0;}.",
+        "The decimal part is dropped by each division itself, not at the end. Both $c{1 / 2} (0.5) and $c{3 / 4} (0.75) immediately round to 0, so this becomes $c{a = 0 + 0;}.",
     },
     {
       code: "a = 8 / -(2 + 1);\n",

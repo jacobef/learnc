@@ -367,7 +367,7 @@ function resetAttempt() {
 function setPrompt(scenario: QuizScenario) {
   if (!instructions) return;
   const text =
-    "Click on the variable that the expression refers to, then press $b{Check}.\nGet 4 in a row correct to pass.\nIn general, $c{*X} refers to the variable whose address is $n{X}'s value.";
+    "Click on the variable that the expression refers to, then press $b{Check}. Get 4 in a row correct to pass.\nIn general, $c{*X} refers to the variable whose address is $n{X}'s value.";
   setPartsContent(instructions, text);
 }
 

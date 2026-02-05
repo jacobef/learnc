@@ -261,7 +261,7 @@ function ensureProgramLayout(): ProgramElements {
   main.appendChild(section);
 
   const codePanel = document.createElement("div");
-  codePanel.className = "panel panel-scroll";
+  codePanel.className = "panel panel-scroll code-panel-shell";
   codePanel.dataset.role = "program-code-panel";
   const codeTitle = document.createElement("div");
   codeTitle.className = "panel-title code-title";
@@ -2047,6 +2047,51 @@ function createProgramTemplate(
     }
   }
 
+  function ensureNewVariableVisible(node: HTMLElement | null) {
+    if (!node) return;
+    requestAnimationFrame(() => {
+      const stateContainer = stageEl as HTMLElement | null;
+      const edgePad = 16;
+      if (stateContainer && !isMobileViewport()) {
+        stateContainer.scrollTo({
+          top: stateContainer.scrollHeight,
+          behavior: "smooth",
+        });
+        return;
+      }
+      const canScrollState =
+        !!stateContainer &&
+        stateContainer.scrollHeight > stateContainer.clientHeight + 1;
+      if (stateContainer && canScrollState) {
+        const containerRect = stateContainer.getBoundingClientRect();
+        const nodeRect = node.getBoundingClientRect();
+        const nodeTop =
+          nodeRect.top - containerRect.top + stateContainer.scrollTop;
+        const nodeBottom = nodeTop + nodeRect.height;
+        const viewTop = stateContainer.scrollTop + edgePad;
+        const viewBottom = viewTop + stateContainer.clientHeight - edgePad * 2;
+        if (nodeTop < viewTop) {
+          stateContainer.scrollTop = Math.max(0, Math.floor(nodeTop - edgePad));
+          return;
+        }
+        if (nodeBottom > viewBottom) {
+          stateContainer.scrollTop = Math.max(
+            0,
+            Math.ceil(nodeBottom - stateContainer.clientHeight + edgePad),
+          );
+          return;
+        }
+      }
+
+      const rect = node.getBoundingClientRect();
+      const viewTop = edgePad;
+      const viewBottom = window.innerHeight - edgePad;
+      if (rect.top < viewTop || rect.bottom > viewBottom) {
+        node.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    });
+  }
+
   function renderStage() {
     if (!stageEl) return;
     stageEl.innerHTML = "";
@@ -2320,6 +2365,7 @@ function createProgramTemplate(
       });
       node.dataset.allowDelete = "true";
       ws.appendChild(node);
+      ensureNewVariableVisible(node);
       updateResetVisibility(state.boundary);
       refreshOtherNames();
     });

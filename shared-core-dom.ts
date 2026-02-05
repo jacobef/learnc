@@ -77,6 +77,29 @@ function txt(n?: Node | null): string {
   return (n?.textContent || "").trim();
 }
 
+function onDomReady(fn: () => void, { once = true }: { once?: boolean } = {}) {
+  if (document.readyState === "loading") {
+    document.addEventListener(
+      "DOMContentLoaded",
+      () => {
+        fn();
+      },
+      once ? { once: true } : undefined,
+    );
+    return;
+  }
+  fn();
+}
+
+function bootstrapWhenAvailable(init: () => boolean) {
+  if (init()) return;
+  const observer = new MutationObserver(() => {
+    if (!init()) return;
+    observer.disconnect();
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
 function disableAutoText(el?: Element | null) {
   if (!el || el.nodeType !== 1) return;
   el.setAttribute("autocapitalize", "off");
@@ -96,16 +119,15 @@ function applyAutoTextDefaults(root: ParentNode = document) {
 
 type StepperTopEntry = {
   top: HTMLDivElement;
-  update: (() => void) | null;
-  scheduled: boolean;
-  needsTop: boolean | null;
-  measure: (() => void) | null;
-  locked: boolean;
-  lockOnMeasure: boolean;
+  controls: HTMLElement | null;
+  update: () => void;
+  measure: () => void;
+  rafId: number | null;
+  needsTop: boolean;
   ro?: ResizeObserver;
 };
 
-const stepperTopState = new Map<Element, StepperTopEntry>();
+const stepperTopState = new WeakMap<Element, StepperTopEntry>();
 
 function findStepperControls(
   panel: Element | null,
@@ -128,19 +150,12 @@ function findStepperControls(
   return { prev, next };
 }
 
-function ensureStepperTopControls(codepane: Element | null): {
-  top: HTMLDivElement;
-  update: (() => void) | null;
-  scheduled: boolean;
-  needsTop: boolean | null;
-  measure: (() => void) | null;
-  locked: boolean;
-  lockOnMeasure: boolean;
-  ro?: ResizeObserver;
-} | null {
+function ensureStepperTopControls(
+  codepane: Element | null,
+): StepperTopEntry | null {
   if (!codepane) return null;
-  if (stepperTopState.has(codepane))
-    return stepperTopState.get(codepane) || null;
+  const existing = stepperTopState.get(codepane);
+  if (existing) return existing;
   const panel = codepane.closest(".panel");
   if (!panel) return null;
   const info = findStepperControls(panel);
@@ -162,40 +177,41 @@ function ensureStepperTopControls(codepane: Element | null): {
   }
   const entry: StepperTopEntry = {
     top,
-    update: null,
-    scheduled: false,
-    needsTop: null,
-    measure: null,
-    locked: false,
-    lockOnMeasure: true,
+    controls,
+    update: () => {},
+    measure: () => {},
+    rafId: null,
+    needsTop: false,
   };
+
   const measure = () => {
-    if (entry.locked || !document.body.contains(codepane)) return;
+    if (!document.body.contains(codepane)) return;
     const rect = codepane.getBoundingClientRect();
     const panelRect = panel.getBoundingClientRect();
     const viewHeight =
       window.innerHeight || document.documentElement.clientHeight || 0;
     const edgeEpsilon = 1;
-    const height = Math.max(
+    const contentHeight = Math.max(
       panel.scrollHeight || 0,
       panelRect.height || 0,
       codepane.scrollHeight || 0,
       rect.height || 0,
     );
-    if (height === 0 || viewHeight === 0) return;
-    const needsBottom =
-      height >= viewHeight ||
+    if (contentHeight === 0 || viewHeight === 0) return;
+    const needsTop =
+      contentHeight >= viewHeight ||
       panelRect.bottom > viewHeight - edgeEpsilon ||
       rect.bottom > viewHeight - edgeEpsilon;
-    entry.needsTop = needsBottom;
-    if (controls) controls.classList.toggle("hidden", !needsBottom);
-    if (entry.lockOnMeasure) entry.locked = true;
+    entry.needsTop = needsTop;
+    if (entry.controls) {
+      entry.controls.classList.toggle("hidden", !needsTop);
+    }
   };
+
   const update = () => {
-    if (entry.locked || entry.scheduled) return;
-    entry.scheduled = true;
-    requestAnimationFrame(() => {
-      entry.scheduled = false;
+    if (entry.rafId !== null) return;
+    entry.rafId = requestAnimationFrame(() => {
+      entry.rafId = null;
       measure();
     });
   };
@@ -226,12 +242,15 @@ function isStepperTopVisible(codepane: Element | null): boolean {
   if (!codepane) return false;
   const entry = ensureStepperTopControls(codepane);
   if (!entry) return false;
-  if (!entry.locked && typeof entry.measure === "function") entry.measure();
+  entry.measure();
   return !!entry.needsTop;
 }
 
 const DEFAULT_NAV_ITEMS: NavItem[] = NAV_ITEMS;
 
+function resolveNavItems(items?: NavItem[]): NavItem[] {
+  return Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
+}
 
 function normalizeNavHref(href = ""): string {
   const clean = String(href || "")
@@ -262,7 +281,7 @@ function resolveActiveNavItem(
   items: NavItem[] = DEFAULT_NAV_ITEMS,
   activeHref?: string,
 ): NavItem | undefined {
-  const list = Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
+  const list = resolveNavItems(items);
   const current = normalizeNavHref(activeHref || currentNavHref());
   return list.find((item) => normalizeNavHref(item?.href || "") === current);
 }
@@ -271,7 +290,7 @@ function buildNav(
   items: NavItem[] = DEFAULT_NAV_ITEMS,
   { activeHref }: { activeHref?: string } = {},
 ): HTMLElement {
-  const list = Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
+  const list = resolveNavItems(items);
   const current = normalizeNavHref(activeHref || currentNavHref());
   const nav = document.createElement("nav");
   nav.className = "tabs";
@@ -289,15 +308,37 @@ function buildNav(
   return nav;
 }
 
+function findExistingLayoutNodes(wrap: HTMLElement | null): {
+  nav: HTMLElement | null;
+  main: HTMLElement | null;
+} {
+  const nav = (wrap?.querySelector("nav.tabs") ||
+    document.querySelector("nav.tabs")) as HTMLElement | null;
+  const main = (wrap?.querySelector(".main") ||
+    document.querySelector(".main")) as HTMLElement | null;
+  return { nav, main };
+}
+
+function ensureWrapConnected(wrap: HTMLElement, nav: HTMLElement, main: HTMLElement) {
+  if (wrap.isConnected) return;
+  const mount = document.body;
+  const firstScript = mount?.querySelector("script");
+  const anchor =
+    main.parentElement === mount ? main : nav.parentElement === mount ? nav : null;
+  if (!mount) return;
+  if (anchor) mount.insertBefore(wrap, anchor);
+  else if (firstScript) mount.insertBefore(wrap, firstScript);
+  else mount.appendChild(wrap);
+}
+
 function ensureBaseLayout({
   navItems,
   activeHref,
 }: { navItems?: NavItem[]; activeHref?: string } = {}) {
   let wrap = document.querySelector(".wrap") as HTMLElement | null;
-  let nav = (wrap?.querySelector("nav.tabs") ||
-    document.querySelector("nav.tabs")) as HTMLElement | null;
-  let main = (wrap?.querySelector(".main") ||
-    document.querySelector(".main")) as HTMLElement | null;
+  const existing = findExistingLayoutNodes(wrap);
+  let nav = existing.nav;
+  let main = existing.main;
   if (!wrap) {
     wrap = document.createElement("div");
     wrap.className = "wrap";
@@ -315,21 +356,7 @@ function ensureBaseLayout({
     main = document.createElement("div");
     main.className = "main";
   }
-  if (!wrap.isConnected) {
-    const mount = document.body;
-    const firstScript = mount?.querySelector("script");
-    const anchor =
-      main?.parentElement === mount
-        ? main
-        : nav?.parentElement === mount
-          ? nav
-          : null;
-    if (mount) {
-      if (anchor) mount.insertBefore(wrap, anchor);
-      else if (firstScript) mount.insertBefore(wrap, firstScript);
-      else mount.appendChild(wrap);
-    }
-  }
+  ensureWrapConnected(wrap, nav, main);
   if (nav.parentElement !== wrap) {
     wrap.appendChild(nav);
   }
@@ -341,8 +368,7 @@ function ensureBaseLayout({
   }
   document.body.classList.add("panel-layout");
   requestAnimationFrame(() => {
-    ensureNavSelectionVisible(nav);
-    bindNavScrollIndicators(nav);
+    centerActiveNavItem(nav);
   });
   return {
     wrap: wrap as HTMLElement,
@@ -351,89 +377,38 @@ function ensureBaseLayout({
   };
 }
 
-function bindNavScrollIndicators(nav: HTMLElement | null) {
-  if (!nav || nav.dataset.scrollIndicatorsBound === "true") return;
-  nav.dataset.scrollIndicatorsBound = "true";
-  const update = () => {
-    adjustNavHeight(nav);
-    updateNavScrollIndicators(nav);
-  };
-  nav.addEventListener("scroll", update, { passive: true });
-  window.addEventListener("resize", update, { passive: true });
-  update();
-}
-
-function adjustNavHeight(nav: HTMLElement | null) {
+function centerActiveNavItem(nav: HTMLElement | null) {
   if (!nav) return;
-  const links = [...nav.querySelectorAll("a")];
-  if (!links.length) return;
-  const first = links[0];
-  if (!(first instanceof HTMLElement)) return;
-  const rect = first.getBoundingClientRect();
-  if (!rect.height) return;
-  const style = window.getComputedStyle(first);
-  const marginTop = parseFloat(style.marginTop) || 0;
-  const marginBottom = parseFloat(style.marginBottom) || 0;
-  const itemHeight = rect.height + marginTop + marginBottom;
-  const maxHeight = window.innerHeight * 0.8;
-  const halfItem = itemHeight * 0.5;
-  const count = Math.max(0, Math.floor((maxHeight - halfItem) / itemHeight));
-  const roundedHeight = Math.max(
-    halfItem,
-    Math.min(maxHeight, count * itemHeight + halfItem),
-  );
-  const fullHeight = Math.min(maxHeight, nav.scrollHeight);
-  const activeIndex = links.findIndex((link) =>
-    link.classList.contains("active"),
-  );
-  const nearBottom = activeIndex >= links.length - 2;
-  const remainder = nav.scrollHeight - roundedHeight;
-  const targetHeight =
-    nearBottom || remainder < itemHeight ? fullHeight : roundedHeight;
-  nav.style.height = `${Math.round(targetHeight)}px`;
-}
-
-function updateNavScrollIndicators(nav: HTMLElement | null) {
-  if (!nav) return;
+  const active = nav.querySelector("a.active") as HTMLElement | null;
+  if (!active) return;
+  const activeCenter = active.offsetTop + active.offsetHeight / 2;
+  const target = activeCenter - nav.clientHeight / 2;
   const maxScroll = Math.max(0, nav.scrollHeight - nav.clientHeight);
-  const top = Math.max(0, nav.scrollTop);
-  nav.classList.toggle("nav-scroll-top", top > 4);
-  nav.classList.toggle("nav-scroll-bottom", top < maxScroll - 4);
-}
-
-function ensureNavSelectionVisible(nav: HTMLElement | null) {
-  if (!nav) return;
-  const links = [...nav.querySelectorAll("a")];
-  if (!links.length) return;
-  const activeIndex = links.findIndex((link) =>
-    link.classList.contains("active"),
-  );
-  if (activeIndex < 0) return;
-  const active = links[activeIndex];
-  const next = links[activeIndex + 1] || active;
-  const nextNext = links[activeIndex + 2] || next;
-  const top = Math.min(active.offsetTop, next.offsetTop, nextNext.offsetTop);
-  const bottom = Math.max(
-    active.offsetTop + active.offsetHeight,
-    next.offsetTop + next.offsetHeight,
-    nextNext.offsetTop + nextNext.offsetHeight,
-  );
-  const padding = 8;
-  const viewTop = nav.scrollTop;
-  const viewBottom = viewTop + nav.clientHeight;
-  if (top < viewTop + padding) {
-    nav.scrollTop = Math.max(0, top - padding);
-    return;
-  }
-  if (bottom > viewBottom - padding) {
-    nav.scrollTop = Math.max(0, bottom - nav.clientHeight + padding);
-  }
+  nav.scrollTop = Math.max(0, Math.min(maxScroll, target));
 }
 
 function initStepperTopControls() {
   document.querySelectorAll(".codepane").forEach((pane) => {
     updateStepperTopControls(pane);
   });
+}
+
+type LineRange = [number, number] | { start: number; end: number };
+
+function clampLineIndex(index: number, maxIndex: number): number {
+  return Math.max(0, Math.min(maxIndex, index));
+}
+
+function normalizeLineRange(
+  range: LineRange,
+  maxIndex: number,
+): [number, number] | null {
+  const startRaw = Number(Array.isArray(range) ? range[0] : range.start);
+  const endRaw = Number(Array.isArray(range) ? range[1] : range.end);
+  if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return null;
+  const start = clampLineIndex(Math.min(startRaw, endRaw), maxIndex);
+  const end = clampLineIndex(Math.max(startRaw, endRaw), maxIndex);
+  return [start, end];
 }
 
 function renderCodePane(
@@ -487,34 +462,17 @@ function renderCodePane(
   }
   if (progress) {
     const range = opts.progressRange;
-    let rangeStart: number | null = null;
-    let rangeEnd: number | null = null;
-    if (Array.isArray(range) && range.length >= 2) {
-      rangeStart = Number(range[0]);
-      rangeEnd = Number(range[1]);
-    } else if (range && typeof range === "object" && !Array.isArray(range)) {
-      rangeStart = Number(range.start);
-      rangeEnd = Number(range.end);
-    }
-    if (
-      typeof rangeStart === "number" &&
-      typeof rangeEnd === "number" &&
-      Number.isFinite(rangeStart) &&
-      Number.isFinite(rangeEnd)
-    ) {
-      const start = Math.min(rangeStart, rangeEnd);
-      const end = Math.max(rangeStart, rangeEnd);
-      const maxIndex = Math.max(0, lines.length - 1);
-      progressRangeStart = Math.max(0, Math.min(maxIndex, start));
-      progressRangeEnd = Math.max(0, Math.min(maxIndex, end));
+    const maxIndex = Math.max(0, lines.length - 1);
+    const progressRange =
+      range && typeof range === "object" ? normalizeLineRange(range, maxIndex) : null;
+    if (progressRange) {
+      progressRangeStart = progressRange[0];
+      progressRangeEnd = progressRange[1];
       if (
         typeof opts.progressIndex === "number" &&
         Number.isFinite(opts.progressIndex)
       ) {
-        progressIndex = Math.max(
-          0,
-          Math.min(lines.length - 1, opts.progressIndex),
-        );
+        progressIndex = clampLineIndex(opts.progressIndex, lines.length - 1);
       } else if (!opts.suppressProgressMid && progressRangeStart != null) {
         progressIndex = progressRangeStart;
       }
@@ -530,20 +488,10 @@ function renderCodePane(
       progressIndex = boundary - 1;
     }
   }
-  const appendStrike = (
-    range: [number, number] | { start: number; end: number },
-  ) => {
-    const rawStart = Number(Array.isArray(range) ? range[0] : range.start);
-    const rawEnd = Number(Array.isArray(range) ? range[1] : range.end);
-    let start = rawStart;
-    let end = rawEnd;
-    if (!Number.isFinite(start) || !Number.isFinite(end)) return;
-    const maxIndex = Math.max(0, lines.length - 1);
-    const min = Math.min(start, end);
-    const max = Math.max(start, end);
-    start = Math.max(0, Math.min(maxIndex, min));
-    end = Math.max(0, Math.min(maxIndex, max));
-    strikeRanges.push([start, end]);
+  const appendStrike = (range: LineRange) => {
+    const normalized = normalizeLineRange(range, Math.max(0, lines.length - 1));
+    if (!normalized) return;
+    strikeRanges.push(normalized);
   };
   if (opts.strikeRange) appendStrike(opts.strikeRange);
   if (Array.isArray(opts.strikeRanges)) {
@@ -552,7 +500,7 @@ function renderCodePane(
   if (Array.isArray(opts.strikeFragments)) {
     opts.strikeFragments.forEach((frag) => {
       if (!frag || !Number.isFinite(frag.line)) return;
-      const line = Math.max(0, Math.min(lines.length - 1, frag.line));
+      const line = clampLineIndex(frag.line, lines.length - 1);
       const text = lines[line] ?? "";
       const max = text.length;
       let start = Math.max(0, Math.min(max, Number(frag.start)));
@@ -1316,51 +1264,29 @@ function restoreWorkspace(
     allowTypeEdit = null,
   } = opts;
   const wrap = el('<div class="grid" data-role="workspace"></div>');
-  if (Array.isArray(state) && state.length) {
-    state.forEach((st) => {
-      const allowDelete =
-        st.allowDelete !== null && st.allowDelete !== undefined
-          ? !!st.allowDelete
-          : deletable;
-      const node = makeAnswerBox({
-        name: st.name,
-        type: st.type,
-        value: st.rawValue ?? st.value,
-        address: st.address ?? null,
-        editable,
-        deletable: allowDelete,
-        allowNameEdit: allowNameEdit ?? st.nameEditable ?? st.allowNameEdit,
-        allowTypeEdit: allowTypeEdit ?? st.typeEditable ?? st.allowTypeEdit,
-        showDoubleExact: st.showDoubleExact ?? null,
-      });
-      if (allowDelete) node.dataset.allowDelete = "true";
-      if ((st.value ?? "") === "")
-        node.querySelector(".value")?.classList.add("placeholder", "muted");
-      wrap.appendChild(node);
+  const source = Array.isArray(state) && state.length ? state : defaults || [];
+  source.forEach((box) => {
+    const allowDelete =
+      box.allowDelete !== null && box.allowDelete !== undefined
+        ? !!box.allowDelete
+        : deletable;
+    const node = makeAnswerBox({
+      name: box.name,
+      type: box.type,
+      value: box.rawValue ?? box.value,
+      address: box.address ?? null,
+      editable,
+      deletable: allowDelete,
+      allowNameEdit: allowNameEdit ?? box.nameEditable ?? box.allowNameEdit,
+      allowTypeEdit: allowTypeEdit ?? box.typeEditable ?? box.allowTypeEdit,
+      showDoubleExact: box.showDoubleExact ?? null,
     });
-  } else if (Array.isArray(defaults)) {
-    defaults.forEach((d) => {
-      const allowDelete =
-        d.allowDelete !== null && d.allowDelete !== undefined
-          ? !!d.allowDelete
-          : deletable;
-      const node = makeAnswerBox({
-        name: d.name,
-        type: d.type,
-        value: d.rawValue ?? d.value,
-        address: d.address ?? null,
-        editable,
-        deletable: allowDelete,
-        allowNameEdit: allowNameEdit ?? d.nameEditable ?? d.allowNameEdit,
-        allowTypeEdit: allowTypeEdit ?? d.typeEditable ?? d.allowTypeEdit,
-        showDoubleExact: d.showDoubleExact ?? null,
-      });
-      if (allowDelete) node.dataset.allowDelete = "true";
-      if ((d.value ?? "") === "")
-        node.querySelector(".value")?.classList.add("placeholder", "muted");
-      wrap.appendChild(node);
-    });
-  }
+    if (allowDelete) node.dataset.allowDelete = "true";
+    if ((box.value ?? "") === "") {
+      node.querySelector(".value")?.classList.add("placeholder", "muted");
+    }
+    wrap.appendChild(node);
+  });
   return wrap;
 }
 
@@ -1737,51 +1663,68 @@ function createStepper({
   };
 }
 
-document.addEventListener("focusin", (e) => {
-  const t = e.target as HTMLElement | null;
-  if (!t) return;
-  disableAutoText(t);
-  if (
-    t.classList?.contains("code-editable") &&
-    t.classList.contains("placeholder")
-  ) {
-    const placeholder = t.dataset?.placeholder || "";
-    if (txt(t) === placeholder) {
-      t.textContent = "";
-      t.classList.remove("placeholder", "muted");
-    }
-  }
-  if (t.classList?.contains("placeholder")) {
-    if (txt(t) === "") {
-      t.classList.add("muted");
-    } else {
-      t.classList.remove("muted");
-    }
-  }
-});
+function syncPlaceholderMutedState(node: HTMLElement | null) {
+  if (!node || !node.classList?.contains("placeholder")) return;
+  if (txt(node) === "") node.classList.add("muted");
+  else node.classList.remove("muted");
+}
 
-document.addEventListener("input", (e) => {
-  const t = e.target as HTMLElement | null;
-  if (!t) return;
-  if (t.classList?.contains("placeholder")) {
-    if (txt(t) === "") t.classList.add("muted");
-    else t.classList.remove("muted");
-  }
-});
+function initEditableFieldHandlers() {
+  if (document.body.dataset.editableFieldHandlersReady === "1") return;
+  document.body.dataset.editableFieldHandlersReady = "1";
 
-document.addEventListener("keydown", (e) => {
-  if (e.key !== "Enter") return;
-  const t = e.target as HTMLElement | null;
-  if (!t?.isContentEditable) return;
-  if (
-    t.classList?.contains("value") ||
-    t.classList?.contains("type") ||
-    t.classList?.contains("name-text")
-  ) {
-    e.preventDefault();
-    t.blur();
-  }
-});
+  document.addEventListener("focusin", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (!target) return;
+    disableAutoText(target);
+    if (
+      target.classList?.contains("code-editable") &&
+      target.classList.contains("placeholder")
+    ) {
+      const placeholder = target.dataset?.placeholder || "";
+      if (txt(target) === placeholder) {
+        target.textContent = "";
+        target.classList.remove("placeholder", "muted");
+      }
+    }
+    syncPlaceholderMutedState(target);
+  });
+
+  document.addEventListener("input", (event) => {
+    const target = event.target as HTMLElement | null;
+    syncPlaceholderMutedState(target);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    const target = event.target as HTMLElement | null;
+    if (!target?.isContentEditable) return;
+    if (
+      target.classList?.contains("value") ||
+      target.classList?.contains("type") ||
+      target.classList?.contains("name-text")
+    ) {
+      event.preventDefault();
+      target.blur();
+    }
+  });
+
+  document.addEventListener("focusout", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (!target) return;
+    if (target.classList?.contains("code-editable")) {
+      const placeholder = target.dataset?.placeholder || "";
+      if (!txt(target)) {
+        target.textContent = placeholder;
+        if (placeholder) target.classList.add("placeholder", "muted");
+      }
+    }
+    if (target.classList?.contains("placeholder") && txt(target) === "") {
+      target.textContent = "";
+      target.classList.add("muted");
+    }
+  });
+}
 
 function isTextInputActive(el: HTMLElement | null) {
   if (!el) return false;
@@ -1811,22 +1754,6 @@ document.addEventListener("keydown", (e) => {
   if (!btn || btn.disabled) return;
   e.preventDefault();
   btn.click();
-});
-
-document.addEventListener("focusout", (e) => {
-  const t = e.target as HTMLElement | null;
-  if (!t) return;
-  if (t.classList?.contains("code-editable")) {
-    const placeholder = t.dataset?.placeholder || "";
-    if (!txt(t)) {
-      t.textContent = placeholder;
-      if (placeholder) t.classList.add("placeholder", "muted");
-    }
-  }
-  if (t.classList?.contains("placeholder") && txt(t) === "") {
-    t.textContent = "";
-    t.classList.add("muted");
-  }
 });
 
 function initScrollHint() {
@@ -1861,110 +1788,109 @@ function initScrollHint() {
 }
 
 function initProgramStateScrollHints() {
-  const bind = (panel: HTMLElement) => {
-    if (panel.dataset.programStateScrollHintBound === "1") return;
-    panel.dataset.programStateScrollHintBound = "1";
+  type BoundScrollHint = {
+    panel: HTMLElement;
+    target: HTMLElement;
+    button: HTMLButtonElement;
+    update: () => void;
+  };
+  const bound = new WeakMap<HTMLElement, BoundScrollHint>();
+  const states = new Set<BoundScrollHint>();
+
+  const shouldShowScrollHint = (target: HTMLElement): boolean => {
+    const scrollable = Math.max(0, target.scrollHeight - target.clientHeight);
+    if (scrollable <= 10) return false;
+
+    const boxes = [...target.querySelectorAll(".vbox")] as HTMLElement[];
+    if (!boxes.length) {
+      const nearBottom = target.scrollTop >= scrollable - 6;
+      return !nearBottom;
+    }
+
+    const rows = boxes.map((box) => ({
+      top: box.offsetTop,
+      bottom: box.offsetTop + box.offsetHeight,
+    }));
+    const maxTop = Math.max(...rows.map((row) => row.top));
+    const bottomRow = rows.filter((row) => Math.abs(row.top - maxTop) <= 2);
+    if (!bottomRow.length) {
+      const nearBottom = target.scrollTop >= scrollable - 6;
+      return !nearBottom;
+    }
+
+    const rowTop = Math.min(...bottomRow.map((row) => row.top));
+    const rowBottom = Math.max(...bottomRow.map((row) => row.bottom));
+    const rowHeight = Math.max(1, rowBottom - rowTop);
+    const viewTop = target.scrollTop;
+    const viewBottom = viewTop + target.clientHeight;
+    const visibleTop = Math.max(viewTop, rowTop);
+    const visibleBottom = Math.min(viewBottom, rowBottom);
+    const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+    const visibleRatio = visibleHeight / rowHeight;
+    return visibleRatio < 0.5;
+  };
+
+  const bindPanel = (panel: HTMLElement) => {
+    if (bound.has(panel)) return;
     const target =
       (panel.querySelector(
         '[data-role="program-stage"], [data-role="expr-stage"], [data-role="sandbox-stage"], [data-role="quiz-stage"]',
       ) as HTMLElement | null) ||
       (panel.querySelector(".panel-body") as HTMLElement | null);
     if (!target) return;
-    const btn = document.createElement("button");
-    btn.className = "panel-scroll-down-btn hidden";
-    btn.setAttribute("aria-label", "Scroll program state to bottom");
-    btn.type = "button";
-    btn.textContent = "↓";
-    panel.appendChild(btn);
 
-    const shouldShow = () => {
-      const scrollable = Math.max(0, target.scrollHeight - target.clientHeight);
-      if (scrollable <= 10) return false;
-
-      const boxes = Array.from(
-        target.querySelectorAll(".vbox"),
-      ) as HTMLElement[];
-      if (!boxes.length) {
-        const nearBottom = target.scrollTop >= scrollable - 6;
-        return !nearBottom;
-      }
-
-      const rows = boxes.map((box) => ({
-        top: box.offsetTop,
-        bottom: box.offsetTop + box.offsetHeight,
-      }));
-      const maxTop = Math.max(...rows.map((row) => row.top));
-      const epsilon = 2;
-      const bottomRow = rows.filter((row) => Math.abs(row.top - maxTop) <= epsilon);
-      if (!bottomRow.length) {
-        const nearBottom = target.scrollTop >= scrollable - 6;
-        return !nearBottom;
-      }
-
-      const rowTop = Math.min(...bottomRow.map((row) => row.top));
-      const rowBottom = Math.max(...bottomRow.map((row) => row.bottom));
-      const rowHeight = Math.max(1, rowBottom - rowTop);
-      const viewTop = target.scrollTop;
-      const viewBottom = viewTop + target.clientHeight;
-      const visibleTop = Math.max(viewTop, rowTop);
-      const visibleBottom = Math.min(viewBottom, rowBottom);
-      const visibleHeight = Math.max(0, visibleBottom - visibleTop);
-      const visibleRatio = visibleHeight / rowHeight;
-
-      return visibleRatio < 0.5;
-    };
+    let button = panel.querySelector(
+      ".panel-scroll-down-btn",
+    ) as HTMLButtonElement | null;
+    if (!button) {
+      button = document.createElement("button");
+      button.className = "panel-scroll-down-btn hidden";
+      button.type = "button";
+      button.textContent = "↓";
+      button.setAttribute("aria-label", "Scroll program state to bottom");
+      panel.appendChild(button);
+    }
 
     const update = () => {
-      btn.classList.toggle("hidden", !shouldShow());
+      button?.classList.toggle("hidden", !shouldShowScrollHint(target));
     };
 
     target.addEventListener("scroll", update, { passive: true });
-    window.addEventListener("resize", update, { passive: true });
-    const observer = new MutationObserver(update);
-    observer.observe(target, { childList: true, subtree: true });
-    btn.addEventListener("click", () => {
+    button.addEventListener("click", () => {
       target.scrollTo({ top: target.scrollHeight, behavior: "smooth" });
     });
+    const observer = new MutationObserver(update);
+    observer.observe(target, { childList: true, subtree: true });
+
+    const state: BoundScrollHint = { panel, target, button, update };
+    bound.set(panel, state);
+    states.add(state);
     requestAnimationFrame(update);
   };
 
   const scan = () => {
     document
       .querySelectorAll(".program-state-panel")
-      .forEach((node) => bind(node as HTMLElement));
+      .forEach((node) => bindPanel(node as HTMLElement));
   };
 
+  const updateAll = () => {
+    for (const state of [...states]) {
+      if (!state.panel.isConnected || !state.target.isConnected) {
+        states.delete(state);
+        continue;
+      }
+      state.update();
+    }
+  };
+
+  window.addEventListener("resize", updateAll, { passive: true });
   scan();
-  const rootObserver = new MutationObserver(scan);
+  const rootObserver = new MutationObserver(() => {
+    scan();
+    updateAll();
+  });
   rootObserver.observe(document.body, { childList: true, subtree: true });
-}
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", initScrollHint);
-} else {
-  initScrollHint();
-}
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", initProgramStateScrollHints);
-} else {
-  initProgramStateScrollHints();
-}
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", () => {
-    applyAutoTextDefaults(document);
-  });
-} else {
-  applyAutoTextDefaults(document);
-}
-
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", initStepperTopControls, {
-    once: true,
-  });
-} else {
-  initStepperTopControls();
 }
 
 function applySidebarStateFromUrl() {
@@ -1977,8 +1903,6 @@ function applySidebarStateFromUrl() {
     if (prefersCollapsed) document.body.classList.add("sidebar-collapsed");
   }
 }
-
-applySidebarStateFromUrl();
 
 function initSidebarToggle() {
   if (document.body.dataset.sidebarToggleReady === "1") return true;
@@ -2035,26 +1959,15 @@ function initSidebarToggle() {
   return true;
 }
 
-if (document.readyState === "loading") {
-  document.addEventListener(
-    "DOMContentLoaded",
-    () => {
-      if (initSidebarToggle()) return;
-      const observer = new MutationObserver(() => {
-        if (initSidebarToggle()) observer.disconnect();
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-    },
-    { once: true },
-  );
-} else {
-  if (!initSidebarToggle()) {
-    const observer = new MutationObserver(() => {
-      if (initSidebarToggle()) observer.disconnect();
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-  }
-}
+onDomReady(() => {
+  initEditableFieldHandlers();
+  applyAutoTextDefaults(document);
+  initScrollHint();
+  initProgramStateScrollHints();
+  initStepperTopControls();
+  applySidebarStateFromUrl();
+  bootstrapWhenAvailable(initSidebarToggle);
+});
 
 function flashStatus(el: Element | null) {
   const node = el as HTMLElement | null;
