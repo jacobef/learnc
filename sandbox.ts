@@ -243,13 +243,6 @@ function resolveBoundary(value: number | null | undefined, fallback: number) {
   return Number.isFinite(value) ? (value as number) : fallback;
 }
 
-function partAt(parts: StatementPart[], index: number): StatementPart | null {
-  if (!Number.isFinite(index)) return null;
-  if (index < 0 || index >= parts.length) return null;
-  return parts[index] || null;
-}
-
-
 function stopIndexForBoundary(
   parts: StatementPart[],
   boundary: number,

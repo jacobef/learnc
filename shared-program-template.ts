@@ -10,7 +10,6 @@ import {
   flashStatus,
   getNavLabelForHref,
   isMobileViewport,
-  isStepperTopVisible,
   makeAnswerBox,
   normalizeBoxValueForContext,
   normalizeZeroDisplay,
@@ -31,7 +30,6 @@ import type {
   IfBlock,
   Part,
   Parts,
-  StatementContext,
   StatementMap,
   StatementPart,
   StatementRange,
@@ -702,7 +700,6 @@ function createProgramTemplate(
     lastLine: Math.max(0, total - 1),
   });
   let activeBranchTargets: Map<number, number> | null = null;
-  let activeBranchExpected: number | null = null;
   let branchSelectionActive = false;
   let branchSelectionTarget: number | null = null;
   let branchSelectionBoundary: number | null = null;
@@ -719,12 +716,6 @@ function createProgramTemplate(
   });
   const hasInitialInstructionsContent =
     typeof initialInstructions === "string" && initialInstructions.length > 0;
-
-  function partAt(index: number): StatementPart | null {
-    if (!Number.isFinite(index)) return null;
-    if (index < 0 || index >= parts.length) return null;
-    return parts[index] || null;
-  }
 
   function stopIndexForBoundary(boundary: number): number {
     const target = Math.max(0, Math.min(totalLines, boundary));
@@ -992,15 +983,6 @@ function createProgramTemplate(
     };
   }
 
-  function previousStepBoundary(boundary: number): number | null {
-    let prev: number | null = null;
-    for (const b of stepBoundaries) {
-      if (b < boundary) prev = b;
-      else break;
-    }
-    return prev;
-  }
-
   function nextStepBoundary(boundary: number): number {
     for (const b of stepBoundaries) {
       if (b > boundary) return b;
@@ -1012,10 +994,6 @@ function createProgramTemplate(
     const endLine = boundary - 1;
     if (!Number.isFinite(endLine)) return null;
     return groupRanges.find((group) => group.endLine === endLine) || null;
-  }
-
-  function getStatementContext(boundary: number): StatementContext {
-    return simulator.getStatementContext(lineList, boundary);
   }
 
   function stateBeforePart(partIndex: number): BoxState[] {
@@ -1847,8 +1825,6 @@ function createProgramTemplate(
     const branchSelectable =
       !!branchInfo && !!branchStep?.editable && branchSelectionActive;
     activeBranchTargets = branchSelectable ? allBoundaryTargets : null;
-    activeBranchExpected =
-      branchSelectable && branchInfo ? branchInfo.expected : null;
     if (progress) {
       const range = executedRangeForBoundary(key);
       const hasMultiLineRange =
@@ -1947,7 +1923,6 @@ function createProgramTemplate(
               ? parts[block.elseIndex]!.startLine
               : ifCloseLine)
         ) {
-          const elseTok = parts[block.elseIndex]?.tokens?.[0];
           const elseCol = elseColumnForLine(ifCloseLine, block);
           if (Number.isFinite(elseCol) && elseCol >= 0) {
             strikeFragments.push({
@@ -2284,7 +2259,6 @@ function createProgramTemplate(
       branchSelectionTarget = null;
       branchSelectionBoundary = null;
     }
-    const debugBoundary = state.boundary >= 35 && state.boundary <= 50;
     renderCodePaneForBoundary();
     renderStage();
     hideHint();

@@ -492,7 +492,6 @@ function createProgramTemplate(config) {
         lastLine: Math.max(0, total - 1),
     });
     let activeBranchTargets = null;
-    let activeBranchExpected = null;
     let branchSelectionActive = false;
     let branchSelectionTarget = null;
     let branchSelectionBoundary = null;
@@ -508,13 +507,6 @@ function createProgramTemplate(config) {
         allBoundaryTargets.set(boundary, boundary);
     });
     const hasInitialInstructionsContent = typeof initialInstructions === "string" && initialInstructions.length > 0;
-    function partAt(index) {
-        if (!Number.isFinite(index))
-            return null;
-        if (index < 0 || index >= parts.length)
-            return null;
-        return parts[index] || null;
-    }
     function stopIndexForBoundary(boundary) {
         const target = Math.max(0, Math.min(totalLines, boundary));
         if (!parts.length)
@@ -739,16 +731,6 @@ function createProgramTemplate(config) {
             expected,
         };
     }
-    function previousStepBoundary(boundary) {
-        let prev = null;
-        for (const b of stepBoundaries) {
-            if (b < boundary)
-                prev = b;
-            else
-                break;
-        }
-        return prev;
-    }
     function nextStepBoundary(boundary) {
         for (const b of stepBoundaries) {
             if (b > boundary)
@@ -761,9 +743,6 @@ function createProgramTemplate(config) {
         if (!Number.isFinite(endLine))
             return null;
         return groupRanges.find((group) => group.endLine === endLine) || null;
-    }
-    function getStatementContext(boundary) {
-        return simulator.getStatementContext(lineList, boundary);
     }
     function stateBeforePart(partIndex) {
         const safeIndex = Math.max(0, Math.min(parts.length, partIndex));
@@ -1450,8 +1429,6 @@ function createProgramTemplate(config) {
         const branchInfo = branchInfoForBoundary(key);
         const branchSelectable = !!branchInfo && !!branchStep?.editable && branchSelectionActive;
         activeBranchTargets = branchSelectable ? allBoundaryTargets : null;
-        activeBranchExpected =
-            branchSelectable && branchInfo ? branchInfo.expected : null;
         if (progress) {
             const range = executedRangeForBoundary(key);
             const hasMultiLineRange = !!range &&
@@ -1549,7 +1526,6 @@ function createProgramTemplate(config) {
                         (Number.isFinite(parts[block.elseIndex]?.startLine)
                             ? parts[block.elseIndex].startLine
                             : ifCloseLine)) {
-                    const elseTok = parts[block.elseIndex]?.tokens?.[0];
                     const elseCol = elseColumnForLine(ifCloseLine, block);
                     if (Number.isFinite(elseCol) && elseCol >= 0) {
                         strikeFragments.push({
@@ -1868,7 +1844,6 @@ function createProgramTemplate(config) {
             branchSelectionTarget = null;
             branchSelectionBoundary = null;
         }
-        const debugBoundary = state.boundary >= 35 && state.boundary <= 50;
         renderCodePaneForBoundary();
         renderStage();
         hideHint();

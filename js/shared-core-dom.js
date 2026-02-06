@@ -1496,111 +1496,143 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     btn.click();
 });
-function initScrollHint() {
-    if (document.body?.classList?.contains("no-scroll-hint"))
-        return;
-    const btn = el('<button class="scroll-down-btn hidden" aria-label="Scroll to bottom">↓</button>');
-    document.body.appendChild(btn);
-    const shouldShow = () => {
-        const doc = document.documentElement;
-        const scrollable = doc.scrollHeight - window.innerHeight;
-        const nearBottom = window.scrollY > scrollable - 140;
-        return scrollable > 200 && !nearBottom;
-    };
-    const update = () => {
-        btn.classList.toggle("hidden", !shouldShow());
-    };
-    window.addEventListener("scroll", update, { passive: true });
-    window.addEventListener("resize", update);
-    const observer = new MutationObserver(update);
-    observer.observe(document.body, { childList: true, subtree: true });
-    btn.addEventListener("click", () => {
-        window.scrollTo({
-            top: document.documentElement.scrollHeight,
-            behavior: "smooth",
-        });
-    });
-    update();
-}
-function initProgramStateScrollHints() {
-    const bound = new WeakMap();
+const customScrollbarState = new WeakMap();
+function initCustomPanelScrollbars() {
     const states = new Set();
-    const shouldShowScrollHint = (target) => {
-        const scrollable = Math.max(0, target.scrollHeight - target.clientHeight);
-        if (scrollable <= 10)
-            return false;
-        const boxes = [...target.querySelectorAll(".vbox")];
-        if (!boxes.length) {
-            const nearBottom = target.scrollTop >= scrollable - 6;
-            return !nearBottom;
+    const selectors = [
+        ".panel-scroll > .panel-body",
+        ".sandbox-state-panel [data-role=\"sandbox-stage\"] .state-panel-scroll-body",
+    ];
+    const updateState = (state) => {
+        const { host, panel, track, thumb } = state;
+        if (!host.isConnected || !panel.isConnected) {
+            track.remove();
+            states.delete(state);
+            return;
         }
-        const rows = boxes.map((box) => ({
-            top: box.offsetTop,
-            bottom: box.offsetTop + box.offsetHeight,
-        }));
-        const maxTop = Math.max(...rows.map((row) => row.top));
-        const bottomRow = rows.filter((row) => Math.abs(row.top - maxTop) <= 2);
-        if (!bottomRow.length) {
-            const nearBottom = target.scrollTop >= scrollable - 6;
-            return !nearBottom;
+        if (isMobileViewport()) {
+            track.classList.add("hidden");
+            return;
         }
-        const rowTop = Math.min(...bottomRow.map((row) => row.top));
-        const rowBottom = Math.max(...bottomRow.map((row) => row.bottom));
-        const rowHeight = Math.max(1, rowBottom - rowTop);
-        const viewTop = target.scrollTop;
-        const viewBottom = viewTop + target.clientHeight;
-        const visibleTop = Math.max(viewTop, rowTop);
-        const visibleBottom = Math.min(viewBottom, rowBottom);
-        const visibleHeight = Math.max(0, visibleBottom - visibleTop);
-        const visibleRatio = visibleHeight / rowHeight;
-        return visibleRatio < 0.5;
+        const hostRect = host.getBoundingClientRect();
+        const panelRect = panel.getBoundingClientRect();
+        const scrollable = Math.max(0, host.scrollHeight - host.clientHeight);
+        if (host.clientHeight <= 0 || scrollable <= 1) {
+            track.classList.add("hidden");
+            return;
+        }
+        const top = Math.max(0, hostRect.top - panelRect.top);
+        track.style.top = `${Math.round(top)}px`;
+        track.style.height = `${Math.round(host.clientHeight)}px`;
+        track.classList.remove("hidden");
+        const visible = host.clientHeight;
+        const thumbHeight = Math.max(28, Math.round((visible * visible) / host.scrollHeight));
+        const maxTravel = Math.max(0, visible - thumbHeight);
+        const ratio = scrollable > 0 ? host.scrollTop / scrollable : 0;
+        const thumbTop = Math.max(0, Math.min(maxTravel, Math.round(maxTravel * ratio)));
+        thumb.style.height = `${thumbHeight}px`;
+        thumb.style.transform = `translateY(${thumbTop}px)`;
     };
-    const bindPanel = (panel) => {
-        if (bound.has(panel))
+    const scheduleUpdate = (state) => {
+        if (state.rafId != null)
             return;
-        const target = panel.querySelector('[data-role="program-stage"], [data-role="expr-stage"], [data-role="sandbox-stage"], [data-role="quiz-stage"]') ||
-            panel.querySelector(".panel-body");
-        if (!target)
-            return;
-        let button = panel.querySelector(".panel-scroll-down-btn");
-        if (!button) {
-            button = document.createElement("button");
-            button.className = "panel-scroll-down-btn hidden";
-            button.type = "button";
-            button.textContent = "↓";
-            button.setAttribute("aria-label", "Scroll program state to bottom");
-            panel.appendChild(button);
-        }
-        const update = () => {
-            button?.classList.toggle("hidden", !shouldShowScrollHint(target));
-        };
-        target.addEventListener("scroll", update, { passive: true });
-        button.addEventListener("click", () => {
-            target.scrollTo({ top: target.scrollHeight, behavior: "smooth" });
+        state.rafId = requestAnimationFrame(() => {
+            state.rafId = null;
+            updateState(state);
         });
-        const observer = new MutationObserver(update);
-        observer.observe(target, { childList: true, subtree: true });
-        const state = { panel, target, button, update };
-        bound.set(panel, state);
+    };
+    const bindHost = (host) => {
+        if (customScrollbarState.has(host))
+            return;
+        const panel = host.closest(".panel");
+        if (!panel)
+            return;
+        host.classList.add("custom-scroll-host");
+        const track = document.createElement("div");
+        track.className = "panel-custom-scrollbar hidden";
+        const thumb = document.createElement("div");
+        thumb.className = "panel-custom-scrollbar-thumb";
+        track.appendChild(thumb);
+        panel.appendChild(track);
+        const state = {
+            host,
+            panel,
+            track,
+            thumb,
+            rafId: null,
+        };
+        customScrollbarState.set(host, state);
         states.add(state);
-        requestAnimationFrame(update);
+        host.addEventListener("scroll", () => scheduleUpdate(state), { passive: true });
+        let dragging = false;
+        let startY = 0;
+        let startScrollTop = 0;
+        const onMove = (event) => {
+            if (!dragging)
+                return;
+            const scrollable = Math.max(0, host.scrollHeight - host.clientHeight);
+            if (scrollable <= 0)
+                return;
+            const thumbHeight = thumb.getBoundingClientRect().height;
+            const maxTravel = Math.max(1, host.clientHeight - thumbHeight);
+            const deltaY = event.clientY - startY;
+            const scrollDelta = (deltaY / maxTravel) * scrollable;
+            host.scrollTop = Math.max(0, Math.min(scrollable, startScrollTop + scrollDelta));
+            scheduleUpdate(state);
+        };
+        const onUp = () => {
+            if (!dragging)
+                return;
+            dragging = false;
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+            document.body.classList.remove("custom-scrollbar-dragging");
+        };
+        thumb.addEventListener("mousedown", (event) => {
+            event.preventDefault();
+            dragging = true;
+            startY = event.clientY;
+            startScrollTop = host.scrollTop;
+            document.body.classList.add("custom-scrollbar-dragging");
+            window.addEventListener("mousemove", onMove);
+            window.addEventListener("mouseup", onUp);
+        });
+        track.addEventListener("mousedown", (event) => {
+            if (event.target === thumb)
+                return;
+            event.preventDefault();
+            const rect = track.getBoundingClientRect();
+            const offset = event.clientY - rect.top;
+            const ratio = Math.max(0, Math.min(1, offset / Math.max(1, rect.height)));
+            const scrollable = Math.max(0, host.scrollHeight - host.clientHeight);
+            host.scrollTop = Math.round(scrollable * ratio);
+            scheduleUpdate(state);
+        });
+        if (typeof ResizeObserver !== "undefined") {
+            const ro = new ResizeObserver(() => scheduleUpdate(state));
+            ro.observe(host);
+            ro.observe(panel);
+        }
+        scheduleUpdate(state);
     };
     const scan = () => {
-        document
-            .querySelectorAll(".program-state-panel")
-            .forEach((node) => bindPanel(node));
+        const seen = new Set();
+        selectors.forEach((selector) => {
+            document.querySelectorAll(selector).forEach((node) => {
+                if (!(node instanceof HTMLElement) || seen.has(node))
+                    return;
+                seen.add(node);
+                bindHost(node);
+            });
+        });
     };
     const updateAll = () => {
         for (const state of [...states]) {
-            if (!state.panel.isConnected || !state.target.isConnected) {
-                states.delete(state);
-                continue;
-            }
-            state.update();
+            scheduleUpdate(state);
         }
     };
-    window.addEventListener("resize", updateAll, { passive: true });
     scan();
+    window.addEventListener("resize", updateAll, { passive: true });
     const rootObserver = new MutationObserver(() => {
         scan();
         updateAll();
@@ -1679,8 +1711,7 @@ function initSidebarToggle() {
 onDomReady(() => {
     initEditableFieldHandlers();
     applyAutoTextDefaults(document);
-    initScrollHint();
-    initProgramStateScrollHints();
+    initCustomPanelScrollbars();
     initStepperTopControls();
     applySidebarStateFromUrl();
     bootstrapWhenAvailable(initSidebarToggle);

@@ -93,7 +93,7 @@ createProgramTemplate({
             editable: true,
             hints: (ctx) => {
                 if (ctx.basicHintTopicIs("value", "tent")) {
-                    const [tent, ring, circus] = ctx.boxesNamed("tent", "ring", "circus");
+                    const [tent, ring] = ctx.boxesNamed("tent", "ring");
                     if (tent.value === ring.value) {
                         return "$n{tent} should store $n{ring}'s address, not $n{ring}'s value.";
                     }
@@ -107,7 +107,7 @@ createProgramTemplate({
             editable: true,
             hints: (ctx) => {
                 if (ctx.basicHintTopicIs("value", "ring")) {
-                    const [ring, clown, circus] = ctx.boxesNamed("ring", "clown", "circus");
+                    const [ring, clown] = ctx.boxesNamed("ring", "clown");
                     if (ring.value === clown.value) {
                         return "$n{ring} should store $n{clown}'s address, not $n{clown}'s value.";
                     }

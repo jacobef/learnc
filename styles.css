@@ -513,7 +513,8 @@ h2 {
 .sandbox-state-panel [data-role="sandbox-stage"] .state-panel-scroll-body {
     flex: 1 1 auto;
     min-height: 0;
-    overflow: auto;
+    overflow-y: scroll;
+    overflow-x: auto;
     padding-top: 12px;
 }
 .expr-panel {
@@ -828,7 +829,8 @@ button {
 .panel-shell .panel-row > .panel.code-panel-shell > .panel-body.codepane {
     flex: 0 1 auto;
     min-height: 0;
-    overflow: auto;
+    overflow-y: scroll;
+    overflow-x: auto;
 }
 
 .panel-controls {
@@ -857,7 +859,8 @@ button {
 .panel-scroll > .panel-body {
     flex: 1 1 auto;
     min-height: 0;
-    overflow: auto;
+    overflow-y: scroll;
+    overflow-x: auto;
 }
 
 
@@ -1052,7 +1055,42 @@ body.panel-layout .panel-controls.controls-main {
 }
 
 .panel-body.codepane {
-    overflow: auto;
+    overflow-y: scroll;
+    overflow-x: auto;
+}
+
+.custom-scroll-host {
+    scrollbar-width: none !important;
+    -ms-overflow-style: none;
+}
+.custom-scroll-host::-webkit-scrollbar {
+    width: 0 !important;
+    height: 0 !important;
+}
+.panel-custom-scrollbar {
+    position: absolute;
+    right: 4px;
+    width: 12px;
+    border-radius: 10px;
+    background: rgba(30, 119, 255, 0.08);
+    border: 1px solid rgba(30, 119, 255, 0.15);
+    z-index: 7;
+}
+.panel-custom-scrollbar.hidden {
+    display: none;
+}
+.panel-custom-scrollbar-thumb {
+    position: absolute;
+    top: 0;
+    left: 1px;
+    right: 1px;
+    border-radius: 999px;
+    background: rgba(35, 55, 85, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    cursor: grab;
+}
+.custom-scrollbar-dragging .panel-custom-scrollbar-thumb {
+    cursor: grabbing;
 }
 .codepane-row {
     --code-line-height: 48px;
@@ -1457,63 +1495,6 @@ body.panel-layout .panel-controls.controls-main {
     grid-column: 1/-1;
     justify-self: center;
     min-width: 240px;
-}
-
-.scroll-down-btn {
-    position: fixed;
-    left: 50%;
-    bottom: 24px;
-    transform: translateX(-50%);
-    width: 48px;
-    height: 48px;
-    border-radius: 50%;
-    border: 1px solid rgba(0, 0, 0, 0.18);
-    background: rgba(255, 255, 255, 0.4);
-    backdrop-filter: blur(6px);
-    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.14);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 22px;
-    color: #234;
-    transition:
-        opacity 0.2s ease,
-        transform 0.2s ease;
-    z-index: 50;
-}
-.scroll-down-btn.hidden {
-    opacity: 0;
-    pointer-events: none;
-    transform: translateY(8px);
-}
-
-.panel-scroll-down-btn {
-    position: absolute;
-    left: 50%;
-    bottom: 8px;
-    transform: translateX(-50%);
-    width: 46px;
-    height: 46px;
-    border-radius: 999px;
-    border: 1px solid rgba(0, 0, 0, 0.18);
-    background: rgba(255, 255, 255, 0.85);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 24px;
-    color: #234;
-    z-index: 6;
-    transition:
-        opacity 0.2s ease,
-        transform 0.2s ease;
-}
-.panel-scroll-down-btn.hidden {
-    opacity: 0;
-    pointer-events: none;
-    transform: translate(-50%, 8px);
 }
 
 .boundary {

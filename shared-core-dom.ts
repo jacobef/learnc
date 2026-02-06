@@ -1756,136 +1756,160 @@ document.addEventListener("keydown", (e) => {
   btn.click();
 });
 
-function initScrollHint() {
-  if (document.body?.classList?.contains("no-scroll-hint")) return;
-  const btn = el(
-    '<button class="scroll-down-btn hidden" aria-label="Scroll to bottom">↓</button>',
-  );
-  document.body.appendChild(btn);
+type CustomScrollbarState = {
+  host: HTMLElement;
+  panel: HTMLElement;
+  track: HTMLDivElement;
+  thumb: HTMLDivElement;
+  rafId: number | null;
+};
 
-  const shouldShow = () => {
-    const doc = document.documentElement;
-    const scrollable = doc.scrollHeight - window.innerHeight;
-    const nearBottom = window.scrollY > scrollable - 140;
-    return scrollable > 200 && !nearBottom;
+const customScrollbarState = new WeakMap<HTMLElement, CustomScrollbarState>();
+
+function initCustomPanelScrollbars() {
+  const states = new Set<CustomScrollbarState>();
+  const selectors = [
+    ".panel-scroll > .panel-body",
+    ".sandbox-state-panel [data-role=\"sandbox-stage\"] .state-panel-scroll-body",
+  ];
+
+  const updateState = (state: CustomScrollbarState) => {
+    const { host, panel, track, thumb } = state;
+    if (!host.isConnected || !panel.isConnected) {
+      track.remove();
+      states.delete(state);
+      return;
+    }
+    if (isMobileViewport()) {
+      track.classList.add("hidden");
+      return;
+    }
+    const hostRect = host.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    const scrollable = Math.max(0, host.scrollHeight - host.clientHeight);
+    if (host.clientHeight <= 0 || scrollable <= 1) {
+      track.classList.add("hidden");
+      return;
+    }
+    const top = Math.max(0, hostRect.top - panelRect.top);
+    track.style.top = `${Math.round(top)}px`;
+    track.style.height = `${Math.round(host.clientHeight)}px`;
+    track.classList.remove("hidden");
+
+    const visible = host.clientHeight;
+    const thumbHeight = Math.max(28, Math.round((visible * visible) / host.scrollHeight));
+    const maxTravel = Math.max(0, visible - thumbHeight);
+    const ratio = scrollable > 0 ? host.scrollTop / scrollable : 0;
+    const thumbTop = Math.max(0, Math.min(maxTravel, Math.round(maxTravel * ratio)));
+    thumb.style.height = `${thumbHeight}px`;
+    thumb.style.transform = `translateY(${thumbTop}px)`;
   };
 
-  const update = () => {
-    btn.classList.toggle("hidden", !shouldShow());
-  };
-
-  window.addEventListener("scroll", update, { passive: true });
-  window.addEventListener("resize", update);
-  const observer = new MutationObserver(update);
-  observer.observe(document.body, { childList: true, subtree: true });
-  btn.addEventListener("click", () => {
-    window.scrollTo({
-      top: document.documentElement.scrollHeight,
-      behavior: "smooth",
+  const scheduleUpdate = (state: CustomScrollbarState) => {
+    if (state.rafId != null) return;
+    state.rafId = requestAnimationFrame(() => {
+      state.rafId = null;
+      updateState(state);
     });
-  });
-  update();
-}
-
-function initProgramStateScrollHints() {
-  type BoundScrollHint = {
-    panel: HTMLElement;
-    target: HTMLElement;
-    button: HTMLButtonElement;
-    update: () => void;
-  };
-  const bound = new WeakMap<HTMLElement, BoundScrollHint>();
-  const states = new Set<BoundScrollHint>();
-
-  const shouldShowScrollHint = (target: HTMLElement): boolean => {
-    const scrollable = Math.max(0, target.scrollHeight - target.clientHeight);
-    if (scrollable <= 10) return false;
-
-    const boxes = [...target.querySelectorAll(".vbox")] as HTMLElement[];
-    if (!boxes.length) {
-      const nearBottom = target.scrollTop >= scrollable - 6;
-      return !nearBottom;
-    }
-
-    const rows = boxes.map((box) => ({
-      top: box.offsetTop,
-      bottom: box.offsetTop + box.offsetHeight,
-    }));
-    const maxTop = Math.max(...rows.map((row) => row.top));
-    const bottomRow = rows.filter((row) => Math.abs(row.top - maxTop) <= 2);
-    if (!bottomRow.length) {
-      const nearBottom = target.scrollTop >= scrollable - 6;
-      return !nearBottom;
-    }
-
-    const rowTop = Math.min(...bottomRow.map((row) => row.top));
-    const rowBottom = Math.max(...bottomRow.map((row) => row.bottom));
-    const rowHeight = Math.max(1, rowBottom - rowTop);
-    const viewTop = target.scrollTop;
-    const viewBottom = viewTop + target.clientHeight;
-    const visibleTop = Math.max(viewTop, rowTop);
-    const visibleBottom = Math.min(viewBottom, rowBottom);
-    const visibleHeight = Math.max(0, visibleBottom - visibleTop);
-    const visibleRatio = visibleHeight / rowHeight;
-    return visibleRatio < 0.5;
   };
 
-  const bindPanel = (panel: HTMLElement) => {
-    if (bound.has(panel)) return;
-    const target =
-      (panel.querySelector(
-        '[data-role="program-stage"], [data-role="expr-stage"], [data-role="sandbox-stage"], [data-role="quiz-stage"]',
-      ) as HTMLElement | null) ||
-      (panel.querySelector(".panel-body") as HTMLElement | null);
-    if (!target) return;
+  const bindHost = (host: HTMLElement) => {
+    if (customScrollbarState.has(host)) return;
+    const panel = host.closest(".panel") as HTMLElement | null;
+    if (!panel) return;
+    host.classList.add("custom-scroll-host");
+    const track = document.createElement("div");
+    track.className = "panel-custom-scrollbar hidden";
+    const thumb = document.createElement("div");
+    thumb.className = "panel-custom-scrollbar-thumb";
+    track.appendChild(thumb);
+    panel.appendChild(track);
 
-    let button = panel.querySelector(
-      ".panel-scroll-down-btn",
-    ) as HTMLButtonElement | null;
-    if (!button) {
-      button = document.createElement("button");
-      button.className = "panel-scroll-down-btn hidden";
-      button.type = "button";
-      button.textContent = "↓";
-      button.setAttribute("aria-label", "Scroll program state to bottom");
-      panel.appendChild(button);
-    }
+    const state: CustomScrollbarState = {
+      host,
+      panel,
+      track,
+      thumb,
+      rafId: null,
+    };
+    customScrollbarState.set(host, state);
+    states.add(state);
 
-    const update = () => {
-      button?.classList.toggle("hidden", !shouldShowScrollHint(target));
+    host.addEventListener("scroll", () => scheduleUpdate(state), { passive: true });
+
+    let dragging = false;
+    let startY = 0;
+    let startScrollTop = 0;
+    const onMove = (event: MouseEvent) => {
+      if (!dragging) return;
+      const scrollable = Math.max(0, host.scrollHeight - host.clientHeight);
+      if (scrollable <= 0) return;
+      const thumbHeight = thumb.getBoundingClientRect().height;
+      const maxTravel = Math.max(1, host.clientHeight - thumbHeight);
+      const deltaY = event.clientY - startY;
+      const scrollDelta = (deltaY / maxTravel) * scrollable;
+      host.scrollTop = Math.max(
+        0,
+        Math.min(scrollable, startScrollTop + scrollDelta),
+      );
+      scheduleUpdate(state);
+    };
+    const onUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("custom-scrollbar-dragging");
     };
 
-    target.addEventListener("scroll", update, { passive: true });
-    button.addEventListener("click", () => {
-      target.scrollTo({ top: target.scrollHeight, behavior: "smooth" });
+    thumb.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      dragging = true;
+      startY = event.clientY;
+      startScrollTop = host.scrollTop;
+      document.body.classList.add("custom-scrollbar-dragging");
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
     });
-    const observer = new MutationObserver(update);
-    observer.observe(target, { childList: true, subtree: true });
 
-    const state: BoundScrollHint = { panel, target, button, update };
-    bound.set(panel, state);
-    states.add(state);
-    requestAnimationFrame(update);
+    track.addEventListener("mousedown", (event) => {
+      if (event.target === thumb) return;
+      event.preventDefault();
+      const rect = track.getBoundingClientRect();
+      const offset = event.clientY - rect.top;
+      const ratio = Math.max(0, Math.min(1, offset / Math.max(1, rect.height)));
+      const scrollable = Math.max(0, host.scrollHeight - host.clientHeight);
+      host.scrollTop = Math.round(scrollable * ratio);
+      scheduleUpdate(state);
+    });
+
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(() => scheduleUpdate(state));
+      ro.observe(host);
+      ro.observe(panel);
+    }
+    scheduleUpdate(state);
   };
 
   const scan = () => {
-    document
-      .querySelectorAll(".program-state-panel")
-      .forEach((node) => bindPanel(node as HTMLElement));
+    const seen = new Set<HTMLElement>();
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((node) => {
+        if (!(node instanceof HTMLElement) || seen.has(node)) return;
+        seen.add(node);
+        bindHost(node);
+      });
+    });
   };
 
   const updateAll = () => {
     for (const state of [...states]) {
-      if (!state.panel.isConnected || !state.target.isConnected) {
-        states.delete(state);
-        continue;
-      }
-      state.update();
+      scheduleUpdate(state);
     }
   };
 
-  window.addEventListener("resize", updateAll, { passive: true });
   scan();
+  window.addEventListener("resize", updateAll, { passive: true });
   const rootObserver = new MutationObserver(() => {
     scan();
     updateAll();
@@ -1962,8 +1986,7 @@ function initSidebarToggle() {
 onDomReady(() => {
   initEditableFieldHandlers();
   applyAutoTextDefaults(document);
-  initScrollHint();
-  initProgramStateScrollHints();
+  initCustomPanelScrollbars();
   initStepperTopControls();
   applySidebarStateFromUrl();
   bootstrapWhenAvailable(initSidebarToggle);

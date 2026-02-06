@@ -204,25 +204,6 @@ export function createSimpleSimulator(
         error?: undefined;
       }
     | EvalError;
-  type UnaryResult =
-    | {
-        kind: "lvalue";
-        type: string;
-        value: BoxValue;
-        address: string;
-        box: BoxState;
-        refBox?: BoxState | null;
-        nanSign?: -1 | 1;
-      }
-    | {
-        kind: "rvalue";
-        type: string;
-        value: BoxValue;
-        address: string;
-        box: null;
-        refBox?: BoxState | null;
-        nanSign?: -1 | 1;
-      };
   type StatementValidationResult =
     | {
         error: string | { text: string; html: string };
@@ -512,16 +493,6 @@ export function createSimpleSimulator(
     return `${baseType}${"*".repeat(stars)}`;
   }
 
-  function isPointerType(type: string): boolean {
-    const { depth } = parseType(type);
-    return Number.isFinite(depth) && depth > 0;
-  }
-
-  function pointerDepth(type: string): number | null {
-    const { depth } = parseType(type);
-    return depth;
-  }
-
   function makePointerType(depth: number, base: string = "int"): string | null {
     if (!Number.isFinite(depth) || depth < 0) return null;
     if (base !== "int" && base !== "long" && base !== "double") return null;
@@ -692,25 +663,6 @@ export function createSimpleSimulator(
     return wrapped;
   }
 
-  function isRefCompatible(targetType: string, refType: string): boolean {
-    const { base: targetBase, depth: targetDepth } = parseType(targetType);
-    const { base: refBase, depth: refDepth } = parseType(refType);
-    if (
-      !targetBase ||
-      !refBase ||
-      !Number.isFinite(targetDepth) ||
-      !Number.isFinite(refDepth)
-    )
-      return false;
-    return targetBase === refBase && targetDepth === refDepth + 1;
-  }
-
-  function expectedPointerTypeForRef(refType: string): string | null {
-    const { base, depth } = parseType(refType);
-    if (!base || !Number.isFinite(depth)) return null;
-    return makePointerType(depth + 1, base);
-  }
-
   function isExpressionPrefix(
     tokens: Token[],
     { allowVars = true }: { allowVars?: boolean } = {},
@@ -804,10 +756,7 @@ export function createSimpleSimulator(
     return isExpressionPrefix(tokens.slice(idx), { allowVars: allowVarAssign });
   }
 
-  function isAssignPrefix(
-    tokens: Token[],
-    declaredNames: DeclaredNames,
-  ): boolean {
+  function isAssignPrefix(tokens: Token[]): boolean {
     if (!tokens.length) return false;
     const eqIndex = tokens.findIndex(
       (tok) => tok.type === "sym" && tok.value === "=",
@@ -878,7 +827,7 @@ export function createSimpleSimulator(
     return (
       isIfPrefix(tokens) ||
       isDeclPrefix(tokens) ||
-      isAssignPrefix(tokens, declaredNames)
+      isAssignPrefix(tokens)
     );
   }
 
@@ -1146,7 +1095,6 @@ export function createSimpleSimulator(
       requireValue = requireSourceValue,
     } = opts;
     const by = Object.fromEntries(state.map((b) => [b.name, b]));
-    const targetBase = parseType(targetType).base || "int";
     const toNumber = (value: bigint | number): number =>
       typeof value === "bigint" ? Number(value) : value;
 
@@ -1589,15 +1537,6 @@ export function createSimpleSimulator(
     };
   }
 
-  function buildUnaryExpr(ops: string[], name: string): ExprNode {
-    let expr: ExprNode = { kind: "var", name };
-    for (let i = ops.length - 1; i >= 0; i--) {
-      const op = ops[i] as "+" | "-" | "*" | "&";
-      expr = { kind: "unary", op, expr };
-    }
-    return expr;
-  }
-
   function convertScalarForAssignment(
     value: bigint | number,
     base: string,
@@ -1954,15 +1893,6 @@ export function createSimpleSimulator(
       });
     }
     return null;
-  }
-
-  function missingDeclError(
-    name: string,
-    typeLabel: string = "int",
-  ): EvalError {
-    const text = `You can't assign to ${name} before declaring it. You need to first declare it (${typeLabel} ${name};) prior to this line.`;
-    const html = `You can't assign to <code class="tok-name">${name}</code> before declaring it. You need to first declare it (<code class="tok-code">${typeLabel} ${name};</code>) prior to this line.`;
-    return { error: { text, html }, kind: "compile" };
   }
 
   function typeMismatchError(name: string, expectedType: string): EvalError {

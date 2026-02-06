@@ -364,7 +364,7 @@ function resetAttempt() {
   clearNextPulse();
 }
 
-function setPrompt(scenario: QuizScenario) {
+function setPrompt() {
   if (!instructions) return;
   const text =
     "Click on the variable that the expression refers to, then press $b{Check}. Get 4 in a row correct to pass.\nIn general, $c{*X} refers to the variable whose address is $n{X}'s value.";
@@ -375,7 +375,7 @@ function newScenario() {
   quiz.scenario = buildScenario();
   resetAttempt();
   renderBoxes(quiz.scenario.boxes);
-  setPrompt(quiz.scenario);
+  setPrompt();
   if (expressionEl) {
     setPartsContent(expressionEl, `$c{${quiz.scenario.boxExpr}}`);
   }

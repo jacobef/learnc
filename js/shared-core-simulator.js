@@ -282,14 +282,6 @@ export function createSimpleSimulator(opts = {}) {
             return baseType;
         return `${baseType}${"*".repeat(stars)}`;
     }
-    function isPointerType(type) {
-        const { depth } = parseType(type);
-        return Number.isFinite(depth) && depth > 0;
-    }
-    function pointerDepth(type) {
-        const { depth } = parseType(type);
-        return depth;
-    }
     function makePointerType(depth, base = "int") {
         if (!Number.isFinite(depth) || depth < 0)
             return null;
@@ -465,22 +457,6 @@ export function createSimpleSimulator(opts = {}) {
             wrapped -= modulo;
         return wrapped;
     }
-    function isRefCompatible(targetType, refType) {
-        const { base: targetBase, depth: targetDepth } = parseType(targetType);
-        const { base: refBase, depth: refDepth } = parseType(refType);
-        if (!targetBase ||
-            !refBase ||
-            !Number.isFinite(targetDepth) ||
-            !Number.isFinite(refDepth))
-            return false;
-        return targetBase === refBase && targetDepth === refDepth + 1;
-    }
-    function expectedPointerTypeForRef(refType) {
-        const { base, depth } = parseType(refType);
-        if (!base || !Number.isFinite(depth))
-            return null;
-        return makePointerType(depth + 1, base);
-    }
     function isExpressionPrefix(tokens, { allowVars = true } = {}) {
         if (!tokens.length)
             return true;
@@ -578,7 +554,7 @@ export function createSimpleSimulator(opts = {}) {
             return true;
         return isExpressionPrefix(tokens.slice(idx), { allowVars: allowVarAssign });
     }
-    function isAssignPrefix(tokens, declaredNames) {
+    function isAssignPrefix(tokens) {
         if (!tokens.length)
             return false;
         const eqIndex = tokens.findIndex((tok) => tok.type === "sym" && tok.value === "=");
@@ -648,7 +624,7 @@ export function createSimpleSimulator(opts = {}) {
         }
         return (isIfPrefix(tokens) ||
             isDeclPrefix(tokens) ||
-            isAssignPrefix(tokens, declaredNames));
+            isAssignPrefix(tokens));
     }
     function exprHasVar(node) {
         if (!node)
@@ -898,7 +874,6 @@ export function createSimpleSimulator(opts = {}) {
     function evaluateExpressionRaw(expr, state, opts = {}) {
         const { allowVars = true, targetType = "int", requireValue = requireSourceValue, } = opts;
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
-        const targetBase = parseType(targetType).base || "int";
         const toNumber = (value) => typeof value === "bigint" ? Number(value) : value;
         function makeLvalue(box, label) {
             const { base, depth } = parseType(box.type);
@@ -1317,14 +1292,6 @@ export function createSimpleSimulator(opts = {}) {
             },
         };
     }
-    function buildUnaryExpr(ops, name) {
-        let expr = { kind: "var", name };
-        for (let i = ops.length - 1; i >= 0; i--) {
-            const op = ops[i];
-            expr = { kind: "unary", op, expr };
-        }
-        return expr;
-    }
     function convertScalarForAssignment(value, base, targetType, nanSign) {
         const { base: targetBase, depth } = parseType(targetType);
         if (!targetBase || depth !== 0)
@@ -1630,11 +1597,6 @@ export function createSimpleSimulator(opts = {}) {
             });
         }
         return null;
-    }
-    function missingDeclError(name, typeLabel = "int") {
-        const text = `You can't assign to ${name} before declaring it. You need to first declare it (${typeLabel} ${name};) prior to this line.`;
-        const html = `You can't assign to <code class="tok-name">${name}</code> before declaring it. You need to first declare it (<code class="tok-code">${typeLabel} ${name};</code>) prior to this line.`;
-        return { error: { text, html }, kind: "compile" };
     }
     function typeMismatchError(name, expectedType) {
         const text = `${name}'s type would need to be ${expectedType} for this line to work.`;

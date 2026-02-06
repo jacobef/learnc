@@ -1,7 +1,6 @@
 import {
   createSimpleSimulator,
   createStepper,
-  disableBoxEditing,
   ensureBaseLayout,
   flashStatus,
   getNavLabelForHref,

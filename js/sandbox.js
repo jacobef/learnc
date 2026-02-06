@@ -197,13 +197,6 @@ function clampBoundary(value, total) {
 function resolveBoundary(value, fallback) {
     return Number.isFinite(value) ? value : fallback;
 }
-function partAt(parts, index) {
-    if (!Number.isFinite(index))
-        return null;
-    if (index < 0 || index >= parts.length)
-        return null;
-    return parts[index] || null;
-}
 function stopIndexForBoundary(parts, boundary, totalLines) {
     const target = Math.max(0, Math.min(totalLines, boundary));
     if (!parts.length)
