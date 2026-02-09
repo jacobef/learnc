@@ -466,6 +466,31 @@ export function stripAllComments(src = "") {
   return out;
 }
 
+export type TextTokenReplacement = readonly [string, string];
+
+export function replaceTextTokens(
+  text: string,
+  replacements: ReadonlyArray<TextTokenReplacement>,
+): string {
+  let out = String(text);
+  for (const [needle, replacement] of replacements) {
+    if (!needle) continue;
+    out = out.split(needle).join(replacement);
+  }
+  return out;
+}
+
+export function applyTextTokenReplacements(
+  value: string | string[] | null | undefined,
+  replacements: ReadonlyArray<TextTokenReplacement>,
+): string | string[] | null | undefined {
+  if (value == null) return value;
+  if (typeof value === "string") {
+    return replaceTextTokens(value, replacements);
+  }
+  return value.map((part) => replaceTextTokens(part, replacements));
+}
+
 export function cloneBoxes(list: BoxState[] | null | undefined): BoxState[] {
   return Array.isArray(list)
     ? list.map((b) => ({

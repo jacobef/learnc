@@ -5,7 +5,6 @@ import {
   ensureBaseLayout,
   formatValueForType,
   randAddr,
-  updateStepperTopControls,
   vbox,
 } from "./shared-core.js";
 import type {
@@ -21,7 +20,6 @@ main.classList.add("main-panelized");
 const instructions = $(
   '[data-role="sandbox-instructions"]',
 ) as HTMLElement | null;
-const codepane = $('[data-role="sandbox-code"]') as HTMLElement | null;
 const editor = $('[data-role="sandbox-editor"]') as HTMLTextAreaElement | null;
 const lineNumbers = $(
   '[data-role="sandbox-line-numbers"]',
@@ -997,7 +995,6 @@ function updateLineGutters(linesOverride?: string[]) {
     if (lineNumbers) lineNumbers.scrollTop = editor.scrollTop;
     if (errorGutter) errorGutter.scrollTop = editor.scrollTop;
   }
-  if (codepane) updateStepperTopControls(codepane);
 }
 
 if (editor) {

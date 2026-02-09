@@ -86,13 +86,13 @@ createProgramTemplate({
             instructions: "What should the program state look like after this entire if-else statement is run?",
             hints: (ctx) => {
                 if (ctx.boxNamed("tin")) {
-                    return "$n{tin} is declared inside the $c{if} block, so it would be removed at the $c{\\}} on line 23.";
+                    return "$n{tin} is created inside the $c{if} block, so it would be removed at the $c{\\}} on line 20.";
                 }
                 if (ctx.boxNamed("silver")) {
-                    return "$n{silver} is declared in the $c{else} block, but the condition is non-zero, so the $c{else} block is skipped and $n{silver} should not exist. Also, even if the $c{else} block wasn't skipped, $n{silver}'s would have been removed with the $c{\\}} on line 27.";
+                    return "$n{silver} is created in the $c{else} block, but the condition is non-zero, so the $c{else} block is skipped and $n{silver} should not exist. Also, even if the $c{else} block wasn't skipped, $n{silver} would have been removed with the $c{\\}} on line 23.";
                 }
                 if (!ctx.boxNamed("gold")) {
-                    return "$n{gold} was declared before this if-else statement, so it should still exist afterwards.";
+                    return "$n{gold} was created before this if-else statement, so it should still exist afterwards.";
                 }
                 if (ctx.basicHintTopicIs("value", "gold")) {
                     const gold = ctx.boxNamed("gold");

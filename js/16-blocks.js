@@ -139,7 +139,7 @@ createProgramTemplate({
             editable: true,
             hints: (ctx) => {
                 if (ctx.boxNamed("wood") || ctx.boxNamed("copper")) {
-                    return "This brace ends the block that declared $n{wood} and $n{copper}, so both should be removed.";
+                    return "This brace ends the block that created $n{wood} and $n{copper}, so both should be removed.";
                 }
                 if (!ctx.boxNamed("brick")) {
                     return "$n{brick} was created outside this block, so it shouldn't be removed.";

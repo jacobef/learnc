@@ -2387,9 +2387,9 @@ export function createSimpleSimulator(
   ): LineStatus {
     const invalid = new Set<number>();
     const incomplete = new Set<number>();
-    const errors = new Map<number, any>();
+    const errors = new Map<number, string | { text: string; html: string }>();
     const errorKinds = new Map<number, string>();
-    const info = new Map<number, any>();
+    const info = new Map<number, string | { text: string; html: string }>();
     const text = lines.join("\n");
     const tokens = tokenizeProgram(text);
     let tokenIndex = 0;

@@ -49,12 +49,9 @@ function ensureExpressionLayout() {
     actionBar.className = "controls-bar controls-bar-expr";
     const controlsMain = document.createElement("div");
     controlsMain.className = "controls-main panel panel-controls";
-    const leftControls = document.createElement("div");
-    leftControls.className = "controls-row controls-left";
-    const rightControls = document.createElement("div");
-    rightControls.className = "controls-row controls-right";
-    controlsMain.appendChild(leftControls);
-    controlsMain.appendChild(rightControls);
+    const controlsRow = document.createElement("div");
+    controlsRow.className = "controls-row controls-left";
+    controlsMain.appendChild(controlsRow);
     actionBar.appendChild(controlsMain);
     section.appendChild(actionBar);
     const stack = document.createElement("div");
@@ -110,6 +107,9 @@ function ensureExpressionLayout() {
     const nextBtn = document.createElement("button");
     nextBtn.dataset.stepper = "next";
     nextBtn.textContent = "Next ▶";
+    const controlsSpacer = document.createElement("span");
+    controlsSpacer.className = "controls-spacer";
+    controlsSpacer.setAttribute("aria-hidden", "true");
     const statusEl = document.createElement("span");
     statusEl.dataset.role = "expr-status";
     statusEl.className = "muted expr-check-inline";
@@ -117,12 +117,13 @@ function ensureExpressionLayout() {
     hintBtn.type = "button";
     hintBtn.dataset.role = "expr-hint-btn";
     hintBtn.textContent = "Hint";
-    leftControls.appendChild(prevBtn);
-    leftControls.appendChild(nextBtn);
-    rightControls.appendChild(checkBtn);
-    rightControls.appendChild(hintBtn);
-    rightControls.appendChild(statusEl);
-    rightControls.appendChild(continueBtn);
+    controlsRow.appendChild(prevBtn);
+    controlsRow.appendChild(nextBtn);
+    controlsRow.appendChild(controlsSpacer);
+    controlsRow.appendChild(continueBtn);
+    controlsRow.appendChild(hintBtn);
+    controlsRow.appendChild(checkBtn);
+    controlsRow.appendChild(statusEl);
     answerStack.appendChild(answerResult);
     answerStack.appendChild(answerSlot);
     answerStack.appendChild(toggleWrap);
@@ -198,6 +199,11 @@ function createExpressionEvalTemplate(config) {
             return;
         statusEl.textContent = "";
         statusEl.className = "muted expr-check-inline";
+    }
+    function setControlVisible(control, visible) {
+        if (!control)
+            return;
+        control.classList.toggle("hidden", !visible);
     }
     function showHint(text) {
         if (!hintPanel)
@@ -480,19 +486,14 @@ function createExpressionEvalTemplate(config) {
         const hasState = Array.isArray(step.boxes);
         if (state.showIntro) {
             setPartsContent(instructionsEl, initialInstructions || null);
-            if (continueBtn)
-                continueBtn.classList.remove("hidden");
-            if (sectionEl)
-                sectionEl.classList.add("hidden");
-            if (hintBtn)
-                hintBtn.classList.add("hidden");
+            setControlVisible(continueBtn, true);
+            setControlVisible(sectionEl, false);
+            setControlVisible(hintBtn, false);
             hideHint();
             return;
         }
-        if (continueBtn)
-            continueBtn.classList.add("hidden");
-        if (sectionEl)
-            sectionEl.classList.remove("hidden");
+        setControlVisible(continueBtn, false);
+        setControlVisible(sectionEl, true);
         const instructionText = step.instructions ?? null;
         setPartsContent(instructionsEl, instructionText);
         if (expressionEl)
@@ -519,18 +520,8 @@ function createExpressionEvalTemplate(config) {
                 toggleWrap?.classList.add("hidden");
             else
                 toggleWrap?.classList.remove("hidden");
-            if (checkBtn) {
-                if (passed)
-                    checkBtn.classList.add("hidden");
-                else
-                    checkBtn.classList.remove("hidden");
-            }
-            if (hintBtn) {
-                if (!passed && step.hints)
-                    hintBtn.classList.remove("hidden");
-                else
-                    hintBtn.classList.add("hidden");
-            }
+            setControlVisible(checkBtn, !passed);
+            setControlVisible(hintBtn, !passed && !!step.hints);
             if (passed)
                 setStatus("correct", true, true);
             if (hasState) {
@@ -545,10 +536,8 @@ function createExpressionEvalTemplate(config) {
         else {
             answerSlot?.classList.add("hidden");
             toggleWrap?.classList.add("hidden");
-            if (checkBtn)
-                checkBtn.classList.add("hidden");
-            if (hintBtn)
-                hintBtn.classList.add("hidden");
+            setControlVisible(checkBtn, false);
+            setControlVisible(hintBtn, false);
             if (hasState) {
                 renderProgramState(step, false, fixedMode);
             }
@@ -562,6 +551,15 @@ function createExpressionEvalTemplate(config) {
         else if (checkBtn) {
             checkBtn.disabled = false;
         }
+        pager?.update();
+    }
+    function markCurrentStepPassed() {
+        state.passes[state.boundary] = true;
+        setControlVisible(checkBtn, false);
+        setControlVisible(hintBtn, false);
+        setActiveMode(activeMode, false);
+        disableBoxEditing(answerSlot);
+        pager?.pulseNext();
         pager?.update();
     }
     function checkAnswer() {
@@ -587,16 +585,8 @@ function createExpressionEvalTemplate(config) {
             const ok = String(chosen.address) === evaluation.result.address;
             setStatus(ok ? "correct" : "incorrect", ok);
             if (ok) {
-                state.passes[state.boundary] = true;
                 state.selections[state.boundary] = selectedName;
-                if (checkBtn)
-                    checkBtn.classList.add("hidden");
-                if (hintBtn)
-                    hintBtn.classList.add("hidden");
-                setActiveMode(activeMode, false);
-                disableBoxEditing(answerSlot);
-                pager?.pulseNext();
-                pager?.update();
+                markCurrentStepPassed();
             }
             return;
         }
@@ -624,17 +614,9 @@ function createExpressionEvalTemplate(config) {
         if (ok) {
             entry.value = match.normalized;
             entry.rawValue = match.normalized;
-            state.passes[state.boundary] = true;
             state.entered[state.boundary] = entry;
-            if (checkBtn)
-                checkBtn.classList.add("hidden");
-            if (hintBtn)
-                hintBtn.classList.add("hidden");
-            setActiveMode(activeMode, false);
             renderEnteredBox(entry, false);
-            disableBoxEditing(answerSlot);
-            pager?.pulseNext();
-            pager?.update();
+            markCurrentStepPassed();
         }
     }
     if (useSelectedBtn) {

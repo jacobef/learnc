@@ -1,4 +1,4 @@
-import { createSimpleSimulator, createStepper, ensureBaseLayout, flashStatus, getNavLabelForHref, randAddr, renderParts, resolveActiveNavItem, setPartsContent, typeInfo, vbox, } from "./shared-core.js";
+import { applyTextTokenReplacements, createSimpleSimulator, createStepper, ensureBaseLayout, flashStatus, getNavLabelForHref, randAddr, renderParts, resolveActiveNavItem, setPartsContent, typeInfo, vbox, } from "./shared-core.js";
 function collectCodeEditorElements(root = document) {
     return {
         instructionsEl: root.querySelector('[data-role="code-instructions"]'),
@@ -41,12 +41,9 @@ function ensureCodeEditorLayout({ textareaMinLines, }) {
     actionBar.className = "controls-bar controls-bar-code";
     const controlsMain = document.createElement("div");
     controlsMain.className = "controls-main panel panel-controls";
-    const leftControls = document.createElement("div");
-    leftControls.className = "controls-row controls-left";
-    const rightControls = document.createElement("div");
-    rightControls.className = "controls-row controls-right";
-    controlsMain.appendChild(leftControls);
-    controlsMain.appendChild(rightControls);
+    const controlsRow = document.createElement("div");
+    controlsRow.className = "controls-row controls-left";
+    controlsMain.appendChild(controlsRow);
     actionBar.appendChild(controlsMain);
     section.appendChild(actionBar);
     const row = document.createElement("div");
@@ -87,7 +84,11 @@ function ensureCodeEditorLayout({ textareaMinLines, }) {
     const nextBtn = document.createElement("button");
     nextBtn.textContent = "Next Program ▶▶";
     nextBtn.dataset.stepper = "next";
-    leftControls.appendChild(nextBtn);
+    const controlsSpacer = document.createElement("span");
+    controlsSpacer.className = "controls-spacer";
+    controlsSpacer.setAttribute("aria-hidden", "true");
+    controlsRow.appendChild(nextBtn);
+    controlsRow.appendChild(controlsSpacer);
     codePanel.appendChild(codeTitle);
     codePanel.appendChild(codePane);
     const stateCol = document.createElement("div");
@@ -106,9 +107,9 @@ function ensureCodeEditorLayout({ textareaMinLines, }) {
     const status = document.createElement("span");
     status.dataset.role = "code-status";
     status.className = "muted";
-    rightControls.appendChild(checkBtn);
-    rightControls.appendChild(hintBtn);
-    rightControls.appendChild(status);
+    controlsRow.appendChild(hintBtn);
+    controlsRow.appendChild(checkBtn);
+    controlsRow.appendChild(status);
     const hintPanel = document.createElement("div");
     hintPanel.dataset.role = "code-hint";
     hintPanel.className = "hint-inline hidden";
@@ -250,6 +251,14 @@ function createCodeEditorTemplate(config) {
             return Math.max(1, Math.ceil(h / lineHeight - 0.01));
         });
     }
+    function syncEditorLinkedScroll() {
+        if (!editor)
+            return;
+        if (lineNumbers)
+            lineNumbers.scrollTop = editor.scrollTop;
+        if (errorGutter)
+            errorGutter.scrollTop = editor.scrollTop;
+    }
     function updateLineGutters() {
         autoSizeEditor();
         const lines = getRawLines();
@@ -298,12 +307,7 @@ function createCodeEditorTemplate(config) {
             if (editor)
                 errorGutter.style.height = `${editor.clientHeight}px`;
         }
-        if (editor) {
-            if (lineNumbers)
-                lineNumbers.scrollTop = editor.scrollTop;
-            if (errorGutter)
-                errorGutter.scrollTop = editor.scrollTop;
-        }
+        syncEditorLinkedScroll();
     }
     function applyUserProgram() {
         const text = getEditorText();
@@ -441,28 +445,16 @@ function createCodeEditorTemplate(config) {
             applyUserProgram,
         };
     }
-    function replaceButtonTokens(text) {
-        const replacements = [
-            ["$checkButton", "$b{Check}"],
-            ["$resetButton", "$b{Reset}"],
-            ["$newVariableButton", "$b{+ New variable}"],
-            ["$runLineButton", "$b{Run line}"],
-            ["$backButton", "$b{Back ◀}"],
-            ["$showAliasesButton", "$b{Show aliases}"],
-        ];
-        let out = text;
-        replacements.forEach(([needle, value]) => {
-            out = out.split(needle).join(value);
-        });
-        return out;
-    }
+    const buttonReplacements = [
+        ["$checkButton", "$b{Check}"],
+        ["$resetButton", "$b{Reset}"],
+        ["$newVariableButton", "$b{+ New variable}"],
+        ["$runLineButton", "$b{Run line}"],
+        ["$backButton", "$b{Back ◀}"],
+        ["$showAliasesButton", "$b{Show aliases}"],
+    ];
     function applyButtonTokens(parts) {
-        if (!parts)
-            return parts;
-        if (typeof parts === "string") {
-            return replaceButtonTokens(parts);
-        }
-        return parts.map((part) => typeof part === "string" ? replaceButtonTokens(part) : part);
+        return applyTextTokenReplacements(parts, buttonReplacements);
     }
     function setStatus(text, cls = "muted") {
         if (!status)
@@ -574,16 +566,7 @@ function createCodeEditorTemplate(config) {
                     event.preventDefault();
             });
         }
-        if (lineNumbers) {
-            editor.addEventListener("scroll", () => {
-                lineNumbers.scrollTop = editor.scrollTop;
-            });
-        }
-        if (errorGutter) {
-            editor.addEventListener("scroll", () => {
-                errorGutter.scrollTop = editor.scrollTop;
-            });
-        }
+        editor.addEventListener("scroll", syncEditorLinkedScroll);
         editor.addEventListener("mouseup", updateLineGutters);
         window.addEventListener("resize", updateLineGutters);
         if (typeof ResizeObserver !== "undefined") {

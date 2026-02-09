@@ -1,4 +1,5 @@
 import {
+  applyTextTokenReplacements,
   applyOtherNames,
   boxValueMatchesSpec,
   cloneBoxes,
@@ -54,9 +55,8 @@ interface ProgramElements {
   instructionsEl: HTMLElement | null;
   codeEl: HTMLElement | null;
   codeRoot: HTMLElement | null;
-  rowEl: HTMLElement | null;
   stageEl: HTMLElement | null;
-  controlsRightEl: HTMLElement | null;
+  controlsActionsEl: HTMLElement | null;
   mobileActionsEl: HTMLElement | null;
   statusEl: HTMLElement | null;
   hintPanel: HTMLElement | null;
@@ -106,53 +106,12 @@ interface ProgramTemplateState {
   allocBase: number | null;
   workspaceEl: HTMLElement | null;
   lastInstructionKey: string | null;
-  lastBoundary: number;
   lastBranchCorrectBoundary: number | null;
-  lastSkippedRanges: Array<[number, number]>;
 }
 
 interface ProgramTemplateResult {
   state: ProgramTemplateState;
   pager: Stepper;
-}
-
-function initProgramStatusGap(root: HTMLElement | null): void {
-  if (!root) return;
-  const bar = root.querySelector(".controls-main") as HTMLElement | null;
-  const left = root.querySelector(".controls-left") as HTMLElement | null;
-  const right = root.querySelector(".controls-right") as HTMLElement | null;
-  const gap = root.querySelector(
-    '[data-role="program-status-gap"]',
-  ) as HTMLElement | null;
-  if (!bar || !left || !right || !gap) return;
-
-  let raf = 0;
-  const update = () => {
-    if (raf) return;
-    raf = requestAnimationFrame(() => {
-      raf = 0;
-      const barRect = bar.getBoundingClientRect();
-      const leftRect = left.getBoundingClientRect();
-      const rightRect = right.getBoundingClientRect();
-      const leftEdge = Math.max(0, leftRect.right - barRect.left);
-      const rightEdge = Math.max(0, rightRect.left - barRect.left);
-      const gapPad = 6;
-      const width = Math.max(0, rightEdge - leftEdge);
-      gap.style.left = `${leftEdge}px`;
-      gap.style.width = `${Math.max(0, width - gapPad)}px`;
-      gap.style.top = `${rightRect.top - barRect.top}px`;
-      gap.style.height = `${rightRect.height}px`;
-    });
-  };
-
-  update();
-  if (typeof ResizeObserver !== "undefined") {
-    const ro = new ResizeObserver(() => update());
-    ro.observe(bar);
-    ro.observe(left);
-    ro.observe(right);
-  }
-  window.addEventListener("resize", update);
 }
 
 function collectProgramElements(root: ParentNode = document): ProgramElements {
@@ -166,14 +125,11 @@ function collectProgramElements(root: ParentNode = document): ProgramElements {
     codeRoot: root.querySelector(
       '[data-role="program-root"]',
     ) as HTMLElement | null,
-    rowEl: root.querySelector(
-      '[data-role="program-row"]',
-    ) as HTMLElement | null,
     stageEl: root.querySelector(
       '[data-role="program-stage"]',
     ) as HTMLElement | null,
-    controlsRightEl: root.querySelector(
-      '[data-role="program-controls-right"]',
+    controlsActionsEl: root.querySelector(
+      '[data-role="program-controls"]',
     ) as HTMLElement | null,
     mobileActionsEl: root.querySelector(
       '[data-role="program-mobile-actions"]',
@@ -242,19 +198,15 @@ function ensureProgramLayout(): ProgramElements {
   actionBar.className = "controls-bar controls-bar-program";
   const controlsMain = document.createElement("div");
   controlsMain.className = "controls-main panel panel-controls";
-  const leftControls = document.createElement("div");
-  leftControls.className = "controls-row controls-left";
-  const rightControls = document.createElement("div");
-  rightControls.className = "controls-row controls-right";
-  rightControls.dataset.role = "program-controls-right";
-  controlsMain.appendChild(leftControls);
-  controlsMain.appendChild(rightControls);
+  const controlsRow = document.createElement("div");
+  controlsRow.className = "controls-row controls-left";
+  controlsRow.dataset.role = "program-controls";
+  controlsMain.appendChild(controlsRow);
   actionBar.appendChild(controlsMain);
   actionBar.appendChild(instructionsEl);
   section.appendChild(actionBar);
   const row = document.createElement("div");
   row.className = "row panel-row";
-  row.dataset.role = "program-row";
   section.appendChild(row);
   main.appendChild(section);
 
@@ -273,8 +225,12 @@ function ensureProgramLayout(): ProgramElements {
   const nextBtn = document.createElement("button");
   nextBtn.textContent = "Run line 1 ▶";
   nextBtn.dataset.stepper = "next";
-  leftControls.appendChild(prevBtn);
-  leftControls.appendChild(nextBtn);
+  const controlsSpacer = document.createElement("span");
+  controlsSpacer.className = "controls-spacer";
+  controlsSpacer.setAttribute("aria-hidden", "true");
+  controlsRow.appendChild(prevBtn);
+  controlsRow.appendChild(nextBtn);
+  controlsRow.appendChild(controlsSpacer);
   codePanel.appendChild(codeTitle);
   codePanel.appendChild(codeEl);
 
@@ -289,8 +245,6 @@ function ensureProgramLayout(): ProgramElements {
   const stageEl = document.createElement("div");
   stageEl.dataset.role = "program-stage";
   stageEl.className = "panel-body";
-  const stateControls = document.createElement("div");
-  stateControls.className = "controls";
   const checkBtn = document.createElement("button");
   checkBtn.dataset.role = "program-check";
   checkBtn.className = "hidden";
@@ -310,23 +264,18 @@ function ensureProgramLayout(): ProgramElements {
   resetBtn.textContent = "Reset";
   const statusEl = document.createElement("span");
   statusEl.dataset.role = "program-status";
-  statusEl.className = "muted controls-status";
-  const statusGap = document.createElement("div");
-  statusGap.dataset.role = "program-status-gap";
-  statusGap.className = "controls-gap";
-  statusGap.appendChild(statusEl);
-  controlsMain.appendChild(statusGap);
-  rightControls.appendChild(checkBtn);
-  rightControls.appendChild(hintBtn);
-  rightControls.appendChild(addBtn);
-  rightControls.appendChild(resetBtn);
+  statusEl.className = "muted";
+  controlsRow.appendChild(addBtn);
+  controlsRow.appendChild(resetBtn);
+  controlsRow.appendChild(hintBtn);
+  controlsRow.appendChild(checkBtn);
+  controlsRow.appendChild(statusEl);
   const hintPanel = document.createElement("div");
   hintPanel.dataset.role = "program-hint";
   hintPanel.className = "hint-inline hidden";
   actionBar.insertBefore(hintPanel, instructionsEl);
   statePanel.appendChild(stateTitle);
   statePanel.appendChild(stageEl);
-  statePanel.appendChild(stateControls);
 
   row.appendChild(codePanel);
   row.appendChild(mobileActions);
@@ -336,9 +285,8 @@ function ensureProgramLayout(): ProgramElements {
     instructionsEl,
     codeEl,
     codeRoot: section,
-    rowEl: row,
     stageEl,
-    controlsRightEl: rightControls,
+    controlsActionsEl: controlsRow,
     mobileActionsEl: mobileActions,
     statusEl,
     hintPanel,
@@ -381,9 +329,8 @@ function createProgramTemplate(
     instructionsEl,
     codeEl,
     codeRoot,
-    rowEl,
     stageEl,
-    controlsRightEl,
+    controlsActionsEl,
     mobileActionsEl,
     statusEl,
     hintPanel,
@@ -395,35 +342,11 @@ function createProgramTemplate(
 
   function placeActionButtonsForViewport() {
     const mobileMode = isMobileViewport() && !!mobileActionsEl;
-    const target = mobileMode ? mobileActionsEl : controlsRightEl;
+    const target = mobileMode ? mobileActionsEl : controlsActionsEl;
     if (!target) return;
-    [checkBtn, hintBtn, addBtn, resetBtn].forEach((btn) => {
-      if (btn && btn.parentElement !== target) target.appendChild(btn);
+    [addBtn, resetBtn, hintBtn, checkBtn, statusEl].forEach((node) => {
+      if (node && node.parentElement !== target) target.appendChild(node);
     });
-    if (hintPanel) {
-      if (mobileMode && rowEl && mobileActionsEl) {
-        if (
-          hintPanel.parentElement !== rowEl ||
-          hintPanel.previousElementSibling !== mobileActionsEl
-        ) {
-          rowEl.insertBefore(hintPanel, mobileActionsEl.nextSibling);
-        }
-      } else if (codeRoot) {
-        const actionBar = codeRoot.querySelector(".controls-bar");
-        if (actionBar instanceof HTMLElement) {
-          if (instructionsEl && instructionsEl.parentElement === actionBar) {
-            if (
-              hintPanel.parentElement !== actionBar ||
-              hintPanel.nextElementSibling !== instructionsEl
-            ) {
-              actionBar.insertBefore(hintPanel, instructionsEl);
-            }
-          } else if (hintPanel.parentElement !== actionBar) {
-            actionBar.appendChild(hintPanel);
-          }
-        }
-      }
-    }
   }
 
   function updateMobileActionsVisibility() {
@@ -438,8 +361,6 @@ function createProgramTemplate(
   window.addEventListener("resize", placeActionButtonsForViewport);
 
   bindBtnRefPulse(codeRoot || document);
-  initProgramStatusGap(codeRoot);
-
   if (
     initialInstructions !== undefined &&
     typeof initialInstructions !== "string"
@@ -648,9 +569,7 @@ function createProgramTemplate(
     allocBase: null,
     workspaceEl: null,
     lastInstructionKey: null,
-    lastBoundary: -1,
     lastBranchCorrectBoundary: null,
-    lastSkippedRanges: [],
   };
 
   function allocFactory(): (type?: string) => string {
@@ -1252,37 +1171,25 @@ function createProgramTemplate(
   }
 
 
-  function replaceButtonTokens(text: string, runLabel: string): string {
+  function buttonReplacements(runLabel: string) {
     const resolvedLabel = runLabel || "Run line";
-    const replacements: Array<[string, string]> = [
+    return [
       ["$runLineButton", `$b{${resolvedLabel}}`],
       ["$backButton", "$b{Back ◀}"],
       ["$checkButton", "$b{Check}"],
       ["$resetButton", "$b{Reset}"],
       ["$newVariableButton", "$b{+ New variable}"],
       ["$showAliasesButton", "$b{Show aliases}"],
-    ];
-    let out = text;
-    replacements.forEach(([needle, value]) => {
-      out = out.split(needle).join(value);
-    });
-    return out;
+    ] as const;
   }
 
   function applyButtonTokens(
     parts: ProgramParts | null,
     runLabel: string,
   ): ProgramParts | null {
-    if (!parts) return parts;
-    if (typeof parts === "string") {
-      return replaceButtonTokens(parts, runLabel);
-    }
-    if (Array.isArray(parts)) {
-      return parts.map((part) =>
-        typeof part === "string" ? replaceButtonTokens(part, runLabel) : part,
-      );
-    }
-    return parts;
+    return applyTextTokenReplacements(parts, buttonReplacements(runLabel)) as
+      | ProgramParts
+      | null;
   }
 
   function formatRunLabel(
@@ -1343,6 +1250,23 @@ function createProgramTemplate(
   function nextBoundaryForLine(current: number): number {
     if (!Number.isFinite(current)) return current + 1;
     if (current >= totalLines) return totalLines;
+    const solvedBranchStep = branchStepInfo(current);
+    if (
+      solvedBranchStep?.editable &&
+      state.branchPasses[solvedBranchStep.startLine]
+    ) {
+      const solvedBranch = branchInfoForBoundary(current);
+      if (
+        solvedBranch &&
+        Number.isFinite(solvedBranch.expected) &&
+        solvedBranch.expected! > current
+      ) {
+        return clampToBranchClose(
+          current,
+          Math.max(0, Math.min(totalLines, solvedBranch.expected!)),
+        );
+      }
+    }
     const skipElseBoundary = skipElseBoundaryForLine(current);
     if (
       Number.isFinite(skipElseBoundary) &&
@@ -1808,6 +1732,25 @@ function createProgramTemplate(
     return resolveParts(entry, ctx);
   }
 
+  function solvedBranchInstructionForBoundary(boundary: number): Part | null {
+    for (const step of stepInfos) {
+      if (!step.ifHeaderOnly || !step.instructions) continue;
+      if (!state.branchPasses[step.startLine]) continue;
+      if (boundary === step.boundary) {
+        return step.instructions;
+      }
+      const info = branchInfoForBoundary(step.boundary);
+      if (
+        info &&
+        Number.isFinite(info.expected) &&
+        boundary === info.expected
+      ) {
+        return step.instructions;
+      }
+    }
+    return null;
+  }
+
   function renderCodePaneForBoundary() {
     if (!codeEl) return;
     const key = state.boundary;
@@ -2144,27 +2087,34 @@ function createProgramTemplate(
     });
   }
 
+  function scrollInstructionsUpIfNeeded(
+    scrollUp: boolean,
+    instructionKey: string | null,
+  ) {
+    if (!scrollUp || !instructionKey || instructionKey === state.lastInstructionKey)
+      return;
+    requestAnimationFrame(() => {
+      const rect = instructionsEl?.getBoundingClientRect();
+      if (!rect) return;
+      const offset = 24;
+      const top = Math.max(0, rect.top + window.scrollY - offset);
+      if (top < window.scrollY) {
+        window.scrollTo({ top, behavior: "smooth" });
+      }
+    });
+  }
+
   function updateInstructions() {
     const key = state.boundary;
     const runLabel = runLabelForBoundary(state.boundary);
     const scrollUp =
       scrollUpByBoundary.get(key) !== false && !!instructionsEl;
-    let specKey: string | null = null;
+    let instructionKey: string | null = null;
     if (key === total && state.passes[key]) {
       setPartsContent(instructionsEl, "Program solved!");
-      specKey = "__solved__";
-      if (scrollUp && specKey !== state.lastInstructionKey) {
-        requestAnimationFrame(() => {
-          const rect = instructionsEl?.getBoundingClientRect();
-          if (!rect) return;
-          const offset = 24;
-          const top = Math.max(0, rect.top + window.scrollY - offset);
-          if (top < window.scrollY) {
-            window.scrollTo({ top, behavior: "smooth" });
-          }
-        });
-      }
-      state.lastInstructionKey = specKey;
+      instructionKey = "__solved__";
+      scrollInstructionsUpIfNeeded(scrollUp, instructionKey);
+      state.lastInstructionKey = instructionKey;
       return;
     }
     let parts = getInstructionParts(key);
@@ -2184,35 +2134,22 @@ function createProgramTemplate(
         }
       }
     }
-    if (key === 0) {
-      if (parts) {
-        parts = parts;
-      } else {
-        parts = null;
+    if (!parts) {
+      const solvedBranchInstructions = solvedBranchInstructionForBoundary(key);
+      if (solvedBranchInstructions) {
+        parts = String(solvedBranchInstructions);
       }
-      specKey = "__initial__";
+    }
+    if (key === 0) {
+      instructionKey = "__initial__";
     } else {
       const spec = instructionMap.get(key) ?? null;
-      specKey = spec ? String(spec) : null;
+      instructionKey = spec ? String(spec) : null;
     }
-    if (!parts) {
-      parts = null;
-    }
-    parts = applyButtonTokens(parts, runLabel);
+    parts = applyButtonTokens(parts || null, runLabel);
     setPartsContent(instructionsEl, parts);
-    if (scrollUp && specKey && specKey !== state.lastInstructionKey) {
-      requestAnimationFrame(() => {
-        const rect = instructionsEl?.getBoundingClientRect();
-        if (!rect) return;
-        const offset = 24;
-        const top = Math.max(0, rect.top + window.scrollY - offset);
-        if (top < window.scrollY) {
-          window.scrollTo({ top, behavior: "smooth" });
-        }
-      });
-    }
-    state.lastInstructionKey = specKey;
-    state.lastBoundary = key;
+    scrollInstructionsUpIfNeeded(scrollUp, instructionKey);
+    state.lastInstructionKey = instructionKey;
   }
 
   function hideHint() {

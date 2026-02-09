@@ -91,15 +91,6 @@ function onDomReady(fn: () => void, { once = true }: { once?: boolean } = {}) {
   fn();
 }
 
-function bootstrapWhenAvailable(init: () => boolean) {
-  if (init()) return;
-  const observer = new MutationObserver(() => {
-    if (!init()) return;
-    observer.disconnect();
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
-}
-
 function disableAutoText(el?: Element | null) {
   if (!el || el.nodeType !== 1) return;
   el.setAttribute("autocapitalize", "off");
@@ -117,133 +108,10 @@ function applyAutoTextDefaults(root: ParentNode = document) {
     .forEach((el) => disableAutoText(el));
 }
 
-type StepperTopEntry = {
-  top: HTMLDivElement;
-  controls: HTMLElement | null;
-  update: () => void;
-  measure: () => void;
-  rafId: number | null;
-  needsTop: boolean;
-  ro?: ResizeObserver;
-};
-
-const stepperTopState = new WeakMap<Element, StepperTopEntry>();
-
-function findStepperControls(
-  panel: Element | null,
-): { prev: HTMLButtonElement; next: HTMLButtonElement } | null {
-  if (!panel) return null;
-  const controls = [...panel.querySelectorAll(".controls")].find((el) => {
-    return (
-      el.querySelector('button[data-stepper="prev"]') &&
-      el.querySelector('button[data-stepper="next"]')
-    );
-  });
-  if (!controls) return null;
-  const prev = controls.querySelector(
-    'button[data-stepper="prev"]',
-  ) as HTMLButtonElement | null;
-  const next = controls.querySelector(
-    'button[data-stepper="next"]',
-  ) as HTMLButtonElement | null;
-  if (!prev || !next) return null;
-  return { prev, next };
-}
-
-function ensureStepperTopControls(
-  codepane: Element | null,
-): StepperTopEntry | null {
-  if (!codepane) return null;
-  const existing = stepperTopState.get(codepane);
-  if (existing) return existing;
-  const panel = codepane.closest(".panel");
-  if (!panel) return null;
-  const info = findStepperControls(panel);
-  if (!info) return null;
-  const controls = info.prev.closest(".controls") as HTMLElement | null;
-  let top = panel.querySelector(".controls-top") as HTMLDivElement | null;
-  if (!top) {
-    top = document.createElement("div");
-    top.className = "controls controls-top";
-    const prevBtn = document.createElement("button");
-    prevBtn.dataset.stepper = "prev";
-    prevBtn.textContent = info.prev.textContent || "Back ◀";
-    const nextBtn = document.createElement("button");
-    nextBtn.dataset.stepper = "next";
-    nextBtn.textContent = info.next.textContent || "Run line 1 ▶";
-    top.appendChild(prevBtn);
-    top.appendChild(nextBtn);
-    panel.insertBefore(top, codepane);
-  }
-  const entry: StepperTopEntry = {
-    top,
-    controls,
-    update: () => {},
-    measure: () => {},
-    rafId: null,
-    needsTop: false,
-  };
-
-  const measure = () => {
-    if (!document.body.contains(codepane)) return;
-    const rect = codepane.getBoundingClientRect();
-    const panelRect = panel.getBoundingClientRect();
-    const viewHeight =
-      window.innerHeight || document.documentElement.clientHeight || 0;
-    const edgeEpsilon = 1;
-    const contentHeight = Math.max(
-      panel.scrollHeight || 0,
-      panelRect.height || 0,
-      codepane.scrollHeight || 0,
-      rect.height || 0,
-    );
-    if (contentHeight === 0 || viewHeight === 0) return;
-    const needsTop =
-      contentHeight >= viewHeight ||
-      panelRect.bottom > viewHeight - edgeEpsilon ||
-      rect.bottom > viewHeight - edgeEpsilon;
-    entry.needsTop = needsTop;
-    if (entry.controls) {
-      entry.controls.classList.toggle("hidden", !needsTop);
-    }
-  };
-
-  const update = () => {
-    if (entry.rafId !== null) return;
-    entry.rafId = requestAnimationFrame(() => {
-      entry.rafId = null;
-      measure();
-    });
-  };
-  entry.update = update;
-  entry.measure = measure;
-  stepperTopState.set(codepane, entry);
-  if (typeof ResizeObserver !== "undefined") {
-    const ro = new ResizeObserver(() => update());
-    ro.observe(codepane);
-    entry.ro = ro;
-  }
-  update();
-  return entry;
-}
-
-function updateStepperTopControls(codepane: Element | null) {
-  const entry = ensureStepperTopControls(codepane);
-  entry?.update?.();
-}
-
 const MOBILE_MEDIA_QUERY = "(max-width: 900px)";
 
 function isMobileViewport(): boolean {
   return window.matchMedia && window.matchMedia(MOBILE_MEDIA_QUERY).matches;
-}
-
-function isStepperTopVisible(codepane: Element | null): boolean {
-  if (!codepane) return false;
-  const entry = ensureStepperTopControls(codepane);
-  if (!entry) return false;
-  entry.measure();
-  return !!entry.needsTop;
 }
 
 const DEFAULT_NAV_ITEMS: NavItem[] = NAV_ITEMS;
@@ -331,6 +199,61 @@ function ensureWrapConnected(wrap: HTMLElement, nav: HTMLElement, main: HTMLElem
   else mount.appendChild(wrap);
 }
 
+function updateSidebarToggleLabel(btn: HTMLButtonElement | null) {
+  if (!btn) return;
+  const hidden = document.body.classList.contains("sidebar-collapsed");
+  const label = hidden ? "Show sidebar" : "Hide sidebar";
+  btn.classList.toggle("is-expanded", !hidden);
+  btn.setAttribute("aria-label", label);
+  btn.setAttribute("aria-expanded", hidden ? "false" : "true");
+  const sr = btn.querySelector(".sr-only");
+  if (sr) sr.textContent = label;
+}
+
+function updateSidebarQueryParam() {
+  const hidden = document.body.classList.contains("sidebar-collapsed");
+  const params = new URLSearchParams(window.location.search);
+  params.set("sidebar", hidden ? "0" : "1");
+  const query = params.toString();
+  const next = `${window.location.pathname}?${query}${window.location.hash}`;
+  window.history.replaceState(null, "", next);
+}
+
+function ensureSidebarControls(wrap: HTMLElement, nav: HTMLElement) {
+  if (!nav.id) nav.id = "sidebar";
+  let sidebarWrap = wrap.querySelector(".sidebar-wrap") as HTMLElement | null;
+  if (!sidebarWrap) {
+    sidebarWrap = document.createElement("div");
+    sidebarWrap.className = "sidebar-wrap";
+    wrap.insertBefore(sidebarWrap, wrap.firstChild);
+  }
+  if (nav.parentElement !== sidebarWrap) {
+    sidebarWrap.appendChild(nav);
+  }
+
+  let btn = sidebarWrap.querySelector(
+    ".sidebar-toggle",
+  ) as HTMLButtonElement | null;
+  if (!btn) {
+    btn = el(
+      '<button type="button" class="sidebar-toggle"><span class="hamburger" aria-hidden="true"><span></span><span></span><span></span></span><span class="sr-only">Toggle sidebar</span></button>',
+    ) as HTMLButtonElement;
+    sidebarWrap.insertBefore(btn, sidebarWrap.firstChild);
+  } else if (btn.parentElement !== sidebarWrap) {
+    sidebarWrap.insertBefore(btn, sidebarWrap.firstChild);
+  }
+  btn.setAttribute("aria-controls", nav.id);
+  if (btn.dataset.bound !== "1") {
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      document.body.classList.toggle("sidebar-collapsed");
+      updateSidebarToggleLabel(btn);
+      updateSidebarQueryParam();
+    });
+  }
+  updateSidebarToggleLabel(btn);
+}
+
 function ensureBaseLayout({
   navItems,
   activeHref,
@@ -357,15 +280,14 @@ function ensureBaseLayout({
     main.className = "main";
   }
   ensureWrapConnected(wrap, nav, main);
-  if (nav.parentElement !== wrap) {
+  if (!wrap.contains(nav)) {
     wrap.appendChild(nav);
   }
   if (main.parentElement !== wrap) {
     wrap.appendChild(main);
   }
-  if (nav.nextElementSibling !== main) {
-    wrap.insertBefore(nav, main);
-  }
+  applySidebarStateFromUrl();
+  ensureSidebarControls(wrap, nav);
   document.body.classList.add("panel-layout");
   requestAnimationFrame(() => {
     centerActiveNavItem(nav);
@@ -385,12 +307,6 @@ function centerActiveNavItem(nav: HTMLElement | null) {
   const target = activeCenter - nav.clientHeight / 2;
   const maxScroll = Math.max(0, nav.scrollHeight - nav.clientHeight);
   nav.scrollTop = Math.max(0, Math.min(maxScroll, target));
-}
-
-function initStepperTopControls() {
-  document.querySelectorAll(".codepane").forEach((pane) => {
-    updateStepperTopControls(pane);
-  });
 }
 
 type LineRange = [number, number] | { start: number; end: number };
@@ -572,7 +488,6 @@ function renderCodePane(
       addBoundary();
     }
   }
-  updateStepperTopControls(root);
 }
 
 let nameStackResizeInstalled = false;
@@ -1918,6 +1833,7 @@ function initCustomPanelScrollbars() {
 }
 
 function applySidebarStateFromUrl() {
+  if (document.body.dataset.sidebarStateApplied === "1") return;
   const params = new URLSearchParams(window.location.search);
   const state = params.get("sidebar");
   if (state === "0") document.body.classList.add("sidebar-collapsed");
@@ -1926,70 +1842,14 @@ function applySidebarStateFromUrl() {
     const prefersCollapsed = isMobileViewport();
     if (prefersCollapsed) document.body.classList.add("sidebar-collapsed");
   }
-}
-
-function initSidebarToggle() {
-  if (document.body.dataset.sidebarToggleReady === "1") return true;
-  const wrap = document.querySelector(".wrap");
-  const nav = wrap?.querySelector("nav");
-  if (!wrap || !nav) return false;
-  if (!nav.id) nav.id = "sidebar";
-  let sidebarWrap = wrap.querySelector(".sidebar-wrap");
-  if (!sidebarWrap) {
-    sidebarWrap = document.createElement("div");
-    sidebarWrap.className = "sidebar-wrap";
-    wrap.insertBefore(sidebarWrap, nav);
-    sidebarWrap.appendChild(nav);
-  }
-  let btn = document.querySelector(".sidebar-toggle");
-  if (!btn) {
-    btn = el(
-      '<button type="button" class="sidebar-toggle"><span class="hamburger" aria-hidden="true"><span></span><span></span><span></span></span><span class="sr-only">Toggle sidebar</span></button>',
-    );
-    document.body.appendChild(btn);
-  }
-  btn.setAttribute("aria-controls", nav.id);
-  const placeToggle = () => {
-    if (btn.parentElement !== sidebarWrap) {
-      sidebarWrap.insertBefore(btn, sidebarWrap.firstChild);
-    }
-  };
-  const updateLabel = () => {
-    const hidden = document.body.classList.contains("sidebar-collapsed");
-    const label = hidden ? "Show sidebar" : "Hide sidebar";
-    btn.classList.toggle("is-expanded", !hidden);
-    btn.setAttribute("aria-label", label);
-    btn.setAttribute("aria-expanded", hidden ? "false" : "true");
-    const sr = btn.querySelector(".sr-only");
-    if (sr) sr.textContent = label;
-  };
-  const updateUrl = () => {
-    const hidden = document.body.classList.contains("sidebar-collapsed");
-    const params = new URLSearchParams(window.location.search);
-    params.set("sidebar", hidden ? "0" : "1");
-    const query = params.toString();
-    const next = `${window.location.pathname}?${query}${window.location.hash}`;
-    window.history.replaceState(null, "", next);
-  };
-  btn.addEventListener("click", () => {
-    document.body.classList.toggle("sidebar-collapsed");
-    updateLabel();
-    placeToggle();
-    updateUrl();
-  });
-  updateLabel();
-  placeToggle();
-  document.body.dataset.sidebarToggleReady = "1";
-  return true;
+  document.body.dataset.sidebarStateApplied = "1";
 }
 
 onDomReady(() => {
   initEditableFieldHandlers();
   applyAutoTextDefaults(document);
   initCustomPanelScrollbars();
-  initStepperTopControls();
-  applySidebarStateFromUrl();
-  bootstrapWhenAvailable(initSidebarToggle);
+  ensureBaseLayout();
 });
 
 function flashStatus(el: Element | null) {
@@ -2010,7 +1870,6 @@ export {
   flashStatus,
   getNavLabelForHref,
   isMobileViewport,
-  isStepperTopVisible,
   bindBtnRefPulse,
   makeAnswerBox,
   readBoxState,
@@ -2021,7 +1880,6 @@ export {
   restoreWorkspace,
   serializeWorkspace,
   setPartsContent,
-  updateStepperTopControls,
   vbox,
   applyOtherNames,
 };

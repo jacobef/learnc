@@ -373,6 +373,23 @@ export function stripAllComments(src = "") {
     }
     return out;
 }
+export function replaceTextTokens(text, replacements) {
+    let out = String(text);
+    for (const [needle, replacement] of replacements) {
+        if (!needle)
+            continue;
+        out = out.split(needle).join(replacement);
+    }
+    return out;
+}
+export function applyTextTokenReplacements(value, replacements) {
+    if (value == null)
+        return value;
+    if (typeof value === "string") {
+        return replaceTextTokens(value, replacements);
+    }
+    return value.map((part) => replaceTextTokens(part, replacements));
+}
 export function cloneBoxes(list) {
     return Array.isArray(list)
         ? list.map((b) => ({

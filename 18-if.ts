@@ -19,13 +19,13 @@ createProgramTemplate({
       editable: false,
     },
     {
-      code: "double olive = 1.0;\n",
+      code: "double olive = 2.0;\n",
       editable: false,
     },
     {
       code: "if (olive) {\n",
       editable: false,
-      instructions: "$v{1.0} is non-zero, so the block is not skipped.",
+      instructions: "$v{2.0} is non-zero, so the block is not skipped.",
     },
     {
       code: "  olive = 5.0;\n",
@@ -84,6 +84,7 @@ createProgramTemplate({
     {
       code: "  if (tree >= stem + 5) {\n",
       editable: true,
+      instructions: "Select the line boundary where execution will resume.",
     },
     {
       code: "    double root;\n",

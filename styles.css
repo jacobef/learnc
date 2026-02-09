@@ -110,10 +110,12 @@ body.panel-layout .wrap > .main {
     gap: 16px;
     max-width: none;
 }
-body.panel-layout .wrap > .main.panelized {
+body.panel-layout .wrap > .main.panelized,
+body.panel-layout .wrap > .main.main-panelized {
     overflow: hidden;
 }
-body.panel-layout .wrap > .main.panelized > section {
+body.panel-layout .wrap > .main.panelized > section,
+body.panel-layout .wrap > .main.main-panelized > section {
     flex: 1 1 auto;
     min-height: 0;
 }
@@ -529,8 +531,10 @@ h2 {
 .expr-eval-row {
     display: flex;
     gap: 16px;
-    align-items: start;
+    align-items: stretch;
     flex-wrap: wrap;
+    flex: 1 1 auto;
+    min-height: 0;
 }
 .expr-left-col {
     display: flex;
@@ -538,16 +542,20 @@ h2 {
     gap: 24px;
     flex: 0 0 360px;
     min-width: 0;
+    min-height: 0;
 }
 .expr-left-col .quiz-expression-panel {
-    flex: 0 0 auto;
+    flex: 1 1 0;
+    min-height: 0;
 }
 .expr-left-col .expr-answer-panel {
-    flex: 0 0 auto;
+    flex: 1 1 0;
+    min-height: 0;
 }
 .expr-eval-row .program-state-panel {
     flex: 1 1 280px;
     min-width: 260px;
+    min-height: 0;
 }
 .expr-answer-stack {
     display: flex;
@@ -619,9 +627,15 @@ h2 {
 .quiz-row {
     display: grid;
     grid-template-columns: 200px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     gap: 16px;
-    align-items: start;
+    align-items: stretch;
     margin-top: 24px;
+    min-height: 0;
+}
+.quiz-row > .panel {
+    min-height: 0;
+    height: 100%;
 }
 .quiz-expression-panel .expr-display {
     padding-top: 10px;
@@ -754,6 +768,16 @@ h2 {
 .state-status {
     font-size: 18px;
 }
+[data-role="quiz-status"] {
+    display: inline-block;
+    width: 20ch;
+    flex: 0 0 20ch;
+    text-align: right;
+    white-space: nowrap;
+}
+.quiz-status-inline {
+    font-size: inherit;
+}
 .ok {
     color: #0a7a0a;
     font-weight: 600;
@@ -810,6 +834,7 @@ button {
 
 .panel-shell .row,
 .panel-shell .panel-row,
+.panel-shell .quiz-row,
 .panel-shell .expr-eval-stack,
 .panel-shell .panel-stack {
     margin-top: 0;
@@ -818,8 +843,16 @@ button {
 }
 
 .panel-shell .panel-row,
+.panel-shell .quiz-row,
 .panel-shell .expr-eval-row {
     align-items: stretch;
+    min-height: 0;
+}
+.panel-shell .panel-row > .panel,
+.panel-shell .quiz-row > .panel,
+.panel-shell .expr-eval-row > .panel {
+    min-height: 0;
+    max-height: 100%;
 }
 .panel-shell .panel-row > .panel.code-panel-shell {
     align-self: start;
@@ -883,7 +916,7 @@ button {
     flex: 0 0 auto;
 }
 
-.panel-scroll .controls:not(.controls-top) {
+.panel-scroll .controls {
     margin-top: auto;
 }
 
@@ -904,10 +937,6 @@ button {
     flex-basis: auto;
     margin-top: 0;
 }
-.controls-top {
-    margin-top: 12px;
-    margin-bottom: 20px;
-}
 .controls-bar {
     margin-top: 12px;
     margin-bottom: 16px;
@@ -918,12 +947,10 @@ button {
     padding: 8px 0;
 }
 .controls-main {
-    --controls-bar-gap: 8px;
-    display: grid;
-    grid-template-columns: 1fr 1.3fr;
-    column-gap: var(--controls-bar-gap);
-    row-gap: 8px;
-    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
 }
 .controls-bar .intro {
     margin: 0;
@@ -948,31 +975,15 @@ button {
     gap: 8px;
     flex-wrap: wrap;
     align-items: center;
-}
-.controls-main .controls-left {
-    grid-column: 1;
-}
-.controls-main .controls-right {
-    grid-column: 2;
     width: 100%;
-    justify-content: flex-start;
-}
-.controls-main .controls-gap {
-    position: absolute;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    pointer-events: none;
-}
-.controls-main .controls-status {
-    display: block;
-    white-space: nowrap;
-    flex: 1 1 auto;
-    min-width: 0;
-    text-align: right;
 }
 .controls-main .controls-left {
     width: 100%;
+}
+.controls-spacer {
+    flex: 0 0 20px;
+    width: 20px;
+    height: 1px;
 }
 .controls .gap-wide {
     margin-left: 24px;
@@ -996,8 +1007,7 @@ body.panel-layout .panel-controls.controls-main {
     gap: 8px;
 }
 .controls-bar-expr .controls-main {
-    grid-template-columns: 360px minmax(0, 1fr);
-    column-gap: 16px;
+    gap: 8px;
 }
 .controls-bar-expr .intro,
 .controls-bar-expr .hint-inline {
@@ -1872,45 +1882,11 @@ nav.tabs a.active:hover {
         position: static;
         top: auto;
     }
-    .controls-main .controls-gap {
-        position: static;
-        width: 100%;
-        height: auto;
-        margin-top: 6px;
-        pointer-events: none;
-        left: auto !important;
-        top: auto !important;
-        right: auto !important;
-        height: auto !important;
-        width: 100% !important;
-    }
-    .controls-main .controls-status {
-        width: 100%;
-    }
-    .controls-main .controls-status {
-        text-align: left;
-    }
     .controls-main {
-        grid-template-columns: 1fr;
         column-gap: 0;
     }
-    .controls-main .controls-left,
-    .controls-main .controls-right {
-        grid-column: 1;
-        width: 100%;
-    }
     .controls-main .controls-left {
-        flex-wrap: nowrap;
-    }
-    .controls-main .controls-right {
-        flex-wrap: wrap;
-        margin-top: 8px;
-    }
-    .controls-bar-program .controls-main .controls-right {
-        display: none;
-    }
-    .controls-bar-program .controls-main .controls-gap {
-        display: none;
+        width: 100%;
     }
     body:not(.sidebar-collapsed) {
         overflow: hidden;
@@ -1951,7 +1927,8 @@ nav.tabs a.active:hover {
         min-height: 0;
         overflow: auto;
     }
-    body.panel-layout .wrap > .main.panelized {
+    body.panel-layout .wrap > .main.panelized,
+    body.panel-layout .wrap > .main.main-panelized {
         overflow: hidden;
     }
     body.panel-layout.sidebar-collapsed {
@@ -1971,7 +1948,8 @@ nav.tabs a.active:hover {
         height: auto;
         overflow: visible;
     }
-    body.panel-layout.sidebar-collapsed .wrap > .main.panelized {
+    body.panel-layout.sidebar-collapsed .wrap > .main.panelized,
+    body.panel-layout.sidebar-collapsed .wrap > .main.main-panelized {
         overflow: visible;
     }
     body.sidebar-collapsed .wrap {
@@ -2108,6 +2086,7 @@ nav.tabs a.active:hover {
     }
     .panel-shell .row,
     .panel-shell .panel-row,
+    .panel-shell .quiz-row,
     .panel-shell .expr-eval-stack,
     .panel-shell .panel-stack {
         height: auto;

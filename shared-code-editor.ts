@@ -1,4 +1,5 @@
 import {
+  applyTextTokenReplacements,
   createSimpleSimulator,
   createStepper,
   ensureBaseLayout,
@@ -145,12 +146,9 @@ function ensureCodeEditorLayout({
   actionBar.className = "controls-bar controls-bar-code";
   const controlsMain = document.createElement("div");
   controlsMain.className = "controls-main panel panel-controls";
-  const leftControls = document.createElement("div");
-  leftControls.className = "controls-row controls-left";
-  const rightControls = document.createElement("div");
-  rightControls.className = "controls-row controls-right";
-  controlsMain.appendChild(leftControls);
-  controlsMain.appendChild(rightControls);
+  const controlsRow = document.createElement("div");
+  controlsRow.className = "controls-row controls-left";
+  controlsMain.appendChild(controlsRow);
   actionBar.appendChild(controlsMain);
   section.appendChild(actionBar);
   const row = document.createElement("div");
@@ -192,7 +190,11 @@ function ensureCodeEditorLayout({
   const nextBtn = document.createElement("button");
   nextBtn.textContent = "Next Program ▶▶";
   nextBtn.dataset.stepper = "next";
-  leftControls.appendChild(nextBtn);
+  const controlsSpacer = document.createElement("span");
+  controlsSpacer.className = "controls-spacer";
+  controlsSpacer.setAttribute("aria-hidden", "true");
+  controlsRow.appendChild(nextBtn);
+  controlsRow.appendChild(controlsSpacer);
   codePanel.appendChild(codeTitle);
   codePanel.appendChild(codePane);
 
@@ -212,9 +214,9 @@ function ensureCodeEditorLayout({
   const status = document.createElement("span");
   status.dataset.role = "code-status";
   status.className = "muted";
-  rightControls.appendChild(checkBtn);
-  rightControls.appendChild(hintBtn);
-  rightControls.appendChild(status);
+  controlsRow.appendChild(hintBtn);
+  controlsRow.appendChild(checkBtn);
+  controlsRow.appendChild(status);
   const hintPanel = document.createElement("div");
   hintPanel.dataset.role = "code-hint";
   hintPanel.className = "hint-inline hidden";
@@ -392,6 +394,12 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     });
   }
 
+  function syncEditorLinkedScroll() {
+    if (!editor) return;
+    if (lineNumbers) lineNumbers.scrollTop = editor.scrollTop;
+    if (errorGutter) errorGutter.scrollTop = editor.scrollTop;
+  }
+
   function updateLineGutters() {
     autoSizeEditor();
     const lines = getRawLines();
@@ -437,10 +445,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
       errorGutter.appendChild(frag);
       if (editor) errorGutter.style.height = `${editor.clientHeight}px`;
     }
-    if (editor) {
-      if (lineNumbers) lineNumbers.scrollTop = editor.scrollTop;
-      if (errorGutter) errorGutter.scrollTop = editor.scrollTop;
-    }
+    syncEditorLinkedScroll();
   }
 
   function applyUserProgram(): BoxState[] | null {
@@ -575,33 +580,21 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
       applyUserProgram,
     };
   }
-
-  function replaceButtonTokens(text: string): string {
-    const replacements: Array<[string, string]> = [
-      ["$checkButton", "$b{Check}"],
-      ["$resetButton", "$b{Reset}"],
-      ["$newVariableButton", "$b{+ New variable}"],
-      ["$runLineButton", "$b{Run line}"],
-      ["$backButton", "$b{Back ◀}"],
-      ["$showAliasesButton", "$b{Show aliases}"],
-    ];
-    let out = text;
-    replacements.forEach(([needle, value]) => {
-      out = out.split(needle).join(value);
-    });
-    return out;
-  }
+  const buttonReplacements = [
+    ["$checkButton", "$b{Check}"],
+    ["$resetButton", "$b{Reset}"],
+    ["$newVariableButton", "$b{+ New variable}"],
+    ["$runLineButton", "$b{Run line}"],
+    ["$backButton", "$b{Back ◀}"],
+    ["$showAliasesButton", "$b{Show aliases}"],
+  ] as const;
 
   function applyButtonTokens(
     parts: CodeEditorParts | null,
   ): CodeEditorParts | null {
-    if (!parts) return parts;
-    if (typeof parts === "string") {
-      return replaceButtonTokens(parts);
-    }
-    return parts.map((part) =>
-      typeof part === "string" ? replaceButtonTokens(part) : part,
-    );
+    return applyTextTokenReplacements(parts, buttonReplacements) as
+      | CodeEditorParts
+      | null;
   }
 
   function setStatus(text: string, cls: string = "muted") {
@@ -718,16 +711,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
         if (event.key === "Enter") event.preventDefault();
       });
     }
-    if (lineNumbers) {
-      editor.addEventListener("scroll", () => {
-        lineNumbers.scrollTop = editor.scrollTop;
-      });
-    }
-    if (errorGutter) {
-      editor.addEventListener("scroll", () => {
-        errorGutter.scrollTop = editor.scrollTop;
-      });
-    }
+    editor.addEventListener("scroll", syncEditorLinkedScroll);
     editor.addEventListener("mouseup", updateLineGutters);
     window.addEventListener("resize", updateLineGutters);
     if (typeof ResizeObserver !== "undefined") {

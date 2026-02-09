@@ -1,49 +1,11 @@
-import { applyOtherNames, boxValueMatchesSpec, cloneBoxes, createSimpleSimulator, createStepper, bindBtnRefPulse, disableBoxEditing, ensureBaseLayout, flashStatus, getNavLabelForHref, isMobileViewport, makeAnswerBox, normalizeBoxValueForContext, normalizeZeroDisplay, randAddr, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, typeInfo, vbox, } from "./shared-core.js";
-function initProgramStatusGap(root) {
-    if (!root)
-        return;
-    const bar = root.querySelector(".controls-main");
-    const left = root.querySelector(".controls-left");
-    const right = root.querySelector(".controls-right");
-    const gap = root.querySelector('[data-role="program-status-gap"]');
-    if (!bar || !left || !right || !gap)
-        return;
-    let raf = 0;
-    const update = () => {
-        if (raf)
-            return;
-        raf = requestAnimationFrame(() => {
-            raf = 0;
-            const barRect = bar.getBoundingClientRect();
-            const leftRect = left.getBoundingClientRect();
-            const rightRect = right.getBoundingClientRect();
-            const leftEdge = Math.max(0, leftRect.right - barRect.left);
-            const rightEdge = Math.max(0, rightRect.left - barRect.left);
-            const gapPad = 6;
-            const width = Math.max(0, rightEdge - leftEdge);
-            gap.style.left = `${leftEdge}px`;
-            gap.style.width = `${Math.max(0, width - gapPad)}px`;
-            gap.style.top = `${rightRect.top - barRect.top}px`;
-            gap.style.height = `${rightRect.height}px`;
-        });
-    };
-    update();
-    if (typeof ResizeObserver !== "undefined") {
-        const ro = new ResizeObserver(() => update());
-        ro.observe(bar);
-        ro.observe(left);
-        ro.observe(right);
-    }
-    window.addEventListener("resize", update);
-}
+import { applyTextTokenReplacements, applyOtherNames, boxValueMatchesSpec, cloneBoxes, createSimpleSimulator, createStepper, bindBtnRefPulse, disableBoxEditing, ensureBaseLayout, flashStatus, getNavLabelForHref, isMobileViewport, makeAnswerBox, normalizeBoxValueForContext, normalizeZeroDisplay, randAddr, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, typeInfo, vbox, } from "./shared-core.js";
 function collectProgramElements(root = document) {
     return {
         instructionsEl: root.querySelector('[data-role="program-instructions"]'),
         codeEl: root.querySelector('[data-role="program-code"]'),
         codeRoot: root.querySelector('[data-role="program-root"]'),
-        rowEl: root.querySelector('[data-role="program-row"]'),
         stageEl: root.querySelector('[data-role="program-stage"]'),
-        controlsRightEl: root.querySelector('[data-role="program-controls-right"]'),
+        controlsActionsEl: root.querySelector('[data-role="program-controls"]'),
         mobileActionsEl: root.querySelector('[data-role="program-mobile-actions"]'),
         statusEl: root.querySelector('[data-role="program-status"]'),
         hintPanel: root.querySelector('[data-role="program-hint"]'),
@@ -90,19 +52,15 @@ function ensureProgramLayout() {
     actionBar.className = "controls-bar controls-bar-program";
     const controlsMain = document.createElement("div");
     controlsMain.className = "controls-main panel panel-controls";
-    const leftControls = document.createElement("div");
-    leftControls.className = "controls-row controls-left";
-    const rightControls = document.createElement("div");
-    rightControls.className = "controls-row controls-right";
-    rightControls.dataset.role = "program-controls-right";
-    controlsMain.appendChild(leftControls);
-    controlsMain.appendChild(rightControls);
+    const controlsRow = document.createElement("div");
+    controlsRow.className = "controls-row controls-left";
+    controlsRow.dataset.role = "program-controls";
+    controlsMain.appendChild(controlsRow);
     actionBar.appendChild(controlsMain);
     actionBar.appendChild(instructionsEl);
     section.appendChild(actionBar);
     const row = document.createElement("div");
     row.className = "row panel-row";
-    row.dataset.role = "program-row";
     section.appendChild(row);
     main.appendChild(section);
     const codePanel = document.createElement("div");
@@ -120,8 +78,12 @@ function ensureProgramLayout() {
     const nextBtn = document.createElement("button");
     nextBtn.textContent = "Run line 1 ▶";
     nextBtn.dataset.stepper = "next";
-    leftControls.appendChild(prevBtn);
-    leftControls.appendChild(nextBtn);
+    const controlsSpacer = document.createElement("span");
+    controlsSpacer.className = "controls-spacer";
+    controlsSpacer.setAttribute("aria-hidden", "true");
+    controlsRow.appendChild(prevBtn);
+    controlsRow.appendChild(nextBtn);
+    controlsRow.appendChild(controlsSpacer);
     codePanel.appendChild(codeTitle);
     codePanel.appendChild(codeEl);
     const statePanel = document.createElement("div");
@@ -135,8 +97,6 @@ function ensureProgramLayout() {
     const stageEl = document.createElement("div");
     stageEl.dataset.role = "program-stage";
     stageEl.className = "panel-body";
-    const stateControls = document.createElement("div");
-    stateControls.className = "controls";
     const checkBtn = document.createElement("button");
     checkBtn.dataset.role = "program-check";
     checkBtn.className = "hidden";
@@ -156,23 +116,18 @@ function ensureProgramLayout() {
     resetBtn.textContent = "Reset";
     const statusEl = document.createElement("span");
     statusEl.dataset.role = "program-status";
-    statusEl.className = "muted controls-status";
-    const statusGap = document.createElement("div");
-    statusGap.dataset.role = "program-status-gap";
-    statusGap.className = "controls-gap";
-    statusGap.appendChild(statusEl);
-    controlsMain.appendChild(statusGap);
-    rightControls.appendChild(checkBtn);
-    rightControls.appendChild(hintBtn);
-    rightControls.appendChild(addBtn);
-    rightControls.appendChild(resetBtn);
+    statusEl.className = "muted";
+    controlsRow.appendChild(addBtn);
+    controlsRow.appendChild(resetBtn);
+    controlsRow.appendChild(hintBtn);
+    controlsRow.appendChild(checkBtn);
+    controlsRow.appendChild(statusEl);
     const hintPanel = document.createElement("div");
     hintPanel.dataset.role = "program-hint";
     hintPanel.className = "hint-inline hidden";
     actionBar.insertBefore(hintPanel, instructionsEl);
     statePanel.appendChild(stateTitle);
     statePanel.appendChild(stageEl);
-    statePanel.appendChild(stateControls);
     row.appendChild(codePanel);
     row.appendChild(mobileActions);
     row.appendChild(statePanel);
@@ -180,9 +135,8 @@ function ensureProgramLayout() {
         instructionsEl,
         codeEl,
         codeRoot: section,
-        rowEl: row,
         stageEl,
-        controlsRightEl: rightControls,
+        controlsActionsEl: controlsRow,
         mobileActionsEl: mobileActions,
         statusEl,
         hintPanel,
@@ -210,38 +164,16 @@ function createProgramTemplate(config) {
         allowVarAssign: true,
         requireSourceValue: true,
     });
-    const { instructionsEl, codeEl, codeRoot, rowEl, stageEl, controlsRightEl, mobileActionsEl, statusEl, hintPanel, hintBtn, checkBtn, addBtn, resetBtn, } = ensureProgramLayout();
+    const { instructionsEl, codeEl, codeRoot, stageEl, controlsActionsEl, mobileActionsEl, statusEl, hintPanel, hintBtn, checkBtn, addBtn, resetBtn, } = ensureProgramLayout();
     function placeActionButtonsForViewport() {
         const mobileMode = isMobileViewport() && !!mobileActionsEl;
-        const target = mobileMode ? mobileActionsEl : controlsRightEl;
+        const target = mobileMode ? mobileActionsEl : controlsActionsEl;
         if (!target)
             return;
-        [checkBtn, hintBtn, addBtn, resetBtn].forEach((btn) => {
-            if (btn && btn.parentElement !== target)
-                target.appendChild(btn);
+        [addBtn, resetBtn, hintBtn, checkBtn, statusEl].forEach((node) => {
+            if (node && node.parentElement !== target)
+                target.appendChild(node);
         });
-        if (hintPanel) {
-            if (mobileMode && rowEl && mobileActionsEl) {
-                if (hintPanel.parentElement !== rowEl ||
-                    hintPanel.previousElementSibling !== mobileActionsEl) {
-                    rowEl.insertBefore(hintPanel, mobileActionsEl.nextSibling);
-                }
-            }
-            else if (codeRoot) {
-                const actionBar = codeRoot.querySelector(".controls-bar");
-                if (actionBar instanceof HTMLElement) {
-                    if (instructionsEl && instructionsEl.parentElement === actionBar) {
-                        if (hintPanel.parentElement !== actionBar ||
-                            hintPanel.nextElementSibling !== instructionsEl) {
-                            actionBar.insertBefore(hintPanel, instructionsEl);
-                        }
-                    }
-                    else if (hintPanel.parentElement !== actionBar) {
-                        actionBar.appendChild(hintPanel);
-                    }
-                }
-            }
-        }
     }
     function updateMobileActionsVisibility() {
         if (!mobileActionsEl)
@@ -253,7 +185,6 @@ function createProgramTemplate(config) {
     updateMobileActionsVisibility();
     window.addEventListener("resize", placeActionButtonsForViewport);
     bindBtnRefPulse(codeRoot || document);
-    initProgramStatusGap(codeRoot);
     if (initialInstructions !== undefined &&
         typeof initialInstructions !== "string") {
         failConfig("Program initialInstructions must be a string.");
@@ -450,9 +381,7 @@ function createProgramTemplate(config) {
         allocBase: null,
         workspaceEl: null,
         lastInstructionKey: null,
-        lastBoundary: -1,
         lastBranchCorrectBoundary: null,
-        lastSkippedRanges: [],
     };
     function allocFactory() {
         if (state.allocBase == null)
@@ -996,9 +925,9 @@ function createProgramTemplate(config) {
         statusEl.textContent = text;
         statusEl.className = cls;
     }
-    function replaceButtonTokens(text, runLabel) {
+    function buttonReplacements(runLabel) {
         const resolvedLabel = runLabel || "Run line";
-        const replacements = [
+        return [
             ["$runLineButton", `$b{${resolvedLabel}}`],
             ["$backButton", "$b{Back ◀}"],
             ["$checkButton", "$b{Check}"],
@@ -1006,22 +935,9 @@ function createProgramTemplate(config) {
             ["$newVariableButton", "$b{+ New variable}"],
             ["$showAliasesButton", "$b{Show aliases}"],
         ];
-        let out = text;
-        replacements.forEach(([needle, value]) => {
-            out = out.split(needle).join(value);
-        });
-        return out;
     }
     function applyButtonTokens(parts, runLabel) {
-        if (!parts)
-            return parts;
-        if (typeof parts === "string") {
-            return replaceButtonTokens(parts, runLabel);
-        }
-        if (Array.isArray(parts)) {
-            return parts.map((part) => typeof part === "string" ? replaceButtonTokens(part, runLabel) : part);
-        }
-        return parts;
+        return applyTextTokenReplacements(parts, buttonReplacements(runLabel));
     }
     function formatRunLabel(start, end, withArrow, verb = "Run") {
         if (start === end) {
@@ -1069,6 +985,16 @@ function createProgramTemplate(config) {
             return current + 1;
         if (current >= totalLines)
             return totalLines;
+        const solvedBranchStep = branchStepInfo(current);
+        if (solvedBranchStep?.editable &&
+            state.branchPasses[solvedBranchStep.startLine]) {
+            const solvedBranch = branchInfoForBoundary(current);
+            if (solvedBranch &&
+                Number.isFinite(solvedBranch.expected) &&
+                solvedBranch.expected > current) {
+                return clampToBranchClose(current, Math.max(0, Math.min(totalLines, solvedBranch.expected)));
+            }
+        }
         const skipElseBoundary = skipElseBoundaryForLine(current);
         if (Number.isFinite(skipElseBoundary) &&
             skipElseBoundary !== current) {
@@ -1414,6 +1340,24 @@ function createProgramTemplate(config) {
         const entry = hintMap.get(state.boundary) ?? null;
         return resolveParts(entry, ctx);
     }
+    function solvedBranchInstructionForBoundary(boundary) {
+        for (const step of stepInfos) {
+            if (!step.ifHeaderOnly || !step.instructions)
+                continue;
+            if (!state.branchPasses[step.startLine])
+                continue;
+            if (boundary === step.boundary) {
+                return step.instructions;
+            }
+            const info = branchInfoForBoundary(step.boundary);
+            if (info &&
+                Number.isFinite(info.expected) &&
+                boundary === info.expected) {
+                return step.instructions;
+            }
+        }
+        return null;
+    }
     function renderCodePaneForBoundary() {
         if (!codeEl)
             return;
@@ -1728,27 +1672,30 @@ function createProgramTemplate(config) {
             }
         });
     }
+    function scrollInstructionsUpIfNeeded(scrollUp, instructionKey) {
+        if (!scrollUp || !instructionKey || instructionKey === state.lastInstructionKey)
+            return;
+        requestAnimationFrame(() => {
+            const rect = instructionsEl?.getBoundingClientRect();
+            if (!rect)
+                return;
+            const offset = 24;
+            const top = Math.max(0, rect.top + window.scrollY - offset);
+            if (top < window.scrollY) {
+                window.scrollTo({ top, behavior: "smooth" });
+            }
+        });
+    }
     function updateInstructions() {
         const key = state.boundary;
         const runLabel = runLabelForBoundary(state.boundary);
         const scrollUp = scrollUpByBoundary.get(key) !== false && !!instructionsEl;
-        let specKey = null;
+        let instructionKey = null;
         if (key === total && state.passes[key]) {
             setPartsContent(instructionsEl, "Program solved!");
-            specKey = "__solved__";
-            if (scrollUp && specKey !== state.lastInstructionKey) {
-                requestAnimationFrame(() => {
-                    const rect = instructionsEl?.getBoundingClientRect();
-                    if (!rect)
-                        return;
-                    const offset = 24;
-                    const top = Math.max(0, rect.top + window.scrollY - offset);
-                    if (top < window.scrollY) {
-                        window.scrollTo({ top, behavior: "smooth" });
-                    }
-                });
-            }
-            state.lastInstructionKey = specKey;
+            instructionKey = "__solved__";
+            scrollInstructionsUpIfNeeded(scrollUp, instructionKey);
+            state.lastInstructionKey = instructionKey;
             return;
         }
         let parts = getInstructionParts(key);
@@ -1770,38 +1717,23 @@ function createProgramTemplate(config) {
                 }
             }
         }
+        if (!parts) {
+            const solvedBranchInstructions = solvedBranchInstructionForBoundary(key);
+            if (solvedBranchInstructions) {
+                parts = String(solvedBranchInstructions);
+            }
+        }
         if (key === 0) {
-            if (parts) {
-                parts = parts;
-            }
-            else {
-                parts = null;
-            }
-            specKey = "__initial__";
+            instructionKey = "__initial__";
         }
         else {
             const spec = instructionMap.get(key) ?? null;
-            specKey = spec ? String(spec) : null;
+            instructionKey = spec ? String(spec) : null;
         }
-        if (!parts) {
-            parts = null;
-        }
-        parts = applyButtonTokens(parts, runLabel);
+        parts = applyButtonTokens(parts || null, runLabel);
         setPartsContent(instructionsEl, parts);
-        if (scrollUp && specKey && specKey !== state.lastInstructionKey) {
-            requestAnimationFrame(() => {
-                const rect = instructionsEl?.getBoundingClientRect();
-                if (!rect)
-                    return;
-                const offset = 24;
-                const top = Math.max(0, rect.top + window.scrollY - offset);
-                if (top < window.scrollY) {
-                    window.scrollTo({ top, behavior: "smooth" });
-                }
-            });
-        }
-        state.lastInstructionKey = specKey;
-        state.lastBoundary = key;
+        scrollInstructionsUpIfNeeded(scrollUp, instructionKey);
+        state.lastInstructionKey = instructionKey;
     }
     function hideHint() {
         if (!hintPanel)

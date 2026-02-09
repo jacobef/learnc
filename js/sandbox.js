@@ -1,9 +1,8 @@
-import { $, applyOtherNames, createSimpleSimulator, ensureBaseLayout, formatValueForType, randAddr, updateStepperTopControls, vbox, } from "./shared-core.js";
+import { $, applyOtherNames, createSimpleSimulator, ensureBaseLayout, formatValueForType, randAddr, vbox, } from "./shared-core.js";
 import { confettiRain } from "./confetti.js";
 const { main } = ensureBaseLayout();
 main.classList.add("main-panelized");
 const instructions = $('[data-role="sandbox-instructions"]');
-const codepane = $('[data-role="sandbox-code"]');
 const editor = $('[data-role="sandbox-editor"]');
 const lineNumbers = $('[data-role="sandbox-line-numbers"]');
 const errorGutter = $('[data-role="sandbox-error-gutter"]');
@@ -897,8 +896,6 @@ function updateLineGutters(linesOverride) {
         if (errorGutter)
             errorGutter.scrollTop = editor.scrollTop;
     }
-    if (codepane)
-        updateStepperTopControls(codepane);
 }
 if (editor) {
     editor.addEventListener("input", () => {

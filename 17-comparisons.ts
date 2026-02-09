@@ -45,30 +45,33 @@ createProgramTemplate({
       },
     },
     {
-      code: "x = (0 < 9 != 5 > 5)\n+ 2 * (2 < 9 + 8 != 1)\n+ 4 * (6 - 3 > 9 == 5);\n",
+      code: "x = (2 < 9 + 8 != 1)\n+ 2 * (0 < 7 == 3 < 3)\n+ 4 * (3 - 1 < 5 == 1);\n",
       editable: true,
       instructions:
         "This one is hard and not super important. If you'd rather skip it, feel free to jump to 18 in the sidebar.\n\n$c{>}, $c{>=}, $c{<}, and $c{<=} have higher precedence than $c{==} and $c{!=}, but lower precedence than addition and subtraction.",
       hints: (ctx) => {
         if (ctx.basicHintTopicIs("value", "x")) {
           const x = ctx.boxNamed("x")!;
-          if (x.value === "29") {
-            return "You're parsing it as if the precedence order was, highest to lowest: [$c{< <= > >=}], [$c{== !=}], [$c{+ -}]. For example, you've parsed line 7 as $c{(2 < 9) + (8 != 1)}. But the order should be: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 7 should be parsed as $c{(2 < (9 + 8)) != 1}.";
-          }
-          if (x.value === "4") {
-            return "You're parsing it as if the precedence order was, highest to lowest: [$c{+ -}], [$c{== !=}], [$c{< <= > >=}]. For example, you've parsed line 7 as $c{2 < ((9 + 8) != 1)}. But the order should be: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 7 should be parsed as $c{(2 < (9 + 8)) != 1}.";
-          }
-          if (x.value === "24") {
-            return "You're parsing it as if the precedence order was, highest to lowest: [$c{== !=}], [$c{< <= > >=}], [$c{+ -}]. For example, you've parsed line 7 as $c{(2 < 9) + (8 != 1)}. But the order should be: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 7 should be parsed as $c{(2 < (9 + 8)) != 1}.";
-          }
-          if (x.value === "0") {
-            return "You're parsing it as if [$c{< <= > >=}] and [$c{== !=}] have the same precedence (both below [$c{+ -}]). For example, you've parsed line 6 as $c{((0 < 9) != 5) > 5}. But the order should be, highest to lowest: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 7 should be parsed as $c{(2 < (9 + 8)) != 1}.";
+          if (x.value === "10") {
+            return "You're parsing it as if the precedence order was, highest to lowest: [$c{< <= > >=}], [$c{== !=}], [$c{+ -}]. For example, you've parsed line 6 as $c{(2 < 9) + (8 != 1)}. But the order should be: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 6 should be parsed as $c{(2 < (9 + 8)) != 1}.";
           }
           if (x.value === "2") {
-            return "You're parsing it as if [$c{+ -}], [$c{< <= > >=}], and [$c{== !=}] all have the same precedence. For example, you've parsed line 7 as $c{((2 < 9) + 8) != 1}. But the order should be, highest to lowest: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 7 should be parsed as $c{(2 < (9 + 8)) != 1}.";
+            return "You're parsing it as if the precedence order was, highest to lowest: [$c{+ -}], [$c{== !=}], [$c{< <= > >=}]. For example, you've parsed line 6 as $c{2 < ((9 + 8) != 1)}. But the order should be: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 6 should be parsed as $c{(2 < (9 + 8)) != 1}.";
           }
-          if (x.value === "28") {
-            return "You're parsing it as if [$c{< <= > >=}] and [$c{== !=}] have the same precedence (both above [$c{+ -}]). For example, you've parsed line 7 as $c{(2 < 9) + (8 != 1)}. But the order should be, highest to lowest: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 7 should be parsed as $c{(2 < (9 + 8)) != 1}.";
+          if (x.value === "16") {
+            return "You're parsing it as if the precedence order was, highest to lowest: [$c{== !=}], [$c{< <= > >=}], [$c{+ -}]. For example, you've parsed line 6 as $c{(2 < 9) + (8 != 1)}. But the order should be: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 6 should be parsed as $c{(2 < (9 + 8)) != 1}.";
+          }
+          if (x.value === "6") {
+            return "You're parsing it as if [$c{< <= > >=}] and [$c{== !=}] have the same precedence (both below [$c{+ -}]). For example, you've parsed line 7 as $c{((0 < 7) == 3) < 3}. But the order should be, highest to lowest: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 7 should be parsed as $c{(0 < 7) == (3 < 3)}.";
+          }
+          if (x.value === "7") {
+            return "You're parsing it as if [$c{+ -}], [$c{< <= > >=}], and [$c{== !=}] all have the same precedence. For example, you've parsed line 6 as $c{((2 < 9) + 8) != 1}. But the order should be, highest to lowest: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 6 should be parsed as $c{(2 < (9 + 8)) != 1}.";
+          }
+          if (x.value === "12") {
+            return "You're parsing it as if [$c{< <= > >=}] and [$c{== !=}] have the same precedence (both above [$c{+ -}]). For example, you've parsed line 6 as $c{(2 < 9) + (8 != 1)}. But the order should be, highest to lowest: [$c{+ -}], [$c{< <= > >=}], [$c{== !=}]. So, for example, line 6 should be parsed as $c{(2 < (9 + 8)) != 1}.";
+          }
+          if (x.value === "0") {
+            return "You're probably only looking at line 6. Lines 7 and 8 are part of the statement too.";
           }
           if (x.value === "") {
             return "$n{x}'s value shouldn't be empty.";
