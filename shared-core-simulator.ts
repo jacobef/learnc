@@ -1911,10 +1911,10 @@ export function createSimpleSimulator(
     if (tokens.some((t) => t.type === "unknown"))
       return "That line has a character that does not belong in a declaration or assignment.";
     if (tokens[0].type === "kw" && tokens[0].value === "if") {
-      return 'If statements should look like "if (condition) { ... }".';
+      return 'If statements should look like "if (condition) statement;" or "if (condition) { ... }".';
     }
     if (tokens[0].type === "kw" && tokens[0].value === "else") {
-      return 'Else statements should look like "else { ... }".';
+      return 'Else statements should look like "else statement;" or "else { ... }".';
     }
     if (tokens[0].type === "kw") {
       const baseType = tokens[0].value;
@@ -2042,32 +2042,71 @@ export function createSimpleSimulator(
     return { next, parsed };
   }
 
+  function ifHeaderEndIndex(tokens: Token[]): number {
+    if (!tokens.length) return -1;
+    if (tokens[0].type !== "kw" || tokens[0].value !== "if") return -1;
+    if (tokens.length < 2) return -1;
+    if (tokens[1].type !== "sym" || tokens[1].value !== "(") return -1;
+    let depth = 0;
+    for (let i = 1; i < tokens.length; i++) {
+      const tok = tokens[i];
+      if (tok.type === "sym" && tok.value === "(") {
+        depth++;
+        continue;
+      }
+      if (tok.type === "sym" && tok.value === ")") {
+        depth--;
+        if (depth < 0) return -1;
+        if (depth === 0) return i;
+      }
+    }
+    return -1;
+  }
+
   function splitStatements(tokens: Token[]): StatementPart[] {
     const parts: StatementPart[] = [];
     let current: Token[] = [];
     let startLine = 0;
+    const pushCurrent = (endLine: number, hasSemicolon: boolean) => {
+      if (!current.length) return;
+      parts.push({
+        tokens: current,
+        startLine: current[0]?.line ?? startLine,
+        endLine,
+        hasSemicolon,
+      });
+      current = [];
+    };
     for (const tok of tokens) {
-      if (tok.type === "sym" && tok.value === ";") {
-        parts.push({
-          tokens: current,
-          startLine: current[0]?.line ?? startLine,
-          endLine: tok.line,
-          hasSemicolon: true,
-        });
-        current = [];
-        startLine = tok.line;
-        continue;
+      if (current.length) {
+        const splitAfterElse =
+          current.length === 1 &&
+          current[0].type === "kw" &&
+          current[0].value === "else" &&
+          !(tok.type === "sym" && tok.value === "{");
+        const ifHeaderEnd = ifHeaderEndIndex(current);
+        const splitAfterIfHeader =
+          ifHeaderEnd >= 0 && ifHeaderEnd === current.length - 1;
+        if (splitAfterElse || splitAfterIfHeader) {
+          pushCurrent(current[current.length - 1].line, false);
+          startLine = tok.line;
+        }
       }
-      if (isBraceToken(tok)) {
+      if (tok.type === "sym" && tok.value === ";") {
         if (current.length) {
           parts.push({
             tokens: current,
             startLine: current[0]?.line ?? startLine,
-            endLine: current[current.length - 1].line,
-            hasSemicolon: false,
+            endLine: tok.line,
+            hasSemicolon: true,
           });
           current = [];
         }
+        startLine = tok.line;
+        continue;
+      }
+      if (isBraceToken(tok)) {
+        pushCurrent(current[current.length - 1]?.line ?? tok.line, false);
         parts.push({
           tokens: [tok],
           startLine: tok.line,
@@ -2080,14 +2119,7 @@ export function createSimpleSimulator(
       if (!current.length) startLine = tok.line;
       current.push(tok);
     }
-    if (current.length) {
-      parts.push({
-        tokens: current,
-        startLine: current[0]?.line ?? startLine,
-        endLine: current[current.length - 1].line,
-        hasSemicolon: false,
-      });
-    }
+    pushCurrent(current[current.length - 1]?.line ?? startLine, false);
     return parts;
   }
 
@@ -2103,6 +2135,12 @@ export function createSimpleSimulator(
     if (!part?.tokens?.length || part.tokens.length !== 1) return false;
     const tok = part.tokens[0];
     return tok.type === "kw" && tok.value === "else";
+  }
+
+  function isDeclarationPart(part: StatementPart | null): boolean {
+    if (!part?.tokens?.length) return false;
+    const parsed = parseStatementTokens(part.tokens);
+    return parsed?.kind === "decl" || parsed?.kind === "declAssign";
   }
 
   function buildIfStatementMap(
@@ -2122,41 +2160,108 @@ export function createSimpleSimulator(
     const lastLine = Number.isFinite(opts.lastLine)
       ? Math.max(0, Number(opts.lastLine))
       : Math.max(0, fallbackLastLine);
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      if (!part?.tokens?.length) continue;
-      const ifParsed = parseIfHeaderTokens(part.tokens);
-      if (!ifParsed) continue;
-      const headerStartLine = part.startLine;
-      const headerEndLine = part.endLine;
-      const openIndex = i + 1;
-      const openPart = parts[openIndex];
-      if (!openPart || !isBracePart(openPart, "{")) {
-        errors.set(headerEndLine, "If statements must use braces.");
-        continue;
+    const declarationNeedsBraces =
+      "Variable declarations in if/else statements require braces.";
+    type StatementExtent =
+      | { kind: "ok"; endIndex: number }
+      | { kind: "error"; line: number; message: string }
+      | { kind: "incomplete"; line: number };
+    const extentMemo = new Map<number, StatementExtent>();
+    const ifMemo = new Map<number, StatementExtent>();
+    const lineForPart = (part?: StatementPart | null): number =>
+      Number.isFinite(part?.endLine) ? part!.endLine : lastLine;
+
+    function parseStatementExtent(startIndex: number): StatementExtent {
+      if (startIndex >= parts.length) {
+        return { kind: "incomplete", line: lastLine };
       }
-      let depth = 0;
-      let closeIndex: number | null = null;
-      for (let j = openIndex; j < parts.length; j++) {
-        const probe = parts[j];
-        if (isBracePart(probe, "{")) {
-          depth++;
-          continue;
-        }
-        if (isBracePart(probe, "}")) {
-          depth--;
-          if (depth === 0) {
-            closeIndex = j;
-            break;
+      const memoized = extentMemo.get(startIndex);
+      if (memoized) return memoized;
+      const part = parts[startIndex];
+      if (!part?.tokens?.length) {
+        const result: StatementExtent = { kind: "ok", endIndex: startIndex };
+        extentMemo.set(startIndex, result);
+        return result;
+      }
+      if (isElsePart(part)) {
+        const result: StatementExtent = {
+          kind: "error",
+          line: lineForPart(part),
+          message: "Else statements must follow an if statement.",
+        };
+        extentMemo.set(startIndex, result);
+        return result;
+      }
+      const ifParsed = parseIfHeaderTokens(part.tokens);
+      if (ifParsed) {
+        const result = parseIfAt(startIndex, ifParsed);
+        extentMemo.set(startIndex, result);
+        return result;
+      }
+      if (isBracePart(part, "{")) {
+        let depth = 0;
+        for (let i = startIndex; i < parts.length; i++) {
+          const probe = parts[i];
+          if (isBracePart(probe, "{")) {
+            depth++;
+            continue;
+          }
+          if (isBracePart(probe, "}")) {
+            depth--;
+            if (depth === 0) {
+              const result: StatementExtent = { kind: "ok", endIndex: i };
+              extentMemo.set(startIndex, result);
+              return result;
+            }
           }
         }
+        const result: StatementExtent = { kind: "incomplete", line: lastLine };
+        extentMemo.set(startIndex, result);
+        return result;
       }
-      if (closeIndex == null) {
-        incomplete.add(lastLine);
-        continue;
+      const result: StatementExtent = { kind: "ok", endIndex: startIndex };
+      extentMemo.set(startIndex, result);
+      return result;
+    }
+
+    function parseIfAt(
+      headerIndex: number,
+      ifParsed: { expr: ExprNode; hasVar: boolean },
+    ): StatementExtent {
+      const memoized = ifMemo.get(headerIndex);
+      if (memoized) return memoized;
+      const header = parts[headerIndex];
+      const headerStartLine = header?.startLine ?? lineForPart(header);
+      const headerEndLine = header?.endLine ?? lineForPart(header);
+      const openIndex = headerIndex + 1;
+      const openPart = parts[openIndex];
+      if (!openPart) {
+        const result: StatementExtent = { kind: "incomplete", line: lastLine };
+        ifMemo.set(headerIndex, result);
+        return result;
       }
+      const thenUsesBraces = isBracePart(openPart, "{");
+      if (!thenUsesBraces && isDeclarationPart(openPart)) {
+        const immediateElseIndex = openIndex + 1;
+        if (isElsePart(parts[immediateElseIndex])) {
+          usedElse.add(immediateElseIndex);
+        }
+        const result: StatementExtent = {
+          kind: "error",
+          line: lineForPart(openPart),
+          message: declarationNeedsBraces,
+        };
+        ifMemo.set(headerIndex, result);
+        return result;
+      }
+      const thenExtent = parseStatementExtent(openIndex);
+      if (thenExtent.kind !== "ok") {
+        ifMemo.set(headerIndex, thenExtent);
+        return thenExtent;
+      }
+      const closeIndex = thenExtent.endIndex;
       let trueTarget = openIndex;
-      if (closeIndex > openIndex + 1) {
+      if (thenUsesBraces && closeIndex > openIndex + 1) {
         trueTarget = openIndex + 1;
       }
       let elseIndex: number | null = null;
@@ -2167,49 +2272,45 @@ export function createSimpleSimulator(
       const possibleElseIndex = closeIndex + 1;
       const possibleElse = parts[possibleElseIndex];
       if (isElsePart(possibleElse)) {
-        elseIndex = possibleElseIndex;
         usedElse.add(possibleElseIndex);
-        const elseOpenPart = parts[possibleElseIndex + 1];
-        if (!elseOpenPart || !isBracePart(elseOpenPart, "{")) {
-          errors.set(
-            possibleElse?.endLine ?? headerEndLine,
-            "Else statements must use braces.",
-          );
-          continue;
-        }
+        elseIndex = possibleElseIndex;
         elseOpenIndex = possibleElseIndex + 1;
-        let elseDepth = 0;
-        let foundElseClose: number | null = null;
-        for (let j = elseOpenIndex; j < parts.length; j++) {
-          const probe = parts[j];
-          if (isBracePart(probe, "{")) {
-            elseDepth++;
-            continue;
-          }
-          if (isBracePart(probe, "}")) {
-            elseDepth--;
-            if (elseDepth === 0) {
-              foundElseClose = j;
-              break;
-            }
-          }
+        const elseOpenPart = parts[elseOpenIndex];
+        if (!elseOpenPart) {
+          const result: StatementExtent = {
+            kind: "incomplete",
+            line: lastLine,
+          };
+          ifMemo.set(headerIndex, result);
+          return result;
         }
-        if (foundElseClose == null) {
-          incomplete.add(lastLine);
-          continue;
+        const elseUsesBraces = isBracePart(elseOpenPart, "{");
+        if (!elseUsesBraces && isDeclarationPart(elseOpenPart)) {
+          const result: StatementExtent = {
+            kind: "error",
+            line: lineForPart(elseOpenPart),
+            message: declarationNeedsBraces,
+          };
+          ifMemo.set(headerIndex, result);
+          return result;
         }
-        elseCloseIndex = foundElseClose;
+        const elseExtent = parseStatementExtent(elseOpenIndex);
+        if (elseExtent.kind !== "ok") {
+          ifMemo.set(headerIndex, elseExtent);
+          return elseExtent;
+        }
+        elseCloseIndex = elseExtent.endIndex;
         afterIndex = elseCloseIndex + 1;
         elseTarget = elseOpenIndex;
-        if (elseCloseIndex > elseOpenIndex + 1) {
+        if (elseUsesBraces && elseCloseIndex > elseOpenIndex + 1) {
           elseTarget = elseOpenIndex + 1;
         }
       }
       const falseTarget =
         elseTarget ??
         (afterIndex < parts.length ? afterIndex : parts.length);
-      map.set(i, {
-        headerIndex: i,
+      map.set(headerIndex, {
+        headerIndex,
         headerStartLine,
         headerEndLine,
         openIndex,
@@ -2224,6 +2325,25 @@ export function createSimpleSimulator(
         expr: ifParsed.expr,
         hasVar: ifParsed.hasVar,
       });
+      const result: StatementExtent = {
+        kind: "ok",
+        endIndex: elseCloseIndex ?? closeIndex,
+      };
+      ifMemo.set(headerIndex, result);
+      return result;
+    }
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (!part?.tokens?.length) continue;
+      const ifParsed = parseIfHeaderTokens(part.tokens);
+      if (!ifParsed) continue;
+      const result = parseIfAt(i, ifParsed);
+      if (result.kind === "error") {
+        errors.set(result.line, result.message);
+      } else if (result.kind === "incomplete") {
+        incomplete.add(result.line);
+      }
     }
     parts.forEach((part, idx) => {
       if (!isElsePart(part)) return;
@@ -2497,11 +2617,27 @@ export function createSimpleSimulator(
         }
         state = result.next;
       };
+      const flushControlPrefix = (nextTok: Token) => {
+        if (!currentTokens.length) return;
+        const splitAfterElse =
+          currentTokens.length === 1 &&
+          currentTokens[0].type === "kw" &&
+          currentTokens[0].value === "else" &&
+          !(nextTok.type === "sym" && nextTok.value === "{");
+        const ifHeaderEnd = ifHeaderEndIndex(currentTokens);
+        const splitAfterIfHeader =
+          ifHeaderEnd >= 0 && ifHeaderEnd === currentTokens.length - 1;
+        if (!splitAfterElse && !splitAfterIfHeader) return;
+        const endTok = currentTokens[currentTokens.length - 1];
+        applyStatementTokens(currentTokens, endTok, false);
+        currentTokens = [];
+      };
       while (
         tokenIndex < tokens.length &&
         tokens[tokenIndex].line === lineIndex
       ) {
         const tok = tokens[tokenIndex];
+        flushControlPrefix(tok);
         if (tok.type === "sym" && tok.value === ";") {
           if (currentTokens.length) {
             applyStatementTokens(currentTokens, tok);

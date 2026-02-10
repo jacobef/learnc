@@ -328,14 +328,33 @@ function renderCodePane(root, lines, boundary, opts = {}) {
         const ln = el(`<div class="ln">${i + 1}</div>`);
         const src = el('<div class="src"></div>');
         const rawLine = lines[i];
-        const fragments = strikeFragmentsByLine.get(i);
-        const hasFragments = !!(fragments && fragments.length);
-        if (hasFragments) {
+        const inStrikeRange = strikeRanges.some(([start, end]) => i >= start && i <= end);
+        const fragments = (strikeFragmentsByLine.get(i) || []).slice();
+        if (inStrikeRange && rawLine.length > 0) {
+            fragments.push({ start: 0, end: rawLine.length });
+        }
+        const mergedFragments = [];
+        if (fragments.length) {
             const sorted = fragments
                 .slice()
-                .sort((a, b) => a.start - b.start);
-            let cursor = 0;
+                .sort((a, b) => a.start - b.start || a.end - b.end);
             sorted.forEach(({ start, end }) => {
+                if (!mergedFragments.length) {
+                    mergedFragments.push({ start, end });
+                    return;
+                }
+                const last = mergedFragments[mergedFragments.length - 1];
+                if (start <= last.end) {
+                    last.end = Math.max(last.end, end);
+                    return;
+                }
+                mergedFragments.push({ start, end });
+            });
+        }
+        const hasFragments = mergedFragments.length > 0;
+        if (hasFragments) {
+            let cursor = 0;
+            mergedFragments.forEach(({ start, end }) => {
                 if (start > cursor) {
                     src.appendChild(document.createTextNode(rawLine.slice(cursor, start)));
                 }
@@ -362,7 +381,6 @@ function renderCodePane(root, lines, boundary, opts = {}) {
             i <= progressRangeEnd;
         if (inProgressRange)
             lr.classList.add("progress-range");
-        const inStrikeRange = strikeRanges.some(([start, end]) => i >= start && i <= end);
         if (inStrikeRange && !hasFragments)
             lr.classList.add("skipped");
         if (i === progressIndex)

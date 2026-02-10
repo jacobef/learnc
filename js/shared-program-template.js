@@ -253,6 +253,12 @@ function createProgramTemplate(config) {
         const tok = part.tokens[0];
         return tok.type === "sym" && tok.value === "{";
     };
+    const isCloseBracePart = (part) => {
+        if (!part?.tokens?.length || part.tokens.length !== 1)
+            return false;
+        const tok = part.tokens[0];
+        return tok.type === "sym" && tok.value === "}";
+    };
     steps.forEach((step, index) => {
         if (!step || typeof step !== "object") {
             failConfig(`Step ${index + 1} must be an object.`);
@@ -263,9 +269,7 @@ function createProgramTemplate(config) {
         if (!step.code.endsWith("\n")) {
             failConfig(`Step ${index + 1} code must end with a newline.`);
         }
-        if (typeof step.editable !== "boolean") {
-            failConfig(`Step ${index + 1} must specify editable as true or false.`);
-        }
+        const editable = step.editable === true;
         if (step.scrollUp !== undefined && typeof step.scrollUp !== "boolean") {
             failConfig(`Step ${index + 1} scrollUp must be true or false.`);
         }
@@ -295,9 +299,23 @@ function createProgramTemplate(config) {
         let ifHeaderOnly = false;
         let ifHeaderHasOpenBrace = false;
         if (headerIndices.length > 0) {
+            const hasElseBeforeHeader = (() => {
+                const headerPartIndex = nonEmptyParts.findIndex((part) => isIfHeaderPart(part));
+                if (headerPartIndex < 0)
+                    return false;
+                const elsePartIndex = nonEmptyParts.findIndex((part) => isElsePart(part));
+                return elsePartIndex >= 0 && elsePartIndex < headerPartIndex;
+            })();
             const headerOnlyCandidate = headerIndices.length === 1 &&
-                nonEmptyParts.every((part) => isIfHeaderPart(part) || isOpenBracePart(part));
+                nonEmptyParts.every((part) => isIfHeaderPart(part) ||
+                    isOpenBracePart(part) ||
+                    isCloseBracePart(part) ||
+                    isElsePart(part));
             if (headerOnlyCandidate) {
+                if (nonEmptyParts.some((part) => isElsePart(part)) &&
+                    !hasElseBeforeHeader) {
+                    failConfig(`Step ${index + 1} has an else-if style header that must keep $c{else} before $c{if}.`);
+                }
                 ifHeaderOnly = true;
                 ifHeaderHasOpenBrace = nonEmptyParts.some((part) => isOpenBracePart(part));
             }
@@ -343,7 +361,7 @@ function createProgramTemplate(config) {
             boundary: endLine + 1,
             instructions: step.instructions,
             hints: step.hints,
-            editable: step.editable,
+            editable,
             scrollUp: step.scrollUp,
             ifHeaderOnly,
             ifHeaderHasOpenBrace,
@@ -488,10 +506,29 @@ function createProgramTemplate(config) {
             return null;
         return clampBoundaryLine(closeLine + 1);
     }
+    function lineForPartIndex(partIndex) {
+        if (partIndex == null || !Number.isFinite(partIndex))
+            return null;
+        const part = parts[partIndex];
+        if (!Number.isFinite(part?.startLine))
+            return null;
+        return clampBoundaryLine(part.startLine);
+    }
+    function lineForFalseBranch(block) {
+        if (block.elseIndex == null)
+            return lineAfterClose(block);
+        const elseEntryIndex = block.elseTarget ??
+            block.elseOpenIndex ??
+            block.elseIndex;
+        const elseEntryLine = lineForPartIndex(elseEntryIndex);
+        if (Number.isFinite(elseEntryLine))
+            return elseEntryLine;
+        return lineAfterClose(block);
+    }
     function branchEntryLine(block, branch) {
         if (branch === "true")
             return lineAfterHeader(block);
-        return lineAfterClose(block);
+        return lineForFalseBranch(block);
     }
     function enclosingIfBlockForLine(lineIndex) {
         if (!Number.isFinite(lineIndex))
@@ -610,6 +647,42 @@ function createProgramTemplate(config) {
         if (!step?.ifHeaderOnly)
             return null;
         return step;
+    }
+    function isHeaderReachable(headerIndex) {
+        if (!Number.isFinite(headerIndex))
+            return false;
+        for (const parent of ifBlocks.map.values()) {
+            if (parent.headerIndex === headerIndex)
+                continue;
+            const parentEnd = parent.elseCloseIndex ?? parent.closeIndex;
+            if (headerIndex <= parent.headerIndex || headerIndex > parentEnd) {
+                continue;
+            }
+            const inTrueBranch = headerIndex >= parent.openIndex && headerIndex <= parent.closeIndex;
+            const inElseBranch = parent.elseIndex != null &&
+                headerIndex >= parent.elseIndex &&
+                headerIndex <= parentEnd;
+            if (!inTrueBranch && !inElseBranch)
+                continue;
+            const parentState = stateBeforePart(parent.headerIndex);
+            const parentCondition = simulator.evaluateCondition(parent.expr, parentState);
+            if ("error" in parentCondition)
+                continue;
+            if (inTrueBranch && !parentCondition.value)
+                return false;
+            if (inElseBranch && parentCondition.value)
+                return false;
+        }
+        return true;
+    }
+    function branchInfoForLabelBoundary(boundary) {
+        const step = branchStepInfo(boundary);
+        if (!step)
+            return null;
+        const headerIndex = headerIndexForLine(step.startLine);
+        if (headerIndex == null || !isHeaderReachable(headerIndex))
+            return null;
+        return branchInfoForBoundary(boundary);
     }
     function branchInfoForBoundary(boundary) {
         const step = stepEndingAtBoundary(boundary);
@@ -949,13 +1022,9 @@ function createProgramTemplate(config) {
         const nextStep = nextStepBoundary(boundary);
         const needsSolve = editableSet.has(nextStep) && !state.passes[nextStep];
         const verb = needsSolve ? "Solve" : "Run";
-        const branchStep = branchStepInfo(boundary);
-        const branchSolved = branchStep
-            ? !!state.branchPasses[branchStep.startLine]
-            : false;
-        const branchInfo = branchInfoForBoundary(boundary) ||
-            branchInfoForBoundary(nextStep);
-        if (branchInfo && !branchSolved) {
+        const branchInfo = branchInfoForLabelBoundary(boundary) ||
+            branchInfoForLabelBoundary(nextStep);
+        if (branchInfo) {
             const start = branchInfo.rangeStart + 1;
             const end = branchInfo.rangeEnd + 1;
             return formatRunLabel(start, end, true, "Branch from");
@@ -1426,10 +1495,33 @@ function createProgramTemplate(config) {
             }
             return -1;
         };
+        const headerStrikeStartForLine = (lineIndex, block) => {
+            const rawLine = lineList[lineIndex] || "";
+            const headerTok = parts[block.headerIndex]?.tokens?.[0];
+            const ifCol = Number.isFinite(headerTok?.col)
+                ? Number(headerTok.col)
+                : -1;
+            if (ifCol > 0 && ifCol <= rawLine.length) {
+                let foundElseCol = -1;
+                const re = /\belse\b/g;
+                let match = null;
+                while ((match = re.exec(rawLine)) !== null) {
+                    if (match.index >= ifCol)
+                        break;
+                    foundElseCol = match.index;
+                }
+                if (foundElseCol >= 0)
+                    return foundElseCol;
+            }
+            return 0;
+        };
         ifBlocks.map.forEach((block) => {
             if (key <= block.headerEndLine)
                 return;
-            const headerStep = stepByStartLine.get(block.headerStartLine);
+            const headerGroup = groupForLine(block.headerStartLine);
+            const headerStep = headerGroup
+                ? (stepByStartLine.get(headerGroup.startLine) ?? null)
+                : null;
             if (headerStep?.editable &&
                 !state.passes[headerStep.boundary] &&
                 key <= headerStep.boundary) {
@@ -1446,7 +1538,11 @@ function createProgramTemplate(config) {
                 return;
             const headerLine = block.headerStartLine;
             const headerText = lineList[headerLine] || "";
-            if (headerText.includes("else")) {
+            const blockElseLine = block.elseIndex != null &&
+                Number.isFinite(parts[block.elseIndex]?.startLine)
+                ? parts[block.elseIndex].startLine
+                : null;
+            if (headerText.includes("else") && blockElseLine === headerLine) {
                 const elseCol = elseColumnForLine(headerLine, block);
                 if (Number.isFinite(elseCol) && elseCol >= 0) {
                     strikeFragments.push({
@@ -1464,6 +1560,16 @@ function createProgramTemplate(config) {
                 ? parts[block.openIndex].startLine
                 : block.headerEndLine;
             if (!condition.value) {
+                if (Number.isFinite(ifOpenLine) &&
+                    Number.isFinite(headerLine) &&
+                    ifOpenLine > headerLine) {
+                    const headerStart = headerStrikeStartForLine(headerLine, block);
+                    strikeFragments.push({
+                        line: headerLine,
+                        start: headerStart,
+                        end: headerText.length,
+                    });
+                }
                 if (block.elseIndex != null &&
                     block.elseOpenIndex != null &&
                     ifCloseLine ===
@@ -2039,12 +2145,8 @@ function createProgramTemplate(config) {
             const nextBoundary = nextStepBoundary(boundary);
             const needsSolve = editableSet.has(nextBoundary) && !state.passes[nextBoundary];
             const verb = needsSolve ? "Solve" : "Run";
-            const branchStep = branchStepInfo(nextBoundary);
-            const branchSolved = branchStep
-                ? !!state.branchPasses[branchStep.startLine]
-                : false;
-            const branchInfo = branchInfoForBoundary(nextBoundary);
-            if (branchInfo && !branchSolved) {
+            const branchInfo = branchInfoForLabelBoundary(nextBoundary);
+            if (branchInfo) {
                 const start = branchInfo.rangeStart + 1;
                 const end = branchInfo.rangeEnd + 1;
                 return formatRunLabel(start, end, false, "Branch from");

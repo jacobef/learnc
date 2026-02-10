@@ -4,7 +4,6 @@ createProgramTemplate({
     steps: [
         {
             code: "int toaster;\n",
-            editable: false,
             instructions: "Click $runLineButton to continue.",
         },
         {

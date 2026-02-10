@@ -3,11 +3,8 @@ import { createProgramTemplate } from "./shared-program-template.js";
 createProgramTemplate({
   initialInstructions: "No instructions for this one. Good luck!",
   steps: [
-    {
-      code: "int spark = 6;\n",
-      editable: false,
-    },
-    { code: "int ember; // will be set later\n", editable: false },
+    { code: "int spark = 6;\n" },
+    { code: "int ember; // will be set later\n" },
     {
       code: "int cinder = 2 + 3 /* 5 */ * (4 - 1);\n",
       editable: true,
@@ -22,7 +19,7 @@ createProgramTemplate({
         return ctx.basicHint;
       },
     },
-    { code: "int* flame = &spark;\n", editable: false },
+    { code: "int* flame = &spark;\n" },
     {
       code: "ember = cinder / 3 + - 1;\n",
       editable: true,
@@ -44,9 +41,9 @@ createProgramTemplate({
         return ctx.basicHint;
       },
     },
-    { code: "int* smolder = &ember;\n", editable: false },
-    { code: "int** blaze = &smolder;\n", editable: false },
-    { code: "int*** inferno = &blaze;\n", editable: false },
+    { code: "int* smolder = &ember;\n" },
+    { code: "int** blaze = &smolder;\n" },
+    { code: "int*** inferno = &blaze;\n" },
     {
       code: "**inferno = &cinder;\n",
       editable: true,

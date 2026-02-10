@@ -5,7 +5,6 @@ createProgramTemplate({
   steps: [
     {
       code: "int x = 2 != 3;\n",
-      editable: false,
       instructions: "$c{!=} is the opposite of $c{==}.",
     },
     {

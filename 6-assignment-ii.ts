@@ -3,13 +3,10 @@ import { createProgramTemplate } from "./shared-program-template.js";
 createProgramTemplate({
   initialInstructions: "No instructions for this one. Good luck!",
   steps: [
-    {
-      code: "int hammer;\n",
-      editable: false,
-    },
-    { code: "int nail = 1;\n", editable: false },
-    { code: "hammer = nail;\n", editable: false },
-    { code: "nail = 2;\n", editable: false },
+    { code: "int hammer;\n" },
+    { code: "int nail = 1;\n" },
+    { code: "hammer = nail;\n" },
+    { code: "nail = 2;\n" },
     {
       code: "nail = hammer;\n",
       editable: true,

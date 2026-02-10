@@ -4,46 +4,16 @@ createProgramTemplate({
   initialInstructions:
     "When an $c{if} block is run, its $c{else} block is not. When an $c{if} block is not run, its $c{else} block is.",
   steps: [
-    {
-      code: "if (1) {\n",
-      editable: false,
-    },
-    {
-      code: "  int iron = 1;\n",
-      editable: false,
-    },
-    {
-      code: "} else {\n",
-      editable: false,
-    },
-    {
-      code: "  int iron = 2;\n",
-      editable: false,
-    },
-    {
-      code: "}\n",
-      editable: false,
-    },
-    {
-      code: "if (0) {\n",
-      editable: false,
-    },
-    {
-      code: "  int iron = 1;\n",
-      editable: false,
-    },
-    {
-      code: "} else {\n",
-      editable: false,
-    },
-    {
-      code: "  int iron = 2;\n",
-      editable: false,
-    },
-    {
-      code: "}\n",
-      editable: false,
-    },
+    { code: "if (1) {\n" },
+    { code: "  int iron = 1;\n" },
+    { code: "} else {\n" },
+    { code: "  int iron = 2;\n" },
+    { code: "}\n" },
+    { code: "if (0) {\n" },
+    { code: "  int iron = 1;\n" },
+    { code: "} else {\n" },
+    { code: "  int iron = 2;\n" },
+    { code: "}\n" },
     {
       code: "if (1 - 1 * -1) {\n",
       editable: true,
@@ -69,19 +39,10 @@ createProgramTemplate({
         return ctx.basicHint;
       },
     },
-    {
-      code: "} else {\n",
-      editable: false,
-      hints: (ctx) => ctx.basicHint,
-    },
-    {
-      code: "  int copper = 1 - 1 * -1;\n}\n",
-      editable: false,
-    },
-    {
-      code: "int gold;\n",
-      editable: false,
-    },
+    { code: "} else {\n" },
+    { code: "  int copper = 1 - 1 * -1;\n" },
+    { code: "}\n" },
+    { code: "int gold;\n" },
     {
       code: "if (1 * -1 - 1) {\n  int tin = 0;\n  gold = 0;\n} else {\n  gold = 1;\n  double silver = 1;\n}\n",
       editable: true,

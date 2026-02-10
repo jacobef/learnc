@@ -22,6 +22,7 @@ const DEFAULT_NAV_ITEMS: NavItem[] = [
   { href: "18-if.html", label: "18. If" },
   { href: "19-else.html", label: "19. Else" },
   { href: "20-abs.html", label: "20. Absolute Value" },
+  { href: "21-else-if.html", label: "21. Else If" },
   { href: "sandbox.html", label: "Sandbox" },
 ];
 

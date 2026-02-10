@@ -4,17 +4,14 @@ createProgramTemplate({
     steps: [
         {
             code: "int a; // mary had a\n",
-            editable: false,
             instructions: "Anything after $c{//} on a line is ignored. This is called a line comment.",
         },
         {
             code: "// little lamb\n",
-            editable: false,
             instructions: "Comments can appear on their own lines as well.",
         },
         {
             code: "int b; int c;\n",
-            editable: false,
             instructions: "Multiple statements can appear on one line.",
         },
         {
@@ -29,17 +26,14 @@ createProgramTemplate({
         },
         {
             code: "int f\n= 5\n;\n",
-            editable: false,
             instructions: "A statement can be split across multiple lines.",
         },
         {
             code: "/* whose fleece\nwas white as snow */\n",
-            editable: false,
             instructions: "A comment can appear on multiple lines, or within a line, beginning with $c{/*} and ending with $c{*/}. This is called a block comment.",
         },
         {
             code: "int g /* hi */ = 3;\n",
-            editable: false,
             instructions: "A comment can appear on multiple lines, or within a line, beginning with $c{/*} and ending with $c{*/}. This is called a block comment.",
         },
         {

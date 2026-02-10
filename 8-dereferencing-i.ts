@@ -17,7 +17,6 @@ createExpressionEvalTemplate({
   steps: [
     {
       expression: "*c",
-      editable: false,
       boxes: [
         { name: "a", type: "int", value: "", address: "108" },
         { name: "b", type: "int", value: "", address: "112" },
@@ -28,14 +27,12 @@ createExpressionEvalTemplate({
     },
     {
       expression: "*f",
-      editable: false,
       boxes: defBoxes,
       instructions:
         "In general, $c{*X} refers to the variable whose address is $n{X}'s value. Here, $c{*f} refers to $n{e}.",
     },
     {
       expression: "*e",
-      editable: false,
       boxes: defBoxes,
       instructions:
         "In general, $c{*X} refers to the variable whose address is $n{X}'s value. Here, $c{*e} refers to $n{d}.",

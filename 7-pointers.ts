@@ -4,10 +4,10 @@ createProgramTemplate({
   initialInstructions:
     "This is where addresses become relevant.\nNo other instructions for this one. Good luck!",
   steps: [
-    { code: "int deer;\n", editable: false },
-    { code: "int hare;\n", editable: false },
-    { code: "int* wolf;\n", editable: false },
-    { code: "wolf = &deer;\n", editable: false },
+    { code: "int deer;\n" },
+    { code: "int hare;\n" },
+    { code: "int* wolf;\n" },
+    { code: "wolf = &deer;\n" },
     {
       code: "wolf = &hare;\n",
       editable: true,

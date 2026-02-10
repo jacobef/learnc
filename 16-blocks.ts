@@ -4,34 +4,13 @@ createProgramTemplate({
   initialInstructions:
     "For once, I've made the whitespace here helpful rather than misleading.\nNo other instructions for this one. Good luck!",
   steps: [
-    {
-      code: "int brick = 10;\n",
-      editable: false,
-    },
-    {
-      code: "{\n",
-      editable: false,
-    },
-    {
-      code: "  int stone;\n",
-      editable: false,
-    },
-    {
-      code: "  double glass = 3.5;\n",
-      editable: false,
-    },
-    {
-      code: "  brick = 5;\n",
-      editable: false,
-    },
-    {
-      code: "}\n",
-      editable: false,
-    },
-    {
-      code: "{\n",
-      editable: false,
-    },
+    { code: "int brick = 10;\n" },
+    { code: "{\n" },
+    { code: "  int stone;\n" },
+    { code: "  double glass = 3.5;\n" },
+    { code: "  brick = 5;\n" },
+    { code: "}\n" },
+    { code: "{\n" },
     {
       code: "  int steel = 9;\n",
       editable: true,
@@ -50,10 +29,7 @@ createProgramTemplate({
         return ctx.basicHint;
       },
     },
-    {
-      code: "{\n",
-      editable: false,
-    },
+    { code: "{\n" },
     {
       code: "  double wood = brick == 10;\n",
       editable: true,
@@ -74,14 +50,8 @@ createProgramTemplate({
         return ctx.basicHint;
       },
     },
-    {
-      code: "  int* copper;\n",
-      editable: false,
-    },
-    {
-      code: "  {\n",
-      editable: false,
-    },
+    { code: "  int* copper;\n" },
+    { code: "  {\n" },
     {
       code: "    int straw = 9.75;\n",
       editable: true,
@@ -92,18 +62,9 @@ createProgramTemplate({
         return ctx.basicHint;
       },
     },
-    {
-      code: "  }\n",
-      editable: false,
-    },
-    {
-      code: "  {\n",
-      editable: false,
-    },
-    {
-      code: "    int plastic;\n",
-      editable: false,
-    },
+    { code: "  }\n" },
+    { code: "  {\n" },
+    { code: "    int plastic;\n" },
     {
       code: "    wood = brick;\n",
       editable: true,

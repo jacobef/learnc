@@ -23,7 +23,7 @@ interface ExpressionStep {
   boxes?: BoxState[];
   instructions?: Parts;
   hints?: Parts | ExpressionHint;
-  editable: boolean;
+  editable?: boolean;
   fixValueCategory?: boolean;
 }
 
@@ -293,6 +293,10 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
   if (!Array.isArray(steps) || !steps.length) {
     failConfig("Expression template requires at least one step.");
   }
+  const normalizedSteps = steps.map((step) => ({
+    ...step,
+    editable: step.editable === true,
+  }));
 
   const {
     instructionsEl,
@@ -331,7 +335,9 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
   let activeMode: AnswerMode = "selected";
 
   function stepFor(index: number): ExpressionStep {
-    return steps[Math.max(0, Math.min(steps.length - 1, index))];
+    return normalizedSteps[
+      Math.max(0, Math.min(normalizedSteps.length - 1, index))
+    ]!;
   }
 
   function setStatus(text: string, ok: boolean, silent: boolean = false) {

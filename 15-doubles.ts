@@ -3,19 +3,14 @@ import { createProgramTemplate } from "./shared-program-template.js";
 createProgramTemplate({
   initialInstructions: "Click $runLineButton to continue.",
   steps: [
-    {
-      code: "double clown = 4.5;\n",
-      editable: false,
-    },
+    { code: "double clown = 4.5;\n" },
     {
       code: "int juggler = clown;\n",
-      editable: false,
       instructions:
         "When an $t{int} is assigned to a $t{double}, the decimal part is dropped.",
     },
     {
       code: "double circus = juggler;\n",
-      editable: false,
       instructions:
         "When a $t{double} is assigned to an $t{int}, the mathematical value is preserved. In this case, $v{4} is simply converted to $v{4.0}.",
     },
@@ -87,10 +82,7 @@ createProgramTemplate({
         return ctx.basicHint;
       },
     },
-    {
-      code: "double* ring = &circus;\n",
-      editable: false,
-    },
+    { code: "double* ring = &circus;\n" },
     {
       code: "double** tent = &ring;\n",
       editable: true,
@@ -110,10 +102,7 @@ createProgramTemplate({
       editable: true,
       hints: (ctx) => {
         if (ctx.basicHintTopicIs("value", "ring")) {
-          const [ring, clown] = ctx.boxesNamed(
-            "ring",
-            "clown",
-          );
+          const [ring, clown] = ctx.boxesNamed("ring", "clown");
           if (ring!.value === clown!.value) {
             return "$n{ring} should store $n{clown}'s address, not $n{clown}'s value.";
           }

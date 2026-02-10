@@ -6,7 +6,6 @@ createProgramTemplate({
   steps: [
     {
       code: "int a = 5 + 2 * (3 - 1);\n",
-      editable: false,
       instructions:
         "Order of operations, from highest to lowest: parenthesis, then multiplication and division, then addition and subtraction.",
     },
@@ -36,25 +35,19 @@ createProgramTemplate({
         return ctx.basicHint;
       },
     },
-    {
-      code: "int b = 12 / 4;\n",
-      editable: false,
-    },
+    { code: "int b = 12 / 4;\n" },
     {
       code: "a = 5 / 3;\n",
-      editable: false,
       instructions:
         "Division drops the decimal part. 5 divided by 3 is 1.666..., which becomes $v{1}.",
     },
     {
       code: "a = -7 / 2;\n",
-      editable: false,
       instructions:
         "Division drops the decimal part. -7 divided by 2 is -3.5, which becomes $v{-3}.\n\nTrivia, feel free to ignore: When used as negation (e.g. $c{-7}) as opposed to subtraction (e.g. $c{9-8}), the $c{-} operator has higher precedence than multiplication and division, so this is parsed as $c{(-7) / 2}, not $c{-(7 / 2)}. In this case it doesn't affect the final result, but in very rare cases that we'll encounter in much later programs, it does.",
     },
     {
       code: "a = 1 / 2 + 3 / 4;\n",
-      editable: false,
       instructions:
         "The decimal part is dropped by each division itself, not at the end. Both $c{1 / 2} (0.5) and $c{3 / 4} (0.75) immediately round to 0, so this becomes $c{a = 0 + 0;}.",
     },
@@ -70,13 +63,11 @@ createProgramTemplate({
     },
     {
       code: "int c = b+1 == 4;\n",
-      editable: false,
       instructions:
         '$c{x == y} evaluates to 1 if x and y have equal values, or 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\nThe name of this operation is "equality".',
     },
     {
       code: "int d = b == 58;\n",
-      editable: false,
       instructions:
         '$c{x == y} evaluates to 1 if x and y have equal values, or 0 if they don\'t. $c{==} has lower precedence than addition and subtraction.\nThe name of this operation is "equality".',
     },
@@ -117,7 +108,6 @@ createProgramTemplate({
     },
     {
       code: "int g = 0 == 1 == 2;\n",
-      editable: false,
       instructions:
         "$c{==} is left-associative, so this is parsed as $c{(0 == 1) == 2}.",
     },

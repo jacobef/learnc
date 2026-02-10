@@ -3,12 +3,9 @@ import { createProgramTemplate } from "./shared-program-template.js";
 createProgramTemplate({
   initialInstructions: "No instructions for this one. Good luck!",
   steps: [
-    {
-      code: "int yin = 2;\n",
-      editable: false,
-    },
-    { code: "int yang = 5;\n", editable: false },
-    { code: "yin = yang + yin;\n", editable: false },
+    { code: "int yin = 2;\n" },
+    { code: "int yang = 5;\n" },
+    { code: "yin = yang + yin;\n" },
     {
       code: "yang = 1 + yang;\n",
       editable: true,

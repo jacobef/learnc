@@ -7,13 +7,13 @@ createProgramTemplate({
             editable: true,
             hints: (ctx) => ctx.basicHint,
         },
-        { code: "int east = 9;\n", editable: false },
+        { code: "int east = 9;\n" },
         {
             code: "north = 5;\n",
             editable: true,
             hints: (ctx) => ctx.basicHint,
         },
-        { code: "int south = -5;\n", editable: false },
+        { code: "int south = -5;\n" },
         {
             code: "int west = -9;\n",
             editable: true,

@@ -167,6 +167,10 @@ function createExpressionEvalTemplate(config) {
     if (!Array.isArray(steps) || !steps.length) {
         failConfig("Expression template requires at least one step.");
     }
+    const normalizedSteps = steps.map((step) => ({
+        ...step,
+        editable: step.editable === true,
+    }));
     const { instructionsEl, continueBtn, sectionEl, expressionEl, answerSlot, answerResult, toggleWrap, hintPanel, hintBtn, useSelectedBtn, useEnteredBtn, checkBtn, statusEl, stageEl, statePanel, } = ensureExpressionLayout();
     const simulator = createSimpleSimulator({
         allowVarAssign: true,
@@ -184,7 +188,7 @@ function createExpressionEvalTemplate(config) {
     let selectedName = null;
     let activeMode = "selected";
     function stepFor(index) {
-        return steps[Math.max(0, Math.min(steps.length - 1, index))];
+        return normalizedSteps[Math.max(0, Math.min(normalizedSteps.length - 1, index))];
     }
     function setStatus(text, ok, silent = false) {
         if (!statusEl)

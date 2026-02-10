@@ -4,14 +4,10 @@ createExpressionEvalTemplate({
   steps: [
     {
       expression: "5",
-      editable: false,
       instructions:
         "An expression is something that can be assigned to a variable. For example, $c{5} is an expression because it can appear in e.g. $c{int x = 5;}.",
     },
-    {
-      expression: "7/3",
-      editable: false,
-    },
+    { expression: "7/3" },
     {
       expression: "x+3",
       boxes: [
@@ -29,17 +25,14 @@ createExpressionEvalTemplate({
     },
     {
       expression: "5.25",
-      editable: false,
       instructions: "A number with a decimal point has type $t{double}.",
     },
     {
       expression: "5.0",
-      editable: false,
       instructions: "A number with a decimal point has type $t{double}.",
     },
     {
       expression: "1.25+2.5",
-      editable: false,
       instructions:
         "An operation performed on $t{double}s always results in a $t{double}.",
     },
@@ -69,7 +62,6 @@ createExpressionEvalTemplate({
     },
     {
       expression: "0.5/4.0",
-      editable: false,
       instructions:
         "Unlike with $t{int}s, division with $t{double}s doesn't chop off the decimal part.",
     },
@@ -115,13 +107,11 @@ createExpressionEvalTemplate({
     },
     {
       expression: "2/4.0",
-      editable: false,
       instructions:
         "When an operation is performed on a $t{double} and an $t{int}, the operation is performed as if both were $t{double}s. Here, $c{2/4.0} is performed as $c{2.0/4.0}, which is $v{0.5}.",
     },
     {
       expression: "0.5+4/8",
-      editable: false,
       instructions:
         "Due to order of operations, the $c{4/8} happens first. $c{4} and $c{8} are both $t{int}s, so the $c{4/8} evaluates to 0.",
     },

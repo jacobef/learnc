@@ -2,14 +2,8 @@ import { createProgramTemplate } from "./shared-program-template.js";
 createProgramTemplate({
     initialInstructions: "Use the $backButton and $runLineButton buttons, or the left and right arrow keys, to see how the code changes the program state.",
     steps: [
-        {
-            code: "int m;\n",
-            editable: false,
-        },
-        {
-            code: "m = 3;\n",
-            editable: false,
-        },
+        { code: "int m;\n" },
+        { code: "m = 3;\n" },
         {
             code: "m = 5;\n",
             editable: true,

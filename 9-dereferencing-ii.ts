@@ -4,31 +4,22 @@ createProgramTemplate({
   initialInstructions:
     "Let's revisit 7, but with some lines added at the end. To understand these new lines, we need a better understanding of what was going on in 7. Click $runLineButton to continue.",
   steps: [
-    {
-      code: "int deer;\n",
-      editable: false,
-    },
-    { code: "int hare;\n", editable: false },
-    { code: "int* wolf;\n", editable: false },
+    { code: "int deer;\n" },
+    { code: "int hare;\n" },
+    { code: "int* wolf;\n" },
     {
       code: "wolf = &deer;\n",
-      editable: false,
       instructions:
         "When $n{wolf} is assigned to $c{&deer}, $n{deer} gains an additional name. Use the $showAliasesButton button under $n{deer} to reveal this name.",
     },
     {
       code: "wolf = &hare;\n",
-      editable: false,
       instructions:
         "When $n{wolf} is assigned to $c{&hare}, the $n{*wolf} name moves from $n{deer} to $n{hare}.",
     },
-    {
-      code: "int** bear;\n",
-      editable: false,
-    },
+    { code: "int** bear;\n" },
     {
       code: "bear = &wolf;\n",
-      editable: false,
       instructions:
         "$c{bear = &wolf;} adds names to $n{wolf} and $n{hare}. Use the $showAliasesButton buttons under those variables to reveal them.",
     },
@@ -44,7 +35,7 @@ createProgramTemplate({
         return ctx.basicHint;
       },
     },
-    { code: "deer = 50;\n", editable: false },
+    { code: "deer = 50;\n" },
     {
       code: "*wolf = 11;\n",
       editable: true,
