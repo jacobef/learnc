@@ -29,6 +29,12 @@ createProgramTemplate({
       editable: true,
       instructions:
         "What should the program state look like after this entire statement is run?",
+      hints: (ctx) => {
+        if (ctx.basicHintTopicIs("value", "x")) {
+          return "$c{y} is 0, and $c{x == y} is also 0, so the $c{else} block is the one that should run.";
+        }
+        return ctx.basicHint;
+      },
     },
   ],
   next: "sandbox.html?finished=1",
