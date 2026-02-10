@@ -38,14 +38,13 @@ createProgramTemplate({
             code: "  if (foam >= 5.0) {\n    reef = wave;\n  } else if (foam > 4.0) {\n    shore = &reef;\n  } else {\n    *shore = tide;\n  }\n",
             editable: true,
             hints: (ctx) => {
-                const [reef, shore, wave] = ctx.boxesNamed("reef", "shore", "wave");
-                if (reef.value === wave.value) {
+                if (ctx.basicHintTopicIs("value", "reef")) {
                     return "$n{foam} is $v{4.5}. Is $c{4.5 >= 5.0} true?";
                 }
-                if (wave.value === "7") {
+                if (ctx.basicHintTopicIs("value", "wave")) {
                     return "$c{foam >= 5.0} is false (0), but $c{foam > 4.0} is true (1), so the $c{else if} block runs, not the $c{else} block.";
                 }
-                if (shore.value !== reef.address) {
+                if (ctx.basicHintTopicIs("value", "shore")) {
                     return "$c{foam >= 5.0} is false (0), but $c{foam > 4.0} is true (1). The $c{else if} block sets $n{shore} to $c{&reef}.";
                 }
                 return ctx.basicHint;
@@ -55,17 +54,17 @@ createProgramTemplate({
             code: "  *shore = 9 / foam;\n",
             editable: true,
             hints: (ctx) => {
-                const [wave, reef] = ctx.boxesNamed("wave", "reef");
-                if (wave.value !== "4") {
+                if (ctx.basicHintTopicIs("value", "wave")) {
                     return "$n{shore} was changed to $c{&reef} in the previous step, so $n{*shore} now refers to $n{reef}, not $n{wave}. Click $resetButton and try again.";
                 }
-                if (reef.value === "10") {
-                    return "$n{*shore} refers to the variable whose address is $n{shore}'s value. After the previous step, $n{shore} points to $n{reef}.";
-                }
-                if (reef.value === "2.0") {
-                    return "$n{reef} is an $t{int}, so the decimal part should be dropped.";
-                }
                 if (ctx.basicHintTopicIs("value", "reef")) {
+                    const reef = ctx.boxNamed("reef");
+                    if (reef.value === "10") {
+                        return "$n{*shore} refers to the variable whose address is $n{shore}'s value. After the previous step, $n{shore} points to $n{reef}.";
+                    }
+                    if (reef.value === "2.0") {
+                        return "$n{reef} is an $t{int}, so the decimal part should be dropped.";
+                    }
                     return "$c{9} ($t{int}) divided by $n{foam} ($v{4.5}, $t{double}) uses $t{double} division: $c{9.0 / 4.5} = $v{2.0}. Then assigning to $n{reef} ($t{int}) drops the decimal.";
                 }
                 return ctx.basicHint;
@@ -74,12 +73,7 @@ createProgramTemplate({
         {
             code: "}\n",
             editable: true,
-            hints: (ctx) => {
-                if (ctx.boxNamed("foam")) {
-                    return "$n{foam} was created inside this block, so it should be removed.";
-                }
-                return ctx.basicHint;
-            },
+            hints: (ctx) => ctx.basicHint,
         },
         {
             code: "int sand = *shore * reef;\n",
