@@ -14,7 +14,7 @@ const DEFAULT_NAV_ITEMS: NavItem[] = [
   { href: "10-whitespace-comments.html", label: "10. Whitespace & Comments" },
   { href: "11-integer-arithmetic.html", label: "11. Integer Arithmetic" },
   { href: "12-assignment-iii.html", label: "12. Assignment III" },
-  { href: "13-review.html", label: "13. Review" },
+  { href: "13-review.html", label: "13. Review I" },
   { href: "14-expressions-doubles.html", label: "14. Expressions & Doubles" },
   { href: "15-doubles.html", label: "15. Doubles" },
   { href: "16-blocks.html", label: "16. Blocks" },
@@ -23,6 +23,7 @@ const DEFAULT_NAV_ITEMS: NavItem[] = [
   { href: "19-else.html", label: "19. Else" },
   { href: "20-abs.html", label: "20. Absolute Value" },
   { href: "21-else-if.html", label: "21. Else If" },
+  { href: "22-review-ii.html", label: "22. Review II" },
   { href: "sandbox.html", label: "Sandbox" },
 ];
 

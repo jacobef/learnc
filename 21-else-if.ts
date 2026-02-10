@@ -37,7 +37,6 @@ createProgramTemplate({
       },
     },
   ],
-  next: "sandbox.html?finished=1",
-  isLast: true,
+  next: "22-review-ii.html",
   workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });
