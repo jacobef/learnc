@@ -174,6 +174,20 @@ function createProgramTemplate(config) {
             if (node && node.parentElement !== target)
                 target.appendChild(node);
         });
+        if (!hintPanel)
+            return;
+        if (mobileMode && mobileActionsEl) {
+            if (hintPanel.parentElement !== mobileActionsEl) {
+                mobileActionsEl.appendChild(hintPanel);
+            }
+            return;
+        }
+        const desktopHintParent = instructionsEl?.parentElement ?? null;
+        if (desktopHintParent &&
+            (hintPanel.parentElement !== desktopHintParent ||
+                hintPanel.nextElementSibling !== instructionsEl)) {
+            desktopHintParent.insertBefore(hintPanel, instructionsEl);
+        }
     }
     function updateMobileActionsVisibility() {
         if (!mobileActionsEl)

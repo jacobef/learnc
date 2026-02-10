@@ -347,6 +347,21 @@ function createProgramTemplate(
     [addBtn, resetBtn, hintBtn, checkBtn, statusEl].forEach((node) => {
       if (node && node.parentElement !== target) target.appendChild(node);
     });
+    if (!hintPanel) return;
+    if (mobileMode && mobileActionsEl) {
+      if (hintPanel.parentElement !== mobileActionsEl) {
+        mobileActionsEl.appendChild(hintPanel);
+      }
+      return;
+    }
+    const desktopHintParent = instructionsEl?.parentElement ?? null;
+    if (
+      desktopHintParent &&
+      (hintPanel.parentElement !== desktopHintParent ||
+        hintPanel.nextElementSibling !== instructionsEl)
+    ) {
+      desktopHintParent.insertBefore(hintPanel, instructionsEl);
+    }
   }
 
   function updateMobileActionsVisibility() {
