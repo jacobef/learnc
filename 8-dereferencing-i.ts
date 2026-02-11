@@ -94,5 +94,6 @@ createExpressionEvalTemplate({
       },
     },
   ],
+  workspace: { alwaysShowExprResult: false },
   next: "9-dereferencing-ii.html",
 });

@@ -5,6 +5,7 @@ function collectExpressionElements(root = document) {
         continueBtn: root.querySelector('[data-role="expr-continue"]'),
         sectionEl: root.querySelector('[data-role="expr-section"]'),
         expressionEl: root.querySelector('[data-role="expr-expression"]'),
+        answerPanel: root.querySelector('[data-role="expr-answer-panel"]'),
         answerSlot: root.querySelector('[data-role="expr-answer-slot"]'),
         answerResult: root.querySelector('[data-role="expr-answer-result"]'),
         toggleWrap: root.querySelector('[data-role="expr-answer-toggle"]'),
@@ -73,6 +74,7 @@ function ensureExpressionLayout() {
     const row = document.createElement("div");
     row.className = "expr-eval-row panel-row";
     const answerPanel = document.createElement("div");
+    answerPanel.dataset.role = "expr-answer-panel";
     answerPanel.className = "panel expr-answer-panel panel-scroll";
     const answerTitle = document.createElement("div");
     answerTitle.className = "panel-title";
@@ -153,7 +155,8 @@ function ensureExpressionLayout() {
     return collectExpressionElements();
 }
 function createExpressionEvalTemplate(config) {
-    const { steps = [], initialInstructions = "", next = null, isLast = false, } = config;
+    const { steps = [], initialInstructions = "", next = null, isLast = false, workspace = {}, } = config;
+    const alwaysShowExprResult = workspace.alwaysShowExprResult !== false;
     const endLabel = (() => {
         if (isLast)
             return "Finish";
@@ -171,7 +174,7 @@ function createExpressionEvalTemplate(config) {
         ...step,
         editable: step.editable === true,
     }));
-    const { instructionsEl, continueBtn, sectionEl, expressionEl, answerSlot, answerResult, toggleWrap, hintPanel, hintBtn, useSelectedBtn, useEnteredBtn, checkBtn, statusEl, stageEl, statePanel, } = ensureExpressionLayout();
+    const { instructionsEl, continueBtn, sectionEl, expressionEl, answerPanel, answerSlot, answerResult, toggleWrap, hintPanel, hintBtn, useSelectedBtn, useEnteredBtn, checkBtn, statusEl, stageEl, statePanel, } = ensureExpressionLayout();
     const simulator = createSimpleSimulator({
         allowVarAssign: true,
         requireSourceValue: true,
@@ -374,6 +377,20 @@ function createExpressionEvalTemplate(config) {
         });
         return { kind: "rvalue", type, value };
     }
+    function shouldShowExprResultPane(step) {
+        if (alwaysShowExprResult)
+            return true;
+        const evaluated = evaluatedAnswer(step);
+        if ("error" in evaluated)
+            return true;
+        if (evaluated.result.kind !== "lvalue")
+            return true;
+        if (step.fixValueCategory)
+            return false;
+        if (!step.editable)
+            return false;
+        return true;
+    }
     function buildHintContext(step) {
         const expected = expectedAnswer(step);
         const selected = selectedBox(step);
@@ -488,6 +505,7 @@ function createExpressionEvalTemplate(config) {
     function render() {
         const step = stepFor(state.boundary);
         const hasState = Array.isArray(step.boxes);
+        const showExprResultPane = shouldShowExprResultPane(step);
         if (state.showIntro) {
             setPartsContent(instructionsEl, initialInstructions || null);
             setControlVisible(continueBtn, true);
@@ -498,6 +516,7 @@ function createExpressionEvalTemplate(config) {
         }
         setControlVisible(continueBtn, false);
         setControlVisible(sectionEl, true);
+        setControlVisible(answerPanel, showExprResultPane);
         const instructionText = step.instructions ?? null;
         setPartsContent(instructionsEl, instructionText);
         if (expressionEl)

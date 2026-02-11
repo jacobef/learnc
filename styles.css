@@ -1057,6 +1057,12 @@ body.panel-layout .panel-controls.controls-main {
     display: none !important;
 }
 
+.reserved-button-slot.hidden {
+    display: inline-flex !important;
+    visibility: hidden;
+    pointer-events: none;
+}
+
 .codepane {
     border: none;
     background: #fff;

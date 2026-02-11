@@ -1203,7 +1203,7 @@ function stepperButtons(root, dir) {
     });
     return list;
 }
-function createStepper({ root, prevButtons = null, nextButtons = null, lines = [], nextPage = null, getBoundary, setBoundary, onBeforeChange, onAfterChange, isStepLocked, getStepBadge, getNextLabel, getNextBoundary, getPrevBoundary, endLabel, allowSameBoundary = false, } = {}) {
+function createStepper({ root, prevButtons = null, nextButtons = null, lines = [], nextPage = null, getBoundary, setBoundary, onBeforeChange, onAfterChange, isStepLocked, getStepBadge, getNextLabel, getNextBoundary, getPrevBoundary, isAtEnd, endLabel, allowSameBoundary = false, } = {}) {
     const boundButtons = new WeakSet();
     const getPrevButtons = () => prevButtons || stepperButtons(root, "prev");
     const getNextButtons = () => nextButtons || stepperButtons(root, "next");
@@ -1220,9 +1220,12 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
         if (typeof setBoundary === "function")
             setBoundary(value);
     }
+    function atEnd(at) {
+        return typeof isAtEnd === "function" ? !!isAtEnd(at, total) : at === total;
+    }
     function locked(at) {
         return typeof isStepLocked === "function"
-            ? !!isStepLocked(at, at === total)
+            ? !!isStepLocked(at, atEnd(at))
             : false;
     }
     function update() {
@@ -1234,13 +1237,15 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
             btn.disabled = current === 0;
         });
         if (nextButtons.length) {
-            const atEnd = current === total;
-            const badge = !atEnd && typeof getStepBadge === "function"
+            const atEndNow = atEnd(current);
+            const isLocked = locked(current);
+            const customLabel = typeof getNextLabel === "function"
+                ? getNextLabel(current, total, atEndNow)
+                : "";
+            const badge = !atEndNow && typeof getStepBadge === "function"
                 ? getStepBadge(current + 1)
                 : "";
             const badgeTag = badge === "note" ? "🔧" : badge === "check" ? "✅" : "";
-            const isLocked = locked(current);
-            const lockTag = isLocked ? " 🔒" : "";
             const labelPrefix = badgeTag ? `${badgeTag} ` : "";
             const adjustLabelForBadge = (label) => {
                 if (badge !== "note")
@@ -1253,21 +1258,22 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
                 }
                 return label;
             };
-            const customLabel = typeof getNextLabel === "function"
-                ? getNextLabel(current, total, atEnd)
-                : "";
-            if (atEnd) {
+            if (atEndNow) {
                 const label = customLabel || endLabel || "Next Program";
                 nextButtons.forEach((btn) => {
-                    btn.textContent = `${labelPrefix}${label}${lockTag} ▶▶`;
+                    const baseText = `${labelPrefix}${label} ▶▶`;
+                    btn.textContent = isLocked ? `${baseText} 🔒` : baseText;
                     btn.dataset.stepperEnd = "true";
                 });
             }
             else {
                 const label = customLabel || `Run line ${current + 1}`;
                 const adjustedLabel = adjustLabelForBadge(label);
+                const isEndPreview = !!customLabel && !!endLabel && customLabel === endLabel;
+                const arrowSuffix = isEndPreview ? "▶▶" : "▶";
                 nextButtons.forEach((btn) => {
-                    btn.textContent = `${labelPrefix}${adjustedLabel}${lockTag} ▶`;
+                    const baseText = `${labelPrefix}${adjustedLabel} ${arrowSuffix}`;
+                    btn.textContent = isLocked ? `${baseText} 🔒` : baseText;
                     btn.dataset.stepperEnd = "false";
                 });
             }
@@ -1329,7 +1335,7 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
             btn.addEventListener("click", () => {
                 const current = boundary();
                 clearPulse();
-                if (current === total) {
+                if (atEnd(current)) {
                     if (!btn.disabled && nextPage) {
                         const nextUrl = withSidebarParam(nextPage);
                         if (nextUrl)

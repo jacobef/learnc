@@ -32,6 +32,11 @@ interface ExpressionTemplateConfig {
   initialInstructions?: string;
   next: string | null;
   isLast?: boolean;
+  workspace?: ExpressionWorkspaceConfig;
+}
+
+interface ExpressionWorkspaceConfig {
+  alwaysShowExprResult?: boolean;
 }
 
 interface ExpressionTemplateState {
@@ -48,6 +53,7 @@ interface ExpressionTemplateElements {
   continueBtn: HTMLButtonElement | null;
   sectionEl: HTMLElement | null;
   expressionEl: HTMLElement | null;
+  answerPanel: HTMLElement | null;
   answerSlot: HTMLElement | null;
   answerResult: HTMLElement | null;
   toggleWrap: HTMLElement | null;
@@ -90,6 +96,9 @@ function collectExpressionElements(
     ) as HTMLElement | null,
     expressionEl: root.querySelector(
       '[data-role="expr-expression"]',
+    ) as HTMLElement | null,
+    answerPanel: root.querySelector(
+      '[data-role="expr-answer-panel"]',
     ) as HTMLElement | null,
     answerSlot: root.querySelector(
       '[data-role="expr-answer-slot"]',
@@ -188,6 +197,7 @@ function ensureExpressionLayout(): ExpressionTemplateElements {
   row.className = "expr-eval-row panel-row";
 
   const answerPanel = document.createElement("div");
+  answerPanel.dataset.role = "expr-answer-panel";
   answerPanel.className = "panel expr-answer-panel panel-scroll";
   const answerTitle = document.createElement("div");
   answerTitle.className = "panel-title";
@@ -280,7 +290,9 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     initialInstructions = "",
     next = null,
     isLast = false,
+    workspace = {},
   } = config;
+  const alwaysShowExprResult = workspace.alwaysShowExprResult !== false;
   const endLabel = (() => {
     if (isLast) return "Finish";
     const label = getNavLabelForHref(next);
@@ -303,6 +315,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     continueBtn,
     sectionEl,
     expressionEl,
+    answerPanel,
     answerSlot,
     answerResult,
     toggleWrap,
@@ -545,6 +558,16 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     return { kind: "rvalue", type, value };
   }
 
+  function shouldShowExprResultPane(step: ExpressionStep): boolean {
+    if (alwaysShowExprResult) return true;
+    const evaluated = evaluatedAnswer(step);
+    if ("error" in evaluated) return true;
+    if (evaluated.result.kind !== "lvalue") return true;
+    if (step.fixValueCategory) return false;
+    if (!step.editable) return false;
+    return true;
+  }
+
   function buildHintContext(step: ExpressionStep): ExpressionHintContext {
     const expected = expectedAnswer(step);
     const selected = selectedBox(step);
@@ -663,6 +686,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
   function render() {
     const step = stepFor(state.boundary);
     const hasState = Array.isArray(step.boxes);
+    const showExprResultPane = shouldShowExprResultPane(step);
     if (state.showIntro) {
       setPartsContent(instructionsEl, initialInstructions || null);
       setControlVisible(continueBtn, true);
@@ -673,6 +697,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     }
     setControlVisible(continueBtn, false);
     setControlVisible(sectionEl, true);
+    setControlVisible(answerPanel, showExprResultPane);
     const instructionText = step.instructions ?? null;
     setPartsContent(instructionsEl, instructionText);
     if (expressionEl) expressionEl.textContent = step.expression;

@@ -118,7 +118,7 @@ createProgramTemplate({
             },
         },
     ],
-    next: "sandbox.html?finished=1",
-    isLast: true,
+    next: "23-while.html",
+    isLast: false,
     workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

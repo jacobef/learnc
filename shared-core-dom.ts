@@ -52,6 +52,7 @@ export interface StepperOptions {
   getNextLabel?: (current: number, total: number, atEnd: boolean) => string;
   getNextBoundary?: (current: number, total: number) => number;
   getPrevBoundary?: (current: number, total: number) => number;
+  isAtEnd?: (current: number, total: number) => boolean;
   endLabel?: string;
   allowSameBoundary?: boolean;
 }
@@ -1430,6 +1431,7 @@ function createStepper({
   getNextLabel,
   getNextBoundary,
   getPrevBoundary,
+  isAtEnd,
   endLabel,
   allowSameBoundary = false,
 }: StepperOptions = {}): Stepper {
@@ -1454,9 +1456,13 @@ function createStepper({
     if (typeof setBoundary === "function") setBoundary(value);
   }
 
+  function atEnd(at: number) {
+    return typeof isAtEnd === "function" ? !!isAtEnd(at, total) : at === total;
+  }
+
   function locked(at: number) {
     return typeof isStepLocked === "function"
-      ? !!isStepLocked(at, at === total)
+      ? !!isStepLocked(at, atEnd(at))
       : false;
   }
 
@@ -1469,14 +1475,17 @@ function createStepper({
       btn.disabled = current === 0;
     });
     if (nextButtons.length) {
-      const atEnd = current === total;
+      const atEndNow = atEnd(current);
+      const isLocked = locked(current);
+      const customLabel =
+        typeof getNextLabel === "function"
+          ? getNextLabel(current, total, atEndNow)
+          : "";
       const badge =
-        !atEnd && typeof getStepBadge === "function"
+        !atEndNow && typeof getStepBadge === "function"
           ? getStepBadge(current + 1)
           : "";
       const badgeTag = badge === "note" ? "🔧" : badge === "check" ? "✅" : "";
-      const isLocked = locked(current);
-      const lockTag = isLocked ? " 🔒" : "";
       const labelPrefix = badgeTag ? `${badgeTag} ` : "";
       const adjustLabelForBadge = (label: string) => {
         if (badge !== "note") return label;
@@ -1488,21 +1497,22 @@ function createStepper({
         }
         return label;
       };
-      const customLabel =
-        typeof getNextLabel === "function"
-          ? getNextLabel(current, total, atEnd)
-          : "";
-      if (atEnd) {
+      if (atEndNow) {
         const label = customLabel || endLabel || "Next Program";
         nextButtons.forEach((btn) => {
-          btn.textContent = `${labelPrefix}${label}${lockTag} ▶▶`;
+          const baseText = `${labelPrefix}${label} ▶▶`;
+          btn.textContent = isLocked ? `${baseText} 🔒` : baseText;
           btn.dataset.stepperEnd = "true";
         });
       } else {
         const label = customLabel || `Run line ${current + 1}`;
         const adjustedLabel = adjustLabelForBadge(label);
+        const isEndPreview =
+          !!customLabel && !!endLabel && customLabel === endLabel;
+        const arrowSuffix = isEndPreview ? "▶▶" : "▶";
         nextButtons.forEach((btn) => {
-          btn.textContent = `${labelPrefix}${adjustedLabel}${lockTag} ▶`;
+          const baseText = `${labelPrefix}${adjustedLabel} ${arrowSuffix}`;
+          btn.textContent = isLocked ? `${baseText} 🔒` : baseText;
           btn.dataset.stepperEnd = "false";
         });
       }
@@ -1565,7 +1575,7 @@ function createStepper({
       btn.addEventListener("click", () => {
         const current = boundary();
         clearPulse();
-        if (current === total) {
+        if (atEnd(current)) {
           if (!btn.disabled && nextPage) {
             const nextUrl = withSidebarParam(nextPage);
             if (nextUrl) window.location.href = nextUrl;

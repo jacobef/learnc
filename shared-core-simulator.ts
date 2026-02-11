@@ -38,6 +38,7 @@ export type Statement =
   | { kind: "blockStart" }
   | { kind: "blockEnd" }
   | { kind: "if"; expr: ExprNode; hasVar: boolean }
+  | { kind: "while"; expr: ExprNode; hasVar: boolean }
   | { kind: "else" }
   | { kind: "decl"; name: string; type: string }
   | { kind: "assign"; lhs: ExprNode; rhs: ExprNode; hasVar: boolean }
@@ -92,8 +93,24 @@ export type IfBlock = {
   expr: ExprNode;
   hasVar: boolean;
 };
+export type WhileBlock = {
+  headerIndex: number;
+  headerStartLine: number;
+  headerEndLine: number;
+  openIndex: number;
+  closeIndex: number;
+  trueTarget: number;
+  afterIndex: number;
+  expr: ExprNode;
+  hasVar: boolean;
+};
 export type IfBlockMap = {
   map: Map<number, IfBlock>;
+  errors: Map<number, string>;
+  incomplete: Set<number>;
+};
+export type WhileBlockMap = {
+  map: Map<number, WhileBlock>;
   errors: Map<number, string>;
   incomplete: Set<number>;
 };
@@ -103,6 +120,11 @@ export type ConditionResult =
 export type ProgramResult =
   | { kind: "ok"; state: BoxState[] }
   | { kind: "compile" | "ub" };
+export type ProgramTrace = {
+  state: BoxState[];
+  nextIndex: number;
+  executedSteps: number;
+};
 export interface LineStatus {
   invalid: Set<number>;
   incomplete: Set<number>;
@@ -119,6 +141,10 @@ export interface SimpleSimulator {
     parts: StatementPart[],
     opts?: { lastLine?: number },
   ) => IfBlockMap;
+  buildWhileStatementMap: (
+    parts: StatementPart[],
+    opts?: { lastLine?: number },
+  ) => WhileBlockMap;
   statementRangeForLine: (
     statementMap: StatementMap | null,
     lineIndex: number,
@@ -155,6 +181,10 @@ export interface SimpleSimulator {
     parts: StatementPart[],
     opts?: { alloc?: (type?: string) => string; stop?: number },
   ) => ProgramResult;
+  traceProgramParts: (
+    parts: StatementPart[],
+    opts?: { alloc?: (type?: string) => string; stopSteps?: number },
+  ) => ProgramTrace | null;
   applyProgram: (
     text: string,
     opts?: { alloc?: (type?: string) => string },
@@ -362,6 +392,7 @@ export function createSimpleSimulator(
                 ident === "long" ||
                 ident === "double" ||
                 ident === "if" ||
+                ident === "while" ||
                 ident === "else"
               ? "kw"
               : "ident",
@@ -771,9 +802,9 @@ export function createSimpleSimulator(
     });
   }
 
-  function isIfPrefix(tokens: Token[]): boolean {
+  function isConditionalPrefix(tokens: Token[], keyword: "if" | "while"): boolean {
     if (!tokens.length) return false;
-    if (tokens[0].type !== "kw" || tokens[0].value !== "if") return false;
+    if (tokens[0].type !== "kw" || tokens[0].value !== keyword) return false;
     if (tokens.length === 1) return true;
     if (tokens[1].type !== "sym" || tokens[1].value !== "(") return false;
     let depth = 0;
@@ -791,6 +822,14 @@ export function createSimpleSimulator(
       }
     }
     return true;
+  }
+
+  function isIfPrefix(tokens: Token[]): boolean {
+    return isConditionalPrefix(tokens, "if");
+  }
+
+  function isWhilePrefix(tokens: Token[]): boolean {
+    return isConditionalPrefix(tokens, "while");
   }
 
   function isStatementPrefix(
@@ -817,7 +856,10 @@ export function createSimpleSimulator(
           allowIntPrefix &&
           ("int".startsWith(t0.value) ||
             "long".startsWith(t0.value) ||
-            "double".startsWith(t0.value))
+            "double".startsWith(t0.value) ||
+            "if".startsWith(t0.value) ||
+            "while".startsWith(t0.value) ||
+            "else".startsWith(t0.value))
         )
           return true;
         return hasDeclaredPrefix(t0.value, declaredNames);
@@ -826,6 +868,7 @@ export function createSimpleSimulator(
     }
     return (
       isIfPrefix(tokens) ||
+      isWhilePrefix(tokens) ||
       isDeclPrefix(tokens) ||
       isAssignPrefix(tokens)
     );
@@ -1675,11 +1718,12 @@ export function createSimpleSimulator(
     return { expr: parsed.expr, hasVar: parsed.hasVar, nextIndex: parsed.nextIndex };
   }
 
-  function parseIfHeaderTokens(
+  function parseConditionHeaderTokens(
     tokens: Token[],
+    keyword: "if" | "while",
   ): { expr: ExprNode; hasVar: boolean } | null {
     if (!tokens.length) return null;
-    if (tokens[0].type !== "kw" || tokens[0].value !== "if") return null;
+    if (tokens[0].type !== "kw" || tokens[0].value !== keyword) return null;
     if (tokens.length < 3) return null;
     if (tokens[1].type !== "sym" || tokens[1].value !== "(") return null;
     let depth = 0;
@@ -1706,6 +1750,18 @@ export function createSimpleSimulator(
     return { expr: parsed.expr, hasVar: parsed.hasVar };
   }
 
+  function parseIfHeaderTokens(
+    tokens: Token[],
+  ): { expr: ExprNode; hasVar: boolean } | null {
+    return parseConditionHeaderTokens(tokens, "if");
+  }
+
+  function parseWhileHeaderTokens(
+    tokens: Token[],
+  ): { expr: ExprNode; hasVar: boolean } | null {
+    return parseConditionHeaderTokens(tokens, "while");
+  }
+
   function parseStatementTokens(tokens: Token[]): Statement | null {
     if (!tokens.length) return null;
     if (tokens.length === 1 && tokens[0].type === "sym") {
@@ -1722,6 +1778,10 @@ export function createSimpleSimulator(
     const ifParsed = parseIfHeaderTokens(tokens);
     if (ifParsed) {
       return { kind: "if", expr: ifParsed.expr, hasVar: ifParsed.hasVar };
+    }
+    const whileParsed = parseWhileHeaderTokens(tokens);
+    if (whileParsed) {
+      return { kind: "while", expr: whileParsed.expr, hasVar: whileParsed.hasVar };
     }
     if (tokens[0].type === "kw") {
       const baseType = tokens[0].value;
@@ -1913,6 +1973,9 @@ export function createSimpleSimulator(
     if (tokens[0].type === "kw" && tokens[0].value === "if") {
       return 'If statements should look like "if (condition) statement;" or "if (condition) { ... }".';
     }
+    if (tokens[0].type === "kw" && tokens[0].value === "while") {
+      return 'While statements should look like "while (condition) statement;" or "while (condition) { ... }".';
+    }
     if (tokens[0].type === "kw" && tokens[0].value === "else") {
       return 'Else statements should look like "else statement;" or "else { ... }".';
     }
@@ -2004,6 +2067,13 @@ export function createSimpleSimulator(
       }
       return { parsed, next: state };
     }
+    if (parsed.kind === "while") {
+      const result = evaluateCondition(parsed.expr, state);
+      if ("error" in result) {
+        return { error: result.error, kind: result.kind };
+      }
+      return { parsed, next: state };
+    }
     if (parsed.kind === "decl" || parsed.kind === "declAssign") {
       if (seenDecl.has(parsed.name))
         return {
@@ -2042,9 +2112,10 @@ export function createSimpleSimulator(
     return { next, parsed };
   }
 
-  function ifHeaderEndIndex(tokens: Token[]): number {
+  function controlHeaderEndIndex(tokens: Token[]): number {
     if (!tokens.length) return -1;
-    if (tokens[0].type !== "kw" || tokens[0].value !== "if") return -1;
+    if (tokens[0].type !== "kw") return -1;
+    if (tokens[0].value !== "if" && tokens[0].value !== "while") return -1;
     if (tokens.length < 2) return -1;
     if (tokens[1].type !== "sym" || tokens[1].value !== "(") return -1;
     let depth = 0;
@@ -2084,10 +2155,10 @@ export function createSimpleSimulator(
           current[0].type === "kw" &&
           current[0].value === "else" &&
           !(tok.type === "sym" && tok.value === "{");
-        const ifHeaderEnd = ifHeaderEndIndex(current);
-        const splitAfterIfHeader =
-          ifHeaderEnd >= 0 && ifHeaderEnd === current.length - 1;
-        if (splitAfterElse || splitAfterIfHeader) {
+        const headerEnd = controlHeaderEndIndex(current);
+        const splitAfterControlHeader =
+          headerEnd >= 0 && headerEnd === current.length - 1;
+        if (splitAfterElse || splitAfterControlHeader) {
           pushCurrent(current[current.length - 1].line, false);
           startLine = tok.line;
         }
@@ -2143,11 +2214,17 @@ export function createSimpleSimulator(
     return parsed?.kind === "decl" || parsed?.kind === "declAssign";
   }
 
-  function buildIfStatementMap(
+  function parseControlStatementMaps(
     parts: StatementPart[],
     opts: { lastLine?: number } = {},
-  ): IfBlockMap {
-    const map = new Map<number, IfBlock>();
+  ): {
+    ifMap: Map<number, IfBlock>;
+    whileMap: Map<number, WhileBlock>;
+    errors: Map<number, string>;
+    incomplete: Set<number>;
+  } {
+    const ifMap = new Map<number, IfBlock>();
+    const whileMap = new Map<number, WhileBlock>();
     const errors = new Map<number, string>();
     const incomplete = new Set<number>();
     const usedElse = new Set<number>();
@@ -2160,14 +2237,17 @@ export function createSimpleSimulator(
     const lastLine = Number.isFinite(opts.lastLine)
       ? Math.max(0, Number(opts.lastLine))
       : Math.max(0, fallbackLastLine);
-    const declarationNeedsBraces =
+    const ifDeclarationNeedsBraces =
       "Variable declarations in if/else statements require braces.";
+    const whileDeclarationNeedsBraces =
+      "Variable declarations in while statements require braces.";
     type StatementExtent =
       | { kind: "ok"; endIndex: number }
       | { kind: "error"; line: number; message: string }
       | { kind: "incomplete"; line: number };
     const extentMemo = new Map<number, StatementExtent>();
     const ifMemo = new Map<number, StatementExtent>();
+    const whileMemo = new Map<number, StatementExtent>();
     const lineForPart = (part?: StatementPart | null): number =>
       Number.isFinite(part?.endLine) ? part!.endLine : lastLine;
 
@@ -2195,6 +2275,12 @@ export function createSimpleSimulator(
       const ifParsed = parseIfHeaderTokens(part.tokens);
       if (ifParsed) {
         const result = parseIfAt(startIndex, ifParsed);
+        extentMemo.set(startIndex, result);
+        return result;
+      }
+      const whileParsed = parseWhileHeaderTokens(part.tokens);
+      if (whileParsed) {
+        const result = parseWhileAt(startIndex, whileParsed);
         extentMemo.set(startIndex, result);
         return result;
       }
@@ -2249,7 +2335,7 @@ export function createSimpleSimulator(
         const result: StatementExtent = {
           kind: "error",
           line: lineForPart(openPart),
-          message: declarationNeedsBraces,
+          message: ifDeclarationNeedsBraces,
         };
         ifMemo.set(headerIndex, result);
         return result;
@@ -2289,7 +2375,7 @@ export function createSimpleSimulator(
           const result: StatementExtent = {
             kind: "error",
             line: lineForPart(elseOpenPart),
-            message: declarationNeedsBraces,
+            message: ifDeclarationNeedsBraces,
           };
           ifMemo.set(headerIndex, result);
           return result;
@@ -2302,14 +2388,14 @@ export function createSimpleSimulator(
         elseCloseIndex = elseExtent.endIndex;
         afterIndex = elseCloseIndex + 1;
         elseTarget = elseOpenIndex;
-        if (elseUsesBraces && elseCloseIndex > elseOpenIndex + 1) {
+        if (elseUsesBraces && elseCloseIndex >= elseOpenIndex + 1) {
           elseTarget = elseOpenIndex + 1;
         }
       }
       const falseTarget =
         elseTarget ??
         (afterIndex < parts.length ? afterIndex : parts.length);
-      map.set(headerIndex, {
+      ifMap.set(headerIndex, {
         headerIndex,
         headerStartLine,
         headerEndLine,
@@ -2333,12 +2419,75 @@ export function createSimpleSimulator(
       return result;
     }
 
+    function parseWhileAt(
+      headerIndex: number,
+      whileParsed: { expr: ExprNode; hasVar: boolean },
+    ): StatementExtent {
+      const memoized = whileMemo.get(headerIndex);
+      if (memoized) return memoized;
+      const header = parts[headerIndex];
+      const headerStartLine = header?.startLine ?? lineForPart(header);
+      const headerEndLine = header?.endLine ?? lineForPart(header);
+      const openIndex = headerIndex + 1;
+      const openPart = parts[openIndex];
+      if (!openPart) {
+        const result: StatementExtent = { kind: "incomplete", line: lastLine };
+        whileMemo.set(headerIndex, result);
+        return result;
+      }
+      const bodyUsesBraces = isBracePart(openPart, "{");
+      if (!bodyUsesBraces && isDeclarationPart(openPart)) {
+        const result: StatementExtent = {
+          kind: "error",
+          line: lineForPart(openPart),
+          message: whileDeclarationNeedsBraces,
+        };
+        whileMemo.set(headerIndex, result);
+        return result;
+      }
+      const bodyExtent = parseStatementExtent(openIndex);
+      if (bodyExtent.kind !== "ok") {
+        whileMemo.set(headerIndex, bodyExtent);
+        return bodyExtent;
+      }
+      const closeIndex = bodyExtent.endIndex;
+      let trueTarget = openIndex;
+      if (bodyUsesBraces && closeIndex > openIndex + 1) {
+        trueTarget = openIndex + 1;
+      }
+      const afterIndex = closeIndex + 1;
+      whileMap.set(headerIndex, {
+        headerIndex,
+        headerStartLine,
+        headerEndLine,
+        openIndex,
+        closeIndex,
+        trueTarget,
+        afterIndex,
+        expr: whileParsed.expr,
+        hasVar: whileParsed.hasVar,
+      });
+      const result: StatementExtent = { kind: "ok", endIndex: closeIndex };
+      whileMemo.set(headerIndex, result);
+      return result;
+    }
+
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
       if (!part?.tokens?.length) continue;
       const ifParsed = parseIfHeaderTokens(part.tokens);
-      if (!ifParsed) continue;
-      const result = parseIfAt(i, ifParsed);
+      if (ifParsed) {
+        const result = parseIfAt(i, ifParsed);
+        if (result.kind === "error") {
+          errors.set(result.line, result.message);
+        } else if (result.kind === "incomplete") {
+          incomplete.add(result.line);
+        }
+        continue;
+      }
+      const whileParsed = parseWhileHeaderTokens(part.tokens);
+      if (!whileParsed) continue;
+      const result = parseWhileAt(i, whileParsed);
       if (result.kind === "error") {
         errors.set(result.line, result.message);
       } else if (result.kind === "incomplete") {
@@ -2351,7 +2500,31 @@ export function createSimpleSimulator(
       const line = Number.isFinite(part.endLine) ? part.endLine : lastLine;
       errors.set(line, "Else statements must follow an if statement.");
     });
-    return { map, errors, incomplete };
+    return { ifMap, whileMap, errors, incomplete };
+  }
+
+  function buildIfStatementMap(
+    parts: StatementPart[],
+    opts: { lastLine?: number } = {},
+  ): IfBlockMap {
+    const parsed = parseControlStatementMaps(parts, opts);
+    return {
+      map: parsed.ifMap,
+      errors: parsed.errors,
+      incomplete: parsed.incomplete,
+    };
+  }
+
+  function buildWhileStatementMap(
+    parts: StatementPart[],
+    opts: { lastLine?: number } = {},
+  ): WhileBlockMap {
+    const parsed = parseControlStatementMaps(parts, opts);
+    return {
+      map: parsed.whileMap,
+      errors: parsed.errors,
+      incomplete: parsed.incomplete,
+    };
   }
 
   function buildStatementMap(lines: string[]): StatementMap {
@@ -2461,6 +2634,10 @@ export function createSimpleSimulator(
         return;
       }
       if (/^if\b/.test(clean)) {
+        patched.push(raw);
+        return;
+      }
+      if (/^while\b/.test(clean)) {
         patched.push(raw);
         return;
       }
@@ -2624,10 +2801,10 @@ export function createSimpleSimulator(
           currentTokens[0].type === "kw" &&
           currentTokens[0].value === "else" &&
           !(nextTok.type === "sym" && nextTok.value === "{");
-        const ifHeaderEnd = ifHeaderEndIndex(currentTokens);
-        const splitAfterIfHeader =
-          ifHeaderEnd >= 0 && ifHeaderEnd === currentTokens.length - 1;
-        if (!splitAfterElse && !splitAfterIfHeader) return;
+        const headerEnd = controlHeaderEndIndex(currentTokens);
+        const splitAfterControlHeader =
+          headerEnd >= 0 && headerEnd === currentTokens.length - 1;
+        if (!splitAfterElse && !splitAfterControlHeader) return;
         const endTok = currentTokens[currentTokens.length - 1];
         applyStatementTokens(currentTokens, endTok, false);
         currentTokens = [];
@@ -2683,10 +2860,14 @@ export function createSimpleSimulator(
     const ifBlocks = buildIfStatementMap(parts, {
       lastLine: Math.max(0, lines.length - 1),
     });
+    const whileBlocks = buildWhileStatementMap(parts, {
+      lastLine: Math.max(0, lines.length - 1),
+    });
     parts.forEach((part, idx) => {
       if (!part?.tokens?.length) return;
       if (part.hasSemicolon) return;
       if (ifBlocks.map.has(idx)) return;
+      if (whileBlocks.map.has(idx)) return;
       if (
         part.tokens[0]?.type === "kw" &&
         part.tokens[0]?.value === "else"
@@ -2721,7 +2902,244 @@ export function createSimpleSimulator(
       if (errorKinds.has(line)) errorKinds.delete(line);
       if (info.has(line)) info.delete(line);
     });
+    whileBlocks.errors.forEach((message, line) => {
+      invalid.add(line);
+      errors.set(line, message);
+      errorKinds.set(line, "compile");
+    });
+    whileBlocks.incomplete.forEach((line) => {
+      incomplete.add(line);
+      if (invalid.has(line)) invalid.delete(line);
+      if (errors.has(line)) errors.delete(line);
+      if (errorKinds.has(line)) errorKinds.delete(line);
+      if (info.has(line)) info.delete(line);
+    });
     return { invalid, incomplete, errors, errorKinds, info };
+  }
+
+  function executeProgramParts(
+    parts: StatementPart[],
+    opts: {
+      alloc: (type?: string) => string;
+      stop: number | null;
+      stopSteps: number | null;
+      analyze: boolean;
+    },
+  ):
+    | {
+        kind: "ok";
+        state: BoxState[];
+        nextIndex: number;
+        executedSteps: number;
+      }
+    | { kind: "compile" | "ub" } {
+    let state: BoxState[] = [];
+    const declared = new Set<string>();
+    const scopes: ScopeStack = [new Set<string>()];
+    const ifBlocks = buildIfStatementMap(parts);
+    const whileBlocks = buildWhileStatementMap(parts);
+    const ifDecisions = new Map<number, boolean>();
+    const elseLookup = new Map<number, IfBlock>();
+    const whileStack: WhileBlock[] = [];
+    ifBlocks.map.forEach((block) => {
+      if (block.elseIndex != null) {
+        elseLookup.set(block.elseIndex, block);
+      }
+    });
+    const continueCompletedWhileLoops = (nextIndex: number): number => {
+      let index = nextIndex;
+      let guard = 0;
+      while (whileStack.length > 0 && guard < parts.length + 5) {
+        const active = whileStack[whileStack.length - 1];
+        if (!active || index !== active.afterIndex) break;
+        whileStack.pop();
+        index = active.headerIndex;
+        guard += 1;
+      }
+      return index;
+    };
+    const elseEntryForIfBlock = (
+      block: IfBlock,
+    ): { nextIndex: number; pushScope: boolean } | null => {
+      if (block.elseOpenIndex == null) return null;
+      let nextIndex = block.elseOpenIndex;
+      let pushScope = false;
+      if (block.elseTarget != null && block.elseTarget !== block.elseOpenIndex) {
+        const elseOpenPart = parts[block.elseOpenIndex];
+        if (isBracePart(elseOpenPart, "{")) {
+          nextIndex = block.elseTarget;
+          pushScope = true;
+        }
+      }
+      return { nextIndex, pushScope };
+    };
+    const maxExecutedParts = Math.max(10000, parts.length * 2000);
+    const fallbackEndLine =
+      parts.length > 0 && Number.isFinite(parts[parts.length - 1]?.endLine)
+        ? parts[parts.length - 1]!.endLine
+        : -1;
+    const terminalBoundary = Math.max(0, fallbackEndLine + 1);
+    const boundaryForProgramIndex = (index: number): number => {
+      if (!Number.isFinite(index) || index >= parts.length) return terminalBoundary;
+      const safeIndex = Math.max(0, Math.floor(index));
+      const line = parts[safeIndex]?.startLine;
+      if (!Number.isFinite(line)) return terminalBoundary;
+      return Math.max(0, line!);
+    };
+    let i = 0;
+    let executedSteps = 0;
+    let executedParts = 0;
+    type ControlFlowResult =
+      | { kind: "not-control" }
+      | { kind: "continue" }
+      | { kind: "break" }
+      | { kind: "error"; errorKind: "compile" | "ub" };
+    const isDeclLikeStatement = (
+      parsed: Statement,
+    ): parsed is Extract<Statement, { kind: "decl" | "declAssign" }> =>
+      parsed.kind === "decl" || parsed.kind === "declAssign";
+    const advanceTo = (nextIndex: number): number => {
+      const before = boundaryForProgramIndex(i);
+      const after = boundaryForProgramIndex(nextIndex);
+      if (after !== before) executedSteps += 1;
+      return nextIndex;
+    };
+    const handleControlFlowStatement = (
+      parsed: Statement,
+      blockEndState: BoxState[],
+    ): ControlFlowResult => {
+      if (parsed.kind === "if") {
+        const block = ifBlocks.map.get(i);
+        if (!block) return { kind: "error", errorKind: "compile" };
+        const condition = evaluateCondition(parsed.expr, state);
+        if ("error" in condition)
+          return { kind: "error", errorKind: condition.kind || "compile" };
+        ifDecisions.set(block.headerIndex, condition.value);
+        if (condition.value) {
+          i = advanceTo(i + 1);
+          return { kind: "continue" };
+        }
+        if (opts.stop !== null && opts.stop <= block.closeIndex) {
+          return { kind: "break" };
+        }
+        const elseEntry = elseEntryForIfBlock(block);
+        if (elseEntry) {
+          if (elseEntry.pushScope) scopes.push(new Set<string>());
+          i = advanceTo(continueCompletedWhileLoops(elseEntry.nextIndex));
+          return { kind: "continue" };
+        }
+        i = advanceTo(continueCompletedWhileLoops(block.closeIndex + 1));
+        return { kind: "continue" };
+      }
+      if (parsed.kind === "while") {
+        const block = whileBlocks.map.get(i);
+        if (!block) return { kind: "error", errorKind: "compile" };
+        const condition = evaluateCondition(parsed.expr, state);
+        if ("error" in condition)
+          return { kind: "error", errorKind: condition.kind || "compile" };
+        if (condition.value) {
+          whileStack.push(block);
+          i = advanceTo(block.openIndex);
+          return { kind: "continue" };
+        }
+        if (opts.stop !== null && opts.stop <= block.closeIndex) {
+          return { kind: "break" };
+        }
+        i = advanceTo(continueCompletedWhileLoops(block.afterIndex));
+        return { kind: "continue" };
+      }
+      if (parsed.kind === "else") {
+        const block = elseLookup.get(i);
+        if (!block) return { kind: "error", errorKind: "compile" };
+        const decision = ifDecisions.get(block.headerIndex);
+        if (decision == null) return { kind: "error", errorKind: "compile" };
+        if (decision) {
+          i = advanceTo(continueCompletedWhileLoops(block.afterIndex));
+          return { kind: "continue" };
+        }
+        const elseEntry = elseEntryForIfBlock(block);
+        if (elseEntry) {
+          if (elseEntry.pushScope) scopes.push(new Set<string>());
+          i = advanceTo(continueCompletedWhileLoops(elseEntry.nextIndex));
+          return { kind: "continue" };
+        }
+        return { kind: "error", errorKind: "compile" };
+      }
+      if (parsed.kind === "blockStart") {
+        scopes.push(new Set<string>());
+        i = advanceTo(continueCompletedWhileLoops(i + 1));
+        return { kind: "continue" };
+      }
+      if (parsed.kind === "blockEnd") {
+        const popped = popScope(scopes, declared, blockEndState);
+        if (popped.error) return { kind: "error", errorKind: "compile" };
+        state = popped.state;
+        i = advanceTo(continueCompletedWhileLoops(i + 1));
+        return { kind: "continue" };
+      }
+      return { kind: "not-control" };
+    };
+    while (i < parts.length) {
+      if (opts.stop !== null && i >= opts.stop) break;
+      if (opts.stopSteps !== null && executedSteps >= opts.stopSteps) break;
+      if (executedParts >= maxExecutedParts) {
+        return { kind: "compile" };
+      }
+      executedParts += 1;
+      const part = parts[i];
+      if (!part.tokens.length) {
+        i = continueCompletedWhileLoops(i + 1);
+        continue;
+      }
+
+      if (opts.analyze) {
+        const validation = validateStatement(part.tokens, state, declared, opts.alloc);
+        if ("error" in validation) {
+          return { kind: validation.kind || "compile" };
+        }
+        const parsed = validation.parsed;
+        const controlResult = handleControlFlowStatement(parsed, validation.next);
+        if (controlResult.kind === "error") {
+          return { kind: controlResult.errorKind };
+        }
+        if (controlResult.kind === "break") break;
+        if (controlResult.kind === "continue") continue;
+        if (!part.hasSemicolon) return { kind: "compile" };
+        if (isDeclLikeStatement(parsed)) {
+          addDeclaredName(scopes, declared, parsed.name);
+        }
+        state = validation.next;
+        i = advanceTo(continueCompletedWhileLoops(i + 1));
+        continue;
+      }
+
+      const parsed = parseStatementTokens(part.tokens);
+      if (!parsed) return { kind: "compile" };
+      const controlResult = handleControlFlowStatement(parsed, state);
+      if (controlResult.kind === "error") return { kind: controlResult.errorKind };
+      if (controlResult.kind === "break") break;
+      if (controlResult.kind === "continue") continue;
+      if (!part.hasSemicolon) return { kind: "compile" };
+      if (isDeclLikeStatement(parsed)) {
+        if (declared.has(parsed.name)) return { kind: "compile" };
+      }
+      const next = applyStatement(state, parsed, {
+        alloc: opts.alloc,
+        allowRedeclare: false,
+      });
+      if (!next) return { kind: "compile" };
+      if (isDeclLikeStatement(parsed)) {
+        addDeclaredName(scopes, declared, parsed.name);
+      }
+      state = next;
+      i = advanceTo(continueCompletedWhileLoops(i + 1));
+    }
+    return {
+      kind: "ok",
+      state,
+      nextIndex: Math.max(0, Math.min(parts.length, i)),
+      executedSteps,
+    };
   }
 
   function applyProgram(
@@ -2733,189 +3151,69 @@ export function createSimpleSimulator(
     return applyProgramParts(parts, opts);
   }
 
+  const resolveAlloc = (alloc?: (type?: string) => string) =>
+    alloc || ((type?: string) => String(randAddr(type || "int")));
+
+  const normalizeStop = (stop: number | undefined, max: number): number | null =>
+    Number.isFinite(stop) && stop !== undefined
+      ? Math.max(0, Math.min(max, Number(stop)))
+      : null;
+
+  const normalizeStopSteps = (stopSteps: number | undefined): number | null =>
+    Number.isFinite(stopSteps) && stopSteps !== undefined
+      ? Math.max(0, Number(stopSteps))
+      : null;
+
   function applyProgramParts(
     parts: StatementPart[],
     opts: { alloc?: (type?: string) => string; stop?: number } = {},
   ): BoxState[] | null {
-    let state: BoxState[] = [];
-    const alloc =
-      opts.alloc || ((type?: string) => String(randAddr(type || "int")));
-    const stop =
-      Number.isFinite(opts.stop) && opts.stop !== undefined
-        ? Math.max(0, Math.min(parts.length, Number(opts.stop)))
-        : null;
-    const declared = new Set<string>();
-    const scopes: ScopeStack = [new Set<string>()];
-    const ifBlocks = buildIfStatementMap(parts);
-    const ifDecisions = new Map<number, boolean>();
-    const elseLookup = new Map<number, IfBlock>();
-    ifBlocks.map.forEach((block) => {
-      if (block.elseIndex != null) {
-        elseLookup.set(block.elseIndex, block);
-      }
+    const alloc = resolveAlloc(opts.alloc);
+    const stop = normalizeStop(opts.stop, parts.length);
+    const result = executeProgramParts(parts, {
+      alloc,
+      stop,
+      stopSteps: null,
+      analyze: false,
     });
-    let i = 0;
-    while (i < parts.length) {
-      if (stop !== null && i >= stop) break;
-      const part = parts[i];
-      if (!part.tokens.length) {
-        i += 1;
-        continue;
-      }
-      const parsed = parseStatementTokens(part.tokens);
-      if (!parsed) return null;
-      if (parsed.kind === "if") {
-        const block = ifBlocks.map.get(i);
-        if (!block) return null;
-        const result = evaluateCondition(parsed.expr, state);
-        if ("error" in result) return null;
-        ifDecisions.set(block.headerIndex, result.value);
-        if (result.value) {
-          i += 1;
-          continue;
-        }
-        if (stop !== null && stop <= block.closeIndex) break;
-        if (block.elseOpenIndex != null) {
-          i = block.elseOpenIndex;
-          continue;
-        }
-        i = block.closeIndex + 1;
-        continue;
-      }
-      if (parsed.kind === "else") {
-        const block = elseLookup.get(i);
-        if (!block) return null;
-        const decision = ifDecisions.get(block.headerIndex);
-        if (decision == null) return null;
-        if (decision) {
-          i = block.afterIndex;
-          continue;
-        }
-        if (block.elseOpenIndex != null) {
-          i = block.elseOpenIndex;
-          continue;
-        }
-        return null;
-      }
-      if (parsed.kind === "blockStart" || parsed.kind === "blockEnd") {
-        if (parsed.kind === "blockStart") {
-          scopes.push(new Set<string>());
-          i += 1;
-          continue;
-        }
-        const popped = popScope(scopes, declared, state);
-        if (popped.error) return null;
-        state = popped.state;
-        i += 1;
-        continue;
-      }
-      if (!part.hasSemicolon) return null;
-      if (parsed.kind === "decl" || parsed.kind === "declAssign") {
-        if (declared.has(parsed.name)) return null;
-      }
-      const next = applyStatement(state, parsed, {
-        alloc,
-        allowRedeclare: false,
-      });
-      if (!next) return null;
-      if (parsed.kind === "decl" || parsed.kind === "declAssign") {
-        addDeclaredName(scopes, declared, parsed.name);
-      }
-      state = next;
-      i += 1;
-    }
-    return state;
+    if (result.kind !== "ok") return null;
+    return result.state;
   }
 
   function analyzeProgramParts(
     parts: StatementPart[],
     opts: { alloc?: (type?: string) => string; stop?: number } = {},
   ): ProgramResult {
-    let state: BoxState[] = [];
-    const alloc =
-      opts.alloc || ((type?: string) => String(randAddr(type || "int")));
-    const stop =
-      Number.isFinite(opts.stop) && opts.stop !== undefined
-        ? Math.max(0, Math.min(parts.length, Number(opts.stop)))
-        : null;
-    const declared = new Set<string>();
-    const scopes: ScopeStack = [new Set<string>()];
-    const ifBlocks = buildIfStatementMap(parts);
-    const ifDecisions = new Map<number, boolean>();
-    const elseLookup = new Map<number, IfBlock>();
-    ifBlocks.map.forEach((block) => {
-      if (block.elseIndex != null) {
-        elseLookup.set(block.elseIndex, block);
-      }
+    const alloc = resolveAlloc(opts.alloc);
+    const stop = normalizeStop(opts.stop, parts.length);
+    const result = executeProgramParts(parts, {
+      alloc,
+      stop,
+      stopSteps: null,
+      analyze: true,
     });
-    let i = 0;
-    while (i < parts.length) {
-      if (stop !== null && i >= stop) break;
-      const part = parts[i];
-      if (!part.tokens.length) {
-        i += 1;
-        continue;
-      }
-      const result = validateStatement(part.tokens, state, declared, alloc);
-      if ("error" in result) {
-        return { kind: result.kind || "compile" };
-      }
-      const parsed = result.parsed;
-      if (parsed.kind === "if") {
-        const block = ifBlocks.map.get(i);
-        if (!block) return { kind: "compile" };
-        const condition = evaluateCondition(parsed.expr, state);
-        if ("error" in condition) {
-          return { kind: condition.kind || "compile" };
-        }
-        ifDecisions.set(block.headerIndex, condition.value);
-        if (condition.value) {
-          i += 1;
-          continue;
-        }
-        if (stop !== null && stop <= block.closeIndex) break;
-        if (block.elseOpenIndex != null) {
-          i = block.elseOpenIndex;
-          continue;
-        }
-        i = block.closeIndex + 1;
-        continue;
-      }
-      if (parsed.kind === "else") {
-        const block = elseLookup.get(i);
-        if (!block) return { kind: "compile" };
-        const decision = ifDecisions.get(block.headerIndex);
-        if (decision == null) return { kind: "compile" };
-        if (decision) {
-          i = block.afterIndex;
-          continue;
-        }
-        if (block.elseOpenIndex != null) {
-          i = block.elseOpenIndex;
-          continue;
-        }
-        return { kind: "compile" };
-      }
-      if (parsed.kind === "blockStart") {
-        scopes.push(new Set<string>());
-        i += 1;
-        continue;
-      }
-      if (parsed.kind === "blockEnd") {
-        const popped = popScope(scopes, declared, result.next);
-        if (popped.error) return { kind: "compile" };
-        state = popped.state;
-        i += 1;
-        continue;
-      }
-      if (!part.hasSemicolon) return { kind: "compile" };
-      if (parsed.kind === "decl" || parsed.kind === "declAssign") {
-        addDeclaredName(scopes, declared, parsed.name);
-      }
-      state = result.next;
-      i += 1;
-    }
-    return { kind: "ok", state };
+    if (result.kind !== "ok") return { kind: result.kind };
+    return { kind: "ok", state: result.state };
+  }
+
+  function traceProgramParts(
+    parts: StatementPart[],
+    opts: { alloc?: (type?: string) => string; stopSteps?: number } = {},
+  ): ProgramTrace | null {
+    const alloc = resolveAlloc(opts.alloc);
+    const stopSteps = normalizeStopSteps(opts.stopSteps);
+    const result = executeProgramParts(parts, {
+      alloc,
+      stop: null,
+      stopSteps,
+      analyze: false,
+    });
+    if (result.kind !== "ok") return null;
+    return {
+      state: result.state,
+      nextIndex: result.nextIndex,
+      executedSteps: result.executedSteps,
+    };
   }
 
   return {
@@ -2924,6 +3222,7 @@ export function createSimpleSimulator(
     parseStatements,
     buildStatementMap,
     buildIfStatementMap,
+    buildWhileStatementMap,
     statementRangeForLine,
     getStatementContext,
     evaluateCondition,
@@ -2932,6 +3231,7 @@ export function createSimpleSimulator(
     findMissingSemicolonLines,
     applyProgramParts,
     analyzeProgramParts,
+    traceProgramParts,
     applyProgram,
   };
 }

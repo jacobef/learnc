@@ -22,10 +22,6 @@ createExpressionEvalTemplate({
             },
         },
         {
-            expression: "5.25",
-            instructions: "A number with a decimal point has type $t{double}.",
-        },
-        {
             expression: "5.0",
             instructions: "A number with a decimal point has type $t{double}.",
         },
