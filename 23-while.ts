@@ -4,21 +4,26 @@ createProgramTemplate({
   initialInstructions:
     "A $c{while} loop will run repeatedly until its expression is zero.",
   steps: [
-    { code: "int i = 2;\n" },
-    { code: "while (i) {\n" },
-    { code: "  int j = i - 1;\n" },
-    { code: "  i = j;\n" },
+    { code: "int fruit = 2;\n" },
+    { code: "while (fruit) {\n" },
+    { code: "  int belt = fruit - 1;\n" },
+    { code: "  fruit = belt;\n" },
     { code: "}\n" },
-    { code: "int x = 3;\n" },
+    { code: "int feedback = 3;\n" },
     {
-      code: "while (x >= 0) {\n",
+      code: "while (feedback >= 0) {\n",
       editable: true,
       instructions: "Select the line boundary where execution will resume.",
     },
-    { code: "  x = x - i - 2;\n", editable: true },
+    {
+      code: "  feedback = feedback - fruit - 2;\n",
+      editable: true,
+      hints: (ctx) => ctx.basicHint,
+    },
     {
       code: "}\n",
       editable: true,
+      hints: (ctx) => ctx.basicHint,
     },
   ],
   next: "sandbox.html?finished=1",
