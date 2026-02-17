@@ -477,7 +477,8 @@ function adjustValueOverflow(node) {
 }
 function vbox({ address = "—", type = "int", value = "", name = "", editable = false, allowNameEdit = false, allowTypeEdit = false, showDoubleExact = false, } = {}) {
     const parsedType = parseType(type || "int");
-    const isDoubleScalar = parsedType.base === "double" && parsedType.depth === 0;
+    const isFloatingScalar = (parsedType.base === "float" || parsedType.base === "double") &&
+        parsedType.depth === 0;
     const rawValue = value ?? "";
     const emptyDisplay = rawValue === "";
     const displayValue = emptyDisplay ? "" : normalizeZeroDisplay(rawValue);
@@ -568,7 +569,7 @@ function vbox({ address = "—", type = "int", value = "", name = "", editable =
         });
     }
     const toggleEl = node.querySelector(".double-toggle");
-    if (valueEl && isDoubleScalar && !emptyDisplay && !editable) {
+    if (valueEl && isFloatingScalar && !emptyDisplay && !editable) {
         const parsed = parseDoubleValueWithSign(rawValue);
         if (parsed != null) {
             const nanSign = parsed.nanSign;
@@ -658,7 +659,7 @@ function disableBoxEditing(root) {
     if (!root)
         return;
     root
-        .querySelectorAll(".value.editable, .type.editable, .name-text.editable")
+        .querySelectorAll(".value.editable, .type.editable, .name-text.editable, .array-col-value.editable")
         .forEach((el) => {
         el.removeAttribute("contenteditable");
         el.classList.remove("editable");
@@ -667,7 +668,7 @@ function disableBoxEditing(root) {
 }
 function removeBoxDeleteButtons(root) {
     const scope = root || document;
-    scope.querySelectorAll(".vbox .delete").forEach((btn) => btn.remove());
+    scope.querySelectorAll(".vbox .delete, .arraybox .delete").forEach((btn) => btn.remove());
 }
 function readBoxState(root) {
     if (!root)
@@ -686,7 +687,7 @@ function readBoxState(root) {
     const rawValue = storedRawValue !== undefined ? storedRawValue : fallbackRawValue;
     let value = normalizeZeroDisplay(rawValue);
     const valueEditable = valEl instanceof HTMLElement && valEl.isContentEditable;
-    if (parsedType.base === "double" &&
+    if ((parsedType.base === "float" || parsedType.base === "double") &&
         parsedType.depth === 0 &&
         valEl instanceof HTMLElement &&
         !valueEditable) {
@@ -711,6 +712,57 @@ function readBoxState(root) {
 function boxAddress(box) {
     const raw = box?.address ?? "";
     return raw.trim();
+}
+function normalizePointeeInnerDepth(value, depth, pointeeArrayDims) {
+    if (!Array.isArray(pointeeArrayDims) || pointeeArrayDims.length === 0)
+        return 0;
+    const raw = Math.floor(Number(value));
+    const normalized = Number.isFinite(raw) ? raw : 0;
+    const maxInner = Math.max(0, Math.floor(Number(depth)) - 1);
+    return Math.max(0, Math.min(normalized, maxInner));
+}
+function pointerCanReferenceBox(pointer, target) {
+    if (!pointer || !target)
+        return false;
+    const parsedPointer = parseType(pointer.type || "int");
+    const parsedTarget = parseType(target.type || "int");
+    if (!parsedPointer.base ||
+        !parsedTarget.base ||
+        !Number.isFinite(parsedPointer.depth) ||
+        !Number.isFinite(parsedTarget.depth)) {
+        return false;
+    }
+    const pointerDepth = Math.floor(parsedPointer.depth);
+    if (pointerDepth < 1)
+        return false;
+    if (parsedPointer.base !== parsedTarget.base)
+        return false;
+    const pointerPointeeArrayDims = (() => {
+        const fromBox = normalizeArrayDims(pointer.pointeeArrayDims);
+        if (fromBox.length)
+            return fromBox;
+        return normalizeArrayDims(parsedPointer.pointeeArrayDims);
+    })();
+    const targetPointeeArrayDims = (() => {
+        const fromBox = normalizeArrayDims(target.pointeeArrayDims);
+        if (fromBox.length)
+            return fromBox;
+        return normalizeArrayDims(parsedTarget.pointeeArrayDims);
+    })();
+    const pointerPointeeInnerDepth = normalizePointeeInnerDepth(pointer.pointeeInnerDepth ?? parsedPointer.pointeeInnerDepth, pointerDepth, pointerPointeeArrayDims);
+    const pointerOuterDepth = Math.max(0, pointerDepth - pointerPointeeInnerDepth);
+    const targetDepth = Math.floor(parsedTarget.depth);
+    const targetPointeeInnerDepth = normalizePointeeInnerDepth(target.pointeeInnerDepth ?? parsedTarget.pointeeInnerDepth, targetDepth, targetPointeeArrayDims);
+    if (!pointerPointeeArrayDims.length) {
+        return targetDepth === pointerDepth - 1 && targetPointeeArrayDims.length === 0;
+    }
+    if (pointerOuterDepth === 1) {
+        return (targetDepth === pointerPointeeInnerDepth &&
+            targetPointeeArrayDims.length === 0);
+    }
+    return (targetDepth === pointerDepth - 1 &&
+        sameDims(targetPointeeArrayDims, pointerPointeeArrayDims) &&
+        targetPointeeInnerDepth === pointerPointeeInnerDepth);
 }
 function collectStageBoxes(root) {
     if (!root)
@@ -737,10 +789,7 @@ function pointerTargetBox(box, byAddr) {
     const target = byAddr.get(raw) || null;
     if (!target)
         return null;
-    const targetDepth = getPointerDepth(target.type);
-    if (!Number.isFinite(targetDepth))
-        return null;
-    if (targetDepth !== depth - 1)
+    if (!pointerCanReferenceBox(box, target))
         return null;
     return target;
 }
@@ -971,6 +1020,465 @@ function makeAnswerBox({ name = "", names = null, type = "", value = "", address
     }
     return node;
 }
+function normalizeArrayDims(value) {
+    if (!Array.isArray(value))
+        return [];
+    const out = [];
+    for (const raw of value) {
+        const num = Math.floor(Number(raw));
+        if (!Number.isFinite(num) || num <= 0)
+            return [];
+        out.push(num);
+    }
+    return out;
+}
+function parseArrayElementName(name) {
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)((?:\[\d+\])+)$/.exec(String(name || ""));
+    if (!match)
+        return null;
+    const baseName = match[1] || "";
+    const suffix = match[2] || "";
+    if (!baseName || !suffix)
+        return null;
+    const indices = [];
+    const rx = /\[(\d+)\]/g;
+    let m;
+    while ((m = rx.exec(suffix)) != null) {
+        const value = Number(m[1]);
+        if (!Number.isFinite(value) || value < 0)
+            return null;
+        indices.push(value);
+    }
+    if (!indices.length)
+        return null;
+    return { baseName, indices };
+}
+function arrayElementName(name, indices) {
+    return `${name}${indices.map((index) => `[${index}]`).join("")}`;
+}
+function inferArrayShapeFromEntries(entries) {
+    if (!entries.length)
+        return [];
+    const dims = entries[0]?.indices.length || 0;
+    if (!dims)
+        return [];
+    const shape = new Array(dims).fill(0);
+    for (const entry of entries) {
+        if (entry.indices.length !== dims)
+            return [];
+        for (let i = 0; i < dims; i++) {
+            const value = entry.indices[i];
+            if (!Number.isFinite(value) || value < 0)
+                return [];
+            shape[i] = Math.max(shape[i], value + 1);
+        }
+    }
+    return shape.every((dim) => dim > 0) ? shape : [];
+}
+function arrayLinearIndex(indices, shape) {
+    if (indices.length !== shape.length)
+        return null;
+    let linear = 0;
+    let stride = 1;
+    for (let i = shape.length - 1; i >= 0; i--) {
+        const idx = indices[i];
+        const dim = shape[i];
+        if (idx < 0 || idx >= dim)
+            return null;
+        linear += idx * stride;
+        stride *= dim;
+    }
+    return linear;
+}
+function arrayElementCount(shape) {
+    return shape.reduce((acc, dim) => acc * dim, 1);
+}
+function sameDims(a, b) {
+    if (a.length !== b.length)
+        return false;
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i])
+            return false;
+    }
+    return true;
+}
+function groupStateObjects(boxes) {
+    const arrayCandidates = new Map();
+    const scalars = [];
+    boxes.forEach((box, index) => {
+        let baseName = "";
+        let indices = [];
+        const metaShape = normalizeArrayDims(box.arrayShape);
+        if (box.arrayRoot && Array.isArray(box.arrayIndices) && box.arrayIndices.length > 0) {
+            baseName = String(box.arrayRoot);
+            indices = box.arrayIndices
+                .map((value) => Math.floor(Number(value)))
+                .filter((value) => Number.isFinite(value) && value >= 0);
+        }
+        else {
+            const parsed = parseArrayElementName(box.name || "");
+            if (parsed) {
+                baseName = parsed.baseName;
+                indices = parsed.indices;
+            }
+        }
+        if (!baseName || !indices.length) {
+            scalars.push({ kind: "scalar", box, index });
+            return;
+        }
+        const list = arrayCandidates.get(baseName) || [];
+        list.push({ box, indices, shape: metaShape, index });
+        arrayCandidates.set(baseName, list);
+    });
+    const out = [...scalars];
+    for (const [baseName, list] of arrayCandidates.entries()) {
+        if (!list.length)
+            continue;
+        const sorted = list.slice().sort((a, b) => a.index - b.index);
+        const first = sorted[0];
+        const shapes = sorted
+            .map((item) => item.shape)
+            .filter((shape) => shape.length > 0);
+        let shape = shapes.length ? shapes[0].slice() : inferArrayShapeFromEntries(sorted);
+        if (shape.length && shapes.some((candidate) => !sameDims(candidate, shape))) {
+            shape = [];
+        }
+        if (!shape.length) {
+            sorted.forEach((item) => {
+                out.push({ kind: "scalar", box: item.box, index: item.index });
+            });
+            continue;
+        }
+        const elementType = String(first.box.type || "").trim();
+        if (!elementType || sorted.some((item) => String(item.box.type || "").trim() !== elementType)) {
+            sorted.forEach((item) => {
+                out.push({ kind: "scalar", box: item.box, index: item.index });
+            });
+            continue;
+        }
+        const entries = [];
+        const seenLinear = new Set();
+        let valid = true;
+        for (const item of sorted) {
+            const linear = arrayLinearIndex(item.indices, shape);
+            if (!Number.isFinite(linear) || linear == null || seenLinear.has(linear)) {
+                valid = false;
+                break;
+            }
+            seenLinear.add(linear);
+            entries.push({
+                box: item.box,
+                indices: item.indices.slice(),
+                shape: shape.slice(),
+                index: item.index,
+                linear,
+            });
+        }
+        if (!valid || seenLinear.size !== arrayElementCount(shape)) {
+            sorted.forEach((item) => {
+                out.push({ kind: "scalar", box: item.box, index: item.index });
+            });
+            continue;
+        }
+        entries.sort((a, b) => a.linear - b.linear);
+        out.push({
+            kind: "array",
+            name: baseName,
+            shape: shape.slice(),
+            index: first.index,
+            elementType,
+            entries,
+            allowDelete: entries.every((entry) => !!entry.box.allowDelete),
+        });
+    }
+    out.sort((a, b) => a.index - b.index);
+    return out;
+}
+function normalizeComparableType(typeText) {
+    return String(typeText || "")
+        .replace(/\s+/g, "")
+        .trim();
+}
+function makeSubarrayRootName(baseName, prefix) {
+    return `${baseName}${prefix.map((index) => `[${index}]`).join("")}`;
+}
+function buildSyntheticSubarrayBoxes(sourceEntries, baseName, prefix, shape) {
+    const subRoot = makeSubarrayRootName(baseName, prefix);
+    return sourceEntries.map((entry) => {
+        const suffix = entry.indices.slice(prefix.length);
+        return {
+            ...entry.box,
+            name: arrayElementName(subRoot, suffix),
+            arrayRoot: subRoot,
+            arrayShape: shape.slice(),
+            arrayIndices: suffix,
+        };
+    });
+}
+function findSubarrayBoxesInGroup(group, expectedShape, baseAddress) {
+    const rank = group.shape.length;
+    if (!rank || !expectedShape.length || expectedShape.length > rank)
+        return null;
+    if (expectedShape.length === rank) {
+        if (!sameDims(group.shape, expectedShape))
+            return null;
+        const firstAddr = String(group.entries[0]?.box.address ?? "").trim();
+        if (firstAddr !== baseAddress)
+            return null;
+        return group.entries.map((entry) => entry.box);
+    }
+    const prefixLen = rank - expectedShape.length;
+    if (!sameDims(group.shape.slice(prefixLen), expectedShape))
+        return null;
+    const start = group.entries.find((entry) => {
+        if (entry.indices.length !== rank)
+            return false;
+        if (String(entry.box.address ?? "").trim() !== baseAddress)
+            return false;
+        for (let i = prefixLen; i < rank; i++) {
+            if ((entry.indices[i] ?? -1) !== 0)
+                return false;
+        }
+        return true;
+    });
+    if (!start)
+        return null;
+    const prefix = start.indices.slice(0, prefixLen);
+    const subset = group.entries.filter((entry) => {
+        if (entry.indices.length !== rank)
+            return false;
+        for (let i = 0; i < prefixLen; i++) {
+            if (entry.indices[i] !== prefix[i])
+                return false;
+        }
+        return true;
+    });
+    if (subset.length !== arrayElementCount(expectedShape))
+        return null;
+    const rebased = subset.map((entry) => ({
+        entry,
+        suffix: entry.indices.slice(prefixLen),
+    }));
+    const seen = new Set();
+    for (const item of rebased) {
+        const linear = arrayLinearIndex(item.suffix, expectedShape);
+        if (linear == null || seen.has(linear))
+            return null;
+        seen.add(linear);
+    }
+    if (seen.size !== arrayElementCount(expectedShape))
+        return null;
+    const sortedSubset = rebased
+        .slice()
+        .sort((left, right) => (arrayLinearIndex(left.suffix, expectedShape) || 0) -
+        (arrayLinearIndex(right.suffix, expectedShape) || 0))
+        .map((item) => item.entry);
+    return buildSyntheticSubarrayBoxes(sortedSubset, group.name, prefix, expectedShape);
+}
+function findArrayObjectBoxesForResult(result, state) {
+    if (!result || !Array.isArray(state) || !state.length)
+        return null;
+    const parsed = parseType(String(result.type || "int"));
+    const expectedShape = normalizeArrayDims(parsed.arrayDims);
+    if (!expectedShape.length)
+        return null;
+    const baseAddress = String(result.value ?? "").trim();
+    if (!baseAddress)
+        return null;
+    const grouped = groupStateObjects(state);
+    const expectedType = normalizeComparableType(String(result.type || ""));
+    for (const item of grouped) {
+        if (item.kind !== "array")
+            continue;
+        const fullType = normalizeComparableType(`${item.elementType}${item.shape.map((d) => `[${d}]`).join("")}`);
+        const isRootTypeMatch = fullType === expectedType;
+        if (isRootTypeMatch) {
+            const firstAddr = String(item.entries[0]?.box.address ?? "").trim();
+            if (firstAddr === baseAddress) {
+                return item.entries.map((entry) => entry.box);
+            }
+        }
+        const subset = findSubarrayBoxesInGroup(item, expectedShape, baseAddress);
+        if (subset)
+            return subset;
+    }
+    return null;
+}
+function makeArrayBox(group, opts) {
+    const { editable, deletable } = opts;
+    const typeText = `${group.elementType}${group.shape.map((d) => `[${d}]`).join("")}`;
+    const firstAddress = String(group.entries[0]?.box.address ?? "—");
+    const node = el(`
+    <div class="arraybox ${editable ? "is-editable" : ""}">
+      <div class="lbl lbl-array-addr">address</div>
+      <div class="array-address"></div>
+      <div class="array-values-wrap">
+        <div class="array-label array-values-label">values</div>
+        <div class="array-values"></div>
+      </div>
+      <div class="lbl lbl-array-type">type</div>
+      <div class="array-type"></div>
+      <div class="array-name-stack">
+        <div class="array-name"></div>
+        <div class="lbl lbl-array-name">name</div>
+      </div>
+    </div>
+  `);
+    node.dataset.arrayRoot = group.name;
+    node.dataset.arrayShape = group.shape.join(",");
+    node.dataset.arrayElementType = group.elementType;
+    node.querySelector(".array-address").textContent = firstAddress;
+    node.querySelector(".array-type").textContent = typeText;
+    node.querySelector(".array-name").textContent = group.name;
+    const valuesWrap = node.querySelector(".array-values");
+    if (!valuesWrap)
+        return node;
+    const lastDim = group.shape[group.shape.length - 1];
+    let currentRowKey = "";
+    let rowEl = null;
+    let rowValuesEl = null;
+    for (const entry of group.entries) {
+        const prefix = entry.indices.slice(0, -1);
+        const rowKey = prefix.join(",");
+        if (!rowEl || rowKey !== currentRowKey) {
+            rowEl = document.createElement("div");
+            rowEl.className = "array-row";
+            if (group.shape.length > 1) {
+                const rowLabel = document.createElement("div");
+                rowLabel.className = "array-row-label";
+                rowLabel.textContent = prefix.map((value) => `[${value}]`).join("");
+                rowEl.appendChild(rowLabel);
+            }
+            rowValuesEl = document.createElement("div");
+            rowValuesEl.className = "array-row-values";
+            rowValuesEl.style.gridTemplateColumns = `repeat(${lastDim}, minmax(64px, 1fr))`;
+            rowEl.appendChild(rowValuesEl);
+            valuesWrap.appendChild(rowEl);
+            currentRowKey = rowKey;
+        }
+        if (!rowValuesEl)
+            continue;
+        const col = document.createElement("div");
+        col.className = "array-col";
+        const valueEl = document.createElement("div");
+        valueEl.className = "array-col-value";
+        const raw = entry.box.rawValue ?? entry.box.value ?? "";
+        const empty = raw === "";
+        valueEl.textContent = empty ? "" : normalizeZeroDisplay(raw);
+        valueEl.dataset.rawValue = String(raw).trim();
+        valueEl.dataset.arrayName = entry.box.name;
+        valueEl.dataset.arrayType = entry.box.type;
+        valueEl.dataset.arrayAddress = String(entry.box.address ?? "");
+        valueEl.dataset.arrayIndices = entry.indices.join(",");
+        if (empty)
+            valueEl.classList.add("placeholder", "muted");
+        if (editable) {
+            valueEl.setAttribute("contenteditable", "true");
+            valueEl.classList.add("editable");
+            disableAutoText(valueEl);
+            valueEl.addEventListener("input", () => {
+                const rawText = valueEl.textContent || "";
+                const compact = rawText.replace(/\s+/g, "");
+                valueEl.dataset.rawValue = rawText.trim();
+                if (!compact) {
+                    valueEl.textContent = "";
+                    valueEl.classList.add("placeholder", "muted");
+                }
+                else {
+                    valueEl.classList.remove("placeholder", "muted");
+                }
+            });
+        }
+        col.appendChild(valueEl);
+        rowValuesEl.appendChild(col);
+    }
+    if (deletable && group.allowDelete) {
+        const del = el('<button class="delete" title="delete">×</button>');
+        node.appendChild(del);
+        del.addEventListener("click", () => {
+            group.entries.forEach((entry) => {
+                const addr = String(entry.box.address ?? "").trim();
+                if (addr)
+                    addrPool.free.push(addr);
+            });
+            node.remove();
+        });
+        node.dataset.allowDelete = "true";
+    }
+    return node;
+}
+function appendStateObjects(container, boxes, opts = {}) {
+    const { editable = false, deletable = editable, allowNameEdit = null, allowTypeEdit = null, } = opts;
+    const grouped = groupStateObjects(Array.isArray(boxes) ? boxes : []);
+    grouped.forEach((item) => {
+        if (item.kind === "scalar") {
+            const box = item.box;
+            const allowDelete = box.allowDelete !== null && box.allowDelete !== undefined
+                ? !!box.allowDelete
+                : deletable;
+            const node = makeAnswerBox({
+                name: box.name,
+                type: box.type,
+                value: box.rawValue ?? box.value,
+                address: box.address ?? null,
+                editable,
+                deletable: allowDelete,
+                allowNameEdit: allowNameEdit ?? box.nameEditable ?? box.allowNameEdit,
+                allowTypeEdit: allowTypeEdit ?? box.typeEditable ?? box.allowTypeEdit,
+                showDoubleExact: box.showDoubleExact ?? null,
+            });
+            if (allowDelete)
+                node.dataset.allowDelete = "true";
+            if ((box.value ?? "") === "") {
+                node.querySelector(".value")?.classList.add("placeholder", "muted");
+            }
+            container.appendChild(node);
+            return;
+        }
+        const node = makeArrayBox(item, {
+            editable,
+            deletable,
+        });
+        container.appendChild(node);
+    });
+}
+function readArrayBoxState(root) {
+    const shape = normalizeArrayDims(String(root.dataset.arrayShape || "")
+        .split(",")
+        .filter(Boolean)
+        .map((value) => Number(value)));
+    const rootName = String(root.dataset.arrayRoot || "").trim();
+    const values = [...root.querySelectorAll(".array-col-value")];
+    return values.map((valueNode) => {
+        const valueEl = valueNode;
+        const typeText = String(valueEl.dataset.arrayType || root.dataset.arrayElementType || "int").trim();
+        const valText = txt(valueEl);
+        const placeholderEmpty = valueEl.classList.contains("placeholder") && valText === "";
+        const storedRawValue = valueEl.dataset.rawValue;
+        const fallbackRawValue = placeholderEmpty ? "" : valText;
+        const rawValue = storedRawValue !== undefined ? storedRawValue : fallbackRawValue;
+        const value = normalizeZeroDisplay(rawValue);
+        const indices = String(valueEl.dataset.arrayIndices || "")
+            .split(",")
+            .filter(Boolean)
+            .map((num) => Math.floor(Number(num)))
+            .filter((num) => Number.isFinite(num) && num >= 0);
+        const fallbackName = rootName && indices.length ? arrayElementName(rootName, indices) : "";
+        return {
+            address: String(valueEl.dataset.arrayAddress || "").trim(),
+            type: typeText,
+            value,
+            rawValue,
+            name: String(valueEl.dataset.arrayName || fallbackName).trim(),
+            names: [],
+            arrayRoot: rootName || null,
+            arrayShape: shape.length ? shape.slice() : null,
+            arrayIndices: indices.length ? indices.slice() : null,
+            allowDelete: root.dataset.allowDelete === "true" ||
+                (root.querySelector(".delete") != null),
+        };
+    });
+}
 function serializeWorkspace(target) {
     if (!target)
         return null;
@@ -986,40 +1494,37 @@ function serializeWorkspace(target) {
     if (!ws)
         return null;
     const wsEl = ws;
-    let boxes = [...ws.querySelectorAll(".vbox")];
-    if (!boxes.length && wsEl.dataset.inline === "true") {
+    let nodes = [...ws.querySelectorAll(".vbox, .arraybox")];
+    if (!nodes.length && wsEl.dataset.inline === "true") {
         const key = wsEl.dataset.workspaceKey || "";
         if (key) {
-            boxes = [...document.querySelectorAll(`.vbox[data-workspace="${key}"]`)];
+            nodes = [
+                ...document.querySelectorAll(`.vbox[data-workspace="${key}"], .arraybox[data-workspace="${key}"]`),
+            ];
         }
     }
-    return boxes.map((v) => readBoxState(v)).filter(Boolean);
+    const out = [];
+    nodes.forEach((node) => {
+        const el = node;
+        if (el.classList.contains("arraybox")) {
+            out.push(...readArrayBoxState(el));
+            return;
+        }
+        const box = readBoxState(el);
+        if (box)
+            out.push(box);
+    });
+    return out;
 }
 function restoreWorkspace(state, defaults, opts = {}) {
     const { editable = true, deletable = editable, allowNameEdit = null, allowTypeEdit = null, } = opts;
     const wrap = el('<div class="grid" data-role="workspace"></div>');
     const source = Array.isArray(state) && state.length ? state : defaults || [];
-    source.forEach((box) => {
-        const allowDelete = box.allowDelete !== null && box.allowDelete !== undefined
-            ? !!box.allowDelete
-            : deletable;
-        const node = makeAnswerBox({
-            name: box.name,
-            type: box.type,
-            value: box.rawValue ?? box.value,
-            address: box.address ?? null,
-            editable,
-            deletable: allowDelete,
-            allowNameEdit: allowNameEdit ?? box.nameEditable ?? box.allowNameEdit,
-            allowTypeEdit: allowTypeEdit ?? box.typeEditable ?? box.allowTypeEdit,
-            showDoubleExact: box.showDoubleExact ?? null,
-        });
-        if (allowDelete)
-            node.dataset.allowDelete = "true";
-        if ((box.value ?? "") === "") {
-            node.querySelector(".value")?.classList.add("placeholder", "muted");
-        }
-        wrap.appendChild(node);
+    appendStateObjects(wrap, source, {
+        editable,
+        deletable,
+        allowNameEdit,
+        allowTypeEdit,
     });
     return wrap;
 }
@@ -1437,8 +1942,6 @@ function isTextInputActive(el) {
 document.addEventListener("keydown", (e) => {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight")
         return;
-    if (e.repeat)
-        return;
     if (isTextInputActive(document.activeElement) ||
         isTextInputActive(e.target))
         return;
@@ -1458,37 +1961,64 @@ function initCustomPanelScrollbars() {
     const states = new Set();
     const selectors = [
         ".panel-scroll > .panel-body",
-        ".sandbox-state-panel [data-role=\"sandbox-stage\"] .state-panel-scroll-body",
+        ".state-panel.state-panel-scrollable .state-panel-scroll-body",
+        ".sandbox-expr-row [data-role=\"sandbox-expr-result\"]",
+        ".expr-answer-result",
     ];
     const updateState = (state) => {
-        const { host, panel, track, thumb } = state;
+        const { host, panel, trackY, thumbY, trackX, thumbX } = state;
         if (!host.isConnected || !panel.isConnected) {
-            track.remove();
+            trackY.remove();
+            trackX.remove();
             states.delete(state);
             return;
         }
         if (isMobileViewport()) {
-            track.classList.add("hidden");
+            trackY.classList.add("hidden");
+            trackX.classList.add("hidden");
             return;
         }
         const hostRect = host.getBoundingClientRect();
         const panelRect = panel.getBoundingClientRect();
-        const scrollable = Math.max(0, host.scrollHeight - host.clientHeight);
-        if (host.clientHeight <= 0 || scrollable <= 1) {
-            track.classList.add("hidden");
-            return;
-        }
+        const left = Math.max(0, hostRect.left - panelRect.left);
         const top = Math.max(0, hostRect.top - panelRect.top);
-        track.style.top = `${Math.round(top)}px`;
-        track.style.height = `${Math.round(host.clientHeight)}px`;
-        track.classList.remove("hidden");
-        const visible = host.clientHeight;
-        const thumbHeight = Math.max(28, Math.round((visible * visible) / host.scrollHeight));
-        const maxTravel = Math.max(0, visible - thumbHeight);
-        const ratio = scrollable > 0 ? host.scrollTop / scrollable : 0;
-        const thumbTop = Math.max(0, Math.min(maxTravel, Math.round(maxTravel * ratio)));
-        thumb.style.height = `${thumbHeight}px`;
-        thumb.style.transform = `translateY(${thumbTop}px)`;
+        const scrollableY = Math.max(0, host.scrollHeight - host.clientHeight);
+        const scrollableX = Math.max(0, host.scrollWidth - host.clientWidth);
+        const hasY = host.clientHeight > 0 && scrollableY > 1;
+        const hasX = host.clientWidth > 0 && scrollableX > 1;
+        if (!hasY) {
+            trackY.classList.add("hidden");
+        }
+        else {
+            const visibleY = host.clientHeight;
+            const trackHeight = Math.max(0, visibleY - (hasX ? 14 : 0));
+            trackY.style.top = `${Math.round(top)}px`;
+            trackY.style.height = `${Math.round(trackHeight)}px`;
+            trackY.classList.remove("hidden");
+            const thumbHeight = Math.max(28, Math.round((visibleY * visibleY) / host.scrollHeight));
+            const maxTravel = Math.max(0, trackHeight - thumbHeight);
+            const ratio = scrollableY > 0 ? host.scrollTop / scrollableY : 0;
+            const thumbTop = Math.max(0, Math.min(maxTravel, Math.round(maxTravel * ratio)));
+            thumbY.style.height = `${thumbHeight}px`;
+            thumbY.style.transform = `translateY(${thumbTop}px)`;
+        }
+        if (!hasX) {
+            trackX.classList.add("hidden");
+        }
+        else {
+            const visibleX = host.clientWidth;
+            const trackWidth = Math.max(0, visibleX - (hasY ? 14 : 0));
+            trackX.style.left = `${Math.round(left)}px`;
+            trackX.style.top = `${Math.round(top + host.clientHeight - 12)}px`;
+            trackX.style.width = `${Math.round(trackWidth)}px`;
+            trackX.classList.remove("hidden");
+            const thumbWidth = Math.max(28, Math.round((visibleX * visibleX) / host.scrollWidth));
+            const maxTravel = Math.max(0, trackWidth - thumbWidth);
+            const ratio = scrollableX > 0 ? host.scrollLeft / scrollableX : 0;
+            const thumbLeft = Math.max(0, Math.min(maxTravel, Math.round(maxTravel * ratio)));
+            thumbX.style.width = `${thumbWidth}px`;
+            thumbX.style.transform = `translateX(${thumbLeft}px)`;
+        }
     };
     const scheduleUpdate = (state) => {
         if (state.rafId != null)
@@ -1501,68 +2031,120 @@ function initCustomPanelScrollbars() {
     const bindHost = (host) => {
         if (customScrollbarState.has(host))
             return;
-        const panel = host.closest(".panel");
+        const panel = host.closest(".panel, .state-panel");
         if (!panel)
             return;
         host.classList.add("custom-scroll-host");
-        const track = document.createElement("div");
-        track.className = "panel-custom-scrollbar hidden";
-        const thumb = document.createElement("div");
-        thumb.className = "panel-custom-scrollbar-thumb";
-        track.appendChild(thumb);
-        panel.appendChild(track);
+        const trackY = document.createElement("div");
+        trackY.className = "panel-custom-scrollbar panel-custom-scrollbar-y hidden";
+        const thumbY = document.createElement("div");
+        thumbY.className = "panel-custom-scrollbar-thumb panel-custom-scrollbar-thumb-y";
+        trackY.appendChild(thumbY);
+        panel.appendChild(trackY);
+        const trackX = document.createElement("div");
+        trackX.className = "panel-custom-scrollbar panel-custom-scrollbar-x hidden";
+        const thumbX = document.createElement("div");
+        thumbX.className = "panel-custom-scrollbar-thumb panel-custom-scrollbar-thumb-x";
+        trackX.appendChild(thumbX);
+        panel.appendChild(trackX);
         const state = {
             host,
             panel,
-            track,
-            thumb,
+            trackY,
+            thumbY,
+            trackX,
+            thumbX,
             rafId: null,
         };
         customScrollbarState.set(host, state);
         states.add(state);
         host.addEventListener("scroll", () => scheduleUpdate(state), { passive: true });
-        let dragging = false;
+        let draggingY = false;
         let startY = 0;
         let startScrollTop = 0;
-        const onMove = (event) => {
-            if (!dragging)
+        const onMoveY = (event) => {
+            if (!draggingY)
                 return;
             const scrollable = Math.max(0, host.scrollHeight - host.clientHeight);
             if (scrollable <= 0)
                 return;
-            const thumbHeight = thumb.getBoundingClientRect().height;
-            const maxTravel = Math.max(1, host.clientHeight - thumbHeight);
+            const thumbHeight = thumbY.getBoundingClientRect().height;
+            const maxTravel = Math.max(1, trackY.getBoundingClientRect().height - thumbHeight);
             const deltaY = event.clientY - startY;
             const scrollDelta = (deltaY / maxTravel) * scrollable;
             host.scrollTop = Math.max(0, Math.min(scrollable, startScrollTop + scrollDelta));
             scheduleUpdate(state);
         };
-        const onUp = () => {
-            if (!dragging)
+        const stopDraggingY = () => {
+            if (!draggingY)
                 return;
-            dragging = false;
-            window.removeEventListener("mousemove", onMove);
-            window.removeEventListener("mouseup", onUp);
+            draggingY = false;
+            window.removeEventListener("mousemove", onMoveY);
+            window.removeEventListener("mouseup", stopDraggingY);
             document.body.classList.remove("custom-scrollbar-dragging");
         };
-        thumb.addEventListener("mousedown", (event) => {
+        thumbY.addEventListener("mousedown", (event) => {
             event.preventDefault();
-            dragging = true;
+            draggingY = true;
             startY = event.clientY;
             startScrollTop = host.scrollTop;
             document.body.classList.add("custom-scrollbar-dragging");
-            window.addEventListener("mousemove", onMove);
-            window.addEventListener("mouseup", onUp);
+            window.addEventListener("mousemove", onMoveY);
+            window.addEventListener("mouseup", stopDraggingY);
         });
-        track.addEventListener("mousedown", (event) => {
-            if (event.target === thumb)
+        trackY.addEventListener("mousedown", (event) => {
+            if (event.target === thumbY)
                 return;
             event.preventDefault();
-            const rect = track.getBoundingClientRect();
+            const rect = trackY.getBoundingClientRect();
             const offset = event.clientY - rect.top;
             const ratio = Math.max(0, Math.min(1, offset / Math.max(1, rect.height)));
             const scrollable = Math.max(0, host.scrollHeight - host.clientHeight);
             host.scrollTop = Math.round(scrollable * ratio);
+            scheduleUpdate(state);
+        });
+        let draggingX = false;
+        let startX = 0;
+        let startScrollLeft = 0;
+        const onMoveX = (event) => {
+            if (!draggingX)
+                return;
+            const scrollable = Math.max(0, host.scrollWidth - host.clientWidth);
+            if (scrollable <= 0)
+                return;
+            const thumbWidth = thumbX.getBoundingClientRect().width;
+            const maxTravel = Math.max(1, trackX.getBoundingClientRect().width - thumbWidth);
+            const deltaX = event.clientX - startX;
+            const scrollDelta = (deltaX / maxTravel) * scrollable;
+            host.scrollLeft = Math.max(0, Math.min(scrollable, startScrollLeft + scrollDelta));
+            scheduleUpdate(state);
+        };
+        const stopDraggingX = () => {
+            if (!draggingX)
+                return;
+            draggingX = false;
+            window.removeEventListener("mousemove", onMoveX);
+            window.removeEventListener("mouseup", stopDraggingX);
+            document.body.classList.remove("custom-scrollbar-dragging");
+        };
+        thumbX.addEventListener("mousedown", (event) => {
+            event.preventDefault();
+            draggingX = true;
+            startX = event.clientX;
+            startScrollLeft = host.scrollLeft;
+            document.body.classList.add("custom-scrollbar-dragging");
+            window.addEventListener("mousemove", onMoveX);
+            window.addEventListener("mouseup", stopDraggingX);
+        });
+        trackX.addEventListener("mousedown", (event) => {
+            if (event.target === thumbX)
+                return;
+            event.preventDefault();
+            const rect = trackX.getBoundingClientRect();
+            const offset = event.clientX - rect.left;
+            const ratio = Math.max(0, Math.min(1, offset / Math.max(1, rect.width)));
+            const scrollable = Math.max(0, host.scrollWidth - host.clientWidth);
+            host.scrollLeft = Math.round(scrollable * ratio);
             scheduleUpdate(state);
         });
         if (typeof ResizeObserver !== "undefined") {
@@ -1627,4 +2209,4 @@ function flashStatus(el) {
     void node.offsetWidth;
     node.classList.add("status-flash");
 }
-export { $, buildNav, createStepper, disableBoxEditing, ensureBaseLayout, flashStatus, getNavLabelForHref, isMobileViewport, bindBtnRefPulse, makeAnswerBox, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, vbox, applyOtherNames, };
+export { $, buildNav, createStepper, disableBoxEditing, ensureBaseLayout, flashStatus, getNavLabelForHref, isMobileViewport, bindBtnRefPulse, makeAnswerBox, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, vbox, applyOtherNames, appendStateObjects, findArrayObjectBoxesForResult, };

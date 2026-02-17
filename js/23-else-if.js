@@ -34,6 +34,6 @@ createProgramTemplate({
             },
         },
     ],
-    next: "22-review-ii.html",
+    next: "24-clamp.html",
     workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

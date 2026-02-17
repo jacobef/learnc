@@ -20,9 +20,15 @@ const DEFAULT_NAV_ITEMS = [
     { href: "18-if.html", label: "18. If" },
     { href: "19-else.html", label: "19. Else" },
     { href: "20-abs.html", label: "20. Absolute Value" },
-    { href: "21-else-if.html", label: "21. Else If" },
-    { href: "22-review-ii.html", label: "22. Review II" },
-    { href: "23-while.html", label: "23. While" },
+    { href: "21-cubed.html", label: "21. Cubed" },
+    { href: "22-max.html", label: "22. Max" },
+    { href: "23-else-if.html", label: "23. Else If" },
+    { href: "24-clamp.html", label: "24. Clamp" },
+    { href: "25-review-ii.html", label: "25. Review II" },
+    { href: "26-rounding-i.html", label: "26. Rounding I" },
+    { href: "27-rounding-ii.html", label: "27. Rounding II" },
+    { href: "28-while.html", label: "28. While" },
+    { href: "29-fibonacci.html", label: "29. Fibonacci" },
     { href: "sandbox.html", label: "Sandbox" },
 ];
 export { DEFAULT_NAV_ITEMS };

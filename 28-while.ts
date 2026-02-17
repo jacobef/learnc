@@ -25,8 +25,17 @@ createProgramTemplate({
       editable: true,
       hints: (ctx) => ctx.basicHint,
     },
+    {
+      code: `while (fruit <= 2) {
+  feedback = 2 * feedback;
+  fruit = fruit + 1;
+}
+`,
+      editable: true,
+      instructions:
+        "What should the program state look like after this $c{while} loop finishes?",
+    },
   ],
-  next: "sandbox.html?finished=1",
-  isLast: true,
+  next: "29-fibonacci.html",
   workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

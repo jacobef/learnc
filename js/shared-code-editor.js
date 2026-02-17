@@ -1,4 +1,4 @@
-import { applyTextTokenReplacements, createSimpleSimulator, createStepper, ensureBaseLayout, flashStatus, getNavLabelForHref, randAddr, renderParts, resolveActiveNavItem, setPartsContent, typeInfo, vbox, } from "./shared-core.js";
+import { applyTextTokenReplacements, appendStateObjects, bindBtnRefPulse, createSimpleSimulator, createStepper, ensureBaseLayout, flashStatus, getNavLabelForHref, randAddr, renderParts, resolveActiveNavItem, setPartsContent, typeInfo, } from "./shared-core.js";
 function collectCodeEditorElements(root = document) {
     return {
         instructionsEl: root.querySelector('[data-role="code-instructions"]'),
@@ -148,6 +148,7 @@ function createCodeEditorTemplate(config) {
         failConfig("Code editor textareaMinLines must be a number.");
     }
     const { instructionsEl, editor, lineNumbers, errorGutter, stage, status, hintPanel, hintBtn, checkBtn, nextBtn, codeRoot, } = ensureCodeEditorLayout({ textareaMinLines });
+    bindBtnRefPulse(codeRoot || document);
     const measureEl = (() => {
         if (!editor || !editor.parentElement)
             return null;
@@ -189,10 +190,7 @@ function createCodeEditorTemplate(config) {
         const lines = Math.max(1, Number(textareaMinLines));
         editor.style.minHeight = `calc(var(--code-line-height) * ${lines} + 16px)`;
     }
-    const simulator = createSimpleSimulator({
-        allowVarAssign: true,
-        requireSourceValue: true,
-    });
+    const simulator = createSimpleSimulator();
     function allocFactory() {
         if (state.allocBase == null)
             state.allocBase = randAddr("int");
@@ -355,7 +353,7 @@ function createCodeEditorTemplate(config) {
     }
     function renderState(title, boxes, status = "ok") {
         const wrap = document.createElement("div");
-        wrap.className = "state-panel";
+        wrap.className = "state-panel state-panel-scrollable";
         const heading = document.createElement("div");
         heading.className = "panel-title state-heading";
         heading.textContent = title;
@@ -408,20 +406,15 @@ function createCodeEditorTemplate(config) {
             grid.appendChild(msg);
         }
         else {
-            boxes.forEach((b) => {
-                const node = vbox({
-                    address: b.address ?? undefined,
-                    type: b.type,
-                    value: b.value,
-                    name: b.name,
-                    editable: false,
-                });
-                if ((b.value ?? "") === "")
-                    node.querySelector(".value")?.classList.add("placeholder", "muted");
-                grid.appendChild(node);
+            appendStateObjects(grid, boxes, {
+                editable: false,
+                deletable: false,
             });
         }
-        wrap.appendChild(grid);
+        const body = document.createElement("div");
+        body.className = "state-panel-scroll-body";
+        body.appendChild(grid);
+        wrap.appendChild(body);
         return wrap;
     }
     function renderStage() {

@@ -1,4 +1,4 @@
-import { boxValueMatchesSpec, createSimpleSimulator, createStepper, disableBoxEditing, ensureBaseLayout, flashStatus, formatValueForType, getNavLabelForHref, normalizeBoxValueForContext, readBoxState, resolveActiveNavItem, setPartsContent, vbox, } from "./shared-core.js";
+import { appendStateObjects, bindBtnRefPulse, boxValueMatchesSpec, createSimpleSimulator, createStepper, disableBoxEditing, ensureBaseLayout, findArrayObjectBoxesForResult, flashStatus, formatValueForType, getNavLabelForHref, normalizeBoxValueForContext, readBoxState, resolveActiveNavItem, setPartsContent, vbox, } from "./shared-core.js";
 function collectExpressionElements(root = document) {
     return {
         instructionsEl: root.querySelector('[data-role="expr-instructions"]'),
@@ -175,10 +175,8 @@ function createExpressionEvalTemplate(config) {
         editable: step.editable === true,
     }));
     const { instructionsEl, continueBtn, sectionEl, expressionEl, answerPanel, answerSlot, answerResult, toggleWrap, hintPanel, hintBtn, useSelectedBtn, useEnteredBtn, checkBtn, statusEl, stageEl, statePanel, } = ensureExpressionLayout();
-    const simulator = createSimpleSimulator({
-        allowVarAssign: true,
-        requireSourceValue: true,
-    });
+    bindBtnRefPulse(sectionEl || document);
+    const simulator = createSimpleSimulator();
     const state = {
         boundary: 0,
         passes: {},
@@ -446,6 +444,16 @@ function createExpressionEvalTemplate(config) {
             return;
         }
         const { result } = evaluated;
+        const arrayBoxes = findArrayObjectBoxesForResult(result, step.boxes ?? []);
+        if (arrayBoxes && arrayBoxes.length) {
+            const wrap = document.createElement("div");
+            appendStateObjects(wrap, arrayBoxes, { editable: false, deletable: false });
+            const arrayNode = wrap.querySelector(".arraybox");
+            if (arrayNode) {
+                answerResult.appendChild(arrayNode);
+                return;
+            }
+        }
         if (result.kind === "lvalue") {
             const match = (step.boxes ?? []).find((box) => String(box.address) === result.address) || null;
             const node = match

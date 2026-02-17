@@ -1,4 +1,4 @@
-import { $, applyOtherNames, createSimpleSimulator, ensureBaseLayout, formatValueForType, randAddr, vbox, } from "./shared-core.js";
+import { $, applyOtherNames, appendStateObjects, createSimpleSimulator, ensureBaseLayout, findArrayObjectBoxesForResult, formatValueForType, randAddr, typeInfo, vbox, } from "./shared-core.js";
 import { confettiRain } from "./confetti.js";
 const { main } = ensureBaseLayout();
 main.classList.add("main-panelized");
@@ -58,10 +58,7 @@ const sandbox = {
     lastState: null,
     exprOtherNamesShown: new Set(),
 };
-const simulator = createSimpleSimulator({
-    allowVarAssign: true,
-    requireSourceValue: true,
-});
+const simulator = createSimpleSimulator();
 function showExprError(message) {
     if (!exprError)
         return;
@@ -71,10 +68,16 @@ function showExprError(message) {
 function allocFactory() {
     if (sandbox.allocBase == null)
         sandbox.allocBase = randAddr("int");
-    let next = sandbox.allocBase;
-    return () => {
+    let next = Number(sandbox.allocBase);
+    return (type = "int") => {
+        const info = typeInfo(type || "int");
+        const size = info.size || 4;
+        const align = info.align || 1;
+        if (next % align !== 0) {
+            next = Math.ceil(next / align) * align;
+        }
         const addr = next;
-        next += 4;
+        next = addr + size;
         return String(addr);
     };
 }
@@ -531,7 +534,9 @@ function renderExpression(outcome) {
         showExprError("Fix the code before evaluating expressions.");
         return;
     }
-    const evaluated = simulator.evaluateExpressionText(expr, outcome.state || []);
+    const evaluated = simulator.evaluateExpressionText(expr, outcome.state || [], {
+        allowSideEffects: false,
+    });
     if ("error" in evaluated) {
         const errorText = typeof evaluated.error === "string"
             ? evaluated.error
@@ -540,6 +545,17 @@ function renderExpression(outcome) {
         return;
     }
     const { result } = evaluated;
+    const arrayBoxes = findArrayObjectBoxesForResult(result, outcome.state || []);
+    if (arrayBoxes && arrayBoxes.length) {
+        const wrap = document.createElement("div");
+        appendStateObjects(wrap, arrayBoxes, { editable: false, deletable: false });
+        const arrayNode = wrap.querySelector(".arraybox");
+        if (arrayNode) {
+            exprResult.appendChild(arrayNode);
+            exprResult.classList.remove("hidden");
+            return;
+        }
+    }
     const match = result.kind === "lvalue"
         ? (outcome.state || []).find((box) => String(box.address) === String(result.address))
         : null;
@@ -663,23 +679,12 @@ function renderState(title, boxes, status = "ok") {
         grid.appendChild(msg);
     }
     else {
-        boxes.forEach((b) => {
-            const node = vbox({
-                address: b.address ?? undefined,
-                type: b.type,
-                value: b.value,
-                name: b.name,
-                editable: false,
-            });
-            if ((b.value ?? "") === "")
-                node.querySelector(".value")?.classList.add("placeholder", "muted");
-            grid.appendChild(node);
+        appendStateObjects(grid, boxes, {
+            editable: false,
+            deletable: false,
         });
     }
-    const body = document.createElement("div");
-    body.className = "state-panel-scroll-body";
-    body.appendChild(grid);
-    wrap.appendChild(body);
+    wrap.appendChild(grid);
     return wrap;
 }
 function refreshOtherNames() {

@@ -1,247 +1,29 @@
-import { cloneBoxes, formatValueForType, normalizeSpecialFloatLiteral, parseDoubleValueWithSign, parseType, randAddr, stripAllComments, } from "./shared-core-utils.js";
-export function createSimpleSimulator(opts = {}) {
-    const { allowVarAssign = false, requireSourceValue = false } = opts;
+import { canonicalizeBaseType, cloneBoxes, formatValueForType, normalizeSpecialFloatLiteral, parseDoubleValueWithSign, parseType, randAddr, stripAllComments, typeInfo, } from "./shared-core-utils.js";
+import { createParserTools, } from "./shared-core-parser.js";
+export function createSimpleSimulator() {
+    const requireSourceValue = true;
     const isEvalError = (result) => !!result.error;
     const isScalarError = (result) => !!result.error;
-    function tokenizeProgram(src = "") {
-        const tokens = [];
-        let i = 0;
-        let line = 0;
-        let col = 0;
-        while (i < src.length) {
-            const ch = src[i];
-            if (ch === "\r") {
-                i++;
-                if (src[i] === "\n")
-                    i++;
-                line++;
-                col = 0;
-                continue;
-            }
-            if (ch === "\n") {
-                i++;
-                line++;
-                col = 0;
-                continue;
-            }
-            if (ch === "/" && src[i + 1] === "/") {
-                i += 2;
-                col += 2;
-                while (i < src.length && src[i] !== "\n" && src[i] !== "\r") {
-                    i++;
-                    col++;
-                }
-                continue;
-            }
-            if (ch === "/" && src[i + 1] === "*") {
-                const startLine = line;
-                const startCol = col;
-                i += 2;
-                col += 2;
-                let closed = false;
-                while (i < src.length) {
-                    const c = src[i];
-                    if (c === "\r") {
-                        i++;
-                        if (src[i] === "\n")
-                            i++;
-                        line++;
-                        col = 0;
-                        continue;
-                    }
-                    if (c === "\n") {
-                        i++;
-                        line++;
-                        col = 0;
-                        continue;
-                    }
-                    if (c === "*" && src[i + 1] === "/") {
-                        i += 2;
-                        col += 2;
-                        closed = true;
-                        break;
-                    }
-                    i++;
-                    col++;
-                }
-                if (!closed) {
-                    tokens.push({
-                        type: "unknown",
-                        value: "/*",
-                        line: startLine,
-                        col: startCol,
-                    });
-                }
-                continue;
-            }
-            if (/\s/.test(ch)) {
-                i++;
-                col++;
-                continue;
-            }
-            if (ch === "=") {
-                if (src[i + 1] === "=") {
-                    tokens.push({ type: "sym", value: "==", line, col });
-                    i += 2;
-                    col += 2;
-                }
-                else {
-                    tokens.push({ type: "sym", value: ch, line, col });
-                    i++;
-                    col++;
-                }
-                continue;
-            }
-            if (ch === "!") {
-                if (src[i + 1] === "=") {
-                    tokens.push({ type: "sym", value: "!=", line, col });
-                    i += 2;
-                    col += 2;
-                }
-                else {
-                    tokens.push({ type: "unknown", value: ch, line, col });
-                    i++;
-                    col++;
-                }
-                continue;
-            }
-            if (ch === "<" || ch === ">") {
-                if (src[i + 1] === ch) {
-                    tokens.push({ type: "sym", value: `${ch}${ch}`, line, col });
-                    i += 2;
-                    col += 2;
-                }
-                else if (src[i + 1] === "=") {
-                    tokens.push({ type: "sym", value: `${ch}=`, line, col });
-                    i += 2;
-                    col += 2;
-                }
-                else {
-                    tokens.push({ type: "sym", value: ch, line, col });
-                    i++;
-                    col++;
-                }
-                continue;
-            }
-            if (ch === "+" ||
-                ch === "-" ||
-                ch === "*" ||
-                ch === "/" ||
-                ch === "&" ||
-                ch === "|" ||
-                ch === "^" ||
-                ch === "~" ||
-                ch === ";" ||
-                ch === "(" ||
-                ch === ")" ||
-                ch === "{" ||
-                ch === "}") {
-                tokens.push({ type: "sym", value: ch, line, col });
-                i++;
-                col++;
-                continue;
-            }
-            if (/[A-Za-z_]/.test(ch)) {
-                const startCol = col;
-                let j = i + 1;
-                while (j < src.length && /[A-Za-z0-9_]/.test(src[j]))
-                    j++;
-                const ident = src.slice(i, j);
-                const special = normalizeSpecialFloatLiteral(ident);
-                tokens.push({
-                    type: special
-                        ? "number"
-                        : ident === "int" ||
-                            ident === "long" ||
-                            ident === "double" ||
-                            ident === "if" ||
-                            ident === "while" ||
-                            ident === "else"
-                            ? "kw"
-                            : "ident",
-                    value: special || ident,
-                    line,
-                    col: startCol,
-                });
-                col += j - i;
-                i = j;
-                continue;
-            }
-            if (/[0-9]/.test(ch)) {
-                const startCol = col;
-                let j = i;
-                let isDecimal = false;
-                if (src[j] === "0" && (src[j + 1] === "x" || src[j + 1] === "X")) {
-                    j += 2;
-                    while (j < src.length && /[0-9a-fA-F]/.test(src[j]))
-                        j++;
-                }
-                else {
-                    while (j < src.length && /[0-9]/.test(src[j]))
-                        j++;
-                    if (src[j] === ".") {
-                        isDecimal = true;
-                        j++;
-                        while (j < src.length && /[0-9]/.test(src[j]))
-                            j++;
-                    }
-                    if (src[j] === "e" || src[j] === "E") {
-                        isDecimal = true;
-                        let k = j + 1;
-                        if (src[k] === "+" || src[k] === "-")
-                            k++;
-                        const expStart = k;
-                        while (k < src.length && /[0-9]/.test(src[k]))
-                            k++;
-                        if (k > expStart) {
-                            j = k;
-                        }
-                    }
-                }
-                if (!isDecimal && (src[j] === "l" || src[j] === "L")) {
-                    j++;
-                }
-                tokens.push({
-                    type: "number",
-                    value: src.slice(i, j),
-                    line,
-                    col: startCol,
-                });
-                col += j - i;
-                i = j;
-                continue;
-            }
-            if (ch === "." && /[0-9]/.test(src[i + 1] || "")) {
-                const startCol = col;
-                let j = i + 1;
-                while (j < src.length && /[0-9]/.test(src[j]))
-                    j++;
-                if (src[j] === "e" || src[j] === "E") {
-                    let k = j + 1;
-                    if (src[k] === "+" || src[k] === "-")
-                        k++;
-                    const expStart = k;
-                    while (k < src.length && /[0-9]/.test(src[k]))
-                        k++;
-                    if (k > expStart) {
-                        j = k;
-                    }
-                }
-                tokens.push({
-                    type: "number",
-                    value: `0${src.slice(i, j)}`,
-                    line,
-                    col: startCol,
-                });
-                col += j - i;
-                i = j;
-                continue;
-            }
-            tokens.push({ type: "unknown", value: ch, line, col });
-            i++;
-            col++;
-        }
-        return tokens;
+    function decayArrayValue(result) {
+        if (isEvalError(result))
+            return result;
+        if (!result.isArray)
+            return result;
+        const arrayShape = normalizeArrayDims(result.arrayShape);
+        const decayedPointeeArrayDims = arrayShape.length > 1
+            ? arrayShape.slice(1)
+            : normalizeArrayDims(result.pointeeArrayDims);
+        return {
+            kind: "rvalue",
+            base: result.base,
+            depth: result.depth,
+            value: result.value,
+            address: "",
+            label: result.label,
+            nanSign: result.nanSign,
+            pointeeArrayDims: decayedPointeeArrayDims,
+            pointeeInnerDepth: normalizePointeeInnerDepth(result.pointeeInnerDepth, result.depth, decayedPointeeArrayDims),
+        };
     }
     function hasDeclaredPrefix(prefix, names) {
         if (!prefix || !names || !names.size)
@@ -252,14 +34,125 @@ export function createSimpleSimulator(opts = {}) {
         }
         return false;
     }
+    function arrayElementName(name, indices) {
+        return `${name}${indices.map((index) => `[${index}]`).join("")}`;
+    }
+    function parseArrayElementName(name) {
+        const match = /^([A-Za-z_][A-Za-z0-9_]*)((?:\[\d+\])+)$/.exec(String(name || ""));
+        if (!match)
+            return null;
+        const baseName = match[1] || "";
+        const suffix = match[2] || "";
+        if (!baseName || !suffix)
+            return null;
+        const indices = [];
+        const rx = /\[(\d+)\]/g;
+        let m;
+        while ((m = rx.exec(suffix)) != null) {
+            const value = Number(m[1]);
+            if (!Number.isFinite(value) || value < 0)
+                return null;
+            indices.push(value);
+        }
+        if (!indices.length)
+            return null;
+        return { baseName, indices };
+    }
+    function forEachArrayIndex(shape, fn) {
+        const dims = shape.map((d) => Math.max(0, Math.floor(Number(d))));
+        if (!dims.length || dims.some((d) => d <= 0))
+            return;
+        let linear = 0;
+        const indices = new Array(dims.length).fill(0);
+        const recur = (depth) => {
+            if (depth >= dims.length) {
+                fn(indices.slice(), linear++);
+                return;
+            }
+            for (let i = 0; i < dims[depth]; i++) {
+                indices[depth] = i;
+                recur(depth + 1);
+            }
+        };
+        recur(0);
+    }
+    function makeArrayDeclaredNames(name, shape) {
+        const out = [name];
+        forEachArrayIndex(shape, (indices) => {
+            out.push(arrayElementName(name, indices));
+        });
+        return out;
+    }
+    function normalizeArrayDims(dims) {
+        if (!Array.isArray(dims))
+            return [];
+        const out = [];
+        for (const dim of dims) {
+            const value = Math.floor(Number(dim));
+            if (!Number.isFinite(value) || value <= 0)
+                return [];
+            out.push(value);
+        }
+        return out;
+    }
+    function sameArrayDims(left, right) {
+        if (left.length !== right.length)
+            return false;
+        for (let i = 0; i < left.length; i++) {
+            if (left[i] !== right[i])
+                return false;
+        }
+        return true;
+    }
+    function normalizePointeeInnerDepth(value, depth, pointeeArrayDims) {
+        if (!Array.isArray(pointeeArrayDims) || pointeeArrayDims.length === 0)
+            return 0;
+        const raw = Math.floor(Number(value));
+        const normalized = Number.isFinite(raw) ? raw : 0;
+        const maxInner = Math.max(0, Math.floor(Number(depth)) - 1);
+        return Math.max(0, Math.min(normalized, maxInner));
+    }
+    function samePointerPointeeType(leftDepth, leftPointeeArrayDims, leftPointeeInnerDepth, rightDepth, rightPointeeArrayDims, rightPointeeInnerDepth) {
+        if (!sameArrayDims(leftPointeeArrayDims, rightPointeeArrayDims))
+            return false;
+        if (!leftPointeeArrayDims.length)
+            return true;
+        return (normalizePointeeInnerDepth(leftPointeeInnerDepth, leftDepth, leftPointeeArrayDims) ===
+            normalizePointeeInnerDepth(rightPointeeInnerDepth, rightDepth, rightPointeeArrayDims));
+    }
+    function arrayElementCount(shape) {
+        let count = 1;
+        for (const dim of shape) {
+            count *= dim;
+        }
+        return count;
+    }
+    function arrayLinearIndex(indices, shape) {
+        if (indices.length !== shape.length)
+            return null;
+        let linear = 0;
+        let stride = 1;
+        for (let i = shape.length - 1; i >= 0; i--) {
+            const idx = indices[i];
+            const dim = shape[i];
+            if (idx < 0 || idx >= dim)
+                return null;
+            linear += idx * stride;
+            stride *= dim;
+        }
+        return linear;
+    }
     function isBraceToken(tok) {
         return tok.type === "sym" && (tok.value === "{" || tok.value === "}");
     }
-    function addDeclaredName(scopes, declared, name) {
-        declared.add(name);
+    function addDeclaredNames(scopes, declared, names) {
+        for (const name of names)
+            declared.add(name);
         const current = scopes[scopes.length - 1];
-        if (current)
-            current.add(name);
+        if (current) {
+            for (const name of names)
+                current.add(name);
+        }
     }
     function popScope(scopes, declared, state) {
         if (scopes.length <= 1) {
@@ -276,39 +169,112 @@ export function createSimpleSimulator(opts = {}) {
     function resolveDeclType(stars, baseType = "int") {
         if (!Number.isFinite(stars) || stars < 0)
             return null;
-        if (!baseType ||
-            (baseType !== "int" && baseType !== "long" && baseType !== "double"))
+        const base = canonicalizeBaseType(baseType);
+        if (!base)
             return null;
         if (stars === 0)
-            return baseType;
-        return `${baseType}${"*".repeat(stars)}`;
+            return base;
+        return `${base}${"*".repeat(stars)}`;
     }
-    function makePointerType(depth, base = "int") {
+    function makePointerType(depth, base = "int", pointeeArrayDims = [], pointeeInnerDepth) {
         if (!Number.isFinite(depth) || depth < 0)
             return null;
-        if (base !== "int" && base !== "long" && base !== "double")
+        const canonicalBase = canonicalizeBaseType(base);
+        if (!canonicalBase)
             return null;
-        return depth === 0 ? base : `${base}${"*".repeat(depth)}`;
+        const dims = normalizeArrayDims(pointeeArrayDims)
+            .map((d) => `[${d}]`)
+            .join("");
+        if (depth === 0)
+            return `${canonicalBase}${dims}`;
+        if (Array.isArray(pointeeArrayDims) && pointeeArrayDims.length > 0) {
+            const rawInner = Math.floor(Number(pointeeInnerDepth));
+            const innerDepth = Math.max(0, Math.min(Number.isFinite(rawInner) ? rawInner : 0, Math.max(0, Math.floor(depth))));
+            const outerDepth = Math.max(0, depth - innerDepth);
+            const inner = innerDepth > 0 ? ` ${"*".repeat(innerDepth)}` : "";
+            if (outerDepth === 0) {
+                return `${canonicalBase}${inner}${dims}`;
+            }
+            return `${canonicalBase}${inner} (${"*".repeat(outerDepth)})${dims}`;
+        }
+        return `${canonicalBase}${"*".repeat(depth)}`;
     }
-    const INT32_MIN = -2147483648n;
-    const INT32_MAX = 2147483647n;
-    const INT64_MIN = -9223372036854775808n;
-    const INT64_MAX = 9223372036854775807n;
+    const INTEGER_TYPE_META = {
+        bool: { bits: 1, signed: false, rank: 1 },
+        char: { bits: 8, signed: true, rank: 2 },
+        "signed char": { bits: 8, signed: true, rank: 2 },
+        "unsigned char": { bits: 8, signed: false, rank: 2 },
+        short: { bits: 16, signed: true, rank: 3 },
+        "unsigned short": { bits: 16, signed: false, rank: 3 },
+        int: { bits: 32, signed: true, rank: 4 },
+        "unsigned int": { bits: 32, signed: false, rank: 4 },
+        long: { bits: 64, signed: true, rank: 5 },
+        "unsigned long": { bits: 64, signed: false, rank: 5 },
+        "long long": { bits: 64, signed: true, rank: 6 },
+        "unsigned long long": { bits: 64, signed: false, rank: 6 },
+    };
+    function integerMetaForBase(base) {
+        return INTEGER_TYPE_META[base] || null;
+    }
+    function isFloatingBase(base) {
+        return base === "float" || base === "double";
+    }
+    function isIntegerBase(base) {
+        return !!integerMetaForBase(base);
+    }
+    function integerRangeForBase(base) {
+        const meta = integerMetaForBase(base);
+        if (!meta)
+            return null;
+        if (!meta.signed) {
+            return {
+                min: 0n,
+                max: (1n << BigInt(meta.bits)) - 1n,
+                bits: meta.bits,
+                signed: false,
+            };
+        }
+        const max = (1n << BigInt(meta.bits - 1)) - 1n;
+        const min = -(1n << BigInt(meta.bits - 1));
+        return { min, max, bits: meta.bits, signed: true };
+    }
     function stripIntegerSuffix(value) {
         const raw = value.trim();
         if (!raw)
             return raw;
-        const last = raw[raw.length - 1];
-        if (last === "l" || last === "L")
-            return raw.slice(0, -1);
-        return raw;
+        const parsed = parseIntegerSuffixInfo(raw);
+        if (!parsed)
+            return raw;
+        return parsed.core;
     }
-    function hasLongSuffix(value) {
-        const raw = value.trim();
+    function parseIntegerSuffixInfo(value) {
+        const raw = String(value || "").trim();
         if (!raw)
-            return false;
-        const last = raw[raw.length - 1];
-        return last === "l" || last === "L";
+            return null;
+        let idx = raw.length;
+        while (idx > 0 && /[uUlL]/.test(raw[idx - 1]))
+            idx--;
+        const core = raw.slice(0, idx);
+        const suffix = raw.slice(idx).toLowerCase();
+        if (!suffix) {
+            return { core, unsigned: false, longCount: 0 };
+        }
+        if (suffix !== "u" &&
+            suffix !== "l" &&
+            suffix !== "ll" &&
+            suffix !== "ul" &&
+            suffix !== "lu" &&
+            suffix !== "ull" &&
+            suffix !== "llu") {
+            return null;
+        }
+        const unsigned = suffix.includes("u");
+        const longCount = suffix.includes("ll")
+            ? 2
+            : suffix.includes("l")
+                ? 1
+                : 0;
+        return { core, unsigned, longCount };
     }
     function parseIntegerLiteral(value) {
         const raw = stripIntegerSuffix(value);
@@ -342,89 +308,112 @@ export function createSimpleSimulator(opts = {}) {
             return null;
         }
     }
-    function classifyNumericLiteral(value) {
-        const n = parseIntegerLiteral(value);
-        if (n == null)
-            return "compile";
-        if (n < INT64_MIN || n > INT64_MAX)
-            return "compile";
-        if (n < INT32_MIN || n > INT32_MAX)
-            return "ub";
-        return "ok";
-    }
     function isSpecialFloatLiteral(value) {
         return !!normalizeSpecialFloatLiteral(value);
     }
     function isDecimalLiteral(value) {
         return /[.eE]/.test(String(value));
     }
-    function numericLiteralErrorForType(value, type) {
-        const { base, depth } = parseType(type);
-        if (!base || depth !== 0)
+    function isNonDecimalIntegerLiteral(value) {
+        const core = stripIntegerSuffix(value);
+        return /^0[xX]/.test(core) || /^0[0-7]/.test(core);
+    }
+    function fitsIntegerLiteralInBase(value, base) {
+        const range = integerRangeForBase(base);
+        if (!range)
+            return false;
+        return value >= range.min && value <= range.max;
+    }
+    function inferIntegerLiteralBase(value) {
+        const info = parseIntegerSuffixInfo(value);
+        if (!info)
             return null;
-        if (isSpecialFloatLiteral(value)) {
-            if (base === "double")
-                return null;
-            return { error: "That number isn't an integer.", kind: "compile" };
+        const literalValue = parseIntegerLiteral(value);
+        if (literalValue == null)
+            return null;
+        const nonDecimal = isNonDecimalIntegerLiteral(value);
+        const candidates = [];
+        if (info.unsigned) {
+            if (info.longCount === 0)
+                candidates.push("unsigned int", "unsigned long", "unsigned long long");
+            else if (info.longCount === 1)
+                candidates.push("unsigned long", "unsigned long long");
+            else
+                candidates.push("unsigned long long");
         }
-        if (isDecimalLiteral(value)) {
-            const parsed = Number(value);
-            if (Number.isNaN(parsed)) {
-                return {
-                    error: "That number is too large to represent.",
-                    kind: "compile",
-                };
+        else if (info.longCount === 0) {
+            if (nonDecimal) {
+                candidates.push("int", "unsigned int", "long", "unsigned long", "long long", "unsigned long long");
             }
-            if (!Number.isFinite(parsed)) {
-                return {
-                    error: "That number is too large to represent.",
-                    kind: "compile",
-                };
+            else {
+                candidates.push("int", "long", "long long");
             }
-            if (base !== "double") {
-                const truncated = Math.trunc(parsed);
-                try {
-                    const asInt = BigInt(truncated);
-                    return checkIntegerRange(asInt, base) || null;
-                }
-                catch {
-                    return integerOverflowError(base);
-                }
-            }
-            return null;
         }
-        if (base === "double")
-            return null;
-        const status = classifyNumericLiteral(value);
-        if (base === "long") {
-            return status === "compile" ? numericLiteralError(status) : null;
+        else if (info.longCount === 1) {
+            if (nonDecimal) {
+                candidates.push("long", "unsigned long", "long long", "unsigned long long");
+            }
+            else {
+                candidates.push("long", "long long");
+            }
         }
-        if (base === "int") {
-            if (status === "compile")
-                return numericLiteralError(status);
-            return null;
+        else {
+            if (nonDecimal) {
+                candidates.push("long long", "unsigned long long");
+            }
+            else {
+                candidates.push("long long");
+            }
+        }
+        for (const candidate of candidates) {
+            if (fitsIntegerLiteralInBase(literalValue, candidate))
+                return candidate;
         }
         return null;
     }
-    function numericLiteralError(kind) {
-        if (kind === "compile")
-            return {
-                error: "That number is too large to represent.",
-                kind: "compile",
-            };
-        if (kind === "ub")
-            return { error: "That number is too large for int.", kind: "ub" };
-        return null;
-    }
-    function integerRangeForBase(base) {
-        if (base === "int")
-            return { min: INT32_MIN, max: INT32_MAX };
-        if (base === "long")
-            return { min: INT64_MIN, max: INT64_MAX };
-        return null;
+    function parseNumericLiteralValue(value) {
+        const trimmed = String(value || "").trim();
+        if (!trimmed) {
+            return { error: "That expression is not valid here.", kind: "compile" };
+        }
+        if (isSpecialFloatLiteral(trimmed)) {
+            const parsed = parseDoubleValueWithSign(trimmed);
+            if (!parsed) {
+                return { error: "That number is too large to represent.", kind: "compile" };
+            }
+            return { base: "double", value: parsed.value, nanSign: parsed.nanSign };
+        }
+        if (isDecimalLiteral(trimmed)) {
+            const lower = trimmed.toLowerCase();
+            if (lower.endsWith("l")) {
+                return { error: "long double is not supported.", kind: "compile" };
+            }
+            const isFloat = lower.endsWith("f");
+            const core = isFloat ? trimmed.slice(0, -1) : trimmed;
+            const parsed = parseDoubleValueWithSign(core);
+            if (!parsed || !Number.isFinite(parsed.value) && !Number.isNaN(parsed.value)) {
+                return { error: "That number is too large to represent.", kind: "compile" };
+            }
+            const base = isFloat ? "float" : "double";
+            const castValue = base === "float" ? Math.fround(parsed.value) : parsed.value;
+            return { base, value: castValue, nanSign: parsed.nanSign };
+        }
+        const literalBase = inferIntegerLiteralBase(trimmed);
+        if (!literalBase) {
+            return { error: "That number is too large to represent.", kind: "compile" };
+        }
+        const parsedInt = parseIntegerLiteral(trimmed);
+        if (parsedInt == null) {
+            return { error: "That number is too large to represent.", kind: "compile" };
+        }
+        const wrapped = normalizeIntegerForBase(parsedInt, literalBase);
+        if (wrapped == null) {
+            return { error: "That number is too large to represent.", kind: "compile" };
+        }
+        return { base: literalBase, value: wrapped };
     }
     function integerOverflowError(base) {
-        const article = base === "int" ? "an" : "a";
+        const article = /^[aeiou]/i.test(base) ? "an" : "a";
         return {
             error: `That calculation overflows ${article} ${base}.`,
             kind: "ub",
@@ -439,407 +428,130 @@ export function createSimpleSimulator(opts = {}) {
         return null;
     }
     function bitWidthForBase(base) {
-        if (base === "int")
-            return 32;
-        if (base === "long")
-            return 64;
+        const meta = integerMetaForBase(base);
+        return meta ? meta.bits : null;
+    }
+    function unsignedVariantForBase(base) {
+        if (base === "char" || base === "signed char" || base === "unsigned char")
+            return "unsigned char";
+        if (base === "short" || base === "unsigned short")
+            return "unsigned short";
+        if (base === "int" || base === "unsigned int")
+            return "unsigned int";
+        if (base === "long" || base === "unsigned long")
+            return "unsigned long";
+        if (base === "long long" || base === "unsigned long long")
+            return "unsigned long long";
+        if (base === "bool")
+            return "bool";
         return null;
     }
+    function signedVariantForBase(base) {
+        if (base === "char" || base === "signed char" || base === "unsigned char")
+            return "signed char";
+        if (base === "short" || base === "unsigned short")
+            return "short";
+        if (base === "int" || base === "unsigned int")
+            return "int";
+        if (base === "long" || base === "unsigned long")
+            return "long";
+        if (base === "long long" || base === "unsigned long long")
+            return "long long";
+        if (base === "bool")
+            return "bool";
+        return null;
+    }
+    function integerPromotionBase(base) {
+        const meta = integerMetaForBase(base);
+        if (!meta)
+            return "int";
+        if (meta.rank < INTEGER_TYPE_META.int.rank)
+            return "int";
+        return base;
+    }
+    function canSignedRepresentUnsigned(signedBase, unsignedBase) {
+        const signedRange = integerRangeForBase(signedBase);
+        const unsignedRange = integerRangeForBase(unsignedBase);
+        if (!signedRange || !unsignedRange)
+            return false;
+        if (!signedRange.signed || unsignedRange.signed)
+            return false;
+        return signedRange.max >= unsignedRange.max;
+    }
+    function usualIntegerBase(leftBase, rightBase) {
+        const leftPromoted = integerPromotionBase(leftBase);
+        const rightPromoted = integerPromotionBase(rightBase);
+        const leftMeta = integerMetaForBase(leftPromoted);
+        const rightMeta = integerMetaForBase(rightPromoted);
+        if (!leftMeta || !rightMeta)
+            return "int";
+        if (leftPromoted === rightPromoted)
+            return leftPromoted;
+        if (leftMeta.signed === rightMeta.signed) {
+            return leftMeta.rank >= rightMeta.rank ? leftPromoted : rightPromoted;
+        }
+        const signedBase = leftMeta.signed ? leftPromoted : rightPromoted;
+        const unsignedBase = leftMeta.signed ? rightPromoted : leftPromoted;
+        const signedMeta = integerMetaForBase(signedBase);
+        const unsignedMeta = integerMetaForBase(unsignedBase);
+        if (!signedMeta || !unsignedMeta)
+            return "int";
+        if (unsignedMeta.rank >= signedMeta.rank) {
+            return unsignedBase;
+        }
+        if (canSignedRepresentUnsigned(signedBase, unsignedBase)) {
+            return signedBase;
+        }
+        return unsignedVariantForBase(signedBase) || unsignedBase;
+    }
     function wrapIntegerToBase(value, base) {
-        const width = bitWidthForBase(base);
-        if (!width)
+        const range = integerRangeForBase(base);
+        if (!range)
             return null;
+        const width = range.bits;
         const modulo = 1n << BigInt(width);
         let wrapped = value % modulo;
         if (wrapped < 0n)
             wrapped += modulo;
-        const signBit = 1n << BigInt(width - 1);
-        if (wrapped >= signBit)
-            wrapped -= modulo;
+        if (range.signed) {
+            const signBit = 1n << BigInt(width - 1);
+            if (wrapped >= signBit)
+                wrapped -= modulo;
+        }
         return wrapped;
     }
-    function isExpressionPrefix(tokens, { allowVars = true } = {}) {
-        if (!tokens.length)
-            return true;
-        let expectingOperand = true;
-        let depth = 0;
-        for (const tok of tokens) {
-            if (tok.type === "unknown")
-                return false;
-            if (expectingOperand) {
-                if (tok.type === "number") {
-                    expectingOperand = false;
-                    continue;
-                }
-                if (tok.type === "ident") {
-                    if (!allowVars)
-                        return false;
-                    expectingOperand = false;
-                    continue;
-                }
-                if (tok.type === "sym") {
-                    if (tok.value === "(") {
-                        depth++;
-                        continue;
-                    }
-                    if (tok.value === "+" || tok.value === "-" || tok.value === "~") {
-                        continue;
-                    }
-                    if (tok.value === "*" || tok.value === "&") {
-                        continue;
-                    }
-                }
-                return false;
-            }
-            else {
-                if (tok.type === "sym") {
-                    if (tok.value === ")") {
-                        if (depth <= 0)
-                            return false;
-                        depth--;
-                        continue;
-                    }
-                    if (tok.value === "+" ||
-                        tok.value === "-" ||
-                        tok.value === "*" ||
-                        tok.value === "/" ||
-                        tok.value === "==" ||
-                        tok.value === "!=" ||
-                        tok.value === "<<" ||
-                        tok.value === ">>" ||
-                        tok.value === "<" ||
-                        tok.value === "<=" ||
-                        tok.value === ">" ||
-                        tok.value === ">=" ||
-                        tok.value === "&" ||
-                        tok.value === "^" ||
-                        tok.value === "|") {
-                        expectingOperand = true;
-                        continue;
-                    }
-                }
-                return false;
-            }
-        }
-        return true;
+    function normalizeIntegerForBase(value, base) {
+        return wrapIntegerToBase(value, base);
     }
-    function isDeclPrefix(tokens) {
-        if (!tokens.length)
-            return false;
-        if (tokens[0].type !== "kw")
-            return false;
-        const baseType = tokens[0].value;
-        if (baseType !== "int" && baseType !== "long" && baseType !== "double")
-            return false;
-        let idx = 1;
-        let stars = 0;
-        while (idx < tokens.length &&
-            tokens[idx].type === "sym" &&
-            tokens[idx].value === "*") {
-            stars++;
-            idx++;
-        }
-        if (!resolveDeclType(stars, baseType))
-            return false;
-        if (idx === tokens.length)
-            return true;
-        if (tokens[idx].type !== "ident")
-            return false;
-        idx++;
-        if (idx === tokens.length)
-            return true;
-        if (tokens[idx].type !== "sym" || tokens[idx].value !== "=")
-            return false;
-        idx++;
-        if (idx === tokens.length)
-            return true;
-        return isExpressionPrefix(tokens.slice(idx), { allowVars: allowVarAssign });
-    }
-    function isAssignPrefix(tokens) {
-        if (!tokens.length)
-            return false;
-        const eqIndex = tokens.findIndex((tok) => tok.type === "sym" && tok.value === "=");
-        if (eqIndex === -1)
-            return false;
-        if (eqIndex === 0)
-            return false;
-        const lhsTokens = tokens.slice(0, eqIndex);
-        if (!isExpressionPrefix(lhsTokens, { allowVars: true }))
-            return false;
-        if (eqIndex === tokens.length - 1)
-            return true;
-        return isExpressionPrefix(tokens.slice(eqIndex + 1), {
-            allowVars: allowVarAssign,
-        });
-    }
-    function isConditionalPrefix(tokens, keyword) {
-        if (!tokens.length)
-            return false;
-        if (tokens[0].type !== "kw" || tokens[0].value !== keyword)
-            return false;
-        if (tokens.length === 1)
-            return true;
-        if (tokens[1].type !== "sym" || tokens[1].value !== "(")
-            return false;
-        let depth = 0;
-        for (let i = 1; i < tokens.length; i++) {
-            const tok = tokens[i];
-            if (tok.type === "sym" && tok.value === "(") {
-                depth++;
-                continue;
-            }
-            if (tok.type === "sym" && tok.value === ")") {
-                depth--;
-                if (depth === 0) {
-                    return i === tokens.length - 1;
-                }
-            }
-        }
-        return true;
-    }
-    function isIfPrefix(tokens) {
-        return isConditionalPrefix(tokens, "if");
-    }
-    function isWhilePrefix(tokens) {
-        return isConditionalPrefix(tokens, "while");
-    }
-    function isStatementPrefix(tokens, declaredNames, allowIntPrefix) {
-        if (!tokens.length)
-            return false;
-        if (tokens.some((t) => t.type === "unknown"))
-            return false;
-        if (tokens[0].type === "kw" && tokens[0].value === "else") {
-            return tokens.length === 1;
-        }
-        if (tokens.length === 1) {
-            const t0 = tokens[0];
-            if (t0.type === "kw" &&
-                (t0.value === "int" || t0.value === "long" || t0.value === "double"))
-                return true;
-            if (t0.type === "sym" && (t0.value === "{" || t0.value === "}"))
-                return true;
-            if (t0.type === "ident") {
-                if (allowIntPrefix &&
-                    ("int".startsWith(t0.value) ||
-                        "long".startsWith(t0.value) ||
-                        "double".startsWith(t0.value) ||
-                        "if".startsWith(t0.value) ||
-                        "while".startsWith(t0.value) ||
-                        "else".startsWith(t0.value)))
-                    return true;
-                return hasDeclaredPrefix(t0.value, declaredNames);
-            }
-            if (t0.type === "sym" && t0.value === "*")
-                return true;
-        }
-        return (isIfPrefix(tokens) ||
-            isWhilePrefix(tokens) ||
-            isDeclPrefix(tokens) ||
-            isAssignPrefix(tokens));
-    }
-    function exprHasVar(node) {
-        if (!node)
-            return false;
-        if (node.kind === "var")
-            return true;
-        if (node.kind === "unary")
-            return exprHasVar(node.expr);
-        if (node.kind === "binary")
-            return exprHasVar(node.left) || exprHasVar(node.right);
-        return false;
-    }
-    function parseExpressionTokens(tokens, start, { allowVars = true } = {}) {
-        let idx = start;
-        const next = () => tokens[idx];
-        function parsePrimary() {
-            const tok = next();
-            if (!tok)
+    const parser = createParserTools({
+        evaluateArrayLengthExpr: (expr) => {
+            const evaluated = evaluateExpression(expr, [], {
+                targetType: "int",
+                requireValue: true,
+            });
+            if (isScalarError(evaluated))
                 return null;
-            if (tok.type === "number") {
-                idx++;
-                return { kind: "num", value: tok.value };
-            }
-            if (tok.type === "ident") {
-                if (!allowVars)
-                    return null;
-                idx++;
-                return { kind: "var", name: tok.value };
-            }
-            if (tok.type === "sym" && tok.value === "(") {
-                idx++;
-                const expr = parseBitwiseOr();
-                if (!expr)
-                    return null;
-                const close = next();
-                if (!close || close.type !== "sym" || close.value !== ")")
-                    return null;
-                idx++;
-                return expr;
-            }
-            return null;
-        }
-        function parseUnary() {
-            const tok = next();
-            if (tok &&
-                tok.type === "sym" &&
-                (tok.value === "+" ||
-                    tok.value === "-" ||
-                    tok.value === "~" ||
-                    (tok.value === "*" || tok.value === "&"))) {
-                idx++;
-                const expr = parseUnary();
-                if (!expr)
-                    return null;
-                return { kind: "unary", op: tok.value, expr };
-            }
-            return parsePrimary();
-        }
-        function parseMulDiv() {
-            let left = parseUnary();
-            if (!left)
+            if (!isIntegerBase(evaluated.base))
                 return null;
-            while (true) {
-                const tok = next();
-                if (!tok ||
-                    tok.type !== "sym" ||
-                    (tok.value !== "*" && tok.value !== "/"))
-                    break;
-                idx++;
-                const right = parseUnary();
-                if (!right)
-                    return null;
-                left = { kind: "binary", op: tok.value, left, right };
-            }
-            return left;
-        }
-        function parseAddSub() {
-            let left = parseMulDiv();
-            if (!left)
+            const raw = evaluated.value;
+            if (typeof raw !== "bigint")
                 return null;
-            while (true) {
-                const tok = next();
-                if (!tok ||
-                    tok.type !== "sym" ||
-                    (tok.value !== "+" && tok.value !== "-"))
-                    break;
-                idx++;
-                const right = parseMulDiv();
-                if (!right)
-                    return null;
-                left = { kind: "binary", op: tok.value, left, right };
-            }
-            return left;
-        }
-        function parseShift() {
-            let left = parseAddSub();
-            if (!left)
+            if (raw <= 0n)
                 return null;
-            while (true) {
-                const tok = next();
-                if (!tok ||
-                    tok.type !== "sym" ||
-                    (tok.value !== "<<" && tok.value !== ">>"))
-                    break;
-                idx++;
-                const right = parseAddSub();
-                if (!right)
-                    return null;
-                left = { kind: "binary", op: tok.value, left, right };
-            }
-            return left;
-        }
-        function parseRelational() {
-            let left = parseShift();
-            if (!left)
+            if (raw > BigInt(Number.MAX_SAFE_INTEGER))
                 return null;
-            while (true) {
-                const tok = next();
-                if (!tok ||
-                    tok.type !== "sym" ||
-                    (tok.value !== "<" &&
-                        tok.value !== "<=" &&
-                        tok.value !== ">" &&
-                        tok.value !== ">="))
-                    break;
-                idx++;
-                const right = parseShift();
-                if (!right)
-                    return null;
-                left = { kind: "binary", op: tok.value, left, right };
-            }
-            return left;
-        }
-        function parseEquality() {
-            let left = parseRelational();
-            if (!left)
-                return null;
-            while (true) {
-                const tok = next();
-                if (!tok ||
-                    tok.type !== "sym" ||
-                    (tok.value !== "==" && tok.value !== "!="))
-                    break;
-                idx++;
-                const right = parseRelational();
-                if (!right)
-                    return null;
-                left = { kind: "binary", op: tok.value, left, right };
-            }
-            return left;
-        }
-        function parseBitwiseAnd() {
-            let left = parseEquality();
-            if (!left)
-                return null;
-            while (true) {
-                const tok = next();
-                if (!tok || tok.type !== "sym" || tok.value !== "&")
-                    break;
-                idx++;
-                const right = parseEquality();
-                if (!right)
-                    return null;
-                left = { kind: "binary", op: tok.value, left, right };
-            }
-            return left;
-        }
-        function parseBitwiseXor() {
-            let left = parseBitwiseAnd();
-            if (!left)
-                return null;
-            while (true) {
-                const tok = next();
-                if (!tok || tok.type !== "sym" || tok.value !== "^")
-                    break;
-                idx++;
-                const right = parseBitwiseAnd();
-                if (!right)
-                    return null;
-                left = { kind: "binary", op: tok.value, left, right };
-            }
-            return left;
-        }
-        function parseBitwiseOr() {
-            let left = parseBitwiseXor();
-            if (!left)
-                return null;
-            while (true) {
-                const tok = next();
-                if (!tok || tok.type !== "sym" || tok.value !== "|")
-                    break;
-                idx++;
-                const right = parseBitwiseXor();
-                if (!right)
-                    return null;
-                left = { kind: "binary", op: tok.value, left, right };
-            }
-            return left;
-        }
-        const expr = parseBitwiseOr();
-        if (!expr)
-            return null;
-        return { expr, nextIndex: idx, hasVar: exprHasVar(expr) };
-    }
+            return Number(raw);
+        },
+    });
+    const tokenizeProgram = parser.tokenizeProgram;
+    const parseExpressionTokens = parser.parseExpressionTokens;
+    const parseDeclHead = parser.parseDeclHead;
+    const parseIfHeaderTokens = parser.parseIfHeaderTokens;
+    const parseWhileHeaderTokens = parser.parseWhileHeaderTokens;
+    const parseStatementTokens = parser.parseStatementTokens;
+    const isStatementPrefix = parser.isStatementPrefix;
+    const controlHeaderEndIndex = parser.controlHeaderEndIndex;
+    const splitStatements = parser.splitStatements;
     function coerceScalarResult(result, requireValue) {
         if (!result)
             return {
@@ -848,28 +560,31 @@ export function createSimpleSimulator(opts = {}) {
             };
         if (result.error)
             return result;
-        if (!Number.isFinite(result.depth) || result.depth !== 0)
+        const source = decayArrayValue(result);
+        if (isEvalError(source))
+            return source;
+        if (!Number.isFinite(source.depth) || source.depth !== 0)
             return {
-                error: "Pointer arithmetic is not supported here.",
+                error: "That expression must be a scalar value.",
                 kind: "compile",
             };
-        const raw = result.value;
-        if (result.kind === "lvalue") {
+        const raw = source.value;
+        if (source.kind === "lvalue") {
             if (requireValue && String(raw ?? "") === "") {
-                const label = result.label || "That value";
+                const label = source.label || "That value";
                 return { error: `${label} doesn't have a value yet.`, kind: "ub" };
             }
         }
-        const base = result.base || "int";
-        if (base === "double") {
+        const base = source.base || "int";
+        if (isFloatingBase(base)) {
             const rawValue = raw ?? "";
             const parsed = parseDoubleValueWithSign(rawValue);
             if (!parsed) {
-                const label = result.label || "That value";
+                const label = source.label || "That value";
                 return { error: `${label} isn't a number.`, kind: "compile" };
             }
-            const nanSign = "nanSign" in result && result.nanSign !== undefined
-                ? result.nanSign
+            const nanSign = "nanSign" in source && source.nanSign !== undefined
+                ? source.nanSign
                 : parsed.nanSign;
             return { value: parsed.value, base, nanSign };
         }
@@ -878,24 +593,141 @@ export function createSimpleSimulator(opts = {}) {
             return { value, base };
         }
         catch {
-            const label = result.label || "That value";
+            const label = source.label || "That value";
             return { error: `${label} isn't a number.`, kind: "compile" };
         }
     }
     function evaluateExpressionRaw(expr, state, opts = {}) {
-        const { allowVars = true, targetType = "int", requireValue = requireSourceValue, } = opts;
+        const { targetType = "int", requireValue = requireSourceValue, onSideEffect, } = opts;
         const by = Object.fromEntries(state.map((b) => [b.name, b]));
+        const arraysByName = (() => {
+            const grouped = new Map();
+            for (const box of state) {
+                let baseName = "";
+                let indices = [];
+                const metadataShape = normalizeArrayDims(box.arrayShape);
+                if (box.arrayRoot && Array.isArray(box.arrayIndices) && box.arrayIndices.length > 0) {
+                    baseName = String(box.arrayRoot);
+                    indices = box.arrayIndices
+                        .map((raw) => Math.floor(Number(raw)))
+                        .filter((value) => Number.isFinite(value) && value >= 0);
+                }
+                else {
+                    const parsedName = parseArrayElementName(box.name);
+                    if (!parsedName)
+                        continue;
+                    baseName = parsedName.baseName;
+                    indices = parsedName.indices;
+                }
+                if (!baseName || !indices.length)
+                    continue;
+                const linearIndex = arrayLinearIndex(indices, metadataShape) ??
+                    (indices.length === 1 ? indices[0] : null);
+                if (!Number.isFinite(linearIndex) || linearIndex < 0)
+                    continue;
+                const parsedType = parseType(box.type);
+                if (!parsedType.base || !Number.isFinite(parsedType.depth))
+                    continue;
+                const elementPointeeArrayDims = normalizeArrayDims(box.pointeeArrayDims);
+                const elementPointeeInnerDepth = normalizePointeeInnerDepth(box.pointeeInnerDepth ?? parsedType.pointeeInnerDepth, parsedType.depth, elementPointeeArrayDims);
+                const existing = grouped.get(baseName);
+                if (!existing) {
+                    grouped.set(baseName, {
+                        elementType: box.type,
+                        elementBase: parsedType.base,
+                        elementDepth: parsedType.depth,
+                        elementPointeeArrayDims,
+                        elementPointeeInnerDepth,
+                        shape: metadataShape,
+                        byIndex: new Map([[linearIndex, box]]),
+                    });
+                    continue;
+                }
+                if (existing.elementType !== box.type ||
+                    existing.elementBase !== parsedType.base ||
+                    existing.elementDepth !== parsedType.depth ||
+                    !sameArrayDims(existing.elementPointeeArrayDims, elementPointeeArrayDims) ||
+                    existing.elementPointeeInnerDepth !== elementPointeeInnerDepth) {
+                    continue;
+                }
+                if (!existing.shape.length && metadataShape.length) {
+                    existing.shape = metadataShape;
+                }
+                else if (existing.shape.length &&
+                    metadataShape.length &&
+                    !sameArrayDims(existing.shape, metadataShape)) {
+                    continue;
+                }
+                existing.byIndex.set(linearIndex, box);
+            }
+            const out = new Map();
+            for (const [name, entry] of grouped.entries()) {
+                const first = entry.byIndex.get(0);
+                if (!first || !String(first.address ?? "").trim())
+                    continue;
+                let shape = entry.shape.slice();
+                let length = 0;
+                if (shape.length) {
+                    length = arrayElementCount(shape);
+                }
+                else {
+                    while (entry.byIndex.has(length))
+                        length++;
+                    if (length > 0)
+                        shape = [length];
+                }
+                if (length <= 0)
+                    continue;
+                out.set(name, {
+                    name,
+                    elementType: entry.elementType,
+                    elementBase: entry.elementBase,
+                    elementDepth: entry.elementDepth,
+                    elementPointeeArrayDims: entry.elementPointeeArrayDims.slice(),
+                    elementPointeeInnerDepth: entry.elementPointeeInnerDepth,
+                    shape: shape.slice(),
+                    length,
+                    baseAddress: String(first.address ?? "").trim(),
+                    byIndex: entry.byIndex,
+                });
+            }
+            return out;
+        })();
         const toNumber = (value) => typeof value === "bigint" ? Number(value) : value;
+        const toUnsignedBits = (value, base) => {
+            const width = bitWidthForBase(base);
+            if (!width)
+                return value;
+            const modulo = 1n << BigInt(width);
+            let next = value % modulo;
+            if (next < 0n)
+                next += modulo;
+            return next;
+        };
+        const pointerStepSize = (base, depth, pointeeArrayDims = [], pointeeInnerDepth) => {
+            const pointeeDepth = Math.max(0, depth - 1);
+            const pointeeType = makePointerType(pointeeDepth, base, pointeeArrayDims, pointeeInnerDepth) || base;
+            const info = typeInfo(pointeeType);
+            const size = Number.isFinite(info.size) && info.size > 0 ? info.size : 1;
+            return BigInt(size);
+        };
         function makeLvalue(box, label) {
-            const { base, depth } = parseType(box.type);
+            const { base, depth, pointeeArrayDims: parsedPointeeArrayDims, pointeeInnerDepth: parsedPointeeInnerDepth, } = parseType(box.type);
             if (!base || !Number.isFinite(depth)) {
                 return {
                     error: "That expression is not valid here.",
                     kind: "compile",
                 };
             }
+            const pointeeArrayDims = (() => {
+                const fromBox = normalizeArrayDims(box.pointeeArrayDims);
+                if (fromBox.length)
+                    return fromBox;
+                return normalizeArrayDims(parsedPointeeArrayDims);
+            })();
+            const pointeeInnerDepth = normalizePointeeInnerDepth(box.pointeeInnerDepth ?? parsedPointeeInnerDepth, depth, pointeeArrayDims);
             let nanSign;
-            if (base === "double") {
+            if (isFloatingBase(base)) {
                 const parsed = parseDoubleValueWithSign(box.value);
                 nanSign = parsed?.nanSign;
             }
@@ -907,9 +739,46 @@ export function createSimpleSimulator(opts = {}) {
                 address: box.address ?? "",
                 label: label || box.name,
                 nanSign,
+                pointeeArrayDims,
+                pointeeInnerDepth,
             };
         }
-        function makeRvalue(value, base, depth = 0, label = "", nanSign) {
+        function makeArrayLvalue(info, label) {
+            let ptr;
+            try {
+                ptr = BigInt(String(info.baseAddress || "0").trim() || "0");
+            }
+            catch {
+                return {
+                    error: "That expression is not valid here.",
+                    kind: "compile",
+                };
+            }
+            return {
+                kind: "lvalue",
+                base: info.elementBase,
+                depth: info.elementDepth + 1,
+                value: ptr,
+                address: String(info.baseAddress || ""),
+                label,
+                isArray: true,
+                arrayShape: info.shape.slice(),
+                pointeeArrayDims: info.shape.length > 1
+                    ? info.shape.slice(1)
+                    : info.elementPointeeArrayDims.slice(),
+                pointeeInnerDepth: info.shape.length > 1
+                    ? Math.max(0, info.elementDepth)
+                    : normalizePointeeInnerDepth(info.elementPointeeInnerDepth, info.elementDepth + 1, info.elementPointeeArrayDims),
+            };
+        }
+        function makeCompileError(message) {
+            return { error: message, kind: "compile" };
+        }
+        function makeUbError(message) {
+            return { error: message, kind: "ub" };
+        }
+        function makeRvalue(value, base, depth = 0, label = "", nanSign, pointeeArrayDims = [], pointeeInnerDepth) {
+            const normalizedPointeeArrayDims = normalizeArrayDims(pointeeArrayDims);
             return {
                 kind: "rvalue",
                 base,
@@ -918,7 +787,515 @@ export function createSimpleSimulator(opts = {}) {
                 address: "",
                 label,
                 nanSign,
+                pointeeArrayDims: normalizedPointeeArrayDims,
+                pointeeInnerDepth: normalizePointeeInnerDepth(pointeeInnerDepth, depth, normalizedPointeeArrayDims),
             };
+        }
+        function runtimeFromEval(evaluated, mustHaveValue = requireValue) {
+            if (isEvalError(evaluated))
+                return evaluated;
+            const decayed = decayArrayValue(evaluated);
+            if (isEvalError(decayed))
+                return decayed;
+            const raw = decayed.value;
+            if (mustHaveValue && String(raw ?? "") === "") {
+                const label = decayed.label || "That value";
+                return makeUbError(`${label} doesn't have a value yet.`);
+            }
+            if (decayed.depth > 0) {
+                const trimmed = String(raw ?? "").trim();
+                if (!trimmed) {
+                    const label = decayed.label || "That pointer";
+                    return makeUbError(`${label} doesn't have a value yet.`);
+                }
+                try {
+                    return {
+                        base: decayed.base,
+                        depth: decayed.depth,
+                        value: BigInt(trimmed),
+                        nanSign: decayed.nanSign,
+                        label: decayed.label || "",
+                        address: decayed.address || "",
+                        kind: decayed.kind,
+                        pointeeArrayDims: normalizeArrayDims(decayed.pointeeArrayDims),
+                        pointeeInnerDepth: normalizePointeeInnerDepth(decayed.pointeeInnerDepth, decayed.depth, normalizeArrayDims(decayed.pointeeArrayDims)),
+                    };
+                }
+                catch {
+                    return makeCompileError("Pointer values must be integer addresses.");
+                }
+            }
+            if (isFloatingBase(decayed.base)) {
+                const parsed = parseDoubleValueWithSign(raw);
+                if (!parsed) {
+                    const label = decayed.label || "That value";
+                    return makeCompileError(`${label} isn't a number.`);
+                }
+                return {
+                    base: decayed.base,
+                    depth: 0,
+                    value: parsed.value,
+                    nanSign: decayed.nanSign !== undefined ? decayed.nanSign : parsed.nanSign,
+                    label: decayed.label || "",
+                    address: decayed.address || "",
+                    kind: decayed.kind,
+                    pointeeArrayDims: [],
+                    pointeeInnerDepth: 0,
+                };
+            }
+            if (!isIntegerBase(decayed.base)) {
+                return makeCompileError("That expression is not valid here.");
+            }
+            try {
+                const parsedInt = typeof raw === "bigint" ? raw : BigInt(String(raw ?? "").trim() || "0");
+                const normalized = normalizeIntegerForBase(parsedInt, decayed.base);
+                if (normalized == null) {
+                    return makeCompileError("That expression is not valid here.");
+                }
+                return {
+                    base: decayed.base,
+                    depth: 0,
+                    value: normalized,
+                    nanSign: decayed.nanSign,
+                    label: decayed.label || "",
+                    address: decayed.address || "",
+                    kind: decayed.kind,
+                    pointeeArrayDims: [],
+                    pointeeInnerDepth: 0,
+                };
+            }
+            catch {
+                const label = decayed.label || "That value";
+                return makeCompileError(`${label} isn't a number.`);
+            }
+        }
+        function runtimeTruthy(value) {
+            if (value.depth > 0)
+                return value.value !== 0n;
+            if (isFloatingBase(value.base)) {
+                const num = value.value;
+                return num !== 0;
+            }
+            return value.value !== 0n;
+        }
+        function resolveTargetBox(target) {
+            if (isEvalError(target))
+                return null;
+            if (target.kind !== "lvalue")
+                return null;
+            return (state.find((box) => String(box.address ?? "") === String(target.address ?? "")) ||
+                null);
+        }
+        function pointerCanReferenceTarget(pointer, target) {
+            const pointerBase = pointer.base || "int";
+            const pointerDepth = Number.isFinite(pointer.depth) ? Math.floor(pointer.depth) : 0;
+            if (pointerDepth < 1)
+                return false;
+            const pointerPointeeArrayDims = normalizeArrayDims(pointer.pointeeArrayDims);
+            const pointerPointeeInnerDepth = normalizePointeeInnerDepth(pointer.pointeeInnerDepth, pointerDepth, pointerPointeeArrayDims);
+            const pointerOuterDepth = Math.max(0, pointerDepth - pointerPointeeInnerDepth);
+            const parsedTarget = parseType(target.type || "int");
+            if (!parsedTarget.base || !Number.isFinite(parsedTarget.depth))
+                return false;
+            if (parsedTarget.base !== pointerBase)
+                return false;
+            const targetDepth = Math.floor(parsedTarget.depth);
+            const targetPointeeArrayDims = (() => {
+                const fromBox = normalizeArrayDims(target.pointeeArrayDims);
+                if (fromBox.length)
+                    return fromBox;
+                return normalizeArrayDims(parsedTarget.pointeeArrayDims);
+            })();
+            const targetPointeeInnerDepth = normalizePointeeInnerDepth(target.pointeeInnerDepth ?? parsedTarget.pointeeInnerDepth, targetDepth, targetPointeeArrayDims);
+            if (!pointerPointeeArrayDims.length) {
+                return targetDepth === pointerDepth - 1 && targetPointeeArrayDims.length === 0;
+            }
+            if (pointerOuterDepth === 1) {
+                return (targetDepth === pointerPointeeInnerDepth &&
+                    targetPointeeArrayDims.length === 0);
+            }
+            return (targetDepth === pointerDepth - 1 &&
+                samePointerPointeeType(targetDepth, targetPointeeArrayDims, targetPointeeInnerDepth, pointerDepth - 1, pointerPointeeArrayDims, pointerPointeeInnerDepth));
+        }
+        function assignIntoTarget(target, source) {
+            if (isEvalError(target))
+                return target;
+            if (target.kind !== "lvalue") {
+                return makeCompileError("That assignment is not valid here.");
+            }
+            if (target.isArray) {
+                return makeCompileError("That assignment is not valid here.");
+            }
+            const targetType = makePointerType(Number.isFinite(target.depth) ? target.depth : 0, target.base || "int", normalizeArrayDims(target.pointeeArrayDims), target.pointeeInnerDepth) || "int";
+            const converted = convertAssignmentValue(source, targetType, requireValue);
+            if ("kind" in converted && converted.kind === "type-mismatch") {
+                return makeCompileError("That assignment is not valid here.");
+            }
+            if ("error" in converted)
+                return converted;
+            const box = resolveTargetBox(target);
+            if (!box)
+                return makeCompileError("That assignment is not valid here.");
+            box.value = converted.value;
+            onSideEffect?.();
+            if (target.depth > 0) {
+                const nextAddress = String(box.value ?? "").trim();
+                try {
+                    return makeRvalue(BigInt(nextAddress || "0"), target.base, target.depth, target.label, converted.nanSign, normalizeArrayDims(target.pointeeArrayDims), target.pointeeInnerDepth);
+                }
+                catch {
+                    return makeCompileError("That assignment is not valid here.");
+                }
+            }
+            if (isFloatingBase(target.base)) {
+                const parsed = parseDoubleValueWithSign(box.value);
+                if (!parsed)
+                    return makeCompileError("That assignment is not valid here.");
+                return makeRvalue(parsed.value, target.base, 0, target.label, converted.nanSign ?? parsed.nanSign);
+            }
+            try {
+                const parsed = BigInt(String(box.value ?? "").trim() || "0");
+                const normalized = normalizeIntegerForBase(parsed, target.base);
+                if (normalized == null)
+                    return makeCompileError("That assignment is not valid here.");
+                return makeRvalue(normalized, target.base, 0, target.label);
+            }
+            catch {
+                return makeCompileError("That assignment is not valid here.");
+            }
+        }
+        function evaluateBinaryResolved(op, leftEval, rightEval) {
+            const left = runtimeFromEval(leftEval, true);
+            if (isEvalError(left))
+                return left;
+            const right = runtimeFromEval(rightEval, true);
+            if (isEvalError(right))
+                return right;
+            if (op === "==" || op === "!=") {
+                if (left.depth > 0 || right.depth > 0) {
+                    let result = false;
+                    if (left.depth > 0 && right.depth > 0) {
+                        if (left.base !== right.base ||
+                            left.depth !== right.depth ||
+                            !samePointerPointeeType(left.depth, left.pointeeArrayDims, left.pointeeInnerDepth, right.depth, right.pointeeArrayDims, right.pointeeInnerDepth)) {
+                            return makeCompileError("That expression is not valid here.");
+                        }
+                        result = left.value === right.value;
+                    }
+                    else {
+                        const pointerValue = left.depth > 0 ? left.value : right.value;
+                        const scalar = left.depth > 0 ? right : left;
+                        if (scalar.depth !== 0 || !isIntegerBase(scalar.base)) {
+                            return makeCompileError("That expression is not valid here.");
+                        }
+                        result = pointerValue === scalar.value;
+                    }
+                    return makeRvalue(result === (op === "==") ? 1n : 0n, "int");
+                }
+            }
+            if (op === "&&" || op === "||") {
+                const leftTruthy = runtimeTruthy(left);
+                const rightTruthy = runtimeTruthy(right);
+                const value = op === "&&" ? leftTruthy && rightTruthy : leftTruthy || rightTruthy;
+                return makeRvalue(value ? 1n : 0n, "int");
+            }
+            if (op === "+" || op === "-") {
+                if (left.depth > 0 || right.depth > 0) {
+                    if (op === "+" && left.depth > 0 && right.depth > 0) {
+                        return makeCompileError("Pointer addition is not valid.");
+                    }
+                    if (op === "-" &&
+                        left.depth > 0 &&
+                        right.depth > 0) {
+                        if (left.base !== right.base || left.depth !== right.depth) {
+                            return makeCompileError("That expression is not valid here.");
+                        }
+                        if (!samePointerPointeeType(left.depth, left.pointeeArrayDims, left.pointeeInnerDepth, right.depth, right.pointeeArrayDims, right.pointeeInnerDepth)) {
+                            return makeCompileError("That expression is not valid here.");
+                        }
+                        const step = pointerStepSize(left.base, left.depth, left.pointeeArrayDims, left.pointeeInnerDepth);
+                        if (step === 0n)
+                            return makeCompileError("That expression is not valid here.");
+                        const diff = (left.value - right.value) / step;
+                        const normalized = normalizeIntegerForBase(diff, "long");
+                        if (normalized == null)
+                            return makeCompileError("That expression is not valid here.");
+                        return makeRvalue(normalized, "long");
+                    }
+                    const pointer = left.depth > 0 ? left : right;
+                    const scalar = left.depth > 0 ? right : left;
+                    if (scalar.depth !== 0 || !isIntegerBase(scalar.base)) {
+                        return makeCompileError("That expression is not valid here.");
+                    }
+                    const step = pointerStepSize(pointer.base, pointer.depth, pointer.pointeeArrayDims, pointer.pointeeInnerDepth);
+                    const delta = scalar.value;
+                    const signedDelta = left.depth > 0
+                        ? op === "+" ? delta : -delta
+                        : delta;
+                    const nextAddress = pointer.value + signedDelta * step;
+                    return makeRvalue(nextAddress, pointer.base, pointer.depth, "", undefined, pointer.pointeeArrayDims, pointer.pointeeInnerDepth);
+                }
+            }
+            if ((op === "<" || op === "<=" || op === ">" || op === ">=") &&
+                (left.depth > 0 || right.depth > 0)) {
+                if (left.depth <= 0 || right.depth <= 0) {
+                    return makeCompileError("That expression is not valid here.");
+                }
+                if (left.base !== right.base ||
+                    left.depth !== right.depth ||
+                    !samePointerPointeeType(left.depth, left.pointeeArrayDims, left.pointeeInnerDepth, right.depth, right.pointeeArrayDims, right.pointeeInnerDepth)) {
+                    return makeCompileError("That expression is not valid here.");
+                }
+                const lhs = left.value;
+                const rhs = right.value;
+                const ok = op === "<"
+                    ? lhs < rhs
+                    : op === "<="
+                        ? lhs <= rhs
+                        : op === ">"
+                            ? lhs > rhs
+                            : lhs >= rhs;
+                return makeRvalue(ok ? 1n : 0n, "int");
+            }
+            if (left.depth > 0 || right.depth > 0) {
+                return makeCompileError("That expression is not valid here.");
+            }
+            const useFloat = isFloatingBase(left.base) || isFloatingBase(right.base);
+            if (useFloat) {
+                if (op === "&" ||
+                    op === "|" ||
+                    op === "^" ||
+                    op === "<<" ||
+                    op === ">>" ||
+                    op === "%") {
+                    return makeCompileError("Bitwise operators require integer values.");
+                }
+                const resultBase = left.base === "double" || right.base === "double" ? "double" : "float";
+                const lhs = toNumber(left.value);
+                const rhs = toNumber(right.value);
+                if (op === "==" || op === "!=" || op === "<" || op === "<=" || op === ">" || op === ">=") {
+                    let ok = false;
+                    if (Number.isNaN(lhs) || Number.isNaN(rhs)) {
+                        ok = op === "!=";
+                    }
+                    else if (op === "==")
+                        ok = lhs === rhs;
+                    else if (op === "!=")
+                        ok = lhs !== rhs;
+                    else if (op === "<")
+                        ok = lhs < rhs;
+                    else if (op === "<=")
+                        ok = lhs <= rhs;
+                    else if (op === ">")
+                        ok = lhs > rhs;
+                    else
+                        ok = lhs >= rhs;
+                    return makeRvalue(ok ? 1n : 0n, "int");
+                }
+                let out;
+                if (op === "+")
+                    out = lhs + rhs;
+                else if (op === "-")
+                    out = lhs - rhs;
+                else if (op === "*")
+                    out = lhs * rhs;
+                else if (op === "/")
+                    out = lhs / rhs;
+                else
+                    return makeCompileError("That expression is not valid here.");
+                const cast = resultBase === "float" ? Math.fround(out) : out;
+                const nanSign = Number.isNaN(cast)
+                    ? left.nanSign ?? right.nanSign ?? 1
+                    : undefined;
+                return makeRvalue(cast, resultBase, 0, "", nanSign);
+            }
+            if (!isIntegerBase(left.base) || !isIntegerBase(right.base)) {
+                return makeCompileError("That expression is not valid here.");
+            }
+            const leftBase = op === "<<" || op === ">>"
+                ? integerPromotionBase(left.base)
+                : usualIntegerBase(left.base, right.base);
+            const rightBase = op === "<<" || op === ">>"
+                ? integerPromotionBase(right.base)
+                : leftBase;
+            const leftNorm = normalizeIntegerForBase(left.value, leftBase);
+            const rightNorm = normalizeIntegerForBase(right.value, rightBase);
+            if (leftNorm == null || rightNorm == null) {
+                return makeCompileError("That expression is not valid here.");
+            }
+            const leftMeta = integerMetaForBase(leftBase);
+            const rightMeta = integerMetaForBase(rightBase);
+            if (!leftMeta || !rightMeta) {
+                return makeCompileError("That expression is not valid here.");
+            }
+            if (op === "==" || op === "!=" || op === "<" || op === "<=" || op === ">" || op === ">=") {
+                const common = usualIntegerBase(left.base, right.base);
+                const lhs = normalizeIntegerForBase(left.value, common);
+                const rhs = normalizeIntegerForBase(right.value, common);
+                if (lhs == null || rhs == null)
+                    return makeCompileError("That expression is not valid here.");
+                let ok = false;
+                if (op === "==")
+                    ok = lhs === rhs;
+                else if (op === "!=")
+                    ok = lhs !== rhs;
+                else if (op === "<")
+                    ok = lhs < rhs;
+                else if (op === "<=")
+                    ok = lhs <= rhs;
+                else if (op === ">")
+                    ok = lhs > rhs;
+                else
+                    ok = lhs >= rhs;
+                return makeRvalue(ok ? 1n : 0n, "int");
+            }
+            if (op === "/" || op === "%") {
+                if (rightNorm === 0n)
+                    return makeUbError("Division by 0 is undefined.");
+            }
+            if (op === "<<" || op === ">>") {
+                const width = bitWidthForBase(leftBase);
+                if (!width)
+                    return makeCompileError("That expression is not valid here.");
+                if (rightNorm < 0n || rightNorm >= BigInt(width)) {
+                    return makeUbError("That shift is undefined.");
+                }
+                if (op === "<<") {
+                    if (leftMeta.signed && leftNorm < 0n) {
+                        return makeUbError("That shift is undefined.");
+                    }
+                    if (leftMeta.signed) {
+                        const shifted = leftNorm << rightNorm;
+                        const overflow = checkIntegerRange(shifted, leftBase);
+                        if (overflow)
+                            return overflow;
+                        return makeRvalue(shifted, leftBase);
+                    }
+                    const shiftedBits = toUnsignedBits(leftNorm, leftBase) << rightNorm;
+                    const wrapped = normalizeIntegerForBase(shiftedBits, leftBase);
+                    if (wrapped == null)
+                        return makeCompileError("That expression is not valid here.");
+                    return makeRvalue(wrapped, leftBase);
+                }
+                if (!leftMeta.signed) {
+                    const shifted = toUnsignedBits(leftNorm, leftBase) >> rightNorm;
+                    const wrapped = normalizeIntegerForBase(shifted, leftBase);
+                    if (wrapped == null)
+                        return makeCompileError("That expression is not valid here.");
+                    return makeRvalue(wrapped, leftBase);
+                }
+                const shifted = leftNorm >> rightNorm;
+                const wrapped = normalizeIntegerForBase(shifted, leftBase);
+                if (wrapped == null)
+                    return makeCompileError("That expression is not valid here.");
+                return makeRvalue(wrapped, leftBase);
+            }
+            if (op === "&" || op === "^" || op === "|") {
+                const common = usualIntegerBase(left.base, right.base);
+                const lhs = normalizeIntegerForBase(left.value, common);
+                const rhs = normalizeIntegerForBase(right.value, common);
+                if (lhs == null || rhs == null)
+                    return makeCompileError("That expression is not valid here.");
+                const lhsBits = toUnsignedBits(lhs, common);
+                const rhsBits = toUnsignedBits(rhs, common);
+                const outBits = op === "&" ? lhsBits & rhsBits : op === "^" ? lhsBits ^ rhsBits : lhsBits | rhsBits;
+                const wrapped = normalizeIntegerForBase(outBits, common);
+                if (wrapped == null)
+                    return makeCompileError("That expression is not valid here.");
+                return makeRvalue(wrapped, common);
+            }
+            const common = usualIntegerBase(left.base, right.base);
+            const lhs = normalizeIntegerForBase(left.value, common);
+            const rhs = normalizeIntegerForBase(right.value, common);
+            if (lhs == null || rhs == null)
+                return makeCompileError("That expression is not valid here.");
+            const commonMeta = integerMetaForBase(common);
+            if (!commonMeta)
+                return makeCompileError("That expression is not valid here.");
+            let out;
+            if (op === "+")
+                out = lhs + rhs;
+            else if (op === "-")
+                out = lhs - rhs;
+            else if (op === "*")
+                out = lhs * rhs;
+            else if (op === "/") {
+                if (commonMeta.signed && rhs === -1n) {
+                    const range = integerRangeForBase(common);
+                    if (range && lhs === range.min)
+                        return integerOverflowError(common);
+                }
+                if (commonMeta.signed)
+                    out = lhs / rhs;
+                else
+                    out = toUnsignedBits(lhs, common) / toUnsignedBits(rhs, common);
+            }
+            else if (op === "%") {
+                if (commonMeta.signed)
+                    out = lhs % rhs;
+                else
+                    out = toUnsignedBits(lhs, common) % toUnsignedBits(rhs, common);
+            }
+            else {
+                return makeCompileError("That expression is not valid here.");
+            }
+            if (commonMeta.signed) {
+                const overflow = checkIntegerRange(out, common);
+                if (overflow)
+                    return overflow;
+            }
+            const normalized = normalizeIntegerForBase(out, common);
+            if (normalized == null)
+                return makeCompileError("That expression is not valid here.");
+            return makeRvalue(normalized, common);
+        }
+        function incrementLvalue(target, delta, returnUpdated) {
+            if (isEvalError(target))
+                return target;
+            if (target.kind !== "lvalue") {
+                return makeCompileError("That expression is not valid here.");
+            }
+            if (target.isArray) {
+                return makeCompileError("That expression is not valid here.");
+            }
+            const current = runtimeFromEval(target, true);
+            if (isEvalError(current))
+                return current;
+            let updated;
+            if (current.depth > 0) {
+                const step = pointerStepSize(current.base, current.depth, current.pointeeArrayDims, current.pointeeInnerDepth);
+                const next = current.value + BigInt(delta) * step;
+                updated = makeRvalue(next, current.base, current.depth, "", undefined, current.pointeeArrayDims, current.pointeeInnerDepth);
+            }
+            else if (isFloatingBase(current.base)) {
+                const nextNum = toNumber(current.value) + delta;
+                const cast = current.base === "float" ? Math.fround(nextNum) : nextNum;
+                updated = makeRvalue(cast, current.base, 0, "", current.nanSign);
+            }
+            else if (isIntegerBase(current.base)) {
+                const nextRaw = current.value + BigInt(delta);
+                const range = integerRangeForBase(current.base);
+                if (range?.signed) {
+                    const overflow = checkIntegerRange(nextRaw, current.base);
+                    if (overflow)
+                        return overflow;
+                }
+                const wrapped = normalizeIntegerForBase(nextRaw, current.base);
+                if (wrapped == null)
+                    return makeCompileError("That expression is not valid here.");
+                updated = makeRvalue(wrapped, current.base);
+            }
+            else {
+                return makeCompileError("That expression is not valid here.");
+            }
+            if (isEvalError(updated))
+                return updated;
+            const assigned = assignIntoTarget(target, updated);
+            if (isEvalError(assigned))
+                return assigned;
+            if (returnUpdated)
+                return assigned;
+            return makeRvalue(current.value, current.base, current.depth, current.label, current.nanSign, current.pointeeArrayDims, current.pointeeInnerDepth);
         }
         function evalNode(node) {
             if (!node)
@@ -927,71 +1304,180 @@ export function createSimpleSimulator(opts = {}) {
                     kind: "compile",
                 };
             if (node.kind === "num") {
-                const err = numericLiteralErrorForType(node.value, targetType);
-                if (err)
-                    return err;
-                try {
-                    if (isDecimalLiteral(node.value) ||
-                        isSpecialFloatLiteral(node.value)) {
-                        const parsed = parseDoubleValueWithSign(node.value);
-                        const value = parsed ? parsed.value : Number(node.value);
-                        return makeRvalue(value, "double", 0, "", parsed?.nanSign);
-                    }
-                    const literalStatus = classifyNumericLiteral(node.value);
-                    if (literalStatus === "compile") {
-                        return {
-                            error: "That number is too large to represent.",
-                            kind: "compile",
-                        };
-                    }
-                    const literalBase = hasLongSuffix(node.value)
-                        ? "long"
-                        : literalStatus === "ub"
-                            ? "long"
-                            : "int";
-                    const intValue = parseIntegerLiteral(node.value);
-                    if (intValue == null) {
-                        return {
-                            error: "That number is too large to represent.",
-                            kind: "compile",
-                        };
-                    }
-                    return makeRvalue(intValue, literalBase);
+                const parsed = parseNumericLiteralValue(node.value);
+                if ("error" in parsed)
+                    return parsed;
+                return makeRvalue(parsed.value, parsed.base, 0, "", parsed.nanSign);
+            }
+            if (node.kind === "cast") {
+                const target = parseType(node.targetType || "int");
+                const targetBase = target.base;
+                const targetDepth = Number.isFinite(target.depth) ? target.depth : 0;
+                const targetPointeeArrayDims = normalizeArrayDims(target.pointeeArrayDims);
+                const targetPointeeInnerDepth = normalizePointeeInnerDepth(target.pointeeInnerDepth, targetDepth, targetPointeeArrayDims);
+                if (!targetBase || !Number.isFinite(targetDepth)) {
+                    return makeCompileError("That expression is not valid here.");
                 }
-                catch {
-                    return {
-                        error: "That number is too large to represent.",
-                        kind: "compile",
-                    };
+                const rhs = evalNode(node.expr);
+                if (isEvalError(rhs))
+                    return rhs;
+                const source = decayArrayValue(rhs);
+                if (isEvalError(source))
+                    return source;
+                if (targetDepth > 0) {
+                    if (source.depth > 0) {
+                        const runtime = runtimeFromEval(source, requireValue);
+                        if (isEvalError(runtime))
+                            return runtime;
+                        return makeRvalue(runtime.value, targetBase, targetDepth, "", runtime.nanSign, targetPointeeArrayDims, targetPointeeInnerDepth);
+                    }
+                    const scalar = coerceScalarResult(source, requireValue);
+                    if (isScalarError(scalar))
+                        return scalar;
+                    if (!isIntegerBase(scalar.base)) {
+                        return makeCompileError("That expression is not valid here.");
+                    }
+                    const asInt = typeof scalar.value === "bigint"
+                        ? scalar.value
+                        : BigInt(Math.trunc(Number(scalar.value)));
+                    return makeRvalue(asInt, targetBase, targetDepth, "", scalar.nanSign, targetPointeeArrayDims, targetPointeeInnerDepth);
                 }
+                if (source.depth > 0) {
+                    const runtime = runtimeFromEval(source, requireValue);
+                    if (isEvalError(runtime))
+                        return runtime;
+                    if (isFloatingBase(targetBase)) {
+                        const num = Number(runtime.value);
+                        const castNum = targetBase === "float" ? Math.fround(num) : num;
+                        return makeRvalue(castNum, targetBase, 0);
+                    }
+                    if (!isIntegerBase(targetBase)) {
+                        return makeCompileError("That expression is not valid here.");
+                    }
+                    const converted = convertScalarForAssignment(runtime.value, "unsigned long long", node.targetType, runtime.nanSign);
+                    if (!converted || "error" in converted) {
+                        return makeCompileError("That expression is not valid here.");
+                    }
+                    return makeRvalue(converted.value, targetBase, 0, "", converted.nanSign);
+                }
+                const scalar = coerceScalarResult(source, requireValue);
+                if (isScalarError(scalar))
+                    return scalar;
+                const converted = convertScalarForAssignment(scalar.value, scalar.base, node.targetType, scalar.nanSign);
+                if (!converted || "error" in converted) {
+                    return makeCompileError("That expression is not valid here.");
+                }
+                return makeRvalue(converted.value, targetBase, 0, "", converted.nanSign);
             }
             if (node.kind === "var") {
-                if (!allowVars)
-                    return {
-                        error: "Assignments should not use variables yet.",
-                        kind: "compile",
-                    };
                 const box = by[node.name];
-                if (!box)
+                if (box)
+                    return makeLvalue(box, node.name);
+                const arrayInfo = arraysByName.get(node.name);
+                if (arrayInfo)
+                    return makeArrayLvalue(arrayInfo, node.name);
+                return {
+                    error: `You can't use ${node.name} before declaring it.`,
+                    kind: "compile",
+                };
+            }
+            if (node.kind === "postfix") {
+                if (node.op === "++")
+                    return incrementLvalue(evalNode(node.expr), 1, false);
+                return incrementLvalue(evalNode(node.expr), -1, false);
+            }
+            if (node.kind === "subscript") {
+                const left = evalNode(node.left);
+                if (isEvalError(left))
+                    return left;
+                const index = evalNode(node.index);
+                if (isEvalError(index))
+                    return index;
+                const leftRuntime = runtimeFromEval(left, true);
+                if (isEvalError(leftRuntime))
+                    return leftRuntime;
+                const indexRuntime = runtimeFromEval(index, true);
+                if (isEvalError(indexRuntime))
+                    return indexRuntime;
+                let pointer = leftRuntime;
+                let scalar = indexRuntime;
+                if (!(pointer.depth > 0 && scalar.depth === 0 && isIntegerBase(scalar.base))) {
+                    if (indexRuntime.depth > 0 &&
+                        leftRuntime.depth === 0 &&
+                        isIntegerBase(leftRuntime.base)) {
+                        pointer = indexRuntime;
+                        scalar = leftRuntime;
+                    }
+                    else {
+                        return makeCompileError("That expression is not valid here.");
+                    }
+                }
+                const step = pointerStepSize(pointer.base, pointer.depth, pointer.pointeeArrayDims, pointer.pointeeInnerDepth);
+                const nextAddress = pointer.value + scalar.value * step;
+                const target = state.find((box) => String(box.address ?? "").trim() === String(nextAddress));
+                if (!target) {
                     return {
-                        error: `You can't use ${node.name} before declaring it.`,
-                        kind: "compile",
+                        error: "That expression is not valid here.",
+                        kind: "ub",
                     };
-                return makeLvalue(box, node.name);
+                }
+                if (!pointerCanReferenceTarget(pointer, target)) {
+                    return {
+                        error: "That expression is not valid here.",
+                        kind: "ub",
+                    };
+                }
+                if (pointer.pointeeArrayDims.length > 0) {
+                    const shape = pointer.pointeeArrayDims.slice();
+                    const targetParsedType = parseType(target.type);
+                    const targetPointeeInnerDepth = normalizePointeeInnerDepth(target.pointeeInnerDepth ?? targetParsedType.pointeeInnerDepth, Number.isFinite(targetParsedType.depth) ? targetParsedType.depth : 0, normalizeArrayDims(target.pointeeArrayDims));
+                    const decayDims = shape.length > 1
+                        ? shape.slice(1)
+                        : normalizeArrayDims(target.pointeeArrayDims);
+                    return {
+                        kind: "lvalue",
+                        base: pointer.base,
+                        depth: pointer.depth,
+                        value: nextAddress,
+                        address: String(nextAddress),
+                        label: `${left.label || ""}[${index.label || ""}]`,
+                        isArray: true,
+                        arrayShape: shape,
+                        pointeeArrayDims: decayDims,
+                        pointeeInnerDepth: shape.length > 1
+                            ? Math.max(0, pointer.depth - 1)
+                            : targetPointeeInnerDepth,
+                    };
+                }
+                return makeLvalue(target, `${left.label || ""}[${index.label || ""}]`);
             }
             if (node.kind === "unary") {
+                if (node.op === "++")
+                    return incrementLvalue(evalNode(node.expr), 1, true);
+                if (node.op === "--")
+                    return incrementLvalue(evalNode(node.expr), -1, true);
                 const rhs = evalNode(node.expr);
                 if (isEvalError(rhs))
                     return rhs;
                 const rhsDepth = rhs.depth ?? 0;
                 if (node.op === "&") {
                     const label = `&${rhs.label || ""}`;
-                    if (rhs.kind !== "lvalue" || !rhs.address) {
+                    if (rhs.kind !== "lvalue") {
+                        return { error: `${label} is not valid here.`, kind: "compile" };
+                    }
+                    if (rhs.isArray) {
+                        const shape = normalizeArrayDims(rhs.arrayShape);
+                        if (!shape.length) {
+                            return { error: `${label} is not valid here.`, kind: "compile" };
+                        }
+                        return makeRvalue(rhs.value, rhs.base || "int", rhsDepth, label, rhs.nanSign, shape, Math.max(0, rhsDepth - 1));
+                    }
+                    if (!rhs.address) {
                         return { error: `${label} is not valid here.`, kind: "compile" };
                     }
                     const nextDepth = Number.isFinite(rhsDepth) ? rhsDepth + 1 : 1;
                     const nextBase = rhs.base || "int";
-                    return makeRvalue(String(rhs.address), nextBase, nextDepth, label);
+                    return makeRvalue(String(rhs.address), nextBase, nextDepth, label, rhs.nanSign, normalizeArrayDims(rhs.pointeeArrayDims), rhs.pointeeInnerDepth);
                 }
                 if (node.op === "*") {
                     const label = `*${rhs.label || ""}`;
@@ -1024,38 +1510,90 @@ export function createSimpleSimulator(opts = {}) {
                             kind: "ub",
                         };
                     }
+                    if (!pointerCanReferenceTarget({
+                        base: rhs.base || "int",
+                        depth: rhsDepth,
+                        pointeeArrayDims: normalizeArrayDims(rhs.pointeeArrayDims),
+                        pointeeInnerDepth: rhs.pointeeInnerDepth,
+                    }, target)) {
+                        return {
+                            error: `${label} has an incompatible pointee type.`,
+                            kind: "ub",
+                        };
+                    }
+                    const pointeeArrayDims = normalizeArrayDims(rhs.pointeeArrayDims);
+                    if (pointeeArrayDims.length > 0) {
+                        const targetParsedType = parseType(target.type);
+                        const targetPointeeInnerDepth = normalizePointeeInnerDepth(target.pointeeInnerDepth ?? targetParsedType.pointeeInnerDepth, Number.isFinite(targetParsedType.depth) ? targetParsedType.depth : 0, normalizeArrayDims(target.pointeeArrayDims));
+                        return {
+                            kind: "lvalue",
+                            base: rhs.base || "int",
+                            depth: rhsDepth,
+                            value: BigInt(ptrVal),
+                            address: ptrVal,
+                            label,
+                            isArray: true,
+                            arrayShape: pointeeArrayDims.slice(),
+                            pointeeArrayDims: pointeeArrayDims.length > 1
+                                ? pointeeArrayDims.slice(1)
+                                : normalizeArrayDims(target.pointeeArrayDims),
+                            pointeeInnerDepth: pointeeArrayDims.length > 1
+                                ? Math.max(0, rhsDepth - 1)
+                                : targetPointeeInnerDepth,
+                        };
+                    }
                     return makeLvalue(target, label);
+                }
+                if (node.op === "!") {
+                    const runtime = runtimeFromEval(rhs, true);
+                    if (isEvalError(runtime))
+                        return runtime;
+                    return makeRvalue(runtimeTruthy(runtime) ? 0n : 1n, "int");
                 }
                 const scalar = coerceScalarResult(rhs, requireValue);
                 if (isScalarError(scalar))
                     return scalar;
                 if (node.op === "~") {
-                    if (scalar.base === "double") {
+                    if (isFloatingBase(scalar.base)) {
                         return {
                             error: "Bitwise operators require integer values.",
                             kind: "compile",
                         };
                     }
-                    const value = scalar.value;
-                    const overflow = checkIntegerRange(value, scalar.base);
-                    if (overflow)
-                        return overflow;
-                    return makeRvalue(~value, scalar.base);
+                    const promotedBase = integerPromotionBase(scalar.base);
+                    const value = normalizeIntegerForBase(scalar.value, promotedBase);
+                    if (value == null)
+                        return makeCompileError("That expression is not valid here.");
+                    const bits = toUnsignedBits(value, promotedBase);
+                    const width = bitWidthForBase(promotedBase);
+                    if (!width)
+                        return makeCompileError("That expression is not valid here.");
+                    const mask = (1n << BigInt(width)) - 1n;
+                    const out = normalizeIntegerForBase((~bits) & mask, promotedBase);
+                    if (out == null)
+                        return makeCompileError("That expression is not valid here.");
+                    return makeRvalue(out, promotedBase);
                 }
                 if (node.op === "+")
-                    return makeRvalue(scalar.value, scalar.base, 0, "", scalar.nanSign);
+                    return makeRvalue(scalar.value, isIntegerBase(scalar.base) ? integerPromotionBase(scalar.base) : scalar.base, 0, "", scalar.nanSign);
                 if (node.op === "-") {
-                    if (scalar.base === "double" && Number.isNaN(scalar.value)) {
+                    if (isFloatingBase(scalar.base) && Number.isNaN(scalar.value)) {
                         const flipped = scalar.nanSign === -1 ? 1 : -1;
                         return makeRvalue(scalar.value, scalar.base, 0, "", flipped);
                     }
-                    if (scalar.base !== "double") {
-                        const value = scalar.value;
-                        const range = integerRangeForBase(scalar.base);
+                    if (!isFloatingBase(scalar.base)) {
+                        const promotedBase = integerPromotionBase(scalar.base);
+                        const value = normalizeIntegerForBase(scalar.value, promotedBase);
+                        if (value == null)
+                            return makeCompileError("That expression is not valid here.");
+                        const range = integerRangeForBase(promotedBase);
                         if (range && value === range.min) {
-                            return integerOverflowError(scalar.base);
+                            return integerOverflowError(promotedBase);
                         }
-                        return makeRvalue(-value, scalar.base);
+                        const neg = normalizeIntegerForBase(-value, promotedBase);
+                        if (neg == null)
+                            return makeCompileError("That expression is not valid here.");
+                        return makeRvalue(neg, promotedBase);
                     }
                     return makeRvalue(-scalar.value, scalar.base);
                 }
@@ -1065,176 +1603,79 @@ export function createSimpleSimulator(opts = {}) {
                 };
             }
             if (node.kind === "binary") {
+                if (node.op === "&&" || node.op === "||") {
+                    const left = evalNode(node.left);
+                    if (isEvalError(left))
+                        return left;
+                    const leftRuntime = runtimeFromEval(left, true);
+                    if (isEvalError(leftRuntime))
+                        return leftRuntime;
+                    const leftTruthy = runtimeTruthy(leftRuntime);
+                    if (node.op === "&&" && !leftTruthy)
+                        return makeRvalue(0n, "int");
+                    if (node.op === "||" && leftTruthy)
+                        return makeRvalue(1n, "int");
+                    const right = evalNode(node.right);
+                    if (isEvalError(right))
+                        return right;
+                    const rightRuntime = runtimeFromEval(right, true);
+                    if (isEvalError(rightRuntime))
+                        return rightRuntime;
+                    return makeRvalue(runtimeTruthy(rightRuntime) ? 1n : 0n, "int");
+                }
                 const left = evalNode(node.left);
                 if (isEvalError(left))
                     return left;
                 const right = evalNode(node.right);
                 if (isEvalError(right))
                     return right;
-                const leftScalar = coerceScalarResult(left, requireValue);
-                if (isScalarError(leftScalar))
-                    return leftScalar;
-                const rightScalar = coerceScalarResult(right, requireValue);
-                if (isScalarError(rightScalar))
-                    return rightScalar;
-                const leftValue = leftScalar.value;
-                const rightValue = rightScalar.value;
-                const useDouble = leftScalar.base === "double" || rightScalar.base === "double";
-                if (node.op === "==" ||
-                    node.op === "!=" ||
-                    node.op === "<" ||
-                    node.op === "<=" ||
-                    node.op === ">" ||
-                    node.op === ">=") {
-                    let result = false;
-                    if (useDouble) {
-                        const leftNum = toNumber(leftValue);
-                        const rightNum = toNumber(rightValue);
-                        if (Number.isNaN(leftNum) || Number.isNaN(rightNum)) {
-                            result = node.op === "!=";
-                        }
-                        else if (node.op === "==") {
-                            result = leftNum === rightNum;
-                        }
-                        else if (node.op === "!=") {
-                            result = leftNum !== rightNum;
-                        }
-                        else if (node.op === "<") {
-                            result = leftNum < rightNum;
-                        }
-                        else if (node.op === "<=") {
-                            result = leftNum <= rightNum;
-                        }
-                        else if (node.op === ">") {
-                            result = leftNum > rightNum;
-                        }
-                        else if (node.op === ">=") {
-                            result = leftNum >= rightNum;
-                        }
-                    }
-                    else {
-                        const leftBig = leftValue;
-                        const rightBig = rightValue;
-                        if (node.op === "==")
-                            result = leftBig === rightBig;
-                        else if (node.op === "!=")
-                            result = leftBig !== rightBig;
-                        else if (node.op === "<")
-                            result = leftBig < rightBig;
-                        else if (node.op === "<=")
-                            result = leftBig <= rightBig;
-                        else if (node.op === ">")
-                            result = leftBig > rightBig;
-                        else if (node.op === ">=")
-                            result = leftBig >= rightBig;
-                    }
-                    return makeRvalue(result ? 1n : 0n, "int");
+                return evaluateBinaryResolved(node.op, left, right);
+            }
+            if (node.kind === "assign") {
+                const lhs = evalNode(node.left);
+                if (isEvalError(lhs))
+                    return lhs;
+                if (lhs.kind !== "lvalue") {
+                    return makeCompileError("That assignment is not valid here.");
                 }
-                if (node.op === "<<" ||
-                    node.op === ">>" ||
-                    node.op === "&" ||
-                    node.op === "^" ||
-                    node.op === "|") {
-                    if (useDouble) {
-                        return {
-                            error: "Bitwise operators require integer values.",
-                            kind: "compile",
-                        };
-                    }
-                    const leftBig = leftValue;
-                    const rightBig = rightValue;
-                    const base = leftScalar.base === "long" || rightScalar.base === "long"
-                        ? "long"
-                        : "int";
-                    const width = bitWidthForBase(base);
-                    const leftOverflow = checkIntegerRange(leftBig, base);
-                    if (leftOverflow)
-                        return leftOverflow;
-                    const rightOverflow = checkIntegerRange(rightBig, base);
-                    if (rightOverflow)
-                        return rightOverflow;
-                    if (node.op === "&") {
-                        return makeRvalue(leftBig & rightBig, base);
-                    }
-                    if (node.op === "^") {
-                        return makeRvalue(leftBig ^ rightBig, base);
-                    }
-                    if (node.op === "|") {
-                        return makeRvalue(leftBig | rightBig, base);
-                    }
-                    if (width == null || rightBig < 0n || rightBig >= BigInt(width)) {
-                        return { error: "That shift is undefined.", kind: "ub" };
-                    }
-                    if (node.op === "<<" && leftBig < 0n) {
-                        return { error: "That shift is undefined.", kind: "ub" };
-                    }
-                    const shifted = node.op === "<<" ? leftBig << rightBig : leftBig >> rightBig;
-                    const overflow = checkIntegerRange(shifted, base);
-                    if (overflow)
-                        return overflow;
-                    return makeRvalue(shifted, base);
+                if (node.op === "=") {
+                    const rhs = evalNode(node.right);
+                    if (isEvalError(rhs))
+                        return rhs;
+                    return assignIntoTarget(lhs, rhs);
                 }
-                if (node.op === "/" && !useDouble && rightValue === 0n)
-                    return { error: "Division by 0 is undefined.", kind: "ub" };
-                let value;
-                if (useDouble) {
-                    const leftNum = toNumber(leftValue);
-                    const rightNum = toNumber(rightValue);
-                    if (Number.isNaN(leftNum) || Number.isNaN(rightNum)) {
-                        const nanSign = Number.isNaN(leftNum)
-                            ? leftScalar.nanSign
-                            : rightScalar.nanSign;
-                        return makeRvalue(NaN, "double", 0, "", nanSign);
-                    }
-                    if (node.op === "+")
-                        value = leftNum + rightNum;
-                    else if (node.op === "-")
-                        value = leftNum - rightNum;
-                    else if (node.op === "*")
-                        value = leftNum * rightNum;
-                    else if (node.op === "/")
-                        value = leftNum / rightNum;
-                    else
-                        return {
-                            error: "That expression is not valid here.",
-                            kind: "compile",
-                        };
-                }
-                else {
-                    const leftBig = leftValue;
-                    const rightBig = rightValue;
-                    const base = leftScalar.base === "long" || rightScalar.base === "long"
-                        ? "long"
-                        : "int";
-                    if (node.op === "/" && rightBig === -1n) {
-                        const range = integerRangeForBase(base);
-                        if (range && leftBig === range.min) {
-                            return integerOverflowError(base);
-                        }
-                    }
-                    if (node.op === "+")
-                        value = leftBig + rightBig;
-                    else if (node.op === "-")
-                        value = leftBig - rightBig;
-                    else if (node.op === "*")
-                        value = leftBig * rightBig;
-                    else if (node.op === "/")
-                        value = leftBig / rightBig;
-                    else
-                        return {
-                            error: "That expression is not valid here.",
-                            kind: "compile",
-                        };
-                    const overflow = checkIntegerRange(value, base);
-                    if (overflow)
-                        return overflow;
-                }
-                const base = useDouble
-                    ? "double"
-                    : leftScalar.base === "long" || rightScalar.base === "long"
-                        ? "long"
-                        : "int";
-                return makeRvalue(value, base);
+                const rhs = evalNode(node.right);
+                if (isEvalError(rhs))
+                    return rhs;
+                const binaryOp = (() => {
+                    if (node.op === "+=")
+                        return "+";
+                    if (node.op === "-=")
+                        return "-";
+                    if (node.op === "*=")
+                        return "*";
+                    if (node.op === "/=")
+                        return "/";
+                    if (node.op === "%=")
+                        return "%";
+                    if (node.op === "<<=")
+                        return "<<";
+                    if (node.op === ">>=")
+                        return ">>";
+                    if (node.op === "&=")
+                        return "&";
+                    if (node.op === "^=")
+                        return "^";
+                    return "|";
+                })();
+                const lhsValue = runtimeFromEval(lhs, true);
+                if (isEvalError(lhsValue))
+                    return lhsValue;
+                const lhsAsRvalue = makeRvalue(lhsValue.value, lhsValue.base, lhsValue.depth, lhsValue.label, lhsValue.nanSign, lhsValue.pointeeArrayDims);
+                const combined = evaluateBinaryResolved(binaryOp, lhsAsRvalue, rhs);
+                if (isEvalError(combined))
+                    return combined;
+                return assignIntoTarget(lhs, combined);
             }
             return { error: "That expression is not valid here.", kind: "compile" };
         }
@@ -1251,23 +1692,83 @@ export function createSimpleSimulator(opts = {}) {
         return scalar;
     }
     function evaluateCondition(expr, state) {
-        const evaluated = evaluateExpression(expr, state, {
-            allowVars: true,
+        const rawEvaluated = evaluateExpressionRaw(expr, state, {
             targetType: "double",
         });
-        if (isScalarError(evaluated))
+        if (isEvalError(rawEvaluated))
+            return rawEvaluated;
+        const evaluated = decayArrayValue(rawEvaluated);
+        if (isEvalError(evaluated))
             return evaluated;
-        const base = evaluated.base || "int";
-        if (base === "double") {
-            const num = typeof evaluated.value === "number"
-                ? evaluated.value
-                : Number(evaluated.value);
-            return { value: num !== 0 };
+        if (requireSourceValue && String(evaluated.value ?? "") === "") {
+            const label = evaluated.label || "That value";
+            return { error: `${label} doesn't have a value yet.`, kind: "ub" };
         }
-        const value = evaluated.value;
-        return { value: value !== 0n };
+        if (evaluated.depth > 0) {
+            try {
+                const addr = BigInt(String(evaluated.value ?? "").trim() || "0");
+                return { value: addr !== 0n };
+            }
+            catch {
+                return { error: "That expression is not valid here.", kind: "compile" };
+            }
+        }
+        const base = evaluated.base || "int";
+        if (isFloatingBase(base)) {
+            const parsed = parseDoubleValueWithSign(evaluated.value);
+            if (!parsed)
+                return { error: "That expression is not valid here.", kind: "compile" };
+            return { value: parsed.value !== 0 };
+        }
+        try {
+            const intVal = typeof evaluated.value === "bigint"
+                ? evaluated.value
+                : BigInt(String(evaluated.value ?? "").trim() || "0");
+            return { value: intVal !== 0n };
+        }
+        catch {
+            return { error: "That expression is not valid here.", kind: "compile" };
+        }
     }
-    function evaluateExpressionText(expr, state) {
+    function prependArrayDimension(typeText, length) {
+        const dim = Math.max(0, Math.floor(Number(length)));
+        const clean = String(typeText || "").trim() || "int";
+        const parsed = parseType(clean);
+        if (parsed.base &&
+            Number.isFinite(parsed.depth) &&
+            Array.isArray(parsed.arrayDims) &&
+            parsed.arrayDims.length > 0) {
+            const dims = [dim, ...parsed.arrayDims]
+                .map((value) => `[${value}]`)
+                .join("");
+            return `${parsed.base}${"*".repeat(Math.max(0, Math.floor(parsed.depth)))}${dims}`;
+        }
+        const ptrArrayMatch = /^(.+?)\(\s*(\*+)\s*\)\s*((?:\[\s*\d+\s*\]\s*)+)\s*$/.exec(clean);
+        if (ptrArrayMatch) {
+            const left = String(ptrArrayMatch[1] || "").trimEnd();
+            const stars = String(ptrArrayMatch[2] || "");
+            const dims = String(ptrArrayMatch[3] || "").replace(/\s+/g, "");
+            return `${left} (${stars}[${dim}])${dims}`;
+        }
+        return `${clean}[${dim}]`;
+    }
+    function arrayExpressionType(result) {
+        if (!result.isArray)
+            return null;
+        const shape = normalizeArrayDims(result.arrayShape);
+        if (!shape.length)
+            return null;
+        const depth = Number.isFinite(result.depth) && result.depth !== undefined
+            ? Math.floor(result.depth)
+            : 0;
+        const pointeeArrayDims = normalizeArrayDims(result.pointeeArrayDims);
+        const pointeeInnerDepth = normalizePointeeInnerDepth(result.pointeeInnerDepth, depth, pointeeArrayDims);
+        const elementType = makePointerType(Math.max(0, depth - 1), result.base || "int", pointeeArrayDims, pointeeInnerDepth) ||
+            `${result.base || "int"}${"*".repeat(Math.max(0, depth - 1))}`;
+        return prependArrayDimension(elementType, shape[0]);
+    }
+    function evaluateExpressionText(expr, state, opts = {}) {
+        const { allowSideEffects = true } = opts;
         const tokens = tokenizeProgram(expr || "");
         if (!tokens.length) {
             return { error: "Enter an expression to evaluate.", kind: "compile" };
@@ -1281,24 +1782,39 @@ export function createSimpleSimulator(opts = {}) {
         if (tokens.some((t) => t.type === "sym" && t.value === ";")) {
             return { error: "That expression is not valid here.", kind: "compile" };
         }
-        const mapped = tokens.map((tok) => tok.type === "kw" ? { ...tok, type: "ident" } : tok);
-        const parsed = parseExpressionTokens(mapped, 0, { allowVars: true });
-        if (!parsed || parsed.nextIndex !== mapped.length) {
+        const parsed = parseExpressionTokens(tokens, 0, { allowVars: true });
+        if (!parsed || parsed.nextIndex !== tokens.length) {
             return { error: "That expression is not valid here.", kind: "compile" };
         }
-        const evaluated = evaluateExpressionRaw(parsed.expr, state, {
-            allowVars: true,
+        let sawSideEffect = false;
+        const evalState = allowSideEffects ? state : cloneBoxes(state);
+        const rawEvaluated = evaluateExpressionRaw(parsed.expr, evalState, {
             targetType: "double",
+            onSideEffect: () => {
+                sawSideEffect = true;
+            },
         });
-        if (isEvalError(evaluated))
-            return evaluated;
-        const resultType = makePointerType(Number.isFinite(evaluated.depth) ? evaluated.depth : 0, evaluated.base || "int");
+        if (isEvalError(rawEvaluated))
+            return rawEvaluated;
+        if (!allowSideEffects && sawSideEffect) {
+            return {
+                error: "Expressions with side effects are not allowed here.",
+                kind: "compile",
+            };
+        }
+        const evaluated = rawEvaluated;
+        const resultType = evaluated.isArray
+            ? arrayExpressionType(evaluated) ||
+                makePointerType(Number.isFinite(evaluated.depth) ? evaluated.depth : 0, evaluated.base || "int", normalizeArrayDims(evaluated.pointeeArrayDims), evaluated.pointeeInnerDepth)
+            : makePointerType(Number.isFinite(evaluated.depth) ? evaluated.depth : 0, evaluated.base || "int", normalizeArrayDims(evaluated.pointeeArrayDims), evaluated.pointeeInnerDepth);
+        const resultKind = evaluated.isArray ? "rvalue" : evaluated.kind || "rvalue";
+        const resultAddress = !evaluated.isArray && evaluated.kind === "lvalue" ? evaluated.address : "";
         return {
             result: {
-                kind: evaluated.kind || "rvalue",
+                kind: resultKind,
                 type: resultType || "int",
                 value: evaluated.value,
-                address: evaluated.kind === "lvalue" ? evaluated.address : "",
+                address: resultAddress,
                 nanSign: evaluated.nanSign,
             },
         };
@@ -1307,57 +1823,61 @@ export function createSimpleSimulator(opts = {}) {
         const { base: targetBase, depth } = parseType(targetType);
         if (!targetBase || depth !== 0)
             return null;
-        if (targetBase === "double") {
-            const num = base === "double"
+        if (isFloatingBase(targetBase)) {
+            const num = isFloatingBase(base)
                 ? typeof value === "bigint"
                     ? Number(value)
                     : value
                 : Number(value);
-            const nextNanSign = Number.isNaN(num) ? (nanSign ?? 1) : undefined;
-            return { value: num, base: "double", nanSign: nextNanSign };
+            const cast = targetBase === "float" ? Math.fround(num) : num;
+            const nextNanSign = Number.isNaN(cast) ? (nanSign ?? 1) : undefined;
+            return { value: cast, base: targetBase, nanSign: nextNanSign };
         }
-        if (targetBase !== "int" && targetBase !== "long")
+        if (!isIntegerBase(targetBase))
             return null;
-        let numValue;
-        if (base === "double") {
+        if (targetBase === "bool") {
+            if (isFloatingBase(base)) {
+                const num = typeof value === "bigint" ? Number(value) : value;
+                return { value: num === 0 ? 0n : 1n, base: targetBase };
+            }
+            return { value: value === 0n ? 0n : 1n, base: targetBase };
+        }
+        let intValue;
+        if (isFloatingBase(base)) {
             const num = typeof value === "bigint" ? Number(value) : value;
             if (!Number.isFinite(num))
                 return integerOverflowError(targetBase);
-            numValue = Math.trunc(num);
-        }
-        else if (typeof value === "bigint") {
-            if (targetBase === "int") {
-                const wrapped = wrapIntegerToBase(value, targetBase);
-                return { value: wrapped ?? value, base: targetBase };
+            try {
+                intValue = BigInt(Math.trunc(num));
             }
-            const overflow = checkIntegerRange(value, targetBase);
-            if (overflow)
-                return overflow;
-            return { value, base: targetBase };
+            catch {
+                return integerOverflowError(targetBase);
+            }
+            const range = integerRangeForBase(targetBase);
+            if (range && (intValue < range.min || intValue > range.max)) {
+                return integerOverflowError(targetBase);
+            }
         }
         else {
-            numValue = Math.trunc(value);
+            intValue = typeof value === "bigint" ? value : BigInt(Math.trunc(value));
         }
-        try {
-            const asInt = BigInt(numValue);
-            const overflow = checkIntegerRange(asInt, targetBase);
-            if (overflow)
-                return overflow;
-            return { value: asInt, base: targetBase };
-        }
-        catch {
+        const wrapped = wrapIntegerToBase(intValue, targetBase);
+        if (wrapped == null)
             return null;
-        }
+        return { value: wrapped, base: targetBase };
     }
     function convertAssignmentValue(evaluated, targetType, requireValue) {
-        if (isEvalError(evaluated))
-            return evaluated;
-        const { base: targetBase, depth: targetDepth } = parseType(targetType);
+        const source = decayArrayValue(evaluated);
+        if (isEvalError(source))
+            return source;
+        const { base: targetBase, depth: targetDepth, pointeeArrayDims: targetPointeeArrayDimsRaw, pointeeInnerDepth: targetPointeeInnerDepthRaw, } = parseType(targetType);
         if (!targetBase || !Number.isFinite(targetDepth)) {
             return { error: "That assignment is not valid here.", kind: "compile" };
         }
+        const targetPointeeArrayDims = normalizeArrayDims(targetPointeeArrayDimsRaw);
+        const targetPointeeInnerDepth = normalizePointeeInnerDepth(targetPointeeInnerDepthRaw, targetDepth, targetPointeeArrayDims);
         if (targetDepth === 0) {
-            const scalar = coerceScalarResult(evaluated, requireValue);
+            const scalar = coerceScalarResult(source, requireValue);
             if (isScalarError(scalar))
                 return scalar;
             const converted = convertScalarForAssignment(scalar.value, scalar.base, targetType, scalar.nanSign);
@@ -1373,28 +1893,45 @@ export function createSimpleSimulator(opts = {}) {
                 nanSign: converted.nanSign,
             };
         }
-        const evalDepth = Number.isFinite(evaluated.depth) && evaluated.depth !== undefined
-            ? evaluated.depth
+        const evalDepth = Number.isFinite(source.depth) && source.depth !== undefined
+            ? source.depth
             : 0;
-        const evalBase = evaluated.base || "int";
-        if (evalDepth !== targetDepth || evalBase !== targetBase) {
-            const expectedType = makePointerType(evalDepth, evalBase) || `int${"*".repeat(evalDepth)}`;
+        const evalBase = source.base || "int";
+        const evalPointeeArrayDims = normalizeArrayDims(source.pointeeArrayDims);
+        const evalPointeeInnerDepth = normalizePointeeInnerDepth(source.pointeeInnerDepth, evalDepth, evalPointeeArrayDims);
+        if (evalDepth === 0 && isIntegerBase(evalBase)) {
+            try {
+                const rawInt = typeof source.value === "bigint"
+                    ? source.value
+                    : BigInt(String(source.value ?? "").trim() || "0");
+                if (rawInt === 0n) {
+                    return { value: "0", nanSign: source.nanSign };
+                }
+            }
+            catch {
+                return { error: "That assignment is not valid here.", kind: "compile" };
+            }
+        }
+        if (evalDepth !== targetDepth ||
+            evalBase !== targetBase ||
+            !samePointerPointeeType(evalDepth, evalPointeeArrayDims, evalPointeeInnerDepth, targetDepth, targetPointeeArrayDims, targetPointeeInnerDepth)) {
+            const expectedType = makePointerType(evalDepth, evalBase, evalPointeeArrayDims, evalPointeeInnerDepth) ||
+                `int${"*".repeat(evalDepth)}`;
             return { kind: "type-mismatch", expectedType };
         }
-        if (requireValue && String(evaluated.value ?? "") === "") {
-            const label = evaluated.label || "That value";
+        if (requireValue && String(source.value ?? "") === "") {
+            const label = source.label || "That value";
             return { error: `${label} doesn't have a value yet.`, kind: "ub" };
         }
         return {
-            value: formatValueForType(evaluated.value, targetType, {
-                nanSign: evaluated.nanSign,
+            value: formatValueForType(source.value, targetType, {
+                nanSign: source.nanSign,
             }),
-            nanSign: evaluated.nanSign,
+            nanSign: source.nanSign,
         };
     }
-    function validateAssignmentExpr(state, targetType, targetName, expr, { allowVars = allowVarAssign } = {}) {
-        const evaluated = evaluateExpressionRaw(expr, state, {
-            allowVars,
+    function validateAssignmentExpr(state, targetType, targetName, expr) {
+        const evaluated = evaluateExpressionRaw(expr, cloneBoxes(state), {
             targetType,
         });
         const converted = convertAssignmentValue(evaluated, targetType, requireSourceValue);
@@ -1405,145 +1942,8 @@ export function createSimpleSimulator(opts = {}) {
             return converted;
         return null;
     }
-    function parseAssignRhs(tokens, idx, { allowVar } = {}) {
-        if (idx >= tokens.length)
-            return null;
-        const allowVars = allowVar ?? allowVarAssign;
-        const parsed = parseExpressionTokens(tokens, idx, { allowVars });
-        if (!parsed || parsed.nextIndex !== tokens.length)
-            return null;
-        return { expr: parsed.expr, hasVar: parsed.hasVar, nextIndex: parsed.nextIndex };
-    }
-    function parseConditionHeaderTokens(tokens, keyword) {
-        if (!tokens.length)
-            return null;
-        if (tokens[0].type !== "kw" || tokens[0].value !== keyword)
-            return null;
-        if (tokens.length < 3)
-            return null;
-        if (tokens[1].type !== "sym" || tokens[1].value !== "(")
-            return null;
-        let depth = 0;
-        let endIdx = -1;
-        for (let i = 1; i < tokens.length; i++) {
-            const tok = tokens[i];
-            if (tok.type === "sym" && tok.value === "(") {
-                depth++;
-                continue;
-            }
-            if (tok.type === "sym" && tok.value === ")") {
-                depth--;
-                if (depth === 0) {
-                    endIdx = i;
-                    break;
-                }
-            }
-        }
-        if (endIdx < 0 || endIdx !== tokens.length - 1)
-            return null;
-        const exprTokens = tokens.slice(2, endIdx);
-        if (!exprTokens.length)
-            return null;
-        const parsed = parseExpressionTokens(exprTokens, 0, { allowVars: true });
-        if (!parsed || parsed.nextIndex !== exprTokens.length)
-            return null;
-        return { expr: parsed.expr, hasVar: parsed.hasVar };
-    }
-    function parseIfHeaderTokens(tokens) {
-        return parseConditionHeaderTokens(tokens, "if");
-    }
-    function parseWhileHeaderTokens(tokens) {
-        return parseConditionHeaderTokens(tokens, "while");
-    }
-    function parseStatementTokens(tokens) {
-        if (!tokens.length)
-            return null;
-        if (tokens.length === 1 && tokens[0].type === "sym") {
-            if (tokens[0].value === "{")
-                return { kind: "blockStart" };
-            if (tokens[0].value === "}")
-                return { kind: "blockEnd" };
-        }
-        if (tokens.length === 1 &&
-            tokens[0].type === "kw" &&
-            tokens[0].value === "else") {
-            return { kind: "else" };
-        }
-        const ifParsed = parseIfHeaderTokens(tokens);
-        if (ifParsed) {
-            return { kind: "if", expr: ifParsed.expr, hasVar: ifParsed.hasVar };
-        }
-        const whileParsed = parseWhileHeaderTokens(tokens);
-        if (whileParsed) {
-            return { kind: "while", expr: whileParsed.expr, hasVar: whileParsed.hasVar };
-        }
-        if (tokens[0].type === "kw") {
-            const baseType = tokens[0].value;
-            if (baseType !== "int" && baseType !== "long" && baseType !== "double")
-                return null;
-            let idx = 1;
-            let stars = 0;
-            while (idx < tokens.length &&
-                tokens[idx].type === "sym" &&
-                tokens[idx].value === "*") {
-                stars++;
-                idx++;
-            }
-            const declType = resolveDeclType(stars, baseType);
-            if (!declType)
-                return null;
-            if (idx >= tokens.length || tokens[idx].type !== "ident")
-                return null;
-            const name = tokens[idx].value;
-            idx++;
-            if (idx === tokens.length) {
-                return { kind: "decl", name, type: declType };
-            }
-            if (tokens[idx].type !== "sym" || tokens[idx].value !== "=")
-                return null;
-            idx++;
-            if (idx >= tokens.length)
-                return null;
-            const rhs = parseAssignRhs(tokens, idx, {
-                allowVar: allowVarAssign,
-            });
-            if (!rhs)
-                return null;
-            return {
-                kind: "declAssign",
-                name,
-                declType,
-                expr: rhs.expr,
-                hasVar: rhs.hasVar,
-            };
-        }
-        if (tokens.length >= 3) {
-            const eqIndex = tokens.findIndex((tok) => tok.type === "sym" && tok.value === "=");
-            if (eqIndex <= 0 || eqIndex >= tokens.length - 1)
-                return null;
-            const lhsTokens = tokens.slice(0, eqIndex);
-            const rhs = parseAssignRhs(tokens, eqIndex + 1, {
-                allowVar: allowVarAssign,
-            });
-            if (!rhs)
-                return null;
-            const lhsParsed = parseExpressionTokens(lhsTokens, 0, {
-                allowVars: true,
-            });
-            if (!lhsParsed || lhsParsed.nextIndex !== lhsTokens.length)
-                return null;
-            return {
-                kind: "assign",
-                lhs: lhsParsed.expr,
-                rhs: rhs.expr,
-                hasVar: rhs.hasVar || lhsParsed.hasVar,
-            };
-        }
-        return null;
-    }
-    function applyAssignmentToTarget(boxes, target, targetType, expr, { allowVars = allowVarAssign } = {}) {
+    function applyAssignmentToTarget(boxes, target, targetType, expr) {
         const evaluated = evaluateExpressionRaw(expr, boxes, {
-            allowVars,
             targetType,
         });
         const converted = convertAssignmentValue(evaluated, targetType, requireSourceValue);
@@ -1556,7 +1956,6 @@ export function createSimpleSimulator(opts = {}) {
     }
     function resolveAssignmentTarget(state, lhs) {
         const evaluated = evaluateExpressionRaw(lhs, state, {
-            allowVars: true,
             targetType: "int",
         });
         if (isEvalError(evaluated))
@@ -1565,7 +1964,7 @@ export function createSimpleSimulator(opts = {}) {
             return { error: "That assignment is not valid here.", kind: "compile" };
         }
         const { base, depth } = evaluated;
-        const targetType = makePointerType(Number.isFinite(depth) ? depth : 0, base || "int") || "int";
+        const targetType = makePointerType(Number.isFinite(depth) ? depth : 0, base || "int", normalizeArrayDims(evaluated.pointeeArrayDims), evaluated.pointeeInnerDepth) || "int";
         const target = state.find((b) => (b.address ?? "") === (evaluated.address ?? ""));
         if (!target) {
             return { error: "That assignment is not valid here.", kind: "compile" };
@@ -1580,23 +1979,67 @@ export function createSimpleSimulator(opts = {}) {
         const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
         if (stmt.kind === "decl") {
             const type = stmt.type || "int";
-            if (by[stmt.name] && !allowRedeclare)
-                return null;
-            if (!by[stmt.name]) {
-                boxes.push({
-                    name: stmt.name,
-                    type,
-                    value: "",
-                    address: alloc(type),
+            if (Array.isArray(stmt.arrayShape) && stmt.arrayShape.length > 0) {
+                const shape = stmt.arrayShape.map((d) => Math.max(0, Math.floor(Number(d))));
+                if (!shape.length || shape.some((d) => d <= 0))
+                    return null;
+                let redeclare = false;
+                forEachArrayIndex(shape, (indices) => {
+                    const elementName = arrayElementName(stmt.name, indices);
+                    if (by[elementName] && !allowRedeclare)
+                        redeclare = true;
+                    if (!by[elementName]) {
+                        boxes.push({
+                            name: elementName,
+                            type: stmt.elementType || type,
+                            value: "",
+                            address: alloc(stmt.elementType || type),
+                            arrayRoot: stmt.name,
+                            arrayShape: shape.slice(),
+                            arrayIndices: indices.slice(),
+                            pointeeArrayDims: stmt.elementPointeeArrayDims
+                                ? [...stmt.elementPointeeArrayDims]
+                                : [],
+                            pointeeInnerDepth: stmt.elementPointeeInnerDepth,
+                        });
+                    }
                 });
+                if (redeclare)
+                    return null;
+            }
+            else {
+                if (by[stmt.name] && !allowRedeclare)
+                    return null;
+                if (!by[stmt.name]) {
+                    boxes.push({
+                        name: stmt.name,
+                        type,
+                        value: "",
+                        address: alloc(type),
+                        pointeeArrayDims: stmt.pointeeArrayDims
+                            ? [...stmt.pointeeArrayDims]
+                            : [],
+                        pointeeInnerDepth: stmt.pointeeInnerDepth,
+                    });
+                }
             }
             return boxes;
         }
+        if (stmt.kind === "empty") {
+            return boxes;
+        }
         if (stmt.kind === "assign") {
-            const resolved = resolveAssignmentTarget(boxes, stmt.lhs);
-            if ("error" in resolved)
+            const evaluated = evaluateExpressionRaw({
+                kind: "assign",
+                op: stmt.op,
+                left: stmt.lhs,
+                right: stmt.rhs,
+            }, boxes, {
+                targetType: "double",
+            });
+            if (isEvalError(evaluated))
                 return null;
-            return applyAssignmentToTarget(boxes, resolved.target, resolved.target.type, stmt.rhs, { allowVars: allowVarAssign });
+            return boxes;
         }
         if (stmt.kind === "declAssign") {
             const declType = stmt.declType || "int";
@@ -1608,14 +2051,24 @@ export function createSimpleSimulator(opts = {}) {
                     type: declType,
                     value: "",
                     address: alloc(declType),
+                    pointeeArrayDims: stmt.pointeeArrayDims
+                        ? [...stmt.pointeeArrayDims]
+                        : [],
+                    pointeeInnerDepth: stmt.pointeeInnerDepth,
                 });
             }
             const target = by[stmt.name] || boxes.find((b) => b.name === stmt.name);
             if (!target)
                 return null;
-            return applyAssignmentToTarget(boxes, target, declType, stmt.expr, {
-                allowVars: allowVarAssign,
+            return applyAssignmentToTarget(boxes, target, declType, stmt.expr);
+        }
+        if (stmt.kind === "expr") {
+            const evaluated = evaluateExpressionRaw(stmt.expr, boxes, {
+                targetType: "double",
             });
+            if (isEvalError(evaluated))
+                return null;
+            return boxes;
         }
         return null;
     }
@@ -1640,60 +2093,32 @@ export function createSimpleSimulator(opts = {}) {
         if (tokens[0].type === "kw" && tokens[0].value === "else") {
             return 'Else statements should look like "else statement;" or "else { ... }".';
         }
-        if (tokens[0].type === "kw") {
-            const baseType = tokens[0].value;
-            if (baseType !== "int" && baseType !== "long" && baseType !== "double")
-                return "A declaration needs a variable name.";
-            if (tokens.length === 1)
-                return "A declaration needs a variable name.";
-            if (tokens.length >= 2 &&
-                tokens[1].type === "sym" &&
-                tokens[1].value === "*") {
-                let idx = 1;
-                while (idx < tokens.length &&
-                    tokens[idx].type === "sym" &&
-                    tokens[idx].value === "*")
-                    idx++;
-                if (tokens[idx]?.type !== "ident")
-                    return "A declaration needs a variable name.";
-                if (tokens[idx + 1]?.type === "sym" &&
-                    tokens[idx + 1].value === "=" &&
-                    tokens[idx + 2]?.type === "number") {
-                    return `Pointer declarations should assign from an address, like "${baseType}* name = &x;".`;
-                }
-                return "A declaration needs a variable name.";
-            }
-            if (tokens[1].type !== "ident")
-                return "A declaration needs a variable name.";
-            return 'Declarations should look like "int name;" or "long name;" or "double name;" or "int name = value;".';
+        const decl = parseDeclHead(tokens);
+        if (decl.kind === "partial") {
+            return "A declaration needs a variable name.";
         }
-        if (tokens[0].type === "ident") {
-            const name = tokens[0].value;
-            if (tokens[1]?.type === "ident") {
-                return `${name} isn't a valid type name.`;
-            }
-            if (!hasDeclaredPrefix(name, seenDecl))
-                return `You can't use ${name} before declaring it.`;
-            if (tokens.length === 1)
-                return 'Assignments should look like "expression = expression;".';
-            if (tokens[1].type !== "sym" || tokens[1].value !== "=")
-                return 'Assignments should use "=".';
-            if (tokens.length === 2)
-                return "Assignment needs a value on the right.";
-            const rhs = tokens[2];
-            if (rhs.type === "ident" && !allowVarAssign)
-                return "Assignments should not use variables yet.";
-            if (rhs.type === "ident" && !hasDeclaredPrefix(rhs.value, seenDecl)) {
-                return `You can't use ${rhs.value} before declaring it.`;
-            }
-            return 'Assignments should look like "expression = expression;".';
+        if (decl.kind === "full" &&
+            Array.isArray(decl.arrayShape) &&
+            decl.arrayShape.length > 0 &&
+            decl.hasInitializer) {
+            return "Array declarations can't have initializers yet.";
         }
-        return "Line should be a declaration or assignment.";
+        if (decl.kind === "full" && decl.hasInitializer && !Number.isFinite(decl.rhsStart)) {
+            return "Declaration needs a value on the right.";
+        }
+        const parsedExpr = parseExpressionTokens(tokens, 0, { allowVars: true });
+        if (parsedExpr && parsedExpr.nextIndex === tokens.length) {
+            if (tokens[0]?.type === "ident" && !hasDeclaredPrefix(tokens[0].value, seenDecl)) {
+                return `You can't use ${tokens[0].value} before declaring it.`;
+            }
+            return "Expression statements need a semicolon.";
+        }
+        return "Line should be a declaration, control statement, or expression statement.";
     }
     function validateStatement(tokens, state, seenDecl, alloc) {
         if (tokens.some((t) => t.type === "unknown")) {
             return {
-                error: "That line has a character that does not belong in a declaration or assignment.",
+                error: "That line has a character that does not belong in this statement.",
                 kind: "compile",
             };
         }
@@ -1711,14 +2136,14 @@ export function createSimpleSimulator(opts = {}) {
             return { parsed, next: state };
         }
         if (parsed.kind === "if") {
-            const result = evaluateCondition(parsed.expr, state);
+            const result = evaluateCondition(parsed.expr, cloneBoxes(state));
             if ("error" in result) {
                 return { error: result.error, kind: result.kind };
             }
             return { parsed, next: state };
         }
         if (parsed.kind === "while") {
-            const result = evaluateCondition(parsed.expr, state);
+            const result = evaluateCondition(parsed.expr, cloneBoxes(state));
             if ("error" in result) {
                 return { error: result.error, kind: result.kind };
             }
@@ -1732,113 +2157,43 @@ export function createSimpleSimulator(opts = {}) {
                 };
             if (parsed.kind === "declAssign") {
                 const targetType = parsed.declType || "int";
-                const err = validateAssignmentExpr(state, targetType, parsed.name, parsed.expr, { allowVars: allowVarAssign });
+                const err = validateAssignmentExpr(state, targetType, parsed.name, parsed.expr);
                 if (err)
                     return err;
             }
         }
         else if (parsed.kind === "assign") {
-            const resolved = resolveAssignmentTarget(state, parsed.lhs);
-            if ("error" in resolved)
-                return resolved;
-            const err = validateAssignmentExpr(state, resolved.target.type, resolved.target.name, parsed.rhs, { allowVars: allowVarAssign });
-            if (err)
-                return err;
+            if (parsed.op === "=") {
+                const resolved = resolveAssignmentTarget(state, parsed.lhs);
+                if ("error" in resolved)
+                    return resolved;
+                const err = validateAssignmentExpr(state, resolved.target.type, resolved.target.name, parsed.rhs);
+                if (err)
+                    return err;
+            }
+            const checked = evaluateExpressionRaw({
+                kind: "assign",
+                op: parsed.op,
+                left: parsed.lhs,
+                right: parsed.rhs,
+            }, cloneBoxes(state), { targetType: "double" });
+            if (isEvalError(checked))
+                return checked;
+        }
+        else if (parsed.kind === "expr") {
+            const checked = evaluateExpressionRaw(parsed.expr, cloneBoxes(state), {
+                targetType: "double",
+            });
+            if (isEvalError(checked))
+                return checked;
         }
         const next = applyStatement(state, parsed, {
             alloc,
             allowRedeclare: false,
         });
         if (!next)
-            return { error: "That assignment is not valid here.", kind: "compile" };
+            return { error: "That statement is not valid here.", kind: "compile" };
         return { next, parsed };
-    }
-    function controlHeaderEndIndex(tokens) {
-        if (!tokens.length)
-            return -1;
-        if (tokens[0].type !== "kw")
-            return -1;
-        if (tokens[0].value !== "if" && tokens[0].value !== "while")
-            return -1;
-        if (tokens.length < 2)
-            return -1;
-        if (tokens[1].type !== "sym" || tokens[1].value !== "(")
-            return -1;
-        let depth = 0;
-        for (let i = 1; i < tokens.length; i++) {
-            const tok = tokens[i];
-            if (tok.type === "sym" && tok.value === "(") {
-                depth++;
-                continue;
-            }
-            if (tok.type === "sym" && tok.value === ")") {
-                depth--;
-                if (depth < 0)
-                    return -1;
-                if (depth === 0)
-                    return i;
-            }
-        }
-        return -1;
-    }
-    function splitStatements(tokens) {
-        const parts = [];
-        let current = [];
-        let startLine = 0;
-        const pushCurrent = (endLine, hasSemicolon) => {
-            if (!current.length)
-                return;
-            parts.push({
-                tokens: current,
-                startLine: current[0]?.line ?? startLine,
-                endLine,
-                hasSemicolon,
-            });
-            current = [];
-        };
-        for (const tok of tokens) {
-            if (current.length) {
-                const splitAfterElse = current.length === 1 &&
-                    current[0].type === "kw" &&
-                    current[0].value === "else" &&
-                    !(tok.type === "sym" && tok.value === "{");
-                const headerEnd = controlHeaderEndIndex(current);
-                const splitAfterControlHeader = headerEnd >= 0 && headerEnd === current.length - 1;
-                if (splitAfterElse || splitAfterControlHeader) {
-                    pushCurrent(current[current.length - 1].line, false);
-                    startLine = tok.line;
-                }
-            }
-            if (tok.type === "sym" && tok.value === ";") {
-                if (current.length) {
-                    parts.push({
-                        tokens: current,
-                        startLine: current[0]?.line ?? startLine,
-                        endLine: tok.line,
-                        hasSemicolon: true,
-                    });
-                    current = [];
-                }
-                startLine = tok.line;
-                continue;
-            }
-            if (isBraceToken(tok)) {
-                pushCurrent(current[current.length - 1]?.line ?? tok.line, false);
-                parts.push({
-                    tokens: [tok],
-                    startLine: tok.line,
-                    endLine: tok.line,
-                    hasSemicolon: true,
-                });
-                startLine = tok.line;
-                continue;
-            }
-            if (!current.length)
-                startLine = tok.line;
-            current.push(tok);
-        }
-        pushCurrent(current[current.length - 1]?.line ?? startLine, false);
-        return parts;
     }
     function isBracePart(part, brace) {
         if (!part?.tokens?.length || part.tokens.length !== 1)
@@ -2381,7 +2736,7 @@ export function createSimpleSimulator(opts = {}) {
                     return;
                 if (result.parsed.kind === "decl" ||
                     result.parsed.kind === "declAssign") {
-                    addDeclaredName(scopes, declared, result.parsed.name);
+                    addDeclaredNames(scopes, declared, result.parsed.declaredNames);
                 }
                 state = result.next;
             };
@@ -2696,7 +3051,7 @@ export function createSimpleSimulator(opts = {}) {
                 if (!part.hasSemicolon)
                     return { kind: "compile" };
                 if (isDeclLikeStatement(parsed)) {
-                    addDeclaredName(scopes, declared, parsed.name);
+                    addDeclaredNames(scopes, declared, parsed.declaredNames);
                 }
                 state = validation.next;
                 i = advanceTo(continueCompletedWhileLoops(i + 1));
@@ -2725,7 +3080,7 @@ export function createSimpleSimulator(opts = {}) {
             if (!next)
                 return { kind: "compile" };
             if (isDeclLikeStatement(parsed)) {
-                addDeclaredName(scopes, declared, parsed.name);
+                addDeclaredNames(scopes, declared, parsed.declaredNames);
             }
             state = next;
             i = advanceTo(continueCompletedWhileLoops(i + 1));

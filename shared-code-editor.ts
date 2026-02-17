@@ -1,5 +1,7 @@
 import {
   applyTextTokenReplacements,
+  appendStateObjects,
+  bindBtnRefPulse,
   createSimpleSimulator,
   createStepper,
   ensureBaseLayout,
@@ -10,7 +12,6 @@ import {
   resolveActiveNavItem,
   setPartsContent,
   typeInfo,
-  vbox,
 } from "./shared-core.js";
 import type {
   BoxState,
@@ -281,6 +282,8 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     codeRoot,
   } = ensureCodeEditorLayout({ textareaMinLines });
 
+  bindBtnRefPulse(codeRoot || document);
+
   const measureEl = (() => {
     if (!editor || !editor.parentElement) return null;
     const el = document.createElement("div");
@@ -325,10 +328,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     editor.style.minHeight = `calc(var(--code-line-height) * ${lines} + 16px)`;
   }
 
-  const simulator = createSimpleSimulator({
-    allowVarAssign: true,
-    requireSourceValue: true,
-  });
+  const simulator = createSimpleSimulator();
 
   function allocFactory(): (type?: string) => string {
     if (state.allocBase == null) state.allocBase = randAddr("int");
@@ -491,7 +491,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     status: CodeEditorOutcome["kind"] = "ok",
   ): HTMLElement {
     const wrap = document.createElement("div");
-    wrap.className = "state-panel";
+    wrap.className = "state-panel state-panel-scrollable";
     const heading = document.createElement("div");
     heading.className = "panel-title state-heading";
     heading.textContent = title;
@@ -540,20 +540,15 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
       msg.textContent = "(no variables yet)";
       grid.appendChild(msg);
     } else {
-      boxes.forEach((b) => {
-        const node = vbox({
-          address: b.address ?? undefined,
-          type: b.type,
-          value: b.value,
-          name: b.name,
-          editable: false,
-        });
-        if ((b.value ?? "") === "")
-          node.querySelector(".value")?.classList.add("placeholder", "muted");
-        grid.appendChild(node);
+      appendStateObjects(grid, boxes, {
+        editable: false,
+        deletable: false,
       });
     }
-    wrap.appendChild(grid);
+    const body = document.createElement("div");
+    body.className = "state-panel-scroll-body";
+    body.appendChild(grid);
+    wrap.appendChild(body);
     return wrap;
   }
 

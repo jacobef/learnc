@@ -1,7 +1,24 @@
-export type BaseType = "int" | "long" | "double";
+export type BaseType =
+  | "bool"
+  | "char"
+  | "signed char"
+  | "unsigned char"
+  | "short"
+  | "unsigned short"
+  | "int"
+  | "unsigned int"
+  | "long"
+  | "unsigned long"
+  | "long long"
+  | "unsigned long long"
+  | "float"
+  | "double";
 export interface ParsedType {
   base: BaseType | null;
   depth: number;
+  arrayDims?: number[];
+  pointeeArrayDims?: number[];
+  pointeeInnerDepth?: number;
 }
 export interface TypeInfo {
   size: number;
@@ -14,6 +31,11 @@ export interface BoxState {
   value: BoxValue;
   rawValue?: string | null;
   address?: string | null;
+  arrayRoot?: string | null;
+  arrayShape?: number[] | null;
+  arrayIndices?: number[] | null;
+  pointeeArrayDims?: number[] | null;
+  pointeeInnerDepth?: number | null;
   names?: string[] | string | null;
   nameEditable?: boolean | null;
   typeEditable?: boolean | null;
@@ -27,13 +49,116 @@ export type RandAddr = ((type?: string) => number) & {
   reset: (seed?: number | null) => void;
 };
 
+function normalizeTypeSpaces(value: string): string {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+export function canonicalizeBaseType(raw: string): BaseType | null {
+  const base = normalizeTypeSpaces(raw);
+  if (!base) return null;
+  if (base === "_Bool" || base === "bool") return "bool";
+  if (base === "char" || base === "signed char") return base;
+  if (base === "unsigned char") return "unsigned char";
+  if (
+    base === "short" ||
+    base === "short int" ||
+    base === "signed short" ||
+    base === "signed short int"
+  )
+    return "short";
+  if (base === "unsigned short" || base === "unsigned short int")
+    return "unsigned short";
+  if (base === "int" || base === "signed" || base === "signed int")
+    return "int";
+  if (base === "unsigned" || base === "unsigned int") return "unsigned int";
+  if (
+    base === "long" ||
+    base === "long int" ||
+    base === "signed long" ||
+    base === "signed long int"
+  )
+    return "long";
+  if (base === "unsigned long" || base === "unsigned long int")
+    return "unsigned long";
+  if (
+    base === "long long" ||
+    base === "long long int" ||
+    base === "signed long long" ||
+    base === "signed long long int"
+  )
+    return "long long";
+  if (
+    base === "unsigned long long" ||
+    base === "unsigned long long int"
+  )
+    return "unsigned long long";
+  if (base === "float") return "float";
+  if (base === "double") return "double";
+  return null;
+}
+
+function parseBaseAndTrailingPointers(raw: string): {
+  base: BaseType | null;
+  pointerDepth: number;
+} {
+  const clean = String(raw || "").trim();
+  if (!clean) return { base: null, pointerDepth: 0 };
+  let idx = clean.length - 1;
+  let pointerDepth = 0;
+  while (idx >= 0) {
+    const ch = clean[idx];
+    if (ch === "*") {
+      pointerDepth++;
+      idx--;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      idx--;
+      continue;
+    }
+    break;
+  }
+  return {
+    base: canonicalizeBaseType(clean.slice(0, idx + 1)),
+    pointerDepth,
+  };
+}
+
 export function parseType(type: string = "int"): ParsedType {
   const clean = String(type || "").trim();
-  const match = clean.match(/^(int|long|double)(\*+)?$/);
-  if (!match) return { base: null, depth: 0 };
-  const base = match[1] as BaseType;
-  const depth = match[2] ? match[2].length : 0;
-  return { base, depth };
+  if (!clean) return { base: null, depth: 0 };
+  const ptrArrayMatch = /^(.+?)\(\s*(\*+)\s*\)\s*((?:\[\s*\d+\s*\]\s*)+)\s*$/.exec(clean);
+  if (ptrArrayMatch) {
+    const leftSide = parseBaseAndTrailingPointers(ptrArrayMatch[1] || "");
+    const base = leftSide.base;
+    if (!base) return { base: null, depth: 0 };
+    const outerPointerDepth = String(ptrArrayMatch[2] || "").length;
+    const dimsText = String(ptrArrayMatch[3] || "");
+    const dims = [...dimsText.matchAll(/\[\s*(\d+)\s*\]/g)]
+      .map((m) => Number(m[1]))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    return {
+      base,
+      depth: leftSide.pointerDepth + outerPointerDepth,
+      pointeeArrayDims: dims,
+      pointeeInnerDepth: leftSide.pointerDepth,
+    };
+  }
+  let remainder = clean;
+  const arrayDims: number[] = [];
+  while (true) {
+    const m = /^(.*)\[\s*(\d+)\s*\]\s*$/.exec(remainder);
+    if (!m) break;
+    arrayDims.unshift(Number(m[2]));
+    remainder = (m[1] || "").trim();
+  }
+  const parsedBase = parseBaseAndTrailingPointers(remainder);
+  const base = parsedBase.base;
+  const depth = parsedBase.pointerDepth;
+  if (!base) return { base: null, depth: 0 };
+  const parsed: ParsedType = { base, depth };
+  if (arrayDims.length) parsed.arrayDims = arrayDims;
+  return parsed;
 }
 
 export function isPointerType(type: string = "int"): boolean {
@@ -68,11 +193,40 @@ export function typeInfo(type: string = "int"): {
   size: number;
   align: number;
 } {
-  const { base, depth } = parseType(type);
+  const { base, depth, arrayDims } = parseType(type);
   if (!base) return { size: 4, align: 4 };
   if (Number.isFinite(depth) && depth > 0) return { size: 8, align: 8 };
-  if (base === "long" || base === "double") return { size: 8, align: 8 };
-  return { size: 4, align: 4 };
+  const scalar = (() => {
+    if (
+      base === "long" ||
+      base === "unsigned long" ||
+      base === "long long" ||
+      base === "unsigned long long" ||
+      base === "double"
+    ) {
+      return { size: 8, align: 8 };
+    }
+    if (base === "short" || base === "unsigned short") {
+      return { size: 2, align: 2 };
+    }
+    if (
+      base === "bool" ||
+      base === "char" ||
+      base === "signed char" ||
+      base === "unsigned char"
+    ) {
+      return { size: 1, align: 1 };
+    }
+    return { size: 4, align: 4 };
+  })();
+  if (Array.isArray(arrayDims) && arrayDims.length > 0) {
+    const count = arrayDims.reduce((acc, dim) => {
+      const n = Math.max(0, Math.floor(Number(dim)));
+      return acc * (n > 0 ? n : 0);
+    }, 1);
+    return { size: scalar.size * count, align: scalar.align };
+  }
+  return scalar;
 }
 
 let nextAddr: number | null = null;
@@ -231,7 +385,7 @@ export function formatValueForType(
   const raw = String(value ?? "");
   if (raw === "") return "";
   const { base, depth } = parseType(type || "int");
-  if (base === "double" && depth === 0) {
+  if ((base === "float" || base === "double") && depth === 0) {
     const parsed = parseDoubleValueWithSign(value);
     if (parsed == null) return raw;
     const nanSign = opts.nanSign ?? parsed.nanSign;
@@ -316,12 +470,27 @@ export function valueTypeMatchesTarget(
   valueType: string,
   targetType: string,
 ): boolean {
+  const sameArrayDims = (left: number[] | undefined, right: number[] | undefined) => {
+    const a = Array.isArray(left) ? left : [];
+    const b = Array.isArray(right) ? right : [];
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  };
   const target = parseType(targetType || "int");
   const value = parseType(valueType || "int");
   if (!target.base || !value.base) return false;
-  const targetIsDouble = target.base === "double" && target.depth === 0;
-  if (targetIsDouble) return value.base === "double";
-  return value.base !== "double";
+  if (target.depth > 0 || value.depth > 0) {
+    return (
+      target.base === value.base &&
+      target.depth === value.depth &&
+      sameArrayDims(target.pointeeArrayDims, value.pointeeArrayDims) &&
+      (target.pointeeInnerDepth || 0) === (value.pointeeInnerDepth || 0)
+    );
+  }
+  return true;
 }
 
 function doubleValuesEqual(
@@ -342,14 +511,24 @@ export function parsedValuesEqual(
   expected: ValueExpressionResult,
 ): boolean {
   if (actual.kind !== "ok" || expected.kind !== "ok") return false;
-  const expectedBase = parseType(expected.type).base;
-  if (expectedBase === "double") {
+  const parsedExpectedType = parseType(expected.type);
+  if (
+    parsedExpectedType.depth === 0 &&
+    (parsedExpectedType.base === "float" || parsedExpectedType.base === "double")
+  ) {
     return doubleValuesEqual(
       Number(actual.value),
       Number(expected.value),
       actual.nanSign,
       expected.nanSign,
     );
+  }
+  if (parsedExpectedType.depth > 0) {
+    try {
+      return BigInt(actual.value as bigint) === BigInt(expected.value as bigint);
+    } catch {
+      return String(actual.value ?? "").trim() === String(expected.value ?? "").trim();
+    }
   }
   try {
     return BigInt(actual.value as bigint) === BigInt(expected.value as bigint);

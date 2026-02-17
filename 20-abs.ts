@@ -28,12 +28,7 @@ createProgramTemplate({
       editable: true,
       hints: (ctx) => ctx.basicHint,
     },
-    {
-      code: "// abs_x now holds the absolute value of x\n",
-      instructions:
-        "If you want a challenge, paste this level's code into the Sandbox, and rewrite it to not use $c{else}, but still work the same (for all possible values of $n{x}). Extra hard: make it not use $c{if} either.",
-    },
   ],
   workspace: { allowVariableCreation: true, allowVariableDeletion: true },
-  next: "21-else-if.html",
+  next: "21-cubed.html",
 });

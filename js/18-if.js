@@ -41,7 +41,7 @@ createProgramTemplate({
         { code: "  double twig = 0.1;\n" },
         { code: "}\n" },
         {
-            code: "if (1 == --1) {\n",
+            code: "if (1 == - -1) {\n",
             editable: true,
             instructions: "Select the line boundary where execution will resume.",
         },

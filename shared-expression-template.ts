@@ -1,9 +1,12 @@
 import {
+  appendStateObjects,
+  bindBtnRefPulse,
   boxValueMatchesSpec,
   createSimpleSimulator,
   createStepper,
   disableBoxEditing,
   ensureBaseLayout,
+  findArrayObjectBoxesForResult,
   flashStatus,
   formatValueForType,
   getNavLabelForHref,
@@ -329,10 +332,9 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     statePanel,
   } = ensureExpressionLayout();
 
-  const simulator = createSimpleSimulator({
-    allowVarAssign: true,
-    requireSourceValue: true,
-  });
+  bindBtnRefPulse(sectionEl || document);
+
+  const simulator = createSimpleSimulator();
 
   const state: ExpressionTemplateState = {
     boundary: 0,
@@ -624,6 +626,16 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       return;
     }
     const { result } = evaluated;
+    const arrayBoxes = findArrayObjectBoxesForResult(result, step.boxes ?? []);
+    if (arrayBoxes && arrayBoxes.length) {
+      const wrap = document.createElement("div");
+      appendStateObjects(wrap, arrayBoxes, { editable: false, deletable: false });
+      const arrayNode = wrap.querySelector(".arraybox") as HTMLElement | null;
+      if (arrayNode) {
+        answerResult.appendChild(arrayNode);
+        return;
+      }
+    }
     if (result.kind === "lvalue") {
       const match =
         (step.boxes ?? []).find(

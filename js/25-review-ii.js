@@ -21,13 +21,13 @@ createProgramTemplate({
         { code: "int* shore = &wave;\n" },
         { code: "{\n" },
         {
-            code: "  double foam = *shore + 0.5;\n",
+            code: "  double foam = *shore + 0.25;\n",
             editable: true,
             hints: (ctx) => {
                 if (ctx.basicHintTopicIs("value", "foam")) {
                     const foam = ctx.boxNamed("foam");
                     if (foam.value === "4" || foam.value === "4.0") {
-                        return "$n{*shore} is $n{wave}, whose value is $v{4}. Adding an $t{int} to a $t{double} gives a $t{double}: $v{4} + $v{0.5} = $v{4.5}.";
+                        return "$n{*shore} is $n{wave}, whose value is $v{4}. Adding an $t{int} to a $t{double} gives a $t{double}: $v{4} + $v{0.25} = $v{4.25}.";
                     }
                     return "$n{*shore} refers to the variable whose address is $n{shore}'s value.";
                 }
@@ -39,7 +39,7 @@ createProgramTemplate({
             editable: true,
             hints: (ctx) => {
                 if (ctx.basicHintTopicIs("value", "reef")) {
-                    return "$n{foam} is $v{4.5}. Is $c{4.5 >= 5.0} true?";
+                    return "$n{foam} is $v{4.25}. Is $c{4.25 >= 5.0} true?";
                 }
                 if (ctx.basicHintTopicIs("value", "wave")) {
                     return "$c{foam >= 5.0} is false (0), but $c{foam > 4.0} is true (1), so the $c{else if} block runs, not the $c{else} block.";
@@ -65,7 +65,7 @@ createProgramTemplate({
                     if (reef.value === "2.0") {
                         return "$n{reef} is an $t{int}, so the decimal part should be dropped.";
                     }
-                    return "$c{9} ($t{int}) divided by $n{foam} ($v{4.5}, $t{double}) uses $t{double} division: $c{9.0 / 4.5} = $v{2.0}. Then assigning to $n{reef} ($t{int}) drops the decimal.";
+                    return "$c{9} ($t{int}) divided by $n{foam} ($v{4.25}, $t{double}) uses $t{double} division: $c{9.0 / 4.25} ≈ $v{2.12}. Then assigning to $n{reef} ($t{int}) drops the decimal.";
                 }
                 return ctx.basicHint;
             },
@@ -118,7 +118,6 @@ createProgramTemplate({
             },
         },
     ],
-    next: "23-while.html",
-    isLast: false,
+    next: "26-rounding-i.html",
     workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

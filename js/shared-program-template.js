@@ -1,4 +1,4 @@
-import { applyTextTokenReplacements, applyOtherNames, boxValueMatchesSpec, cloneBoxes, createSimpleSimulator, createStepper, bindBtnRefPulse, disableBoxEditing, ensureBaseLayout, flashStatus, getNavLabelForHref, isMobileViewport, makeAnswerBox, normalizeBoxValueForContext, normalizeZeroDisplay, randAddr, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, typeInfo, vbox, } from "./shared-core.js";
+import { applyTextTokenReplacements, applyOtherNames, appendStateObjects, boxValueMatchesSpec, cloneBoxes, createSimpleSimulator, createStepper, bindBtnRefPulse, disableBoxEditing, ensureBaseLayout, flashStatus, getNavLabelForHref, isMobileViewport, makeAnswerBox, normalizeBoxValueForContext, normalizeZeroDisplay, randAddr, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, typeInfo, } from "./shared-core.js";
 function collectProgramElements(root = document) {
     return {
         instructionsEl: root.querySelector('[data-role="program-instructions"]'),
@@ -160,10 +160,7 @@ function createProgramTemplate(config) {
         alert(message);
         throw new Error(message);
     };
-    const simulator = createSimpleSimulator({
-        allowVarAssign: true,
-        requireSourceValue: true,
-    });
+    const simulator = createSimpleSimulator();
     const { instructionsEl, codeEl, codeRoot, stageEl, controlsActionsEl, mobileActionsEl, statusEl, hintPanel, hintBtn, checkBtn, addBtn, resetBtn, } = ensureProgramLayout();
     function placeActionButtonsForViewport() {
         const mobileMode = isMobileViewport() && !!mobileActionsEl;
@@ -307,6 +304,12 @@ function createProgramTemplate(config) {
         const tok = part.tokens[0];
         return tok.type === "sym" && tok.value === "}";
     };
+    const isInstructionSpec = (value) => typeof value === "string" ||
+        (Array.isArray(value) && value.every((item) => typeof item === "string"));
+    const isHintSpec = (value) => typeof value === "function" ||
+        (Array.isArray(value) && value.every((item) => typeof item === "function"));
+    const isEditableSpec = (value) => typeof value === "boolean" ||
+        (Array.isArray(value) && value.every((item) => typeof item === "boolean"));
     steps.forEach((step, index) => {
         if (!step || typeof step !== "object") {
             failConfig(`Step ${index + 1} must be an object.`);
@@ -317,13 +320,17 @@ function createProgramTemplate(config) {
         if (!step.code.endsWith("\n")) {
             failConfig(`Step ${index + 1} code must end with a newline.`);
         }
-        const editable = step.editable === true;
-        if (step.scrollUp !== undefined && typeof step.scrollUp !== "boolean") {
-            failConfig(`Step ${index + 1} scrollUp must be true or false.`);
+        if (step.instructions !== undefined &&
+            !isInstructionSpec(step.instructions)) {
+            failConfig(`Step ${index + 1} instructions must be a string or an array of strings.`);
         }
-        if (step.hints && typeof step.hints !== "function") {
-            failConfig(`Step ${index + 1} hints must be a function.`);
+        if (step.hints !== undefined && !isHintSpec(step.hints)) {
+            failConfig(`Step ${index + 1} hints must be a function or an array of functions.`);
         }
+        if (step.editable !== undefined && !isEditableSpec(step.editable)) {
+            failConfig(`Step ${index + 1} editable must be true/false or an array of true/false values.`);
+        }
+        const editable = step.editable ?? false;
         const rawLines = step.code.split(/\r?\n/);
         if (rawLines[rawLines.length - 1] === "")
             rawLines.pop();
@@ -449,7 +456,9 @@ function createProgramTemplate(config) {
             instructions: step.instructions,
             hints: step.hints,
             editable,
-            scrollUp: step.scrollUp,
+            canBeEditable: Array.isArray(editable)
+                ? editable.some((value) => value)
+                : editable === true,
             ifHeaderOnly,
             ifHeaderHasOpenBrace,
             whileHeaderOnly,
@@ -543,6 +552,70 @@ function createProgramTemplate(config) {
     const stepStartLines = stepInfos
         .map((step) => step.startLine)
         .sort((a, b) => a - b);
+    const stepReachCounts = new Array(stepInfos.length).fill(0);
+    let lastRuntimeStageStepIndex = null;
+    const resolveEditableForVisit = (stepInfo, visitIndex) => {
+        const { editable } = stepInfo;
+        if (Array.isArray(editable)) {
+            return editable[visitIndex] === true;
+        }
+        return editable === true;
+    };
+    const resolveInstructionsForVisit = (stepInfo, visitIndex) => {
+        const { instructions } = stepInfo;
+        if (Array.isArray(instructions)) {
+            return instructions[visitIndex];
+        }
+        return instructions;
+    };
+    const resolveHintsForEditableVisit = (stepInfo, editableVisitIndex) => {
+        const { hints } = stepInfo;
+        if (Array.isArray(hints)) {
+            if (editableVisitIndex == null)
+                return undefined;
+            return hints[editableVisitIndex];
+        }
+        return hints;
+    };
+    const resolveStepVisitForStage = (stepInfo) => {
+        if (!stepInfo) {
+            lastRuntimeStageStepIndex = null;
+            return {
+                stepVisitIndex: null,
+                editableVisitIndex: null,
+                stepEditable: false,
+                instructions: undefined,
+                hints: undefined,
+            };
+        }
+        const isNewVisit = lastRuntimeStageStepIndex !== stepInfo.index;
+        if (isNewVisit) {
+            stepReachCounts[stepInfo.index] = (stepReachCounts[stepInfo.index] || 0) + 1;
+        }
+        const stepVisitIndex = Math.max(0, (stepReachCounts[stepInfo.index] || 1) - 1);
+        const stepEditable = resolveEditableForVisit(stepInfo, stepVisitIndex);
+        let editableVisitIndex = null;
+        if (stepEditable) {
+            const editableVisitsBefore = Array.isArray(stepInfo.editable)
+                ? stepInfo.editable
+                    .slice(0, Math.max(0, stepVisitIndex))
+                    .filter((value) => value).length
+                : stepInfo.editable
+                    ? stepVisitIndex
+                    : 0;
+            editableVisitIndex = editableVisitsBefore;
+        }
+        const instructions = resolveInstructionsForVisit(stepInfo, stepVisitIndex);
+        const hints = resolveHintsForEditableVisit(stepInfo, editableVisitIndex);
+        lastRuntimeStageStepIndex = stepInfo.index;
+        return {
+            stepVisitIndex,
+            editableVisitIndex,
+            stepEditable,
+            instructions,
+            hints,
+        };
+    };
     const executablePartStartLines = new Set();
     parts.forEach((part) => {
         if (!Number.isFinite(part?.startLine))
@@ -581,8 +654,7 @@ function createProgramTemplate(config) {
     if (!finalTrace || finalTrace.nextIndex < parts.length) {
         failConfig(`Program exceeds ${MAX_RUNTIME_TRACE_STEPS} execution steps. Reduce loop iterations in this level.`);
     }
-    const buildRuntimeStage = ({ traceIndex, partIndex, runLine, beforeBoundary, afterBoundary, stateBefore, stateAfter, forceStateEditable = false, }) => {
-        const stepInfo = stepForLine(runLine);
+    const buildRuntimeStage = ({ traceIndex, partIndex, runLine, stepInfo, stepVisitIndex, stepEditable, instructions, hints, beforeBoundary, afterBoundary, stateBefore, stateAfter, forceStateEditable = false, }) => {
         let resolvedAfterBoundary = afterBoundary;
         const ifBlock = ifBlocks.map.get(partIndex);
         if (ifBlock) {
@@ -613,7 +685,7 @@ function createProgramTemplate(config) {
             Number.isFinite(stepInfo.boundary) &&
             beforeBoundary < stepInfo.boundary &&
             resolvedAfterBoundary >= stepInfo.boundary;
-        if (stepInfo?.editable) {
+        if (stepInfo && stepEditable) {
             if (partIndex >= 0 && isHeaderOnlyStep(stepInfo)) {
                 editableMode = "boundary";
                 interactionBoundary = stepInfo.boundary;
@@ -666,6 +738,10 @@ function createProgramTemplate(config) {
             afterBoundary: resolvedAfterBoundary,
             stateAfter: cloneBoxes(stateAfter || []),
             step: stepInfo,
+            stepVisitIndex,
+            stepEditable,
+            instructions,
+            hints,
             editableMode,
             interactionBoundary,
             expectedBoundary,
@@ -688,10 +764,17 @@ function createProgramTemplate(config) {
             const nextBoundary = insertIndex + 1 < noOpStarts.length
                 ? noOpStarts[insertIndex + 1]
                 : toBoundary;
+            const stepInfo = stepForLine(startLine);
+            const resolvedVisit = resolveStepVisitForStage(stepInfo);
             pushRuntimeStage(buildRuntimeStage({
                 traceIndex,
                 partIndex: -1,
                 runLine: startLine,
+                stepInfo,
+                stepVisitIndex: resolvedVisit.stepVisitIndex,
+                stepEditable: resolvedVisit.stepEditable,
+                instructions: resolvedVisit.instructions,
+                hints: resolvedVisit.hints,
                 beforeBoundary: startLine,
                 afterBoundary: nextBoundary,
                 stateBefore: stateSnapshot,
@@ -726,7 +809,7 @@ function createProgramTemplate(config) {
             ? immediateAfterBoundary
             : rawAfterBoundary;
         const stepInfo = stepForLine(runLine);
-        const groupedEditableStep = !!stepInfo && stepInfo.editable && !isHeaderOnlyStep(stepInfo);
+        const groupedEditableStep = !!stepInfo && stepInfo.canBeEditable && !isHeaderOnlyStep(stepInfo);
         if (groupedEditableStep && stepInfo) {
             if (!pendingGroupedEditable || pendingGroupedEditable.step.index !== stepInfo.index) {
                 pendingGroupedEditable = {
@@ -745,10 +828,16 @@ function createProgramTemplate(config) {
             const groupedStepCompleted = !nextStepInfo || nextStepInfo.index !== stepInfo.index;
             if (groupedStepCompleted) {
                 const grouped = pendingGroupedEditable;
+                const resolvedVisit = resolveStepVisitForStage(grouped.step);
                 pushRuntimeStage(buildRuntimeStage({
                     traceIndex: index,
                     partIndex: -1,
                     runLine: grouped.step.startLine,
+                    stepInfo: grouped.step,
+                    stepVisitIndex: resolvedVisit.stepVisitIndex,
+                    stepEditable: resolvedVisit.stepEditable,
+                    instructions: resolvedVisit.instructions,
+                    hints: resolvedVisit.hints,
                     beforeBoundary: grouped.entryBoundary,
                     afterBoundary: stageAfterBoundary,
                     stateBefore: cloneBoxes(grouped.entryState || []),
@@ -769,10 +858,16 @@ function createProgramTemplate(config) {
             continue;
         }
         pendingGroupedEditable = null;
+        const resolvedVisit = resolveStepVisitForStage(stepInfo);
         pushRuntimeStage(buildRuntimeStage({
             traceIndex: index,
             partIndex,
             runLine,
+            stepInfo,
+            stepVisitIndex: resolvedVisit.stepVisitIndex,
+            stepEditable: resolvedVisit.stepEditable,
+            instructions: resolvedVisit.instructions,
+            hints: resolvedVisit.hints,
             beforeBoundary,
             afterBoundary: stageAfterBoundary,
             stateBefore: cloneBoxes(before.state || []),
@@ -788,6 +883,25 @@ function createProgramTemplate(config) {
             stateSnapshot: cloneBoxes(after.state || []),
         });
     }
+    stepInfos.forEach((stepInfo) => {
+        const reachedCount = stepReachCounts[stepInfo.index] || 0;
+        if (Array.isArray(stepInfo.instructions) &&
+            stepInfo.instructions.length !== reachedCount) {
+            failConfig(`Step ${stepInfo.index + 1} instructions array length (${stepInfo.instructions.length}) must match the number of times the step is reached (${reachedCount}).`);
+        }
+        if (Array.isArray(stepInfo.editable) && stepInfo.editable.length !== reachedCount) {
+            failConfig(`Step ${stepInfo.index + 1} editable array length (${stepInfo.editable.length}) must match the number of times the step is reached (${reachedCount}).`);
+        }
+        const editableReachedCount = Array.isArray(stepInfo.editable)
+            ? stepInfo.editable.slice(0, reachedCount).filter((value) => value).length
+            : stepInfo.editable
+                ? reachedCount
+                : 0;
+        if (Array.isArray(stepInfo.hints) &&
+            stepInfo.hints.length !== editableReachedCount) {
+            failConfig(`Step ${stepInfo.index + 1} hints array length (${stepInfo.hints.length}) must match the number of times the step is reached as editable (${editableReachedCount}).`);
+        }
+    });
     console.log("[cBoxes] precomputed stages", runtimeStages);
     function runtimeMaxStep() {
         return runtimeStages.length - 1;
@@ -1191,9 +1305,9 @@ function createProgramTemplate(config) {
             return String(randAddr(type || "int"));
         const used = new Set();
         let maxAddr = null;
-        wrap.querySelectorAll(".vbox").forEach((node) => {
-            const box = readBoxState(node);
-            const raw = box?.address ?? "";
+        const snapshot = serializeWorkspace(wrap) || [];
+        snapshot.forEach((box) => {
+            const raw = box.address ?? "";
             const addrNum = Number(raw);
             if (!Number.isFinite(addrNum))
                 return;
@@ -1478,7 +1592,7 @@ function createProgramTemplate(config) {
     }
     function getHintParts(ctx) {
         const stage = runtimeStateEditStageForBoundary(state.boundary);
-        const hintSpec = stage?.step?.hints ?? null;
+        const hintSpec = stage?.hints ?? null;
         return resolveParts(hintSpec, ctx);
     }
     function renderCodePaneForBoundary() {
@@ -1793,17 +1907,9 @@ function createProgramTemplate(config) {
                 grid.appendChild(msg);
             }
             else {
-                expected.forEach((b) => {
-                    const node = vbox({
-                        address: b.address ?? "—",
-                        type: b.type,
-                        value: b.value,
-                        name: b.name,
-                        editable: false,
-                    });
-                    if ((b.value ?? "") === "")
-                        node.querySelector(".value")?.classList.add("placeholder", "muted");
-                    grid.appendChild(node);
+                appendStateObjects(grid, expected, {
+                    editable: false,
+                    deletable: false,
                 });
             }
             stageEl.appendChild(grid);
@@ -1838,8 +1944,8 @@ function createProgramTemplate(config) {
             }
         });
     }
-    function scrollInstructionsUpIfNeeded(scrollUp, instructionKey) {
-        if (!scrollUp || !instructionKey || instructionKey === state.lastInstructionKey)
+    function scrollInstructionsUpIfNeeded(instructionKey) {
+        if (!instructionsEl || !instructionKey || instructionKey === state.lastInstructionKey)
             return;
         requestAnimationFrame(() => {
             const rect = instructionsEl?.getBoundingClientRect();
@@ -1855,20 +1961,19 @@ function createProgramTemplate(config) {
     function updateInstructions() {
         const runLabel = runLabelForBoundary(state.boundary);
         const instructionStage = runtimeCurrentStage();
-        const scrollUp = instructionStage?.step?.scrollUp !== false && !!instructionsEl;
         let instructionKey = null;
         let parts = null;
         if (!instructionStage && hasInitialInstructionsContent) {
             parts = initialInstructions || "";
             instructionKey = "__initial__";
         }
-        else if (instructionStage?.step?.instructions) {
-            parts = String(instructionStage.step.instructions);
+        else if (instructionStage?.instructions) {
+            parts = String(instructionStage.instructions);
             instructionKey = `runtime-stage-${instructionStage.index}`;
         }
         parts = applyButtonTokens(parts || null, runLabel);
         setPartsContent(instructionsEl, parts);
-        scrollInstructionsUpIfNeeded(scrollUp, instructionKey);
+        scrollInstructionsUpIfNeeded(instructionKey);
         state.lastInstructionKey = instructionKey;
     }
     function hideHint() {
@@ -1881,9 +1986,7 @@ function createProgramTemplate(config) {
         const ws = getWorkspaceEl();
         if (!ws)
             return [];
-        return [...ws.querySelectorAll(".vbox")]
-            .map((v) => readBoxState(v))
-            .filter(Boolean);
+        return serializeWorkspace(ws) || [];
     }
     function evaluateWorkspace(boxes) {
         const expected = getExpectedState(state.boundary);
@@ -2076,7 +2179,9 @@ function createProgramTemplate(config) {
             runtimeMarkCurrentStageSolved();
             const ws = getWorkspaceEl();
             if (ws) {
-                ws.querySelectorAll(".vbox").forEach((v) => disableBoxEditing(v));
+                ws
+                    .querySelectorAll(".vbox, .arraybox")
+                    .forEach((v) => disableBoxEditing(v));
                 removeBoxDeleteButtons(ws);
             }
             if (checkBtn)
