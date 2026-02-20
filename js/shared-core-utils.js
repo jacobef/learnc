@@ -367,6 +367,11 @@ export function parseValueExpressionInput(evaluator, raw) {
     };
 }
 export function valueTypeMatchesTarget(valueType, targetType) {
+    const isIntegerScalarBase = (base) => {
+        if (!base)
+            return false;
+        return base !== "float" && base !== "double";
+    };
     const sameArrayDims = (left, right) => {
         const a = Array.isArray(left) ? left : [];
         const b = Array.isArray(right) ? right : [];
@@ -382,6 +387,9 @@ export function valueTypeMatchesTarget(valueType, targetType) {
     const value = parseType(valueType || "int");
     if (!target.base || !value.base)
         return false;
+    if (target.depth > 0 && value.depth === 0) {
+        return isIntegerScalarBase(value.base);
+    }
     if (target.depth > 0 || value.depth > 0) {
         return (target.base === value.base &&
             target.depth === value.depth &&

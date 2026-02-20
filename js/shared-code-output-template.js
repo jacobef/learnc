@@ -1,43 +1,33 @@
-import { applyTextTokenReplacements, appendStateObjects, bindBtnRefPulse, boxValueMatchesSpec, createSimpleSimulator, createStepper, ensureBaseLayout, flashStatus, formatValueForType, getNavLabelForHref, parseType, randAddr, renderParts, resolveActiveNavItem, setPartsContent, typeInfo, } from "./shared-core.js";
+import { applyTextTokenReplacements, appendStateObjects, bindBtnRefPulse, boxValueMatchesSpec, clearNode, createSimpleSimulator, createStepper, ensurePanelizedMain, flashStatus, formatValueForType, getNavLabelForHref, parseType, queryElement, queryRole, randAddr, renderParts, setPartsContent, syncDocumentTitleFromNav, typeInfo, } from "./shared-core.js";
 const INT32_MIN = -2147483648n;
 const INT32_MAX = 2147483647n;
 function collectCodeOutputChallengeElements(root = document) {
+    const role = (name) => queryRole(name, root);
     return {
-        instructionsEl: root.querySelector('[data-role="code-instructions"]'),
-        lockedLineNumbers: root.querySelector('[data-role="code-locked-line-numbers"]'),
-        lockedInputLine: root.querySelector('[data-role="code-locked-input-line"]'),
-        lockedErrorGutter: root.querySelector('[data-role="code-locked-error-gutter"]'),
-        editor: root.querySelector('[data-role="code-editor"]'),
-        lineNumbers: root.querySelector('[data-role="code-line-numbers"]'),
-        errorGutter: root.querySelector('[data-role="code-error-gutter"]'),
-        stage: root.querySelector('[data-role="code-stage"]'),
-        status: root.querySelector('[data-role="code-status"]'),
-        hintPanel: root.querySelector('[data-role="code-hint"]'),
-        hintBtn: root.querySelector('[data-role="code-hint-btn"]'),
-        checkBtn: root.querySelector('[data-role="code-check"]'),
-        rerollBtn: root.querySelector('[data-role="code-reroll"]'),
-        showFailBtn: root.querySelector('[data-role="code-show-failing-case"]'),
-        nextBtn: root.querySelector('button[data-stepper="next"]'),
-        codeRoot: root.querySelector('[data-role="code-root"]'),
+        instructionsEl: role("code-instructions"),
+        lockedLineNumbers: role("code-locked-line-numbers"),
+        lockedInputLine: role("code-locked-input-line"),
+        lockedErrorGutter: role("code-locked-error-gutter"),
+        editor: role("code-editor"),
+        lineNumbers: role("code-line-numbers"),
+        errorGutter: role("code-error-gutter"),
+        stage: role("code-stage"),
+        status: role("code-status"),
+        hintPanel: role("code-hint"),
+        hintBtn: role("code-hint-btn"),
+        checkBtn: role("code-check"),
+        rerollBtn: role("code-reroll"),
+        showFailBtn: role("code-show-failing-case"),
+        nextBtn: queryElement('button[data-stepper="next"]', root),
+        codeRoot: role("code-root"),
     };
 }
 function ensureCodeOutputChallengeLayout({ textareaMinLines, }) {
-    const activeItem = resolveActiveNavItem();
-    const resolvedTitle = activeItem?.label || "";
-    const nextBrowserTitle = resolvedTitle ? `C Boxes - ${resolvedTitle}` : "";
-    if (nextBrowserTitle)
-        document.title = nextBrowserTitle;
-    const existing = document.querySelector('[data-role="code-editor"]');
+    const resolvedTitle = syncDocumentTitleFromNav();
+    const existing = queryRole("code-editor");
     if (existing)
         return collectCodeOutputChallengeElements();
-    const { main } = ensureBaseLayout();
-    main.classList.add("main-panelized");
-    if (resolvedTitle) {
-        const heading = document.createElement("h1");
-        heading.className = "page-title";
-        heading.textContent = resolvedTitle;
-        main.appendChild(heading);
-    }
+    const main = ensurePanelizedMain(resolvedTitle);
     const instructionsEl = document.createElement("p");
     instructionsEl.dataset.role = "code-instructions";
     instructionsEl.className = "intro";
@@ -203,39 +193,6 @@ function createCodeOutputChallengeTemplate(config) {
         name: ensureIdentifier(spec?.name || "", `Output name ${index + 1}`),
         type: String(spec?.type || "").trim(),
     }));
-    const inputNameSet = new Set();
-    for (const spec of inputSpecs) {
-        if (inputNameSet.has(spec.name)) {
-            failConfig(`Duplicate input name: ${spec.name}.`);
-        }
-        inputNameSet.add(spec.name);
-    }
-    const outputNameSet = new Set();
-    for (const spec of outputSpecs) {
-        if (outputNameSet.has(spec.name)) {
-            failConfig(`Duplicate output name: ${spec.name}.`);
-        }
-        if (inputNameSet.has(spec.name)) {
-            failConfig(`Input/output names must be different: ${spec.name}.`);
-        }
-        outputNameSet.add(spec.name);
-    }
-    for (const [index, spec] of inputSpecs.entries()) {
-        const parsed = parseType(spec.type);
-        if (!parsed.base ||
-            parsed.depth !== 0 ||
-            (parsed.base !== "int" && parsed.base !== "long" && parsed.base !== "double")) {
-            failConfig(`Input type ${index + 1} must be int, long, or double.`);
-        }
-    }
-    for (const [index, spec] of outputSpecs.entries()) {
-        const parsed = parseType(spec.type);
-        if (!parsed.base ||
-            parsed.depth !== 0 ||
-            (parsed.base !== "int" && parsed.base !== "long" && parsed.base !== "double")) {
-            failConfig(`Output type ${index + 1} must be int, long, or double.`);
-        }
-    }
     if (!Array.isArray(testInputs)) {
         failConfig("testInputs must be an array.");
     }
@@ -266,15 +223,6 @@ function createCodeOutputChallengeTemplate(config) {
     }
     const { instructionsEl, lockedLineNumbers, lockedInputLine, lockedErrorGutter, editor, lineNumbers, errorGutter, stage, status, hintPanel, hintBtn, checkBtn, rerollBtn, showFailBtn, nextBtn, codeRoot, } = ensureCodeOutputChallengeLayout({ textareaMinLines });
     bindBtnRefPulse(codeRoot || document);
-    const measureEl = (() => {
-        if (!editor || !editor.parentElement)
-            return null;
-        const el = document.createElement("div");
-        el.className = "code-textarea-measure";
-        el.setAttribute("aria-hidden", "true");
-        editor.parentElement.appendChild(el);
-        return el;
-    })();
     const simulator = createSimpleSimulator();
     function makeAllocFactory(start) {
         let next = Math.max(0, Math.floor(Number(start)));
@@ -447,8 +395,8 @@ function createCodeOutputChallengeTemplate(config) {
         visibleCase: createChallengeCaseForInputRow(startInput, "startInput"),
         testCases,
         lastReport: null,
-        showFullShownOutput: false,
         pendingFailingCase: null,
+        showFullShownOutput: false,
     };
     let pager = null;
     function normalizeUserCodeText(text) {
@@ -549,26 +497,6 @@ function createCodeOutputChallengeTemplate(config) {
         editor.style.height = "auto";
         editor.style.height = `${editor.scrollHeight}px`;
     }
-    function measureWrapCounts(lines) {
-        if (!editor || !measureEl)
-            return lines.map(() => 1);
-        const style = window.getComputedStyle(editor);
-        const paddingLeft = parseFloat(style.paddingLeft) || 0;
-        const paddingRight = parseFloat(style.paddingRight) || 0;
-        const contentWidth = Math.max(1, editor.clientWidth - paddingLeft - paddingRight);
-        measureEl.style.width = `${contentWidth}px`;
-        measureEl.style.fontFamily = style.fontFamily;
-        measureEl.style.fontSize = style.fontSize;
-        measureEl.style.fontWeight = style.fontWeight;
-        measureEl.style.letterSpacing = style.letterSpacing;
-        measureEl.style.lineHeight = style.lineHeight;
-        const lineHeight = getLineHeightPx();
-        return lines.map((line) => {
-            measureEl.textContent = line === "" ? " " : line;
-            const h = measureEl.scrollHeight;
-            return Math.max(1, Math.ceil(h / lineHeight - 0.01));
-        });
-    }
     function syncEditorLinkedScroll() {
         if (!editor)
             return;
@@ -582,17 +510,16 @@ function createCodeOutputChallengeTemplate(config) {
         const lines = getUserRawLines();
         const count = Math.max(lines.length, 1);
         const lineHeight = getLineHeightPx();
-        const wraps = measureWrapCounts(lines);
         if (lineNumbers) {
             const frag = document.createDocumentFragment();
             for (let i = 1; i <= count; i++) {
                 const num = document.createElement("div");
                 num.className = "code-line-number";
-                num.style.height = `${(wraps[i - 1] || 1) * lineHeight}px`;
+                num.style.height = `${lineHeight}px`;
                 num.textContent = String(i + preludeLineCount);
                 frag.appendChild(num);
             }
-            lineNumbers.innerHTML = "";
+            clearNode(lineNumbers);
             lineNumbers.appendChild(frag);
             if (editor)
                 lineNumbers.style.height = `${editor.clientHeight}px`;
@@ -603,7 +530,7 @@ function createCodeOutputChallengeTemplate(config) {
             for (let i = 0; i < count; i++) {
                 const cell = document.createElement("div");
                 cell.className = "code-error-line";
-                cell.style.height = `${(wraps[i] || 1) * lineHeight}px`;
+                cell.style.height = `${lineHeight}px`;
                 if (status.invalid.has(i)) {
                     cell.classList.add("is-invalid");
                     const kind = status.errorKinds?.get(i) || "compile";
@@ -620,7 +547,7 @@ function createCodeOutputChallengeTemplate(config) {
                 }
                 frag.appendChild(cell);
             }
-            errorGutter.innerHTML = "";
+            clearNode(errorGutter);
             errorGutter.appendChild(frag);
             if (editor)
                 errorGutter.style.height = `${editor.clientHeight}px`;
@@ -701,28 +628,46 @@ function createCodeOutputChallengeTemplate(config) {
             };
         }
         const finalState = analyzed.state;
-        const outputChecks = outputChecksForCase(testCase, finalState);
-        const firstFailing = outputChecks.find((check) => check.status !== "ok") || null;
-        if (firstFailing) {
-            const kindByStatus = {
-                missing: "missing-output",
-                "wrong-type": "wrong-output-type",
-                "wrong-value": "wrong-output-value",
-            };
-            return {
-                ok: false,
-                kind: kindByStatus[firstFailing.status],
-                state: finalState,
-                outputBox: firstFailing.actual,
-                expected: firstFailing.expected,
-                failingOutput: firstFailing.output,
-            };
+        for (let index = 0; index < outputSpecs.length; index += 1) {
+            const outputSpec = outputSpecs[index];
+            const expected = expectedBoxes[index];
+            const actual = finalState.find((box) => box.name === outputSpec.name) || null;
+            if (!actual) {
+                return {
+                    ok: false,
+                    kind: "missing-output",
+                    state: finalState,
+                    outputBox: null,
+                    expected,
+                    failingOutput: outputSpec,
+                };
+            }
+            if (String(actual.type || "").trim() !== outputSpec.type) {
+                return {
+                    ok: false,
+                    kind: "wrong-output-type",
+                    state: finalState,
+                    outputBox: actual,
+                    expected,
+                    failingOutput: outputSpec,
+                };
+            }
+            if (!boxValueMatchesSpec(simulator, actual, expected).ok) {
+                return {
+                    ok: false,
+                    kind: "wrong-output-value",
+                    state: finalState,
+                    outputBox: actual,
+                    expected,
+                    failingOutput: outputSpec,
+                };
+            }
         }
         return {
             ok: true,
             kind: "ok",
             state: finalState,
-            outputBox: outputChecks.find((check) => check.actual)?.actual || outputChecks[0]?.actual || null,
+            outputBox: finalState.find((box) => box.name === (outputSpecs[0]?.name || "")) || null,
             expected: fallbackExpected,
             failingOutput: null,
         };
@@ -747,29 +692,6 @@ function createCodeOutputChallengeTemplate(config) {
             type: outputSpec.type,
             value: testCase.expectedLiterals[index] || "",
         }));
-    }
-    function outputChecksForCase(testCase, finalState) {
-        const expectedBoxes = expectedBoxesForCase(testCase);
-        return outputSpecs.map((outputSpec, index) => {
-            const expected = expectedBoxes[index];
-            const actual = finalState?.find((box) => box.name === outputSpec.name) || null;
-            let status = "ok";
-            if (!actual) {
-                status = "missing";
-            }
-            else if (String(actual.type || "").trim() !== outputSpec.type) {
-                status = "wrong-type";
-            }
-            else if (!boxValueMatchesSpec(simulator, actual, expected).ok) {
-                status = "wrong-value";
-            }
-            return {
-                output: { ...outputSpec },
-                expected,
-                actual,
-                status,
-            };
-        });
     }
     function expectedStateBoxesForCase(testCase) {
         return expectedBoxesForCase(testCase).map((box) => ({
@@ -830,7 +752,7 @@ function createCodeOutputChallengeTemplate(config) {
     function renderStage() {
         if (!stage)
             return null;
-        stage.innerHTML = "";
+        clearNode(stage);
         const currentResult = evaluateCase(state.visibleCase);
         const group = document.createElement("div");
         group.className = "state-group two-col";
@@ -903,7 +825,7 @@ function createCodeOutputChallengeTemplate(config) {
                 num.textContent = String(i + 1);
                 frag.appendChild(num);
             }
-            lockedLineNumbers.innerHTML = "";
+            clearNode(lockedLineNumbers);
             lockedLineNumbers.appendChild(frag);
         }
         if (lockedErrorGutter) {
@@ -913,7 +835,7 @@ function createCodeOutputChallengeTemplate(config) {
                 cell.className = "code-error-line";
                 frag.appendChild(cell);
             }
-            lockedErrorGutter.innerHTML = "";
+            clearNode(lockedErrorGutter);
             lockedErrorGutter.appendChild(frag);
         }
     }
@@ -1032,7 +954,6 @@ function createCodeOutputChallengeTemplate(config) {
             nextBtn.disabled = !state.pass;
     }
     function buildHintContext(currentResult, report) {
-        const outputChecks = outputChecksForCase(state.visibleCase, currentResult.state || null);
         return {
             text: getEditorText(),
             inputs: inputSpecs.map((inputSpec, index) => ({
@@ -1040,7 +961,6 @@ function createCodeOutputChallengeTemplate(config) {
                 value: state.visibleCase.inputValues[index],
             })),
             outputs: outputSpecs.map((outputSpec) => ({ ...outputSpec })),
-            outputChecks,
             currentCase: state.visibleCase,
             currentResult,
             report,

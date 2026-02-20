@@ -3,17 +3,20 @@ import {
   appendStateObjects,
   bindBtnRefPulse,
   boxValueMatchesSpec,
+  clearNode,
   createSimpleSimulator,
   createStepper,
-  ensureBaseLayout,
+  ensurePanelizedMain,
   flashStatus,
   formatValueForType,
   getNavLabelForHref,
   parseType,
+  queryElement,
+  queryRole,
   randAddr,
   renderParts,
-  resolveActiveNavItem,
   setPartsContent,
+  syncDocumentTitleFromNav,
   typeInfo,
 } from "./shared-core.js";
 import type { BoxState, LineStatus, Parts, SimpleSimulator, Stepper } from "./shared-core.js";
@@ -87,15 +90,6 @@ interface ChallengeCaseResult {
   failingOutput: ChallengeVariableSpec | null;
 }
 
-type OutputCheckStatus = "ok" | "missing" | "wrong-type" | "wrong-value";
-
-interface ChallengeOutputCheck {
-  output: ChallengeVariableSpec;
-  expected: BoxState;
-  actual: BoxState | null;
-  status: OutputCheckStatus;
-}
-
 interface ChallengeRunItem {
   index: number;
   testCase: ChallengeCase;
@@ -115,15 +109,14 @@ interface CodeOutputChallengeState {
   visibleCase: ChallengeCase;
   testCases: ChallengeCase[];
   lastReport: ChallengeRunReport | null;
-  showFullShownOutput: boolean;
   pendingFailingCase: ChallengeCase | null;
+  showFullShownOutput: boolean;
 }
 
 interface CodeOutputChallengeHintContext {
   text: string;
   inputs: Array<ChallengeVariableSpec & { value: ChallengeRuntimeValue }>;
   outputs: ChallengeVariableSpec[];
-  outputChecks: ChallengeOutputCheck[];
   currentCase: ChallengeCase;
   currentResult: ChallengeCaseResult;
   report: ChallengeRunReport;
@@ -139,53 +132,24 @@ const INT32_MAX = 2147483647n;
 function collectCodeOutputChallengeElements(
   root: ParentNode = document,
 ): CodeOutputChallengeElements {
+  const role = <T extends Element>(name: string) => queryRole<T>(name, root);
   return {
-    instructionsEl: root.querySelector(
-      '[data-role="code-instructions"]',
-    ) as HTMLElement | null,
-    lockedLineNumbers: root.querySelector(
-      '[data-role="code-locked-line-numbers"]',
-    ) as HTMLElement | null,
-    lockedInputLine: root.querySelector(
-      '[data-role="code-locked-input-line"]',
-    ) as HTMLElement | null,
-    lockedErrorGutter: root.querySelector(
-      '[data-role="code-locked-error-gutter"]',
-    ) as HTMLElement | null,
-    editor: root.querySelector(
-      '[data-role="code-editor"]',
-    ) as HTMLTextAreaElement | null,
-    lineNumbers: root.querySelector(
-      '[data-role="code-line-numbers"]',
-    ) as HTMLElement | null,
-    errorGutter: root.querySelector(
-      '[data-role="code-error-gutter"]',
-    ) as HTMLElement | null,
-    stage: root.querySelector('[data-role="code-stage"]') as HTMLElement | null,
-    status: root.querySelector(
-      '[data-role="code-status"]',
-    ) as HTMLElement | null,
-    hintPanel: root.querySelector(
-      '[data-role="code-hint"]',
-    ) as HTMLElement | null,
-    hintBtn: root.querySelector(
-      '[data-role="code-hint-btn"]',
-    ) as HTMLButtonElement | null,
-    checkBtn: root.querySelector(
-      '[data-role="code-check"]',
-    ) as HTMLButtonElement | null,
-    rerollBtn: root.querySelector(
-      '[data-role="code-reroll"]',
-    ) as HTMLButtonElement | null,
-    showFailBtn: root.querySelector(
-      '[data-role="code-show-failing-case"]',
-    ) as HTMLButtonElement | null,
-    nextBtn: root.querySelector(
-      'button[data-stepper="next"]',
-    ) as HTMLButtonElement | null,
-    codeRoot: root.querySelector(
-      '[data-role="code-root"]',
-    ) as HTMLElement | null,
+    instructionsEl: role<HTMLElement>("code-instructions"),
+    lockedLineNumbers: role<HTMLElement>("code-locked-line-numbers"),
+    lockedInputLine: role<HTMLElement>("code-locked-input-line"),
+    lockedErrorGutter: role<HTMLElement>("code-locked-error-gutter"),
+    editor: role<HTMLTextAreaElement>("code-editor"),
+    lineNumbers: role<HTMLElement>("code-line-numbers"),
+    errorGutter: role<HTMLElement>("code-error-gutter"),
+    stage: role<HTMLElement>("code-stage"),
+    status: role<HTMLElement>("code-status"),
+    hintPanel: role<HTMLElement>("code-hint"),
+    hintBtn: role<HTMLButtonElement>("code-hint-btn"),
+    checkBtn: role<HTMLButtonElement>("code-check"),
+    rerollBtn: role<HTMLButtonElement>("code-reroll"),
+    showFailBtn: role<HTMLButtonElement>("code-show-failing-case"),
+    nextBtn: queryElement<HTMLButtonElement>('button[data-stepper="next"]', root),
+    codeRoot: role<HTMLElement>("code-root"),
   };
 }
 
@@ -194,21 +158,11 @@ function ensureCodeOutputChallengeLayout({
 }: {
   textareaMinLines: number;
 }): CodeOutputChallengeElements {
-  const activeItem = resolveActiveNavItem();
-  const resolvedTitle = activeItem?.label || "";
-  const nextBrowserTitle = resolvedTitle ? `C Boxes - ${resolvedTitle}` : "";
-  if (nextBrowserTitle) document.title = nextBrowserTitle;
-  const existing = document.querySelector('[data-role="code-editor"]');
+  const resolvedTitle = syncDocumentTitleFromNav();
+  const existing = queryRole<HTMLElement>("code-editor");
   if (existing) return collectCodeOutputChallengeElements();
 
-  const { main } = ensureBaseLayout();
-  main.classList.add("main-panelized");
-  if (resolvedTitle) {
-    const heading = document.createElement("h1");
-    heading.className = "page-title";
-    heading.textContent = resolvedTitle;
-    main.appendChild(heading);
-  }
+  const main = ensurePanelizedMain(resolvedTitle);
 
   const instructionsEl = document.createElement("p");
   instructionsEl.dataset.role = "code-instructions";
@@ -398,43 +352,6 @@ function createCodeOutputChallengeTemplate(
     name: ensureIdentifier(spec?.name || "", `Output name ${index + 1}`),
     type: String(spec?.type || "").trim(),
   }));
-  const inputNameSet = new Set<string>();
-  for (const spec of inputSpecs) {
-    if (inputNameSet.has(spec.name)) {
-      failConfig(`Duplicate input name: ${spec.name}.`);
-    }
-    inputNameSet.add(spec.name);
-  }
-  const outputNameSet = new Set<string>();
-  for (const spec of outputSpecs) {
-    if (outputNameSet.has(spec.name)) {
-      failConfig(`Duplicate output name: ${spec.name}.`);
-    }
-    if (inputNameSet.has(spec.name)) {
-      failConfig(`Input/output names must be different: ${spec.name}.`);
-    }
-    outputNameSet.add(spec.name);
-  }
-  for (const [index, spec] of inputSpecs.entries()) {
-    const parsed = parseType(spec.type);
-    if (
-      !parsed.base ||
-      parsed.depth !== 0 ||
-      (parsed.base !== "int" && parsed.base !== "long" && parsed.base !== "double")
-    ) {
-      failConfig(`Input type ${index + 1} must be int, long, or double.`);
-    }
-  }
-  for (const [index, spec] of outputSpecs.entries()) {
-    const parsed = parseType(spec.type);
-    if (
-      !parsed.base ||
-      parsed.depth !== 0 ||
-      (parsed.base !== "int" && parsed.base !== "long" && parsed.base !== "double")
-    ) {
-      failConfig(`Output type ${index + 1} must be int, long, or double.`);
-    }
-  }
   if (!Array.isArray(testInputs)) {
     failConfig("testInputs must be an array.");
   }
@@ -493,15 +410,6 @@ function createCodeOutputChallengeTemplate(
   } = ensureCodeOutputChallengeLayout({ textareaMinLines });
 
   bindBtnRefPulse(codeRoot || document);
-
-  const measureEl = (() => {
-    if (!editor || !editor.parentElement) return null;
-    const el = document.createElement("div");
-    el.className = "code-textarea-measure";
-    el.setAttribute("aria-hidden", "true");
-    editor.parentElement.appendChild(el);
-    return el;
-  })();
 
   const simulator = createSimpleSimulator();
 
@@ -719,8 +627,8 @@ function createCodeOutputChallengeTemplate(
     visibleCase: createChallengeCaseForInputRow(startInput, "startInput"),
     testCases,
     lastReport: null,
-    showFullShownOutput: false,
     pendingFailingCase: null,
+    showFullShownOutput: false,
   };
 
   let pager: Stepper | null = null;
@@ -828,29 +736,6 @@ function createCodeOutputChallengeTemplate(
     editor.style.height = `${editor.scrollHeight}px`;
   }
 
-  function measureWrapCounts(lines: string[]): number[] {
-    if (!editor || !measureEl) return lines.map(() => 1);
-    const style = window.getComputedStyle(editor);
-    const paddingLeft = parseFloat(style.paddingLeft) || 0;
-    const paddingRight = parseFloat(style.paddingRight) || 0;
-    const contentWidth = Math.max(
-      1,
-      editor.clientWidth - paddingLeft - paddingRight,
-    );
-    measureEl.style.width = `${contentWidth}px`;
-    measureEl.style.fontFamily = style.fontFamily;
-    measureEl.style.fontSize = style.fontSize;
-    measureEl.style.fontWeight = style.fontWeight;
-    measureEl.style.letterSpacing = style.letterSpacing;
-    measureEl.style.lineHeight = style.lineHeight;
-    const lineHeight = getLineHeightPx();
-    return lines.map((line) => {
-      measureEl.textContent = line === "" ? " " : line;
-      const h = measureEl.scrollHeight;
-      return Math.max(1, Math.ceil(h / lineHeight - 0.01));
-    });
-  }
-
   function syncEditorLinkedScroll() {
     if (!editor) return;
     if (lineNumbers) lineNumbers.scrollTop = editor.scrollTop;
@@ -862,17 +747,16 @@ function createCodeOutputChallengeTemplate(
     const lines = getUserRawLines();
     const count = Math.max(lines.length, 1);
     const lineHeight = getLineHeightPx();
-    const wraps = measureWrapCounts(lines);
     if (lineNumbers) {
       const frag = document.createDocumentFragment();
       for (let i = 1; i <= count; i++) {
         const num = document.createElement("div");
         num.className = "code-line-number";
-        num.style.height = `${(wraps[i - 1] || 1) * lineHeight}px`;
+        num.style.height = `${lineHeight}px`;
         num.textContent = String(i + preludeLineCount);
         frag.appendChild(num);
       }
-      lineNumbers.innerHTML = "";
+      clearNode(lineNumbers);
       lineNumbers.appendChild(frag);
       if (editor) lineNumbers.style.height = `${editor.clientHeight}px`;
     }
@@ -882,7 +766,7 @@ function createCodeOutputChallengeTemplate(
       for (let i = 0; i < count; i++) {
         const cell = document.createElement("div");
         cell.className = "code-error-line";
-        cell.style.height = `${(wraps[i] || 1) * lineHeight}px`;
+        cell.style.height = `${lineHeight}px`;
         if (status.invalid.has(i)) {
           cell.classList.add("is-invalid");
           const kind = status.errorKinds?.get(i) || "compile";
@@ -898,7 +782,7 @@ function createCodeOutputChallengeTemplate(
         }
         frag.appendChild(cell);
       }
-      errorGutter.innerHTML = "";
+      clearNode(errorGutter);
       errorGutter.appendChild(frag);
       if (editor) errorGutter.style.height = `${editor.clientHeight}px`;
     }
@@ -1004,24 +888,40 @@ function createCodeOutputChallengeTemplate(
       };
     }
     const finalState = analyzed.state;
-    const outputChecks = outputChecksForCase(testCase, finalState);
-    const firstFailing = outputChecks.find((check) => check.status !== "ok") || null;
-    if (firstFailing) {
-      const kindByStatus: Record<
-        Exclude<OutputCheckStatus, "ok">,
-        "missing-output" | "wrong-output-type" | "wrong-output-value"
-      > = {
-        missing: "missing-output",
-        "wrong-type": "wrong-output-type",
-        "wrong-value": "wrong-output-value",
-      };
-      return {
-        ok: false,
-        kind: kindByStatus[firstFailing.status as Exclude<OutputCheckStatus, "ok">],
-        state: finalState,
-        outputBox: firstFailing.actual,
-        expected: firstFailing.expected,
-        failingOutput: firstFailing.output,
+    for (let index = 0; index < outputSpecs.length; index += 1) {
+      const outputSpec = outputSpecs[index]!;
+      const expected = expectedBoxes[index]!;
+      const actual =
+        finalState.find((box: BoxState) => box.name === outputSpec.name) || null;
+      if (!actual) {
+        return {
+          ok: false,
+          kind: "missing-output",
+          state: finalState,
+          outputBox: null,
+          expected,
+          failingOutput: outputSpec,
+        };
+      }
+      if (String(actual.type || "").trim() !== outputSpec.type) {
+        return {
+          ok: false,
+          kind: "wrong-output-type",
+          state: finalState,
+          outputBox: actual,
+          expected,
+          failingOutput: outputSpec,
+        };
+      }
+      if (!boxValueMatchesSpec(simulator, actual, expected).ok) {
+        return {
+          ok: false,
+          kind: "wrong-output-value",
+          state: finalState,
+          outputBox: actual,
+          expected,
+          failingOutput: outputSpec,
+        };
       }
     }
     return {
@@ -1029,7 +929,10 @@ function createCodeOutputChallengeTemplate(
       kind: "ok",
       state: finalState,
       outputBox:
-        outputChecks.find((check) => check.actual)?.actual || outputChecks[0]?.actual || null,
+        finalState.find(
+          (box: BoxState) =>
+            box.name === (outputSpecs[0]?.name || ""),
+        ) || null,
       expected: fallbackExpected,
       failingOutput: null,
     };
@@ -1056,32 +959,6 @@ function createCodeOutputChallengeTemplate(
       type: outputSpec.type,
       value: testCase.expectedLiterals[index] || "",
     }));
-  }
-
-  function outputChecksForCase(
-    testCase: ChallengeCase,
-    finalState: BoxState[] | null,
-  ): ChallengeOutputCheck[] {
-    const expectedBoxes = expectedBoxesForCase(testCase);
-    return outputSpecs.map((outputSpec, index) => {
-      const expected = expectedBoxes[index]!;
-      const actual =
-        finalState?.find((box: BoxState) => box.name === outputSpec.name) || null;
-      let status: OutputCheckStatus = "ok";
-      if (!actual) {
-        status = "missing";
-      } else if (String(actual.type || "").trim() !== outputSpec.type) {
-        status = "wrong-type";
-      } else if (!boxValueMatchesSpec(simulator, actual, expected).ok) {
-        status = "wrong-value";
-      }
-      return {
-        output: { ...outputSpec },
-        expected,
-        actual,
-        status,
-      };
-    });
   }
 
   function expectedStateBoxesForCase(testCase: ChallengeCase): BoxState[] {
@@ -1146,7 +1023,7 @@ function createCodeOutputChallengeTemplate(
 
   function renderStage(): ChallengeCaseResult | null {
     if (!stage) return null;
-    stage.innerHTML = "";
+    clearNode(stage);
     const currentResult = evaluateCase(state.visibleCase);
     const group = document.createElement("div");
     group.className = "state-group two-col";
@@ -1235,7 +1112,7 @@ function createCodeOutputChallengeTemplate(
         num.textContent = String(i + 1);
         frag.appendChild(num);
       }
-      lockedLineNumbers.innerHTML = "";
+      clearNode(lockedLineNumbers);
       lockedLineNumbers.appendChild(frag);
     }
     if (lockedErrorGutter) {
@@ -1245,7 +1122,7 @@ function createCodeOutputChallengeTemplate(
         cell.className = "code-error-line";
         frag.appendChild(cell);
       }
-      lockedErrorGutter.innerHTML = "";
+      clearNode(lockedErrorGutter);
       lockedErrorGutter.appendChild(frag);
     }
   }
@@ -1371,10 +1248,6 @@ function createCodeOutputChallengeTemplate(
     currentResult: ChallengeCaseResult,
     report: ChallengeRunReport,
   ): CodeOutputChallengeHintContext {
-    const outputChecks = outputChecksForCase(
-      state.visibleCase,
-      currentResult.state || null,
-    );
     return {
       text: getEditorText(),
       inputs: inputSpecs.map((inputSpec, index) => ({
@@ -1382,7 +1255,6 @@ function createCodeOutputChallengeTemplate(
         value: state.visibleCase.inputValues[index]!,
       })),
       outputs: outputSpecs.map((outputSpec) => ({ ...outputSpec })),
-      outputChecks,
       currentCase: state.visibleCase,
       currentResult,
       report,

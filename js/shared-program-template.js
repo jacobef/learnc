@@ -1,18 +1,19 @@
-import { applyTextTokenReplacements, applyOtherNames, appendStateObjects, boxValueMatchesSpec, cloneBoxes, createSimpleSimulator, createStepper, bindBtnRefPulse, disableBoxEditing, ensureBaseLayout, flashStatus, getNavLabelForHref, isMobileViewport, makeAnswerBox, normalizeBoxValueForContext, normalizeZeroDisplay, randAddr, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, typeInfo, } from "./shared-core.js";
+import { applyTextTokenReplacements, applyOtherNames, appendStateObjects, boxValueMatchesSpec, clearNode, cloneBoxes, createSimpleSimulator, createStepper, bindBtnRefPulse, disableBoxEditing, ensurePanelizedMain, flashStatus, getNavLabelForHref, isMobileViewport, makeAnswerBox, normalizeBoxValueForContext, normalizeZeroDisplay, queryRole, randAddr, removeBoxDeleteButtons, renderCodePane, renderParts, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, typeInfo, } from "./shared-core.js";
 function collectProgramElements(root = document) {
+    const role = (name) => queryRole(name, root);
     return {
-        instructionsEl: root.querySelector('[data-role="program-instructions"]'),
-        codeEl: root.querySelector('[data-role="program-code"]'),
-        codeRoot: root.querySelector('[data-role="program-root"]'),
-        stageEl: root.querySelector('[data-role="program-stage"]'),
-        controlsActionsEl: root.querySelector('[data-role="program-controls"]'),
-        mobileActionsEl: root.querySelector('[data-role="program-mobile-actions"]'),
-        statusEl: root.querySelector('[data-role="program-status"]'),
-        hintPanel: root.querySelector('[data-role="program-hint"]'),
-        hintBtn: root.querySelector('[data-role="program-hint-btn"]'),
-        checkBtn: root.querySelector('[data-role="program-check"]'),
-        addBtn: root.querySelector('[data-role="program-add"]'),
-        resetBtn: root.querySelector('[data-role="program-reset"]'),
+        instructionsEl: role("program-instructions"),
+        codeEl: role("program-code"),
+        codeRoot: role("program-root"),
+        stageEl: role("program-stage"),
+        controlsActionsEl: role("program-controls"),
+        mobileActionsEl: role("program-mobile-actions"),
+        statusEl: role("program-status"),
+        hintPanel: role("program-hint"),
+        hintBtn: role("program-hint-btn"),
+        checkBtn: role("program-check"),
+        addBtn: role("program-add"),
+        resetBtn: role("program-reset"),
     };
 }
 function boxNamed(boxes, name) {
@@ -26,22 +27,11 @@ function boxesNamed(boxes, ...names) {
     return names.map((name) => map.get(name));
 }
 function ensureProgramLayout() {
-    const activeItem = resolveActiveNavItem();
-    const resolvedTitle = activeItem?.label || "";
-    const nextBrowserTitle = resolvedTitle ? `C Boxes - ${resolvedTitle}` : "";
-    if (nextBrowserTitle)
-        document.title = nextBrowserTitle;
-    const existing = document.querySelector('[data-role="program-code"]');
+    const resolvedTitle = syncDocumentTitleFromNav();
+    const existing = queryRole("program-code");
     if (existing)
         return collectProgramElements();
-    const { main } = ensureBaseLayout();
-    main.classList.add("main-panelized");
-    if (resolvedTitle) {
-        const heading = document.createElement("h1");
-        heading.className = "page-title";
-        heading.textContent = resolvedTitle;
-        main.appendChild(heading);
-    }
+    const main = ensurePanelizedMain(resolvedTitle);
     const instructionsEl = document.createElement("p");
     instructionsEl.dataset.role = "program-instructions";
     instructionsEl.className = "intro";
@@ -205,32 +195,6 @@ function createProgramTemplate(config) {
     }
     const stepInfos = [];
     const lineList = [];
-    const canRunWithStepBudget = (text) => {
-        const tokens = simulator.tokenizeProgram(text);
-        const localParts = simulator.splitStatements(tokens);
-        const stepBudget = Math.max(1, localParts.length * 8);
-        const trace = simulator.traceProgramParts(localParts, {
-            stopSteps: stepBudget,
-        });
-        return !!trace;
-    };
-    const canRunWithAutoClosedBlocks = (text) => {
-        const tokens = simulator.tokenizeProgram(text);
-        let balance = 0;
-        tokens.forEach((tok) => {
-            if (tok.type !== "sym")
-                return;
-            if (tok.value === "{")
-                balance += 1;
-            else if (tok.value === "}")
-                balance -= 1;
-        });
-        if (balance <= 0)
-            return false;
-        const closers = "}\n".repeat(balance);
-        const patched = `${text}\n${closers}`;
-        return canRunWithStepBudget(patched);
-    };
     const isIfHeaderPart = (part) => {
         const tokens = part?.tokens;
         if (!tokens || tokens.length < 2)
@@ -304,151 +268,37 @@ function createProgramTemplate(config) {
         const tok = part.tokens[0];
         return tok.type === "sym" && tok.value === "}";
     };
-    const isInstructionSpec = (value) => typeof value === "string" ||
-        (Array.isArray(value) && value.every((item) => typeof item === "string"));
-    const isHintSpec = (value) => typeof value === "function" ||
-        (Array.isArray(value) && value.every((item) => typeof item === "function"));
-    const isEditableSpec = (value) => typeof value === "boolean" ||
-        (Array.isArray(value) && value.every((item) => typeof item === "boolean"));
     steps.forEach((step, index) => {
         if (!step || typeof step !== "object") {
             failConfig(`Step ${index + 1} must be an object.`);
         }
-        if (typeof step.code !== "string") {
+        if (typeof step.code !== "string" || !step.code.trim()) {
             failConfig(`Step ${index + 1} must include a code string.`);
         }
-        if (!step.code.endsWith("\n")) {
-            failConfig(`Step ${index + 1} code must end with a newline.`);
-        }
-        if (step.instructions !== undefined &&
-            !isInstructionSpec(step.instructions)) {
-            failConfig(`Step ${index + 1} instructions must be a string or an array of strings.`);
-        }
-        if (step.hints !== undefined && !isHintSpec(step.hints)) {
-            failConfig(`Step ${index + 1} hints must be a function or an array of functions.`);
-        }
-        if (step.editable !== undefined && !isEditableSpec(step.editable)) {
-            failConfig(`Step ${index + 1} editable must be true/false or an array of true/false values.`);
-        }
+        const normalizedCode = step.code.endsWith("\n") ? step.code : `${step.code}\n`;
         const editable = step.editable ?? false;
-        const rawLines = step.code.split(/\r?\n/);
+        const rawLines = normalizedCode.split(/\r?\n/);
         if (rawLines[rawLines.length - 1] === "")
             rawLines.pop();
-        if (rawLines.length === 0) {
-            failConfig(`Step ${index + 1} code must include at least one line.`);
-        }
-        const tokens = simulator.tokenizeProgram(step.code);
-        const parts = simulator.splitStatements(tokens);
-        const stepStartLine = lineList.length;
-        const stepEndLine = stepStartLine + rawLines.length - 1;
-        const ifBlocks = simulator.buildIfStatementMap(parts, {
-            lastLine: Math.max(0, rawLines.length - 1),
-        });
-        const whileBlocks = simulator.buildWhileStatementMap(parts, {
-            lastLine: Math.max(0, rawLines.length - 1),
-        });
-        const headerIndices = [];
-        const whileHeaderIndices = [];
-        parts.forEach((part, partIndex) => {
-            if (part.tokens.length && isIfHeaderPart(part)) {
-                headerIndices.push(partIndex);
-            }
-            if (part.tokens.length && isWhileHeaderPart(part)) {
-                whileHeaderIndices.push(partIndex);
-            }
-        });
-        const nonEmptyParts = parts.filter((part) => part.tokens.length > 0);
-        let ifHeaderOnly = false;
-        let ifHeaderHasOpenBrace = false;
-        let whileHeaderOnly = false;
-        let whileHeaderHasOpenBrace = false;
-        if (headerIndices.length > 0) {
-            const hasElseBeforeHeader = (() => {
-                const headerPartIndex = nonEmptyParts.findIndex((part) => isIfHeaderPart(part));
-                if (headerPartIndex < 0)
-                    return false;
-                const elsePartIndex = nonEmptyParts.findIndex((part) => isElsePart(part));
-                return elsePartIndex >= 0 && elsePartIndex < headerPartIndex;
-            })();
-            const headerOnlyCandidate = headerIndices.length === 1 &&
-                nonEmptyParts.every((part) => isIfHeaderPart(part) ||
-                    isOpenBracePart(part) ||
-                    isCloseBracePart(part) ||
-                    isElsePart(part));
-            if (headerOnlyCandidate) {
-                if (nonEmptyParts.some((part) => isElsePart(part)) &&
-                    !hasElseBeforeHeader) {
-                    failConfig(`Step ${index + 1} has an else-if style header that must keep $c{else} before $c{if}.`);
-                }
-                ifHeaderOnly = true;
-                ifHeaderHasOpenBrace = nonEmptyParts.some((part) => isOpenBracePart(part));
-            }
-            else {
-                const incompleteHeader = headerIndices.some((idx) => {
-                    const block = ifBlocks.map.get(idx);
-                    if (!block)
-                        return true;
-                    const closeIndex = block.elseCloseIndex != null ? block.elseCloseIndex : block.closeIndex;
-                    const closeLine = Number.isFinite(parts[closeIndex]?.endLine)
-                        ? parts[closeIndex].endLine
-                        : block.headerEndLine;
-                    if (!Number.isFinite(closeLine))
-                        return true;
-                    return stepStartLine + closeLine > stepEndLine;
-                });
-                if (incompleteHeader) {
-                    failConfig(`Step ${index + 1} contains an if statement that doesn't include its full block. Either include the full if statement in the step, or make the step only the if header (optionally with "{").`);
-                }
-            }
-        }
-        if (whileHeaderIndices.length > 0) {
-            const headerOnlyCandidate = whileHeaderIndices.length === 1 &&
-                nonEmptyParts.every((part) => isWhileHeaderPart(part) ||
-                    isOpenBracePart(part) ||
-                    isCloseBracePart(part));
-            if (headerOnlyCandidate) {
-                whileHeaderOnly = true;
-                whileHeaderHasOpenBrace = nonEmptyParts.some((part) => isOpenBracePart(part));
-            }
-            else {
-                const incompleteHeader = whileHeaderIndices.some((idx) => {
-                    const block = whileBlocks.map.get(idx);
-                    if (!block)
-                        return true;
-                    const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
-                        ? parts[block.closeIndex].endLine
-                        : block.headerEndLine;
-                    if (!Number.isFinite(closeLine))
-                        return true;
-                    return stepStartLine + closeLine > stepEndLine;
-                });
-                if (incompleteHeader) {
-                    failConfig(`Step ${index + 1} contains a while statement that doesn't include its full block. Either include the full while statement in the step, or make the step only the while header (optionally with "{").`);
-                }
-            }
-        }
-        for (let partIndex = 0; partIndex < parts.length; partIndex++) {
-            const part = parts[partIndex];
-            if (part?.tokens?.length && !part.hasSemicolon) {
-                if (ifBlocks.map.has(partIndex))
-                    continue;
-                if (whileBlocks.map.has(partIndex))
-                    continue;
-                if (isIfHeaderPart(part))
-                    continue;
-                if (isWhileHeaderPart(part))
-                    continue;
-                if (isElsePart(part))
-                    continue;
-                failConfig(`Step ${index + 1} contains an incomplete statement. Each step must be runnable on its own.`);
-            }
-        }
+        const stepParts = simulator.splitStatements(simulator.tokenizeProgram(normalizedCode));
+        const nonEmptyParts = stepParts.filter((part) => part.tokens.length > 0);
+        const ifHeaderOnly = nonEmptyParts.filter((part) => isIfHeaderPart(part)).length === 1 &&
+            nonEmptyParts.every((part) => isIfHeaderPart(part) ||
+                isOpenBracePart(part) ||
+                isCloseBracePart(part) ||
+                isElsePart(part));
+        const ifHeaderHasOpenBrace = ifHeaderOnly && nonEmptyParts.some((part) => isOpenBracePart(part));
+        const whileHeaderOnly = nonEmptyParts.filter((part) => isWhileHeaderPart(part)).length === 1 &&
+            nonEmptyParts.every((part) => isWhileHeaderPart(part) ||
+                isOpenBracePart(part) ||
+                isCloseBracePart(part));
+        const whileHeaderHasOpenBrace = whileHeaderOnly && nonEmptyParts.some((part) => isOpenBracePart(part));
         const startLine = lineList.length;
         rawLines.forEach((line) => lineList.push(line));
         const endLine = lineList.length - 1;
         stepInfos.push({
             index,
-            code: step.code,
+            code: normalizedCode,
             lines: rawLines,
             startLine,
             endLine,
@@ -465,9 +315,6 @@ function createProgramTemplate(config) {
             whileHeaderHasOpenBrace,
         });
     });
-    if (stepInfos.some((step) => step.endLine < step.startLine)) {
-        failConfig("Program steps must each contain at least one line.");
-    }
     const total = lineList.length;
     const stepByLine = new Array(total).fill(null);
     stepInfos.forEach((step) => {
@@ -883,26 +730,6 @@ function createProgramTemplate(config) {
             stateSnapshot: cloneBoxes(after.state || []),
         });
     }
-    stepInfos.forEach((stepInfo) => {
-        const reachedCount = stepReachCounts[stepInfo.index] || 0;
-        if (Array.isArray(stepInfo.instructions) &&
-            stepInfo.instructions.length !== reachedCount) {
-            failConfig(`Step ${stepInfo.index + 1} instructions array length (${stepInfo.instructions.length}) must match the number of times the step is reached (${reachedCount}).`);
-        }
-        if (Array.isArray(stepInfo.editable) && stepInfo.editable.length !== reachedCount) {
-            failConfig(`Step ${stepInfo.index + 1} editable array length (${stepInfo.editable.length}) must match the number of times the step is reached (${reachedCount}).`);
-        }
-        const editableReachedCount = Array.isArray(stepInfo.editable)
-            ? stepInfo.editable.slice(0, reachedCount).filter((value) => value).length
-            : stepInfo.editable
-                ? reachedCount
-                : 0;
-        if (Array.isArray(stepInfo.hints) &&
-            stepInfo.hints.length !== editableReachedCount) {
-            failConfig(`Step ${stepInfo.index + 1} hints array length (${stepInfo.hints.length}) must match the number of times the step is reached as editable (${editableReachedCount}).`);
-        }
-    });
-    console.log("[cBoxes] precomputed stages", runtimeStages);
     function runtimeMaxStep() {
         return runtimeStages.length - 1;
     }
@@ -1155,17 +982,6 @@ function createProgramTemplate(config) {
             return lineAfterHeader(block);
         return lineForFalseBranch(block);
     }
-    stepInfos.forEach((step) => {
-        const text = lineList.slice(0, step.boundary).join("\n");
-        const canRun = canRunWithStepBudget(text);
-        const allowHeaderOnly = (step.ifHeaderOnly && !step.ifHeaderHasOpenBrace) ||
-            !!step.whileHeaderOnly;
-        if (!canRun &&
-            !canRunWithAutoClosedBlocks(text) &&
-            !allowHeaderOnly) {
-            failConfig(`Step ${step.index + 1} cannot be run as-is. Fix the code in this step.`);
-        }
-    });
     function isHeaderOnlyStep(step) {
         return !!(step && (step.ifHeaderOnly || step.whileHeaderOnly));
     }
@@ -1227,9 +1043,6 @@ function createProgramTemplate(config) {
             return cloneBoxes(trace.state || []);
         return [];
     }
-    function decorateState(boxes) {
-        return cloneBoxes(boxes || []);
-    }
     function normalizeState(list) {
         if (!Array.isArray(list))
             return [];
@@ -1264,10 +1077,6 @@ function createProgramTemplate(config) {
                 return false;
         }
         return true;
-    }
-    function ensureBaseline(boundary, defaults) {
-        void boundary;
-        return cloneBoxes(defaults || []);
     }
     function getWorkspaceEl() {
         return (state.workspaceEl ||
@@ -1368,8 +1177,8 @@ function createProgramTemplate(config) {
     function defaultsForBoundary(boundary) {
         const pendingBaseline = runtimePendingEditableBaselineState(boundary);
         if (pendingBaseline)
-            return decorateState(pendingBaseline);
-        return decorateState(getExpectedState(boundary));
+            return cloneBoxes(pendingBaseline || []);
+        return cloneBoxes(getExpectedState(boundary) || []);
     }
     function setStatus(text, cls = "muted") {
         if (!statusEl)
@@ -1396,10 +1205,6 @@ function createProgramTemplate(config) {
             return `${verb} line ${start}${withArrow ? " ▶" : ""}`;
         }
         return `${verb} lines ${start}-${end}${withArrow ? " ▶" : ""}`;
-    }
-    function runLabelForBoundary(boundary) {
-        void boundary;
-        return runtimeRunLabel(true);
     }
     function formatNameList(names) {
         const tokens = names.map((name) => `$n{${name}}`);
@@ -1881,7 +1686,7 @@ function createProgramTemplate(config) {
     function renderStage() {
         if (!stageEl)
             return;
-        stageEl.innerHTML = "";
+        clearNode(stageEl);
         const key = state.boundary;
         const runtimeEditableStage = runtimeStateEditStageForBoundary(key, {
             includeSolved: true,
@@ -1896,7 +1701,7 @@ function createProgramTemplate(config) {
             return;
         }
         if (!editable) {
-            const expected = decorateState(getExpectedState(state.boundary));
+            const expected = cloneBoxes(getExpectedState(state.boundary) || []);
             const grid = document.createElement("div");
             grid.className = "grid";
             if (!expected.length) {
@@ -1929,7 +1734,6 @@ function createProgramTemplate(config) {
         stageEl.appendChild(wrap);
         state.workspaceEl = wrap;
         attachResetWatcher(wrap, key);
-        ensureBaseline(key, defaults);
         maybeScrollStateOnGrowth(defaults.length);
         refreshOtherNames();
     }
@@ -1959,7 +1763,7 @@ function createProgramTemplate(config) {
         });
     }
     function updateInstructions() {
-        const runLabel = runLabelForBoundary(state.boundary);
+        const runLabel = runtimeRunLabel(true);
         const instructionStage = runtimeCurrentStage();
         let instructionKey = null;
         let parts = null;
@@ -2202,7 +2006,7 @@ function createProgramTemplate(config) {
             const boxes = readWorkspaceBoxes();
             const result = evaluateWorkspace(boxes);
             const ctx = partsContext({ boxes });
-            const runLabel = runLabelForBoundary(state.boundary);
+            const runLabel = runtimeRunLabel(true);
             if (result.ok) {
                 showHint("Looks good. Press $checkButton.", runLabel);
                 return;

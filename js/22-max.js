@@ -38,7 +38,7 @@ if (y < x) {
             return "That computes the smaller value. $n{max} should be the larger of $n{x} and $n{y}.";
         }
         if (ctx.currentResult.kind === "missing-output") {
-            return "Create an output variable named $n{max}.";
+            return "You need to create a variable named $n{max}.";
         }
         if (ctx.currentResult.kind === "wrong-output-type") {
             return "$n{max} should have type $t{double}.";

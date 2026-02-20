@@ -1,7 +1,13 @@
 import { DEFAULT_NAV_ITEMS as NAV_ITEMS } from "./nav-items.js";
 import { doubleDisplayIsExact, formatDoubleDefault, formatDoubleExact, formatDoubleStorage, getPointerDepth, normalizeZeroDisplay, parseDoubleValueWithSign, parseType, randAddr, } from "./shared-core-utils.js";
-function $(selector, root = document) {
-    return root.querySelector(selector);
+function queryElement(selector, root = document) {
+    return (root?.querySelector?.(selector) ?? null);
+}
+function queryRole(role, root = document) {
+    return queryElement(`[data-role="${role}"]`, root);
+}
+function clearNode(node) {
+    node?.replaceChildren();
 }
 function el(html) {
     const t = document.createElement("template");
@@ -203,6 +209,23 @@ function ensureBaseLayout({ navItems, activeHref, } = {}) {
         main: main,
     };
 }
+function syncDocumentTitleFromNav(prefix = "C Boxes") {
+    const activeItem = resolveActiveNavItem();
+    const resolvedTitle = String(activeItem?.label || "").trim();
+    document.title = resolvedTitle ? `${prefix} - ${resolvedTitle}` : prefix;
+    return resolvedTitle;
+}
+function ensurePanelizedMain(title = "") {
+    const { main } = ensureBaseLayout();
+    main.classList.add("main-panelized");
+    if (title && !main.querySelector(".page-title")) {
+        const heading = document.createElement("h1");
+        heading.className = "page-title";
+        heading.textContent = title;
+        main.appendChild(heading);
+    }
+    return main;
+}
 function centerActiveNavItem(nav) {
     if (!nav)
         return;
@@ -227,7 +250,7 @@ function normalizeLineRange(range, maxIndex) {
     return [start, end];
 }
 function renderCodePane(root, lines, boundary, opts = {}) {
-    root.innerHTML = "";
+    clearNode(root);
     const code = el('<div class="codecol"></div>');
     if (opts.progress)
         code.classList.add("has-progress");
@@ -397,84 +420,6 @@ function renderCodePane(root, lines, boundary, opts = {}) {
         }
     }
 }
-let nameStackResizeInstalled = false;
-function updateNameStackSpacing(node) {
-    if (!node)
-        return;
-    const stack = node.querySelector(".name-stack");
-    if (!stack)
-        return;
-    if (!node.isConnected)
-        return;
-    const boxRect = node.getBoundingClientRect();
-    const stackRect = stack.getBoundingClientRect();
-    const overflow = Math.max(0, Math.ceil(stackRect.bottom - boxRect.bottom));
-    node.style.setProperty("--name-stack-space", `${overflow}px`);
-}
-function watchNameStack(node) {
-    const stack = node?.querySelector(".name-stack");
-    if (!stack)
-        return;
-    const update = () => updateNameStackSpacing(node);
-    requestAnimationFrame(update);
-    if (typeof ResizeObserver !== "undefined") {
-        const ro = new ResizeObserver(update);
-        ro.observe(stack);
-    }
-    else if (!nameStackResizeInstalled) {
-        nameStackResizeInstalled = true;
-        window.addEventListener("resize", () => {
-            document
-                .querySelectorAll(".vbox")
-                .forEach((box) => updateNameStackSpacing(box));
-        });
-    }
-}
-function adjustValueOverflow(node) {
-    if (!node)
-        return;
-    if (!node.isConnected)
-        return;
-    const valueEl = node.querySelector(".value");
-    const cell = node.querySelector(".cell");
-    if (!valueEl || !cell)
-        return;
-    let baseHeight = Number(node.dataset.baseHeight);
-    if (!baseHeight) {
-        const computed = parseFloat(getComputedStyle(node).height || "");
-        baseHeight =
-            Number.isFinite(computed) && computed > 0
-                ? computed
-                : node.getBoundingClientRect().height;
-        if (!baseHeight)
-            baseHeight = 200;
-        node.dataset.baseHeight = String(baseHeight);
-    }
-    let baseNameStackTop = Number(node.dataset.baseNameStackTop);
-    if (!baseNameStackTop) {
-        const rawTop = getComputedStyle(node).getPropertyValue("--name-stack-top");
-        const parsedTop = parseFloat(rawTop || "");
-        baseNameStackTop =
-            Number.isFinite(parsedTop) && parsedTop > 0 ? parsedTop : 160;
-        node.dataset.baseNameStackTop = String(baseNameStackTop);
-    }
-    const valueHeight = Math.ceil(valueEl.scrollHeight);
-    const measuredCellHeight = Math.ceil(cell.getBoundingClientRect().height);
-    const expectedCellHeight = Math.ceil(baseHeight - 92);
-    const extra = Math.max(0, valueHeight - expectedCellHeight + 56);
-    const nextHeight = Math.ceil(baseHeight + extra);
-    const nextNameTop = Math.ceil(baseNameStackTop + extra);
-    const currentHeight = parseFloat(node.style.height || "") || baseHeight;
-    if (Math.abs(currentHeight - nextHeight) >= 1) {
-        node.style.height = `${nextHeight}px`;
-    }
-    node.style.setProperty("--name-stack-top", `${nextNameTop}px`);
-    updateNameStackSpacing(node);
-    const nextCellHeight = Math.ceil(cell.getBoundingClientRect().height);
-    if (Math.abs(nextCellHeight - measuredCellHeight) >= 1) {
-        requestAnimationFrame(() => adjustValueOverflow(node));
-    }
-}
 function vbox({ address = "—", type = "int", value = "", name = "", editable = false, allowNameEdit = false, allowTypeEdit = false, showDoubleExact = false, } = {}) {
     const parsedType = parseType(type || "int");
     const isFloatingScalar = (parsedType.base === "float" || parsedType.base === "double") &&
@@ -497,37 +442,30 @@ function vbox({ address = "—", type = "int", value = "", name = "", editable =
     const namesHtml = nameTags;
     const node = el(`
     <div class="vbox ${editable ? "is-editable" : ""}">
-      <div class="lbl lbl-addr">address</div>
-      <div class="address">${address}</div>
-        <div class="cell">
-        <div class="lbl lbl-value">value</div>
-        <div class="${valueClasses}">${displayValue}</div>
-        <button class="double-toggle hidden" type="button" aria-pressed="false">exact</button>
-      </div>
-      <div class="lbl lbl-type">type</div>
-      <div class="${typeClasses}">${type}</div>
-      <div class="name-stack">
-        <div class="${listClasses}">
-          <div class="name-list-inner">${namesHtml}</div>
+      <div class="vbox-main">
+        <div class="vbox-address-row">
+          <div class="lbl lbl-addr">address</div>
+          <div class="address">${address}</div>
         </div>
-        <div class="lbl lbl-name">${namesList.length > 1 ? "name(s)" : "name"}</div>
+        <div class="cell">
+          <div class="lbl lbl-value">value</div>
+          <div class="${valueClasses}">${displayValue}</div>
+          <button class="double-toggle hidden" type="button" aria-pressed="false">exact</button>
+        </div>
+        <div class="name-stack">
+          <div class="${listClasses}">
+            <div class="name-list-inner">${namesHtml}</div>
+          </div>
+          <div class="lbl lbl-name">${namesList.length > 1 ? "name(s)" : "name"}</div>
+        </div>
+      </div>
+      <div class="vbox-meta">
+        <div class="lbl lbl-type">type</div>
+        <div class="${typeClasses}">${type}</div>
       </div>
     </div>
   `);
     const valueEl = node.querySelector(".value");
-    const scheduleAdjust = () => {
-        if ((node.dataset.adjustPending || "") === "true")
-            return;
-        node.dataset.adjustPending = "true";
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                node.dataset.adjustPending = "false";
-                if (!node.isConnected)
-                    return;
-                adjustValueOverflow(node);
-            });
-        });
-    };
     if (valueEl) {
         valueEl.dataset.rawValue = rawValue.trim();
     }
@@ -547,7 +485,6 @@ function vbox({ address = "—", type = "int", value = "", name = "", editable =
                 valueEl.classList.remove("placeholder", "muted");
                 delete valueEl.dataset.empty;
             }
-            scheduleAdjust();
         });
         if (emptyDisplay) {
             valueEl.dataset.empty = "true";
@@ -617,33 +554,6 @@ function vbox({ address = "—", type = "int", value = "", name = "", editable =
                     else {
                         toggleEl.classList.add("hidden");
                     }
-                    scheduleAdjust();
-                });
-            }
-            if (valueEl.isContentEditable) {
-                valueEl.addEventListener("input", () => {
-                    const next = parseDoubleValueWithSign(valueEl.textContent || "");
-                    if (next == null)
-                        return;
-                    const nextNanSign = next.nanSign;
-                    valueEl.dataset.doubleValue = formatDoubleStorage(next.value, nextNanSign);
-                    const nextExactText = formatDoubleExact(next.value, nextNanSign);
-                    const nextDefaultText = formatDoubleDefault(next.value, nextNanSign);
-                    const nextApprox = !doubleDisplayIsExact(nextDefaultText, nextExactText);
-                    const isExact = node.dataset.doubleDisplay === "exact";
-                    if (nextApprox && !isExact)
-                        valueEl.dataset.doubleApprox = "true";
-                    else
-                        delete valueEl.dataset.doubleApprox;
-                    if (toggleEl) {
-                        if (nextApprox) {
-                            toggleEl.classList.remove("hidden");
-                        }
-                        else {
-                            toggleEl.classList.add("hidden");
-                        }
-                    }
-                    scheduleAdjust();
                 });
             }
         }
@@ -651,8 +561,6 @@ function vbox({ address = "—", type = "int", value = "", name = "", editable =
     else if (toggleEl) {
         toggleEl.classList.add("hidden");
     }
-    watchNameStack(node);
-    requestAnimationFrame(scheduleAdjust);
     return node;
 }
 function disableBoxEditing(root) {
@@ -713,57 +621,6 @@ function boxAddress(box) {
     const raw = box?.address ?? "";
     return raw.trim();
 }
-function normalizePointeeInnerDepth(value, depth, pointeeArrayDims) {
-    if (!Array.isArray(pointeeArrayDims) || pointeeArrayDims.length === 0)
-        return 0;
-    const raw = Math.floor(Number(value));
-    const normalized = Number.isFinite(raw) ? raw : 0;
-    const maxInner = Math.max(0, Math.floor(Number(depth)) - 1);
-    return Math.max(0, Math.min(normalized, maxInner));
-}
-function pointerCanReferenceBox(pointer, target) {
-    if (!pointer || !target)
-        return false;
-    const parsedPointer = parseType(pointer.type || "int");
-    const parsedTarget = parseType(target.type || "int");
-    if (!parsedPointer.base ||
-        !parsedTarget.base ||
-        !Number.isFinite(parsedPointer.depth) ||
-        !Number.isFinite(parsedTarget.depth)) {
-        return false;
-    }
-    const pointerDepth = Math.floor(parsedPointer.depth);
-    if (pointerDepth < 1)
-        return false;
-    if (parsedPointer.base !== parsedTarget.base)
-        return false;
-    const pointerPointeeArrayDims = (() => {
-        const fromBox = normalizeArrayDims(pointer.pointeeArrayDims);
-        if (fromBox.length)
-            return fromBox;
-        return normalizeArrayDims(parsedPointer.pointeeArrayDims);
-    })();
-    const targetPointeeArrayDims = (() => {
-        const fromBox = normalizeArrayDims(target.pointeeArrayDims);
-        if (fromBox.length)
-            return fromBox;
-        return normalizeArrayDims(parsedTarget.pointeeArrayDims);
-    })();
-    const pointerPointeeInnerDepth = normalizePointeeInnerDepth(pointer.pointeeInnerDepth ?? parsedPointer.pointeeInnerDepth, pointerDepth, pointerPointeeArrayDims);
-    const pointerOuterDepth = Math.max(0, pointerDepth - pointerPointeeInnerDepth);
-    const targetDepth = Math.floor(parsedTarget.depth);
-    const targetPointeeInnerDepth = normalizePointeeInnerDepth(target.pointeeInnerDepth ?? parsedTarget.pointeeInnerDepth, targetDepth, targetPointeeArrayDims);
-    if (!pointerPointeeArrayDims.length) {
-        return targetDepth === pointerDepth - 1 && targetPointeeArrayDims.length === 0;
-    }
-    if (pointerOuterDepth === 1) {
-        return (targetDepth === pointerPointeeInnerDepth &&
-            targetPointeeArrayDims.length === 0);
-    }
-    return (targetDepth === pointerDepth - 1 &&
-        sameDims(targetPointeeArrayDims, pointerPointeeArrayDims) &&
-        targetPointeeInnerDepth === pointerPointeeInnerDepth);
-}
 function collectStageBoxes(root) {
     if (!root)
         return [];
@@ -777,22 +634,6 @@ function collectStageBoxes(root) {
     })
         .filter((box) => !!box);
 }
-function pointerTargetBox(box, byAddr) {
-    if (!box)
-        return null;
-    const depth = getPointerDepth(box.type);
-    if (!Number.isFinite(depth) || depth < 1)
-        return null;
-    const raw = (box.value ?? "").trim();
-    if (raw === "")
-        return null;
-    const target = byAddr.get(raw) || null;
-    if (!target)
-        return null;
-    if (!pointerCanReferenceBox(box, target))
-        return null;
-    return target;
-}
 function buildOtherNamesMap(boxes) {
     const byAddr = new Map();
     boxes.forEach((box) => {
@@ -803,26 +644,26 @@ function buildOtherNamesMap(boxes) {
     const otherNamesByAddr = new Map();
     boxes.forEach((box) => {
         const baseName = String(box.name || "").trim();
-        const depth = getPointerDepth(box.type);
-        if (!baseName || !Number.isFinite(depth) || depth < 1)
+        const depth = Math.max(0, Math.floor(getPointerDepth(box.type)));
+        if (!baseName || depth < 1)
             return;
-        let current = box;
-        for (let step = 1; step <= depth; step++) {
-            const target = pointerTargetBox(current, byAddr);
+        let pointedAddr = String(box.value ?? "").trim();
+        for (let step = 1; step <= depth; step += 1) {
+            if (!pointedAddr)
+                break;
+            const target = byAddr.get(pointedAddr);
             if (!target)
                 break;
-            const targetAddr = boxAddress(target);
-            if (targetAddr) {
-                let bucket = otherNamesByAddr.get(targetAddr);
+            const resolvedAddr = boxAddress(target);
+            if (resolvedAddr) {
+                let bucket = otherNamesByAddr.get(resolvedAddr);
                 if (!bucket) {
                     bucket = new Set();
-                    otherNamesByAddr.set(targetAddr, bucket);
+                    otherNamesByAddr.set(resolvedAddr, bucket);
                 }
                 bucket.add(`${"*".repeat(step)}${baseName}`);
             }
-            current = target;
-            if (getPointerDepth(current.type) < 1)
-                break;
+            pointedAddr = String(target.value ?? "").trim();
         }
     });
     return otherNamesByAddr;
@@ -873,6 +714,10 @@ function updateOtherNamesList(node, aliases, showAliases) {
 function ensureOtherNamesToggle(node, onToggle) {
     if (!node)
         return null;
+    const stack = node.querySelector(".name-stack");
+    const label = node.querySelector(".lbl-name");
+    if (!stack || !label)
+        return null;
     let btn = node.querySelector(".other-names-toggle");
     if (!btn) {
         btn = document.createElement("button");
@@ -888,28 +733,10 @@ function ensureOtherNamesToggle(node, onToggle) {
                 onToggle?.(node);
         });
     }
+    if (btn.parentElement !== stack || btn.nextElementSibling !== label) {
+        stack.insertBefore(btn, label);
+    }
     return btn;
-}
-function placeOtherNamesToggle(node, btn, showAliases) {
-    if (!node || !btn)
-        return;
-    const listInner = node.querySelector(".name-list-inner");
-    const baseTag = listInner?.querySelector(".name-tag");
-    const label = node.querySelector(".lbl-name");
-    const stack = node.querySelector(".name-stack");
-    if (!listInner || !baseTag || !label || !stack)
-        return;
-    if (showAliases) {
-        btn.classList.add("stacked");
-        if (btn.parentElement !== stack || btn.nextElementSibling !== label) {
-            stack.insertBefore(btn, label);
-        }
-        return;
-    }
-    btn.classList.remove("stacked");
-    if (btn.parentElement !== baseTag) {
-        baseTag.appendChild(btn);
-    }
 }
 function applyOtherNames(root, opts = {}) {
     if (!root)
@@ -968,8 +795,6 @@ function applyOtherNames(root, opts = {}) {
             toggle.setAttribute("aria-pressed", showAliases ? "true" : "false");
         }
         updateOtherNamesList(node, filtered, showAliases);
-        if (toggle)
-            placeOtherNamesToggle(node, toggle, showAliases);
     });
     if (useShownSet && cleanupShownAddrs) {
         shownAddrs.forEach((addr) => {
@@ -1310,17 +1135,23 @@ function makeArrayBox(group, opts) {
     const firstAddress = String(group.entries[0]?.box.address ?? "—");
     const node = el(`
     <div class="arraybox ${editable ? "is-editable" : ""}">
-      <div class="lbl lbl-array-addr">address</div>
-      <div class="array-address"></div>
-      <div class="array-values-wrap">
-        <div class="array-label array-values-label">values</div>
-        <div class="array-values"></div>
+      <div class="arraybox-main">
+        <div class="arraybox-address-row">
+          <div class="lbl lbl-array-addr">address</div>
+          <div class="array-address"></div>
+        </div>
+        <div class="array-values-wrap">
+          <div class="array-label array-values-label">values</div>
+          <div class="array-values"></div>
+        </div>
+        <div class="array-name-stack">
+          <div class="array-name"></div>
+          <div class="lbl lbl-array-name">name</div>
+        </div>
       </div>
-      <div class="lbl lbl-array-type">type</div>
-      <div class="array-type"></div>
-      <div class="array-name-stack">
-        <div class="array-name"></div>
-        <div class="lbl lbl-array-name">name</div>
+      <div class="arraybox-meta">
+        <div class="lbl lbl-array-type">type</div>
+        <div class="array-type"></div>
       </div>
     </div>
   `);
@@ -1589,7 +1420,7 @@ function parseStyledText(text) {
 function renderParts(panel, parts) {
     if (!panel)
         return;
-    panel.innerHTML = "";
+    clearNode(panel);
     const list = Array.isArray(parts) ? parts : [parts];
     const appendText = (value) => {
         const text = String(value);
@@ -1691,7 +1522,7 @@ function setPartsContent(panel, parts) {
     if (!panel)
         return;
     if (!parts || (Array.isArray(parts) && parts.length === 0)) {
-        panel.textContent = "";
+        clearNode(panel);
         panel.classList.add("hidden");
         return;
     }
@@ -2209,4 +2040,4 @@ function flashStatus(el) {
     void node.offsetWidth;
     node.classList.add("status-flash");
 }
-export { $, buildNav, createStepper, disableBoxEditing, ensureBaseLayout, flashStatus, getNavLabelForHref, isMobileViewport, bindBtnRefPulse, makeAnswerBox, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, vbox, applyOtherNames, appendStateObjects, findArrayObjectBoxesForResult, };
+export { clearNode, buildNav, createStepper, disableBoxEditing, ensureBaseLayout, ensurePanelizedMain, flashStatus, getNavLabelForHref, isMobileViewport, bindBtnRefPulse, makeAnswerBox, queryElement, queryRole, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, vbox, applyOtherNames, appendStateObjects, findArrayObjectBoxesForResult, };

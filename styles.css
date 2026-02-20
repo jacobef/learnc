@@ -10,7 +10,6 @@
     --code-line: #0f6b7a;
     --edit-bg: #fff8d6;
     --edit-line: #b59b00;
-    --type-offset: 70px;
     --focus: #1e77ff;
     --done: #19a974;
     --ui-font: "Times New Roman", Times, serif;
@@ -315,162 +314,6 @@ h2 {
     display: none;
 }
 
-.ref-legend {
-    margin-top: 8px;
-    font-size: 16px;
-    color: #334;
-    font-family: var(--ui-font);
-}
-
-.ref-list {
-    display: grid;
-    gap: 16px;
-    margin-top: 20px;
-}
-
-.ref-section {
-    font-size: 18px;
-    font-weight: 700;
-    color: #233;
-    text-transform: uppercase;
-    letter-spacing: 1.2px;
-    margin-top: 18px;
-    font-family: var(--ui-font);
-}
-
-.ref-card {
-    padding: 16px;
-    border: 1px solid var(--border);
-    background: var(--panel);
-    border-radius: 12px;
-    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.04);
-}
-
-.ref-row {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 24px;
-    align-items: start;
-}
-
-.ref-copy h2 {
-    margin-top: 0;
-}
-
-.ref-code {
-    display: inline-block;
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-    background: #fff;
-    border: 1px solid var(--border);
-    padding: 8px 10px;
-    border-radius: 8px;
-    font-size: 16px;
-    color: var(--code-line);
-}
-
-.ref-text {
-    margin: 10px 0 0;
-    font-size: 18px;
-    font-family: var(--ui-font);
-    color: #223;
-}
-
-.ref-note {
-    margin-top: 8px;
-    font-size: 14px;
-    color: #555;
-    font-family: var(--ui-font);
-}
-
-.ref-visual {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    flex-wrap: wrap;
-}
-
-.ref-break {
-    flex-basis: 100%;
-    height: 0;
-}
-
-.ref-arrow {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-    font-family: var(--ui-font);
-    color: #234;
-    font-weight: 700;
-}
-
-.ref-arrow-text {
-    font-size: 33px;
-}
-
-.ref-arrow-label {
-    font-size: 18px;
-    color: #666;
-    font-weight: 400;
-}
-
-.ref-op {
-    font-size: 44px;
-    font-weight: 400;
-    color: #111;
-    line-height: 1;
-    padding: 0 4px;
-}
-
-.ref-expr {
-    font-size: 20px;
-    font-weight: 700;
-    color: #111;
-    font-family: ui-monospace, Menlo, Consolas, monospace;
-}
-
-.ref-label {
-    font-size: 16px;
-    font-weight: 700;
-    color: #222;
-    font-family: var(--ui-font);
-}
-
-.ref-note-inline {
-    font-size: 14px;
-    font-weight: 600;
-    color: #555;
-    font-family: var(--ui-font);
-    width: 100%;
-}
-
-.ref-inline {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    flex-wrap: wrap;
-}
-
-.ref-inline .vbox {
-    margin-top: 0;
-    margin-bottom: 0;
-}
-
-.ref-box {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-}
-
-.ref-box-label {
-    font-size: 12px;
-    color: #666;
-    font-family: var(--ui-font);
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-}
-
 .panel {
     padding: 12px;
     border: 1px solid var(--border);
@@ -583,10 +426,6 @@ h2 {
 .expr-answer-empty {
     padding: 10px 8px;
     font-style: italic;
-}
-.controls-break {
-    flex-basis: 100%;
-    height: 0;
 }
 .controls .expr-check-inline {
     flex: 0 0 auto;
@@ -734,11 +573,9 @@ h2 {
     font-weight: 700;
     color: #234;
 }
-.vbox.no-addr .lbl-addr,
-.vbox.no-addr .address {
+.vbox.no-addr .vbox-address-row {
     display: none;
 }
-.vbox.no-name .lbl-name,
 .vbox.no-name .name-stack {
     display: none;
 }
@@ -783,16 +620,6 @@ h2 {
 }
 .state-status {
     font-size: 18px;
-}
-[data-role="quiz-status"] {
-    display: inline-block;
-    width: 20ch;
-    flex: 0 0 20ch;
-    text-align: right;
-    white-space: nowrap;
-}
-.quiz-status-inline {
-    font-size: inherit;
 }
 .ok {
     color: #0a7a0a;
@@ -973,16 +800,6 @@ button {
     margin-top: 8px;
     margin-bottom: 6px;
 }
-.controls-bar > .intro.hidden {
-    display: block !important;
-    visibility: hidden;
-    margin: 0 0 6px;
-    min-height: 0;
-    padding: 0;
-    border: 0;
-    box-shadow: none;
-    background: transparent;
-}
 .controls-bar .hint-inline {
     margin-top: 8px;
 }
@@ -1161,6 +978,7 @@ body.panel-layout .panel-controls.controls-main {
 .custom-scrollbar-dragging .panel-custom-scrollbar-thumb {
     cursor: grabbing;
 }
+
 .codepane-row {
     --code-line-height: 48px;
     display: flex;
@@ -1458,27 +1276,22 @@ body.panel-layout .panel-controls.controls-main {
     background: var(--edit-bg);
 }
 .name-stack {
-    position: absolute;
-    top: var(--name-stack-top);
-    left: 0;
-    right: var(--type-offset);
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 4px;
-    z-index: 2;
+    width: 100%;
+    min-height: 36px;
 }
 .name-list {
-    position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-wrap: wrap;
-    overflow: visible;
+    overflow: hidden;
     white-space: normal;
-    width: calc(100% + var(--name-overflow));
-    margin-left: calc(var(--name-overflow) / -2);
-    margin-right: calc(var(--name-overflow) / -2);
+    width: 100%;
+    margin: 0;
     color: var(--name);
     font-weight: 800;
 }
@@ -1630,16 +1443,41 @@ body.panel-layout .panel-controls.controls-main {
 }
 
 .vbox {
-    --name-stack-space: 0px;
-    --name-stack-top: 160px;
-    --name-overflow: 48px;
+    --box-main-width: 150px;
     position: relative;
-    box-sizing: content-box;
-    width: 150px;
-    height: 200px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: stretch;
+    gap: 10px;
+    width: max-content;
+    max-width: 100%;
     margin: 8px 0;
-    margin-bottom: calc(8px + var(--name-stack-space));
-    padding-right: var(--type-offset);
+}
+.vbox-main {
+    width: var(--box-main-width);
+    min-width: var(--box-main-width);
+    max-width: var(--box-main-width);
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+.vbox-address-row {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 40px;
+}
+.vbox-meta {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    min-width: 10px;
+    gap: 6px;
+    transform: translateY(-14px);
 }
 .vbox.quiz-selectable {
     cursor: pointer;
@@ -1653,8 +1491,8 @@ body.panel-layout .panel-controls.controls-main {
 .vbox.quiz-selectable::after {
     content: "";
     position: absolute;
-    top: -14px;
-    bottom: calc(-14px - var(--name-stack-space));
+    top: -8px;
+    bottom: -8px;
     left: -8px;
     right: -8px;
     border-radius: 14px;
@@ -1670,17 +1508,39 @@ body.panel-layout .panel-controls.controls-main {
 }
 .arraybox {
     position: relative;
-    box-sizing: content-box;
+    box-sizing: border-box;
+    display: flex;
+    align-items: stretch;
+    gap: 10px;
     width: max-content;
-    flex: 0 0 auto;
-    min-width: 0;
-    max-width: none;
+    max-width: 100%;
     margin: 8px 0;
-    padding: 46px var(--type-offset) 42px 0;
 }
 .arraybox.is-editable {
     background: transparent;
     border: none;
+}
+.arraybox-main {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: max-content;
+}
+.arraybox-address-row {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 40px;
+}
+.arraybox-meta {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    min-width: 10px;
+    gap: 6px;
 }
 .arraybox .array-label {
     font-size: 11px;
@@ -1688,10 +1548,7 @@ body.panel-layout .panel-controls.controls-main {
     letter-spacing: 0.2px;
 }
 .arraybox .array-address {
-    position: absolute;
-    top: 10px;
-    left: 0;
-    right: var(--type-offset);
+    position: static;
     text-align: center;
     color: var(--addr);
     font-size: 18px;
@@ -1700,10 +1557,7 @@ body.panel-layout .panel-controls.controls-main {
     white-space: nowrap;
 }
 .arraybox .array-type {
-    position: absolute;
-    top: 50%;
-    left: calc(100% - var(--type-offset) + 6px);
-    transform: translateY(-50%);
+    position: static;
     text-align: left;
     color: var(--type);
     font-size: 18px;
@@ -1783,10 +1637,7 @@ body.panel-layout .panel-controls.controls-main {
     box-shadow: 0 0 0 2px rgba(181, 155, 0, 0.25);
 }
 .arraybox .array-name-stack {
-    position: absolute;
-    left: 0;
-    right: var(--type-offset);
-    bottom: 0;
+    position: relative;
     text-align: center;
 }
 .arraybox .array-name {
@@ -1797,23 +1648,13 @@ body.panel-layout .panel-controls.controls-main {
     white-space: nowrap;
 }
 .arraybox .lbl-array-addr {
-    top: -12px;
-    left: 0;
-    right: var(--type-offset);
     text-align: center;
 }
 .arraybox .lbl-array-type {
-    top: calc(50% - 34px);
-    left: calc(100% - var(--type-offset) + 6px);
-    right: auto;
-    transform: translateY(-50%);
     text-align: left;
+    padding-left: 2px;
 }
 .arraybox .lbl-array-name {
-    position: relative;
-    bottom: auto;
-    left: auto;
-    right: auto;
     text-align: center;
 }
 .arraybox .delete {
@@ -1834,18 +1675,16 @@ body.panel-layout .panel-controls.controls-main {
 }
 
 .vbox .cell {
-    position: absolute;
-    left: 0;
-    right: var(--type-offset);
-    top: 46px;
-    bottom: 46px;
+    position: relative;
     border: 2.5px solid #000;
     border-radius: 12px;
     background: transparent;
     display: flex;
-    align-items: flex-start;
+    flex: 1 1 auto;
+    min-height: 114px;
+    align-items: center;
     justify-content: center;
-    padding: 36px 10px 16px;
+    padding: 24px 10px;
 }
 
 .vbox .value {
@@ -1860,10 +1699,16 @@ body.panel-layout .panel-controls.controls-main {
     text-align: center;
     white-space: normal;
     overflow-wrap: anywhere;
-    margin-top: 2px;
-    max-width: max-content;
+    margin-top: 0;
+    max-width: none;
     margin-left: auto;
     margin-right: auto;
+}
+.vbox .value.editable {
+    display: inline-block;
+    width: fit-content;
+    min-width: 1ch;
+    max-width: 100%;
 }
 .vbox .value:empty::before {
     content: "\\00a0";
@@ -1901,10 +1746,7 @@ body.panel-layout .panel-controls.controls-main {
 }
 
 .vbox .address {
-    position: absolute;
-    top: 10px;
-    left: 0;
-    right: var(--type-offset);
+    position: static;
     text-align: center;
     color: var(--addr);
     font-size: 18px;
@@ -1914,53 +1756,32 @@ body.panel-layout .panel-controls.controls-main {
 }
 
 .vbox .type {
-    position: absolute;
-    top: 50%;
-    left: calc(100% - var(--type-offset) + 6px);
-    right: auto;
-    transform: translateY(-50%);
+    position: static;
     color: var(--type);
     font-size: 18px;
     font-weight: 800;
     line-height: 1.2;
-    min-height: 22px;
+    min-height: 24px;
     min-width: 10px;
     display: inline-flex;
     align-items: center;
     white-space: nowrap;
     text-align: left;
-    padding: 0 6px;
+    padding: 0;
     max-width: none;
     overflow: visible;
 }
 .vbox .type.editable {
-    padding: 2px 10px;
-}
-
-.vbox .name {
-    position: absolute;
-    bottom: 8px;
-    left: 0;
-    right: var(--type-offset);
-    text-align: center;
-    color: var(--name);
-    font-size: 18px;
-    font-weight: 800;
-    line-height: 1.1;
-    white-space: nowrap;
+    padding: 2px 10px 2px 8px;
 }
 
 .lbl {
-    position: absolute;
     font-size: 11px;
     color: #555;
     letter-spacing: 0.2px;
 }
 
-.lbl-addr {
-    top: -12px;
-    left: 0;
-    right: var(--type-offset);
+.vbox .lbl-addr {
     text-align: center;
 }
 .cell .lbl-value {
@@ -1970,25 +1791,11 @@ body.panel-layout .panel-controls.controls-main {
     font-size: 11px;
     color: #555;
 }
-.lbl-type {
-    top: calc(50% - 34px);
-    left: calc(100% - var(--type-offset) + 6px);
-    right: auto;
-    transform: translateY(-50%);
+.vbox .lbl-type {
     text-align: left;
-    padding-left: 6px;
+    padding-left: 2px;
 }
-.lbl-name {
-    bottom: -8px;
-    left: 0;
-    right: var(--type-offset);
-    text-align: center;
-}
-.name-stack .lbl-name {
-    position: relative;
-    bottom: auto;
-    left: auto;
-    right: auto;
+.vbox .lbl-name {
     text-align: center;
 }
 
@@ -2017,6 +1824,8 @@ body.panel-layout .panel-controls.controls-main {
 .grid {
     display: flex;
     flex-wrap: wrap;
+    align-items: flex-start;
+    align-content: flex-start;
     gap: 24px 32px;
 }
 
@@ -2039,8 +1848,8 @@ body.panel-layout .panel-controls.controls-main {
 .vbox.is-editable::before {
     content: "";
     position: absolute;
-    top: -14px;
-    bottom: calc(-14px - var(--name-stack-space));
+    top: -8px;
+    bottom: -8px;
     left: -8px;
     right: -8px;
     border: 1px dashed rgba(0, 0, 0, 0.18);
@@ -2211,9 +2020,6 @@ nav.tabs a.active:hover {
         width: 100%;
         margin: 0;
     }
-    .ref-row {
-        grid-template-columns: 1fr;
-    }
     .panel-title {
         max-width: 90%;
         white-space: normal;
@@ -2368,8 +2174,19 @@ nav.tabs a.active:hover {
     }
     .vbox {
         width: 100%;
+        max-width: 100%;
         box-sizing: border-box;
-        --name-overflow: 0px;
+        flex-direction: column;
+        gap: 8px;
+    }
+    .vbox-main {
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+    }
+    .vbox-meta {
+        justify-content: flex-start;
+        transform: none;
     }
     .arraybox {
         width: 100%;
@@ -2377,19 +2194,14 @@ nav.tabs a.active:hover {
         box-sizing: border-box;
     }
     .arraybox .array-type {
-        position: static;
-        transform: none;
         margin-top: 6px;
         text-align: left;
     }
     .arraybox .lbl-array-type {
-        position: static;
-        transform: none;
         margin-top: 4px;
         text-align: left;
     }
     .arraybox .array-name-stack {
-        position: static;
         margin-top: 6px;
     }
 }

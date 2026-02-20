@@ -64,8 +64,29 @@ if (clamped < low) {
     ) {
       return "The bounds are swapped. Values below $n{low} should clamp to $n{low}, and values above $n{high} should clamp to $n{high}.";
     }
+    if (
+      ctx.behavesLike(`double clamped;
+if (low <= n <= high) {
+  clamped = n;
+} else if (n < low) {
+  clamped = low;
+} else {
+  clamped = high;
+}
+`) ||
+      ctx.behavesLike(`double clamped;
+if (low < n < high) {
+  clamped = n;
+} else if (n <= low) {
+  clamped = low;
+} else {
+  clamped = high;
+}`)
+    ) {
+      return "It seems like you're doing some chained comparison like $c{low <= n <= high}. Chained comparisons aren't built into C; $c{low <= n <= high} is parsed as $c{(low <= n) <= high}, which is not what you intended.\nIt's easier to put the in-between case in an $c{else}. If you don't want to, $c{low <= n && n <= high} will work for the in-between check (we haven't learned about $c{&&} yet, but it basically means \"and\").";
+    }
     if (ctx.currentResult.kind === "missing-output") {
-      return "Create an output variable named $n{clamped}.";
+      return "You need to create a variable named $n{clamped}.";
     }
     if (ctx.currentResult.kind === "wrong-output-type") {
       return "$n{clamped} should have type $t{double}.";

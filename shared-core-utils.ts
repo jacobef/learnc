@@ -470,6 +470,10 @@ export function valueTypeMatchesTarget(
   valueType: string,
   targetType: string,
 ): boolean {
+  const isIntegerScalarBase = (base: BaseType | null): boolean => {
+    if (!base) return false;
+    return base !== "float" && base !== "double";
+  };
   const sameArrayDims = (left: number[] | undefined, right: number[] | undefined) => {
     const a = Array.isArray(left) ? left : [];
     const b = Array.isArray(right) ? right : [];
@@ -482,6 +486,9 @@ export function valueTypeMatchesTarget(
   const target = parseType(targetType || "int");
   const value = parseType(valueType || "int");
   if (!target.base || !value.base) return false;
+  if (target.depth > 0 && value.depth === 0) {
+    return isIntegerScalarBase(value.base);
+  }
   if (target.depth > 0 || value.depth > 0) {
     return (
       target.base === value.base &&

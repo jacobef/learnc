@@ -34,13 +34,10 @@ createCodeOutputChallengeTemplate({
       return "You're always rounding up. Values like $v{1.25} should become $v{1}, not $v{2}.";
     }
     if (ctx.currentResult.kind === "missing-output") {
-      return "Create an output variable named $n{rounded}.";
+      return "You need to create a variable named $n{rounded}.";
     }
     if (ctx.currentResult.kind === "wrong-output-type") {
       return "$n{rounded} should have type $t{int}.";
-    }
-    if (ctx.currentResult.kind === "wrong-output-value") {
-      return "For non-negative numbers, add $v{0.5} before assigning to an $t{int}.";
     }
     if (ctx.currentResult.ok && !ctx.report.pass) {
       return "The shown input works, but another tested input fails. Click $showFailingCaseButton to jump to one.";

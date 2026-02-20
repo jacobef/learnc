@@ -2,18 +2,20 @@ import {
   appendStateObjects,
   bindBtnRefPulse,
   boxValueMatchesSpec,
+  clearNode,
   createSimpleSimulator,
   createStepper,
   disableBoxEditing,
-  ensureBaseLayout,
+  ensurePanelizedMain,
   findArrayObjectBoxesForResult,
   flashStatus,
   formatValueForType,
   getNavLabelForHref,
   normalizeBoxValueForContext,
   readBoxState,
-  resolveActiveNavItem,
+  queryRole,
   setPartsContent,
+  syncDocumentTitleFromNav,
   vbox,
 } from "./shared-core.js";
 import type { BoxState, Parts, Stepper } from "./shared-core.js";
@@ -87,74 +89,33 @@ interface ExpressionHintContext {
 function collectExpressionElements(
   root: ParentNode = document,
 ): ExpressionTemplateElements {
+  const role = <T extends Element>(name: string) => queryRole<T>(name, root);
   return {
-    instructionsEl: root.querySelector(
-      '[data-role="expr-instructions"]',
-    ) as HTMLElement | null,
-    continueBtn: root.querySelector(
-      '[data-role="expr-continue"]',
-    ) as HTMLButtonElement | null,
-    sectionEl: root.querySelector(
-      '[data-role="expr-section"]',
-    ) as HTMLElement | null,
-    expressionEl: root.querySelector(
-      '[data-role="expr-expression"]',
-    ) as HTMLElement | null,
-    answerPanel: root.querySelector(
-      '[data-role="expr-answer-panel"]',
-    ) as HTMLElement | null,
-    answerSlot: root.querySelector(
-      '[data-role="expr-answer-slot"]',
-    ) as HTMLElement | null,
-    answerResult: root.querySelector(
-      '[data-role="expr-answer-result"]',
-    ) as HTMLElement | null,
-    toggleWrap: root.querySelector(
-      '[data-role="expr-answer-toggle"]',
-    ) as HTMLElement | null,
-    hintPanel: root.querySelector(
-      '[data-role="expr-hint"]',
-    ) as HTMLElement | null,
-    hintBtn: root.querySelector(
-      '[data-role="expr-hint-btn"]',
-    ) as HTMLButtonElement | null,
-    useSelectedBtn: root.querySelector(
-      '[data-role="expr-use-selected"]',
-    ) as HTMLButtonElement | null,
-    useEnteredBtn: root.querySelector(
-      '[data-role="expr-use-entered"]',
-    ) as HTMLButtonElement | null,
-    checkBtn: root.querySelector(
-      '[data-role="expr-check"]',
-    ) as HTMLButtonElement | null,
-    statusEl: root.querySelector(
-      '[data-role="expr-status"]',
-    ) as HTMLElement | null,
-    stageEl: root.querySelector(
-      '[data-role="expr-stage"]',
-    ) as HTMLElement | null,
-    statePanel: root.querySelector(
-      '[data-role="expr-state-panel"]',
-    ) as HTMLElement | null,
+    instructionsEl: role<HTMLElement>("expr-instructions"),
+    continueBtn: role<HTMLButtonElement>("expr-continue"),
+    sectionEl: role<HTMLElement>("expr-section"),
+    expressionEl: role<HTMLElement>("expr-expression"),
+    answerPanel: role<HTMLElement>("expr-answer-panel"),
+    answerSlot: role<HTMLElement>("expr-answer-slot"),
+    answerResult: role<HTMLElement>("expr-answer-result"),
+    toggleWrap: role<HTMLElement>("expr-answer-toggle"),
+    hintPanel: role<HTMLElement>("expr-hint"),
+    hintBtn: role<HTMLButtonElement>("expr-hint-btn"),
+    useSelectedBtn: role<HTMLButtonElement>("expr-use-selected"),
+    useEnteredBtn: role<HTMLButtonElement>("expr-use-entered"),
+    checkBtn: role<HTMLButtonElement>("expr-check"),
+    statusEl: role<HTMLElement>("expr-status"),
+    stageEl: role<HTMLElement>("expr-stage"),
+    statePanel: role<HTMLElement>("expr-state-panel"),
   };
 }
 
 function ensureExpressionLayout(): ExpressionTemplateElements {
-  const activeItem = resolveActiveNavItem();
-  const resolvedTitle = activeItem?.label || "";
-  const nextBrowserTitle = resolvedTitle ? `C Boxes - ${resolvedTitle}` : "";
-  if (nextBrowserTitle) document.title = nextBrowserTitle;
-  const existing = document.querySelector('[data-role="expr-expression"]');
+  const resolvedTitle = syncDocumentTitleFromNav();
+  const existing = queryRole<HTMLElement>("expr-expression");
   if (existing) return collectExpressionElements();
 
-  const { main } = ensureBaseLayout();
-  main.classList.add("main-panelized");
-  if (resolvedTitle) {
-    const heading = document.createElement("h1");
-    heading.className = "page-title";
-    heading.textContent = resolvedTitle;
-    main.appendChild(heading);
-  }
+  const main = ensurePanelizedMain(resolvedTitle);
 
   const instructionsEl = document.createElement("p");
   instructionsEl.dataset.role = "expr-instructions";
@@ -434,7 +395,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
 
   function renderSelectedPreview(step: ExpressionStep) {
     if (!answerSlot) return;
-    answerSlot.innerHTML = "";
+    clearNode(answerSlot);
     const box = selectedBox(step);
     if (!box) {
       const msg = document.createElement("div");
@@ -457,7 +418,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
 
   function renderEnteredBox(saved: BoxState | null, editable: boolean) {
     if (!answerSlot) return;
-    answerSlot.innerHTML = "";
+    clearNode(answerSlot);
     const node = vbox({
       address: "—",
       type: saved?.type ?? "",
@@ -485,7 +446,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     fixedMode: AnswerMode | null,
   ) {
     if (!stageEl) return;
-    stageEl.innerHTML = "";
+    clearNode(stageEl);
     const boxes = step.boxes ?? [];
     const disableHover = !editable || fixedMode === "entered";
     boxes.forEach((box) => {
@@ -616,7 +577,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
 
   function renderCorrectAnswer(step: ExpressionStep) {
     if (!answerResult) return;
-    answerResult.innerHTML = "";
+    clearNode(answerResult);
     const evaluated = evaluatedAnswer(step);
     if ("error" in evaluated) {
       const msg = document.createElement("div");

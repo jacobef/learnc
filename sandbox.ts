@@ -1,11 +1,12 @@
 import {
-  $,
   applyOtherNames,
   appendStateObjects,
+  clearNode,
   createSimpleSimulator,
   ensureBaseLayout,
   findArrayObjectBoxesForResult,
   formatValueForType,
+  queryRole,
   randAddr,
   typeInfo,
   vbox,
@@ -20,24 +21,18 @@ import { confettiRain } from "./confetti.js";
 const { main } = ensureBaseLayout();
 main.classList.add("main-panelized");
 
-const instructions = $(
-  '[data-role="sandbox-instructions"]',
-) as HTMLElement | null;
-const editor = $('[data-role="sandbox-editor"]') as HTMLTextAreaElement | null;
-const lineNumbers = $(
-  '[data-role="sandbox-line-numbers"]',
-) as HTMLElement | null;
-const errorGutter = $(
-  '[data-role="sandbox-error-gutter"]',
-) as HTMLElement | null;
-const errorDetail = $(
-  '[data-role="sandbox-error-detail"]',
-) as HTMLElement | null;
-const exprInput = $('[data-role="sandbox-expr"]') as HTMLInputElement | null;
-const exprResult = $('[data-role="sandbox-expr-result"]') as HTMLElement | null;
-const exprError = $('[data-role="sandbox-expr-error"]') as HTMLElement | null;
-const prevBtn = $('[data-role="sandbox-prev"]') as HTMLButtonElement | null;
-const nextBtn = $('[data-role="sandbox-next"]') as HTMLButtonElement | null;
+const role = <T extends Element>(name: string): T | null => queryRole<T>(name);
+
+const instructions = role<HTMLElement>("sandbox-instructions");
+const editor = role<HTMLTextAreaElement>("sandbox-editor");
+const lineNumbers = role<HTMLElement>("sandbox-line-numbers");
+const errorGutter = role<HTMLElement>("sandbox-error-gutter");
+const errorDetail = role<HTMLElement>("sandbox-error-detail");
+const exprInput = role<HTMLInputElement>("sandbox-expr");
+const exprResult = role<HTMLElement>("sandbox-expr-result");
+const exprError = role<HTMLElement>("sandbox-expr-error");
+const prevBtn = role<HTMLButtonElement>("sandbox-prev");
+const nextBtn = role<HTMLButtonElement>("sandbox-next");
 const prevButtons = [prevBtn].filter((btn): btn is HTMLButtonElement => !!btn);
 const nextButtons = [nextBtn].filter((btn): btn is HTMLButtonElement => !!btn);
 let finishedConfettiShown = false;
@@ -182,7 +177,7 @@ function isGenericCompileMessage(message: string | ParsedMessage) {
 function showErrorDetail(message: string | ParsedMessage, kind: string) {
   if (!errorDetail) return;
   const parsed = parseErrorMessage(message);
-  errorDetail.innerHTML = "";
+  clearNode(errorDetail);
   if (kind === "ub") {
     const base = document.createElement("span");
     if (parsed.html) {
@@ -575,9 +570,9 @@ function getProgramOutcome(
 }
 
 function renderStage() {
-  const stage = $('[data-role="sandbox-stage"]') as HTMLElement | null;
+  const stage = role<HTMLElement>("sandbox-stage");
   if (!stage) return;
-  stage.innerHTML = "";
+  clearNode(stage);
   const lines = getRawLines();
   const { parts } = getProgramParts(lines);
   const { boundary, total } = syncBoundaryWithLines(lines);
@@ -615,7 +610,7 @@ function renderStage() {
 
 function renderExpression(outcome: { kind: string; state: BoxState[] | null }) {
   if (!exprResult || !exprInput) return;
-  exprResult.innerHTML = "";
+  clearNode(exprResult);
   exprResult.classList.add("hidden");
   showExprError("");
   const expr = exprInput.value.trim();
@@ -790,7 +785,7 @@ function renderState(
 }
 
 function refreshOtherNames() {
-  const stage = $('[data-role="sandbox-stage"]') as HTMLElement | null;
+  const stage = role<HTMLElement>("sandbox-stage");
   if (stage) {
     applyOtherNames(stage, {
       shownAddrs: sandbox.otherNamesShown,
@@ -852,7 +847,7 @@ function updateLineGutters(linesOverride?: string[]) {
   const lineHeight = getLineHeightPx();
   const wraps = measureWrapCounts(lines);
   if (highlightEl) {
-    highlightEl.innerHTML = "";
+    clearNode(highlightEl);
     const frag = document.createDocumentFragment();
     for (let i = 0; i < lines.length; i++) {
       const span = document.createElement("span");
@@ -883,7 +878,7 @@ function updateLineGutters(linesOverride?: string[]) {
       num.textContent = String(i);
       frag.appendChild(num);
     }
-    lineNumbers.innerHTML = "";
+    clearNode(lineNumbers);
     lineNumbers.appendChild(frag);
     if (editor) lineNumbers.style.height = `${editor.clientHeight}px`;
   }
@@ -995,7 +990,7 @@ function updateLineGutters(linesOverride?: string[]) {
       }
       frag.appendChild(cell);
     }
-    errorGutter.innerHTML = "";
+    clearNode(errorGutter);
     errorGutter.appendChild(frag);
     if (editor) errorGutter.style.height = `${editor.clientHeight}px`;
   }

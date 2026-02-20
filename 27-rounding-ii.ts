@@ -60,13 +60,10 @@ if (rounded < n) {
       return "That drops the decimal part instead of rounding to the nearest integer.";
     }
     if (ctx.currentResult.kind === "missing-output") {
-      return "Create an output variable named $n{rounded}.";
+      return "You need to create a variable named $n{rounded}.";
     }
     if (ctx.currentResult.kind === "wrong-output-type") {
       return "$n{rounded} should have type $t{int}.";
-    }
-    if (ctx.currentResult.kind === "wrong-output-value") {
-      return "For rounding: add $v{0.5} for non-negative values, and subtract $v{0.5} for negative values, before assigning to $t{int}.";
     }
     if (ctx.currentResult.ok && !ctx.report.pass) {
       return "The shown input works, but another tested input fails. Click $showFailingCaseButton to jump to one.";

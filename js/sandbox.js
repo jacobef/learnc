@@ -1,17 +1,18 @@
-import { $, applyOtherNames, appendStateObjects, createSimpleSimulator, ensureBaseLayout, findArrayObjectBoxesForResult, formatValueForType, randAddr, typeInfo, vbox, } from "./shared-core.js";
+import { applyOtherNames, appendStateObjects, clearNode, createSimpleSimulator, ensureBaseLayout, findArrayObjectBoxesForResult, formatValueForType, queryRole, randAddr, typeInfo, vbox, } from "./shared-core.js";
 import { confettiRain } from "./confetti.js";
 const { main } = ensureBaseLayout();
 main.classList.add("main-panelized");
-const instructions = $('[data-role="sandbox-instructions"]');
-const editor = $('[data-role="sandbox-editor"]');
-const lineNumbers = $('[data-role="sandbox-line-numbers"]');
-const errorGutter = $('[data-role="sandbox-error-gutter"]');
-const errorDetail = $('[data-role="sandbox-error-detail"]');
-const exprInput = $('[data-role="sandbox-expr"]');
-const exprResult = $('[data-role="sandbox-expr-result"]');
-const exprError = $('[data-role="sandbox-expr-error"]');
-const prevBtn = $('[data-role="sandbox-prev"]');
-const nextBtn = $('[data-role="sandbox-next"]');
+const role = (name) => queryRole(name);
+const instructions = role("sandbox-instructions");
+const editor = role("sandbox-editor");
+const lineNumbers = role("sandbox-line-numbers");
+const errorGutter = role("sandbox-error-gutter");
+const errorDetail = role("sandbox-error-detail");
+const exprInput = role("sandbox-expr");
+const exprResult = role("sandbox-expr-result");
+const exprError = role("sandbox-expr-error");
+const prevBtn = role("sandbox-prev");
+const nextBtn = role("sandbox-next");
 const prevButtons = [prevBtn].filter((btn) => !!btn);
 const nextButtons = [nextBtn].filter((btn) => !!btn);
 let finishedConfettiShown = false;
@@ -137,7 +138,7 @@ function showErrorDetail(message, kind) {
     if (!errorDetail)
         return;
     const parsed = parseErrorMessage(message);
-    errorDetail.innerHTML = "";
+    clearNode(errorDetail);
     if (kind === "ub") {
         const base = document.createElement("span");
         if (parsed.html) {
@@ -482,10 +483,10 @@ function getProgramOutcome(linesOverride, partsOverride, boundaryOverride) {
     };
 }
 function renderStage() {
-    const stage = $('[data-role="sandbox-stage"]');
+    const stage = role("sandbox-stage");
     if (!stage)
         return;
-    stage.innerHTML = "";
+    clearNode(stage);
     const lines = getRawLines();
     const { parts } = getProgramParts(lines);
     const { boundary, total } = syncBoundaryWithLines(lines);
@@ -524,7 +525,7 @@ function renderStage() {
 function renderExpression(outcome) {
     if (!exprResult || !exprInput)
         return;
-    exprResult.innerHTML = "";
+    clearNode(exprResult);
     exprResult.classList.add("hidden");
     showExprError("");
     const expr = exprInput.value.trim();
@@ -688,7 +689,7 @@ function renderState(title, boxes, status = "ok") {
     return wrap;
 }
 function refreshOtherNames() {
-    const stage = $('[data-role="sandbox-stage"]');
+    const stage = role("sandbox-stage");
     if (stage) {
         applyOtherNames(stage, {
             shownAddrs: sandbox.otherNamesShown,
@@ -746,7 +747,7 @@ function updateLineGutters(linesOverride) {
     const lineHeight = getLineHeightPx();
     const wraps = measureWrapCounts(lines);
     if (highlightEl) {
-        highlightEl.innerHTML = "";
+        clearNode(highlightEl);
         const frag = document.createDocumentFragment();
         for (let i = 0; i < lines.length; i++) {
             const span = document.createElement("span");
@@ -779,7 +780,7 @@ function updateLineGutters(linesOverride) {
             num.textContent = String(i);
             frag.appendChild(num);
         }
-        lineNumbers.innerHTML = "";
+        clearNode(lineNumbers);
         lineNumbers.appendChild(frag);
         if (editor)
             lineNumbers.style.height = `${editor.clientHeight}px`;
@@ -890,7 +891,7 @@ function updateLineGutters(linesOverride) {
             }
             frag.appendChild(cell);
         }
-        errorGutter.innerHTML = "";
+        clearNode(errorGutter);
         errorGutter.appendChild(frag);
         if (editor)
             errorGutter.style.height = `${editor.clientHeight}px`;
