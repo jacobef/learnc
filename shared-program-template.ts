@@ -37,6 +37,12 @@ import type {
   StatementRange,
   Stepper,
 } from "./shared-core.js";
+import {
+  clearLevelProgress,
+  currentLevelId,
+  maybeRestoreLevelProgress,
+  writeLevelProgress,
+} from "./shared-progress.js";
 
 type ProgramParts = Parts;
 type ProgramHint = (ctx: ProgramContext) => Part | null | undefined;
@@ -66,6 +72,7 @@ interface ProgramElements {
   hintPanel: HTMLElement | null;
   hintBtn: HTMLButtonElement | null;
   checkBtn: HTMLButtonElement | null;
+  levelResetBtn: HTMLButtonElement | null;
   addBtn: HTMLButtonElement | null;
   resetBtn: HTMLButtonElement | null;
 }
@@ -114,6 +121,16 @@ interface ProgramTemplateResult {
   pager: Stepper;
 }
 
+interface ProgramTemplateProgress {
+  executionSteps: number;
+  allocBase: number | null;
+  runtimeLatestSolvedStage: number;
+  runtimeWorkspaceByStage: Array<{
+    stageIndex: number;
+    boxes: BoxState[] | null;
+  }>;
+}
+
 function collectProgramElements(root: ParentNode = document): ProgramElements {
   const role = <T extends Element>(name: string) => queryRole<T>(name, root);
   return {
@@ -127,6 +144,7 @@ function collectProgramElements(root: ParentNode = document): ProgramElements {
     hintPanel: role<HTMLElement>("program-hint"),
     hintBtn: role<HTMLButtonElement>("program-hint-btn"),
     checkBtn: role<HTMLButtonElement>("program-check"),
+    levelResetBtn: role<HTMLButtonElement>("program-reset-level"),
     addBtn: role<HTMLButtonElement>("program-add"),
     resetBtn: role<HTMLButtonElement>("program-reset"),
   };
@@ -192,12 +210,16 @@ function ensureProgramLayout(): ProgramElements {
   const nextBtn = document.createElement("button");
   nextBtn.textContent = "Run line 1 ▶";
   nextBtn.dataset.stepper = "next";
+  const levelResetBtn = document.createElement("button");
+  levelResetBtn.dataset.role = "program-reset-level";
+  levelResetBtn.textContent = "Reset level";
   const controlsSpacer = document.createElement("span");
   controlsSpacer.className = "controls-spacer";
   controlsSpacer.setAttribute("aria-hidden", "true");
   controlsRow.appendChild(prevBtn);
   controlsRow.appendChild(nextBtn);
   controlsRow.appendChild(controlsSpacer);
+  controlsRow.appendChild(levelResetBtn);
   codePanel.appendChild(codeTitle);
   codePanel.appendChild(codeEl);
 
@@ -259,6 +281,7 @@ function ensureProgramLayout(): ProgramElements {
     hintPanel,
     hintBtn,
     checkBtn,
+    levelResetBtn,
     addBtn,
     resetBtn,
   };
@@ -300,6 +323,7 @@ function createProgramTemplate(
     hintPanel,
     hintBtn,
     checkBtn,
+    levelResetBtn,
     addBtn,
     resetBtn,
   } = ensureProgramLayout();
@@ -308,7 +332,7 @@ function createProgramTemplate(
     const mobileMode = isMobileViewport() && !!mobileActionsEl;
     const target = mobileMode ? mobileActionsEl : controlsActionsEl;
     if (!target) return;
-    [resetBtn, addBtn, hintBtn, checkBtn, statusEl].forEach((node) => {
+    [levelResetBtn, resetBtn, addBtn, hintBtn, checkBtn, statusEl].forEach((node) => {
       if (node && node.parentElement !== target) target.appendChild(node);
     });
     if (!hintPanel) return;
@@ -330,7 +354,7 @@ function createProgramTemplate(
 
   function updateMobileActionsVisibility() {
     if (!mobileActionsEl) return;
-    const hasVisibleAction = [checkBtn, hintBtn, addBtn, resetBtn].some(
+    const hasVisibleAction = [levelResetBtn, checkBtn, hintBtn, addBtn, resetBtn].some(
       (btn) => !!btn && !btn.classList.contains("hidden"),
     );
     mobileActionsEl.classList.toggle("hidden", !hasVisibleAction);
@@ -496,6 +520,12 @@ function createProgramTemplate(
     const safeLine = Math.max(0, Math.min(total - 1, Math.floor(line)));
     return stepByLine[safeLine] ?? null;
   }
+
+  const levelId = currentLevelId();
+  const restoredProgress = maybeRestoreLevelProgress<ProgramTemplateProgress>(
+    levelId,
+    "this level",
+  );
 
   const state: ProgramTemplateState = {
     boundary: 0,
@@ -1013,6 +1043,33 @@ function createProgramTemplate(
   function runtimeStepClamp(stepCount: number): number {
     const safeStep = Math.floor(stepCount);
     return Math.max(-1, Math.min(runtimeMaxStep(), safeStep));
+  }
+
+  function progressSnapshot(): ProgramTemplateProgress {
+    return {
+      executionSteps: state.executionSteps,
+      allocBase: state.allocBase,
+      runtimeLatestSolvedStage,
+      runtimeWorkspaceByStage: Array.from(runtimeWorkspaceByStage.entries())
+        .filter(([stageIndex]) => Number.isFinite(stageIndex))
+        .map(([stageIndex, boxes]) => ({
+          stageIndex,
+          boxes: boxes ? cloneBoxes(boxes) : null,
+        })),
+    };
+  }
+
+  function persistProgress() {
+    const snapshot = progressSnapshot();
+    const isDefault =
+      snapshot.executionSteps === -1 &&
+      snapshot.runtimeLatestSolvedStage === -1 &&
+      snapshot.runtimeWorkspaceByStage.length === 0;
+    if (isDefault) {
+      clearLevelProgress(levelId);
+      return;
+    }
+    writeLevelProgress(snapshot, levelId);
   }
 
   function runtimeTraceForStage(stepCount: number): RuntimeTrace | null {
@@ -2106,6 +2163,19 @@ function createProgramTemplate(
     });
   }
 
+  if (stageEl) {
+    stageEl.addEventListener("input", () => {
+      save();
+      persistProgress();
+    });
+    stageEl.addEventListener("click", () => {
+      window.setTimeout(() => {
+        save();
+        persistProgress();
+      }, 0);
+    });
+  }
+
   function scrollInstructionsUpIfNeeded(instructionKey: string | null) {
     if (!instructionsEl || !instructionKey || instructionKey === state.lastInstructionKey)
       return;
@@ -2236,6 +2306,7 @@ function createProgramTemplate(
     updateInstructions();
     if (normalEditable && resetBtn) updateResetVisibility(key);
     ensureCodeLineVisible();
+    persistProgress();
   }
 
   function save() {
@@ -2262,6 +2333,19 @@ function createProgramTemplate(
       ensureNewVariableVisible(node);
       updateResetVisibility(state.boundary);
       refreshOtherNames();
+      save();
+      persistProgress();
+    });
+  }
+
+  if (levelResetBtn) {
+    levelResetBtn.addEventListener("click", () => {
+      const confirmed = window.confirm(
+        "Reset your saved progress for this level and start over?",
+      );
+      if (!confirmed) return;
+      clearLevelProgress(levelId);
+      window.location.reload();
     });
   }
 
@@ -2398,6 +2482,32 @@ function createProgramTemplate(
     });
   }
 
+  if (restoredProgress) {
+    state.executionSteps = runtimeStepClamp(restoredProgress.executionSteps);
+    state.allocBase =
+      typeof restoredProgress.allocBase === "number"
+        ? restoredProgress.allocBase
+        : null;
+    const solvedStage = Math.floor(
+      Number(restoredProgress.runtimeLatestSolvedStage),
+    );
+    runtimeLatestSolvedStage = Number.isFinite(solvedStage)
+      ? Math.max(-1, Math.min(runtimeMaxStep(), solvedStage))
+      : -1;
+    runtimeWorkspaceByStage.clear();
+    if (Array.isArray(restoredProgress.runtimeWorkspaceByStage)) {
+      restoredProgress.runtimeWorkspaceByStage.forEach((entry) => {
+        const stageIndex = Math.floor(Number(entry?.stageIndex));
+        if (!Number.isFinite(stageIndex)) return;
+        if (stageIndex < 0 || stageIndex > runtimeMaxStep()) return;
+        const stage = runtimeStages[stageIndex];
+        if (!stage || stage.editableMode !== "state") return;
+        const boxes = Array.isArray(entry?.boxes) ? cloneBoxes(entry.boxes) : null;
+        runtimeWorkspaceByStage.set(stageIndex, boxes);
+      });
+    }
+  }
+
   syncBoundaryFromStage();
   const pager = createStepper({
     root: codeRoot || codeEl?.closest(".panel") || document.body,
@@ -2413,7 +2523,10 @@ function createProgramTemplate(
       }
       syncBoundaryFromStage();
     },
-    onBeforeChange: save,
+    onBeforeChange: () => {
+      save();
+      persistProgress();
+    },
     onAfterChange: render,
     isStepLocked: () => !!runtimePendingStage(),
     getStepBadge: () => runtimeStepBadge(),

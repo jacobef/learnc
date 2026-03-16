@@ -19,6 +19,12 @@ import {
   vbox,
 } from "./shared-core.js";
 import type { BoxState, Parts, Stepper } from "./shared-core.js";
+import {
+  clearLevelProgress,
+  currentLevelId,
+  maybeRestoreLevelProgress,
+  writeLevelProgress,
+} from "./shared-progress.js";
 
 type AnswerMode = "selected" | "entered";
 type ExpressionHint = (ctx: ExpressionHintContext) => Parts | null | undefined;
@@ -56,6 +62,7 @@ interface ExpressionTemplateState {
 interface ExpressionTemplateElements {
   instructionsEl: HTMLElement | null;
   continueBtn: HTMLButtonElement | null;
+  levelResetBtn: HTMLButtonElement | null;
   sectionEl: HTMLElement | null;
   expressionEl: HTMLElement | null;
   answerPanel: HTMLElement | null;
@@ -86,6 +93,15 @@ interface ExpressionHintContext {
   hasState: boolean;
 }
 
+interface ExpressionTemplateProgress {
+  boundary: number;
+  passes: Record<number, boolean>;
+  selections: Record<number, string | null>;
+  entered: Record<number, BoxState | null>;
+  modes: Record<number, AnswerMode>;
+  showIntro: boolean;
+}
+
 function collectExpressionElements(
   root: ParentNode = document,
 ): ExpressionTemplateElements {
@@ -93,6 +109,7 @@ function collectExpressionElements(
   return {
     instructionsEl: role<HTMLElement>("expr-instructions"),
     continueBtn: role<HTMLButtonElement>("expr-continue"),
+    levelResetBtn: role<HTMLButtonElement>("expr-reset-level"),
     sectionEl: role<HTMLElement>("expr-section"),
     expressionEl: role<HTMLElement>("expr-expression"),
     answerPanel: role<HTMLElement>("expr-answer-panel"),
@@ -198,6 +215,10 @@ function ensureExpressionLayout(): ExpressionTemplateElements {
   const nextBtn = document.createElement("button");
   nextBtn.dataset.stepper = "next";
   nextBtn.textContent = "Next ▶";
+  const levelResetBtn = document.createElement("button");
+  levelResetBtn.type = "button";
+  levelResetBtn.dataset.role = "expr-reset-level";
+  levelResetBtn.textContent = "Reset level";
   const controlsSpacer = document.createElement("span");
   controlsSpacer.className = "controls-spacer";
   controlsSpacer.setAttribute("aria-hidden", "true");
@@ -211,6 +232,7 @@ function ensureExpressionLayout(): ExpressionTemplateElements {
   controlsRow.appendChild(prevBtn);
   controlsRow.appendChild(nextBtn);
   controlsRow.appendChild(controlsSpacer);
+  controlsRow.appendChild(levelResetBtn);
   controlsRow.appendChild(continueBtn);
   controlsRow.appendChild(hintBtn);
   controlsRow.appendChild(checkBtn);
@@ -277,6 +299,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
   const {
     instructionsEl,
     continueBtn,
+    levelResetBtn,
     sectionEl,
     expressionEl,
     answerPanel,
@@ -297,15 +320,6 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
 
   const simulator = createSimpleSimulator();
 
-  const state: ExpressionTemplateState = {
-    boundary: 0,
-    passes: {},
-    selections: {},
-    entered: {},
-    modes: {},
-    showIntro: !!initialInstructions,
-  };
-
   let pager: Stepper | null = null;
   let selectedName: string | null = null;
   let activeMode: AnswerMode = "selected";
@@ -315,6 +329,64 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       Math.max(0, Math.min(normalizedSteps.length - 1, index))
     ]!;
   }
+
+  function clampBoundary(value: number): number {
+    const safe = Math.floor(Number(value));
+    if (!Number.isFinite(safe)) return 0;
+    return Math.max(0, Math.min(normalizedSteps.length - 1, safe));
+  }
+
+  function sanitizedRecord<T>(
+    value: Record<number, T> | null | undefined,
+  ): Record<number, T> {
+    if (!value || typeof value !== "object") return {};
+    const entries = Object.entries(value).filter(([key]) => /^\d+$/.test(key));
+    return Object.fromEntries(entries) as Record<number, T>;
+  }
+
+  function sanitizedPassedSelections(
+    value: Record<number, string | null> | null | undefined,
+    passes: Record<number, boolean>,
+  ): Record<number, string | null> {
+    if (!value || typeof value !== "object") return {};
+    const entries = Object.entries(value).filter(
+      ([key, selected]) => passes[Number(key)] === true && typeof selected === "string",
+    );
+    return Object.fromEntries(entries) as Record<number, string | null>;
+  }
+
+  function defaultModeForStep(index: number): AnswerMode {
+    const step = stepFor(index);
+    if (step.editable && step.fixValueCategory) {
+      const evaluated = evaluatedAnswer(step);
+      if ("result" in evaluated && evaluated.result) {
+        return evaluated.result.kind === "lvalue" ? "selected" : "entered";
+      }
+    }
+    return "selected";
+  }
+
+  const levelId = currentLevelId();
+  const defaultShowIntro = !!initialInstructions;
+  const restoredProgress = maybeRestoreLevelProgress<ExpressionTemplateProgress>(
+    levelId,
+    "this level",
+  );
+  const restoredPasses = sanitizedRecord<boolean>(restoredProgress?.passes);
+  const state: ExpressionTemplateState = {
+    boundary: clampBoundary(restoredProgress?.boundary ?? 0),
+    passes: restoredPasses,
+    selections: sanitizedPassedSelections(
+      restoredProgress?.selections,
+      restoredPasses,
+    ),
+    entered: sanitizedRecord<BoxState | null>(restoredProgress?.entered),
+    modes: sanitizedRecord<AnswerMode>(restoredProgress?.modes),
+    showIntro:
+      typeof restoredProgress?.showIntro === "boolean"
+        ? restoredProgress.showIntro
+        : defaultShowIntro,
+  };
 
   function setStatus(text: string, ok: boolean, silent: boolean = false) {
     if (!statusEl) return;
@@ -505,6 +577,50 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     return node ? readBoxState(node) : null;
   }
 
+  function progressSnapshot(): ExpressionTemplateProgress {
+    const passes = Object.fromEntries(
+      Object.entries(state.passes).filter(([, value]) => value === true),
+    ) as Record<number, boolean>;
+    const selections = Object.fromEntries(
+      Object.entries(state.selections).filter(
+        ([key, value]) => passes[Number(key)] === true && typeof value === "string",
+      ),
+    ) as Record<number, string | null>;
+    const entered = Object.fromEntries(
+      Object.entries(state.entered).filter(([, value]) => value != null),
+    ) as Record<number, BoxState | null>;
+    const modes = Object.fromEntries(
+      Object.entries(state.modes).filter(([key, value]) => {
+        const index = Number(key);
+        return value === "entered" && defaultModeForStep(index) !== "entered";
+      }),
+    ) as Record<number, AnswerMode>;
+    return {
+      boundary: clampBoundary(state.boundary),
+      passes,
+      selections,
+      entered,
+      modes,
+      showIntro: state.showIntro,
+    };
+  }
+
+  function persistProgress() {
+    const snapshot = progressSnapshot();
+    const isDefault =
+      snapshot.boundary === 0 &&
+      Object.keys(snapshot.passes).length === 0 &&
+      Object.keys(snapshot.selections).length === 0 &&
+      Object.keys(snapshot.entered).length === 0 &&
+      Object.keys(snapshot.modes).length === 0 &&
+      snapshot.showIntro === defaultShowIntro;
+    if (isDefault) {
+      clearLevelProgress(levelId);
+      return;
+    }
+    writeLevelProgress(snapshot, levelId);
+  }
+
   function expectedAnswer(step: ExpressionStep): ExpressionHintContext["expected"] {
     const evaluated = evaluatedAnswer(step);
     if ("error" in evaluated) {
@@ -640,7 +756,11 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
   function saveStep(index: number) {
     const step = stepFor(index);
     if (!step.editable) return;
-    state.selections[index] = selectedName;
+    if (state.passes[index] && activeMode === "selected" && selectedName) {
+      state.selections[index] = selectedName;
+    } else {
+      delete state.selections[index];
+    }
     if (activeMode === "entered" && answerSlot) {
       const node = answerSlot.querySelector(".vbox");
       state.entered[index] = node ? readBoxState(node) : null;
@@ -664,6 +784,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       setControlVisible(sectionEl, false);
       setControlVisible(hintBtn, false);
       hideHint();
+      persistProgress();
       return;
     }
     setControlVisible(continueBtn, false);
@@ -722,6 +843,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       checkBtn.disabled = false;
     }
     pager?.update();
+    persistProgress();
   }
 
   function markCurrentStepPassed() {
@@ -732,6 +854,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     disableBoxEditing(answerSlot);
     pager?.pulseNext();
     pager?.update();
+    persistProgress();
   }
 
   function checkAnswer() {
@@ -808,6 +931,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       state.modes[state.boundary] = "selected";
       updateSelectionHighlight(selectedName, true);
       renderSelectedPreview(stepFor(state.boundary));
+      persistProgress();
     });
   }
 
@@ -815,13 +939,24 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     useEnteredBtn.addEventListener("click", () => {
       const step = stepFor(state.boundary);
       if (!step.editable || step.fixValueCategory) return;
-      if (activeMode === "selected") {
-        state.selections[state.boundary] = selectedName;
-      }
       setActiveMode("entered", true);
       state.modes[state.boundary] = "entered";
       updateSelectionHighlight(selectedName, false);
       renderEnteredBox(state.entered[state.boundary] ?? null, true);
+      persistProgress();
+    });
+  }
+
+  if (answerSlot) {
+    answerSlot.addEventListener("input", () => {
+      saveStep(state.boundary);
+      persistProgress();
+    });
+    answerSlot.addEventListener("click", () => {
+      window.setTimeout(() => {
+        saveStep(state.boundary);
+        persistProgress();
+      }, 0);
     });
   }
 
@@ -833,6 +968,17 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     continueBtn.addEventListener("click", () => {
       state.showIntro = false;
       render();
+    });
+  }
+
+  if (levelResetBtn) {
+    levelResetBtn.addEventListener("click", () => {
+      const confirmed = window.confirm(
+        "Reset your saved progress for this level and start over?",
+      );
+      if (!confirmed) return;
+      clearLevelProgress(levelId);
+      window.location.reload();
     });
   }
 
@@ -863,10 +1009,13 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     nextPage: next,
     getBoundary: () => state.boundary,
     setBoundary: (value) => {
-      state.boundary = value;
+      state.boundary = clampBoundary(value);
     },
     isStepLocked: (at) => isStepLocked(at),
-    onBeforeChange: (current) => saveStep(current),
+    onBeforeChange: (current) => {
+      saveStep(current);
+      persistProgress();
+    },
     onAfterChange: () => render(),
     getNextLabel: (_boundary, _total, atEnd) => {
       if (atEnd) return endLabel;

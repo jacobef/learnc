@@ -1,4 +1,8 @@
 import { ensureBaseLayout } from "./shared-core.js";
+import {
+  clearAllLevelProgress,
+  savedLevelCount,
+} from "./shared-progress.js";
 
 {
   const { main } = ensureBaseLayout();
@@ -42,6 +46,7 @@ import { ensureBaseLayout } from "./shared-core.js";
   main.appendChild(intro);
 
   const startWrap = document.createElement("div");
+  startWrap.className = "home-actions";
   const startLink = document.createElement("a");
   const updateStartLink = (): void => {
     const sidebarState = document.body.classList.contains("sidebar-collapsed") ? "0" : "1";
@@ -67,5 +72,24 @@ import { ensureBaseLayout } from "./shared-core.js";
   startButton.textContent = "Start here!";
   startLink.appendChild(startButton);
   startWrap.appendChild(startLink);
+  const resetProgressBtn = document.createElement("button");
+  const updateResetProgressButton = (): void => {
+    const count = savedLevelCount();
+    resetProgressBtn.textContent =
+      count > 0 ? `Reset all progress (${count})` : "Reset all progress";
+    resetProgressBtn.disabled = count === 0;
+  };
+  resetProgressBtn.textContent = "Reset all progress";
+  resetProgressBtn.addEventListener("click", () => {
+    if (savedLevelCount() <= 0) return;
+    const confirmed = window.confirm(
+      "Reset all saved progress? This clears every level's saved state.",
+    );
+    if (!confirmed) return;
+    clearAllLevelProgress();
+    updateResetProgressButton();
+  });
+  updateResetProgressButton();
+  startWrap.appendChild(resetProgressBtn);
   main.appendChild(startWrap);
 }

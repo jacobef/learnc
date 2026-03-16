@@ -1,5 +1,6 @@
 import { applyTextTokenReplacements, appendStateObjects, bindBtnRefPulse, boxValueMatchesSpec, clearNode, createSimpleSimulator, createStepper, ensurePanelizedMain, flashStatus, getNavLabelForHref, queryElement, queryRole, randAddr, renderParts, setPartsContent, syncDocumentTitleFromNav, typeInfo, } from "./shared-core.js";
 import { ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
+import { clearLevelProgress, currentLevelId, maybeRestoreLevelProgress, writeLevelProgress, } from "./shared-progress.js";
 function collectCodeEditorElements(root = document) {
     const role = (name) => queryRole(name, root);
     return {
@@ -12,6 +13,7 @@ function collectCodeEditorElements(root = document) {
         hintPanel: role("code-hint"),
         hintBtn: role("code-hint-btn"),
         checkBtn: role("code-check"),
+        levelResetBtn: role("code-reset-level"),
         nextBtn: queryElement('button[data-stepper="next"]', root),
         codeRoot: role("code-root"),
     };
@@ -85,13 +87,16 @@ function ensureCodeEditorLayout(textareaMinLines) {
     const checkBtn = document.createElement("button");
     checkBtn.dataset.role = "code-check";
     checkBtn.textContent = "Check";
+    const levelResetBtn = document.createElement("button");
+    levelResetBtn.dataset.role = "code-reset-level";
+    levelResetBtn.textContent = "Reset level";
     const status = document.createElement("span");
     status.dataset.role = "code-status";
     status.className = "muted";
     const spacer = document.createElement("span");
     spacer.className = "controls-spacer";
     spacer.setAttribute("aria-hidden", "true");
-    controlsRow.append(nextBtn, spacer, hintBtn, checkBtn, status);
+    controlsRow.append(nextBtn, spacer, levelResetBtn, hintBtn, checkBtn, status);
     const hintPanel = document.createElement("div");
     hintPanel.dataset.role = "code-hint";
     hintPanel.className = "hint-inline hidden";
@@ -107,17 +112,29 @@ function ensureCodeEditorLayout(textareaMinLines) {
         hintPanel,
         hintBtn,
         checkBtn,
+        levelResetBtn,
         nextBtn,
         codeRoot: section,
     };
 }
 function createCodeEditorTemplate(config) {
     const { startCode = "", targetState = [], textareaMinLines, allowNewLines = true, hints = null, instructions = "", next = null, isLast = false, } = config;
-    const { instructionsEl, editor, lineNumbers, stage, status, diagnosticEl, hintPanel, hintBtn, checkBtn, nextBtn, codeRoot, } = ensureCodeEditorLayout(textareaMinLines);
+    const { instructionsEl, editor, lineNumbers, stage, status, diagnosticEl, hintPanel, hintBtn, checkBtn, levelResetBtn, nextBtn, codeRoot, } = ensureCodeEditorLayout(textareaMinLines);
     const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
     bindBtnRefPulse(codeRoot || document);
     const simulator = createSimpleSimulator();
-    const state = { text: startCode, pass: false, allocBase: null };
+    const levelId = currentLevelId();
+    const defaultText = normalizeEditorText(startCode);
+    const restoredProgress = maybeRestoreLevelProgress(levelId, "this level");
+    const state = {
+        text: typeof restoredProgress?.text === "string"
+            ? normalizeEditorText(restoredProgress.text)
+            : defaultText,
+        pass: restoredProgress?.pass === true,
+        allocBase: typeof restoredProgress?.allocBase === "number"
+            ? restoredProgress.allocBase
+            : null,
+    };
     let pager = null;
     const endLabel = (() => {
         if (isLast)
@@ -152,6 +169,21 @@ function createCodeEditorTemplate(config) {
         if (allowNewLines)
             return text;
         return text.replace(/\r\n/g, "\n").replace(/\n/g, " ");
+    }
+    function progressSnapshot() {
+        return {
+            text: state.text,
+            pass: state.pass,
+            allocBase: state.allocBase,
+        };
+    }
+    function persistProgress() {
+        const snapshot = progressSnapshot();
+        if (snapshot.text === defaultText && !snapshot.pass) {
+            clearLevelProgress(levelId);
+            return;
+        }
+        writeLevelProgress(snapshot, levelId);
     }
     function setStatus(text, cls = "muted") {
         if (!status)
@@ -356,10 +388,10 @@ function createCodeEditorTemplate(config) {
         }
         nextBtn?.classList.remove("hidden");
         pager?.update();
+        persistProgress();
     }
     if (editor) {
-        editor.value = startCode;
-        state.text = startCode;
+        editor.value = state.text;
         editor.addEventListener("input", () => {
             state.text = normalizeEditorText(editor.value);
             if (!allowNewLines && editor.value !== state.text)
@@ -400,6 +432,15 @@ function createCodeEditorTemplate(config) {
             hintBtn?.classList.add("hidden");
             pager?.pulseNext();
             render();
+        });
+    }
+    if (levelResetBtn) {
+        levelResetBtn.addEventListener("click", () => {
+            const confirmed = window.confirm("Reset your saved progress for this level and start over?");
+            if (!confirmed)
+                return;
+            clearLevelProgress(levelId);
+            window.location.reload();
         });
     }
     pager = createStepper({

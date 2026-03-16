@@ -1,9 +1,11 @@
 import { appendStateObjects, bindBtnRefPulse, boxValueMatchesSpec, clearNode, createSimpleSimulator, createStepper, disableBoxEditing, ensurePanelizedMain, findArrayObjectBoxesForResult, flashStatus, formatValueForType, getNavLabelForHref, normalizeBoxValueForContext, readBoxState, queryRole, setPartsContent, syncDocumentTitleFromNav, vbox, } from "./shared-core.js";
+import { clearLevelProgress, currentLevelId, maybeRestoreLevelProgress, writeLevelProgress, } from "./shared-progress.js";
 function collectExpressionElements(root = document) {
     const role = (name) => queryRole(name, root);
     return {
         instructionsEl: role("expr-instructions"),
         continueBtn: role("expr-continue"),
+        levelResetBtn: role("expr-reset-level"),
         sectionEl: role("expr-section"),
         expressionEl: role("expr-expression"),
         answerPanel: role("expr-answer-panel"),
@@ -99,6 +101,10 @@ function ensureExpressionLayout() {
     const nextBtn = document.createElement("button");
     nextBtn.dataset.stepper = "next";
     nextBtn.textContent = "Next ▶";
+    const levelResetBtn = document.createElement("button");
+    levelResetBtn.type = "button";
+    levelResetBtn.dataset.role = "expr-reset-level";
+    levelResetBtn.textContent = "Reset level";
     const controlsSpacer = document.createElement("span");
     controlsSpacer.className = "controls-spacer";
     controlsSpacer.setAttribute("aria-hidden", "true");
@@ -112,6 +118,7 @@ function ensureExpressionLayout() {
     controlsRow.appendChild(prevBtn);
     controlsRow.appendChild(nextBtn);
     controlsRow.appendChild(controlsSpacer);
+    controlsRow.appendChild(levelResetBtn);
     controlsRow.appendChild(continueBtn);
     controlsRow.appendChild(hintBtn);
     controlsRow.appendChild(checkBtn);
@@ -164,23 +171,57 @@ function createExpressionEvalTemplate(config) {
         ...step,
         editable: step.editable === true,
     }));
-    const { instructionsEl, continueBtn, sectionEl, expressionEl, answerPanel, answerSlot, answerResult, toggleWrap, hintPanel, hintBtn, useSelectedBtn, useEnteredBtn, checkBtn, statusEl, stageEl, statePanel, } = ensureExpressionLayout();
+    const { instructionsEl, continueBtn, levelResetBtn, sectionEl, expressionEl, answerPanel, answerSlot, answerResult, toggleWrap, hintPanel, hintBtn, useSelectedBtn, useEnteredBtn, checkBtn, statusEl, stageEl, statePanel, } = ensureExpressionLayout();
     bindBtnRefPulse(sectionEl || document);
     const simulator = createSimpleSimulator();
-    const state = {
-        boundary: 0,
-        passes: {},
-        selections: {},
-        entered: {},
-        modes: {},
-        showIntro: !!initialInstructions,
-    };
     let pager = null;
     let selectedName = null;
     let activeMode = "selected";
     function stepFor(index) {
         return normalizedSteps[Math.max(0, Math.min(normalizedSteps.length - 1, index))];
     }
+    function clampBoundary(value) {
+        const safe = Math.floor(Number(value));
+        if (!Number.isFinite(safe))
+            return 0;
+        return Math.max(0, Math.min(normalizedSteps.length - 1, safe));
+    }
+    function sanitizedRecord(value) {
+        if (!value || typeof value !== "object")
+            return {};
+        const entries = Object.entries(value).filter(([key]) => /^\d+$/.test(key));
+        return Object.fromEntries(entries);
+    }
+    function sanitizedPassedSelections(value, passes) {
+        if (!value || typeof value !== "object")
+            return {};
+        const entries = Object.entries(value).filter(([key, selected]) => passes[Number(key)] === true && typeof selected === "string");
+        return Object.fromEntries(entries);
+    }
+    function defaultModeForStep(index) {
+        const step = stepFor(index);
+        if (step.editable && step.fixValueCategory) {
+            const evaluated = evaluatedAnswer(step);
+            if ("result" in evaluated && evaluated.result) {
+                return evaluated.result.kind === "lvalue" ? "selected" : "entered";
+            }
+        }
+        return "selected";
+    }
+    const levelId = currentLevelId();
+    const defaultShowIntro = !!initialInstructions;
+    const restoredProgress = maybeRestoreLevelProgress(levelId, "this level");
+    const restoredPasses = sanitizedRecord(restoredProgress?.passes);
+    const state = {
+        boundary: clampBoundary(restoredProgress?.boundary ?? 0),
+        passes: restoredPasses,
+        selections: sanitizedPassedSelections(restoredProgress?.selections, restoredPasses),
+        entered: sanitizedRecord(restoredProgress?.entered),
+        modes: sanitizedRecord(restoredProgress?.modes),
+        showIntro: typeof restoredProgress?.showIntro === "boolean"
+            ? restoredProgress.showIntro
+            : defaultShowIntro,
+    };
     function setStatus(text, ok, silent = false) {
         if (!statusEl)
             return;
@@ -350,6 +391,37 @@ function createExpressionEvalTemplate(config) {
         const node = answerSlot?.querySelector(".vbox") || null;
         return node ? readBoxState(node) : null;
     }
+    function progressSnapshot() {
+        const passes = Object.fromEntries(Object.entries(state.passes).filter(([, value]) => value === true));
+        const selections = Object.fromEntries(Object.entries(state.selections).filter(([key, value]) => passes[Number(key)] === true && typeof value === "string"));
+        const entered = Object.fromEntries(Object.entries(state.entered).filter(([, value]) => value != null));
+        const modes = Object.fromEntries(Object.entries(state.modes).filter(([key, value]) => {
+            const index = Number(key);
+            return value === "entered" && defaultModeForStep(index) !== "entered";
+        }));
+        return {
+            boundary: clampBoundary(state.boundary),
+            passes,
+            selections,
+            entered,
+            modes,
+            showIntro: state.showIntro,
+        };
+    }
+    function persistProgress() {
+        const snapshot = progressSnapshot();
+        const isDefault = snapshot.boundary === 0 &&
+            Object.keys(snapshot.passes).length === 0 &&
+            Object.keys(snapshot.selections).length === 0 &&
+            Object.keys(snapshot.entered).length === 0 &&
+            Object.keys(snapshot.modes).length === 0 &&
+            snapshot.showIntro === defaultShowIntro;
+        if (isDefault) {
+            clearLevelProgress(levelId);
+            return;
+        }
+        writeLevelProgress(snapshot, levelId);
+    }
     function expectedAnswer(step) {
         const evaluated = evaluatedAnswer(step);
         if ("error" in evaluated) {
@@ -486,7 +558,12 @@ function createExpressionEvalTemplate(config) {
         const step = stepFor(index);
         if (!step.editable)
             return;
-        state.selections[index] = selectedName;
+        if (state.passes[index] && activeMode === "selected" && selectedName) {
+            state.selections[index] = selectedName;
+        }
+        else {
+            delete state.selections[index];
+        }
         if (activeMode === "entered" && answerSlot) {
             const node = answerSlot.querySelector(".vbox");
             state.entered[index] = node ? readBoxState(node) : null;
@@ -509,6 +586,7 @@ function createExpressionEvalTemplate(config) {
             setControlVisible(sectionEl, false);
             setControlVisible(hintBtn, false);
             hideHint();
+            persistProgress();
             return;
         }
         setControlVisible(continueBtn, false);
@@ -572,6 +650,7 @@ function createExpressionEvalTemplate(config) {
             checkBtn.disabled = false;
         }
         pager?.update();
+        persistProgress();
     }
     function markCurrentStepPassed() {
         state.passes[state.boundary] = true;
@@ -581,6 +660,7 @@ function createExpressionEvalTemplate(config) {
         disableBoxEditing(answerSlot);
         pager?.pulseNext();
         pager?.update();
+        persistProgress();
     }
     function checkAnswer() {
         hideHint();
@@ -653,6 +733,7 @@ function createExpressionEvalTemplate(config) {
             state.modes[state.boundary] = "selected";
             updateSelectionHighlight(selectedName, true);
             renderSelectedPreview(stepFor(state.boundary));
+            persistProgress();
         });
     }
     if (useEnteredBtn) {
@@ -660,13 +741,23 @@ function createExpressionEvalTemplate(config) {
             const step = stepFor(state.boundary);
             if (!step.editable || step.fixValueCategory)
                 return;
-            if (activeMode === "selected") {
-                state.selections[state.boundary] = selectedName;
-            }
             setActiveMode("entered", true);
             state.modes[state.boundary] = "entered";
             updateSelectionHighlight(selectedName, false);
             renderEnteredBox(state.entered[state.boundary] ?? null, true);
+            persistProgress();
+        });
+    }
+    if (answerSlot) {
+        answerSlot.addEventListener("input", () => {
+            saveStep(state.boundary);
+            persistProgress();
+        });
+        answerSlot.addEventListener("click", () => {
+            window.setTimeout(() => {
+                saveStep(state.boundary);
+                persistProgress();
+            }, 0);
         });
     }
     if (checkBtn) {
@@ -676,6 +767,15 @@ function createExpressionEvalTemplate(config) {
         continueBtn.addEventListener("click", () => {
             state.showIntro = false;
             render();
+        });
+    }
+    if (levelResetBtn) {
+        levelResetBtn.addEventListener("click", () => {
+            const confirmed = window.confirm("Reset your saved progress for this level and start over?");
+            if (!confirmed)
+                return;
+            clearLevelProgress(levelId);
+            window.location.reload();
         });
     }
     if (hintBtn) {
@@ -702,10 +802,13 @@ function createExpressionEvalTemplate(config) {
         nextPage: next,
         getBoundary: () => state.boundary,
         setBoundary: (value) => {
-            state.boundary = value;
+            state.boundary = clampBoundary(value);
         },
         isStepLocked: (at) => isStepLocked(at),
-        onBeforeChange: (current) => saveStep(current),
+        onBeforeChange: (current) => {
+            saveStep(current);
+            persistProgress();
+        },
         onAfterChange: () => render(),
         getNextLabel: (_boundary, _total, atEnd) => {
             if (atEnd)

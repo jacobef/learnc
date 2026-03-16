@@ -818,6 +818,13 @@ button {
     width: 20px;
     height: 1px;
 }
+.controls-row [data-role="code-reset-level"],
+.controls-row [data-role="expr-reset-level"],
+.controls-row [data-role="program-reset-level"],
+.program-mobile-actions [data-role="program-reset-level"] {
+    order: 999;
+    margin-left: auto;
+}
 .controls .gap-wide {
     margin-left: 24px;
 }
@@ -1349,6 +1356,12 @@ body.panel-layout .panel-controls.controls-main {
 .start-button {
     font-size: 20px;
     margin: auto;
+}
+.home-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
 }
 
 .state-group {

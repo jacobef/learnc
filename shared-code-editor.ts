@@ -29,6 +29,12 @@ import {
   updateCodeSurface,
   type CodeDecoration,
 } from "./shared-code-editor-surface.js";
+import {
+  clearLevelProgress,
+  currentLevelId,
+  maybeRestoreLevelProgress,
+  writeLevelProgress,
+} from "./shared-progress.js";
 
 type CodeEditorParts = Parts;
 type CodeEditorPartsSpec =
@@ -46,6 +52,7 @@ interface CodeEditorElements {
   hintPanel: HTMLElement | null;
   hintBtn: HTMLButtonElement | null;
   checkBtn: HTMLButtonElement | null;
+  levelResetBtn: HTMLButtonElement | null;
   nextBtn: HTMLButtonElement | null;
   codeRoot: HTMLElement | null;
 }
@@ -86,6 +93,12 @@ interface CodeEditorResult {
   outcome: CodeEditorOutcome;
 }
 
+interface CodeEditorProgress {
+  text: string;
+  pass: boolean;
+  allocBase: number | null;
+}
+
 function collectCodeEditorElements(
   root: ParentNode = document,
 ): CodeEditorElements {
@@ -100,6 +113,7 @@ function collectCodeEditorElements(
     hintPanel: role<HTMLElement>("code-hint"),
     hintBtn: role<HTMLButtonElement>("code-hint-btn"),
     checkBtn: role<HTMLButtonElement>("code-check"),
+    levelResetBtn: role<HTMLButtonElement>("code-reset-level"),
     nextBtn: queryElement<HTMLButtonElement>('button[data-stepper="next"]', root),
     codeRoot: role<HTMLElement>("code-root"),
   };
@@ -180,13 +194,16 @@ function ensureCodeEditorLayout(
   const checkBtn = document.createElement("button");
   checkBtn.dataset.role = "code-check";
   checkBtn.textContent = "Check";
+  const levelResetBtn = document.createElement("button");
+  levelResetBtn.dataset.role = "code-reset-level";
+  levelResetBtn.textContent = "Reset level";
   const status = document.createElement("span");
   status.dataset.role = "code-status";
   status.className = "muted";
   const spacer = document.createElement("span");
   spacer.className = "controls-spacer";
   spacer.setAttribute("aria-hidden", "true");
-  controlsRow.append(nextBtn, spacer, hintBtn, checkBtn, status);
+  controlsRow.append(nextBtn, spacer, levelResetBtn, hintBtn, checkBtn, status);
 
   const hintPanel = document.createElement("div");
   hintPanel.dataset.role = "code-hint";
@@ -204,6 +221,7 @@ function ensureCodeEditorLayout(
     hintPanel,
     hintBtn,
     checkBtn,
+    levelResetBtn,
     nextBtn,
     codeRoot: section,
   };
@@ -231,6 +249,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     hintPanel,
     hintBtn,
     checkBtn,
+    levelResetBtn,
     nextBtn,
     codeRoot,
   } = ensureCodeEditorLayout(textareaMinLines);
@@ -238,7 +257,23 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
 
   bindBtnRefPulse(codeRoot || document);
   const simulator = createSimpleSimulator();
-  const state: CodeEditorState = { text: startCode, pass: false, allocBase: null };
+  const levelId = currentLevelId();
+  const defaultText = normalizeEditorText(startCode);
+  const restoredProgress = maybeRestoreLevelProgress<CodeEditorProgress>(
+    levelId,
+    "this level",
+  );
+  const state: CodeEditorState = {
+    text:
+      typeof restoredProgress?.text === "string"
+        ? normalizeEditorText(restoredProgress.text)
+        : defaultText,
+    pass: restoredProgress?.pass === true,
+    allocBase:
+      typeof restoredProgress?.allocBase === "number"
+        ? restoredProgress.allocBase
+        : null,
+  };
   let pager: Stepper | null = null;
 
   const endLabel = (() => {
@@ -273,6 +308,23 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
   function normalizeEditorText(text: string): string {
     if (allowNewLines) return text;
     return text.replace(/\r\n/g, "\n").replace(/\n/g, " ");
+  }
+
+  function progressSnapshot(): CodeEditorProgress {
+    return {
+      text: state.text,
+      pass: state.pass,
+      allocBase: state.allocBase,
+    };
+  }
+
+  function persistProgress() {
+    const snapshot = progressSnapshot();
+    if (snapshot.text === defaultText && !snapshot.pass) {
+      clearLevelProgress(levelId);
+      return;
+    }
+    writeLevelProgress(snapshot, levelId);
   }
 
   function setStatus(text: string, cls = "muted") {
@@ -486,11 +538,11 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     }
     nextBtn?.classList.remove("hidden");
     pager?.update();
+    persistProgress();
   }
 
   if (editor) {
-    editor.value = startCode;
-    state.text = startCode;
+    editor.value = state.text;
     editor.addEventListener("input", () => {
       state.text = normalizeEditorText(editor.value);
       if (!allowNewLines && editor.value !== state.text) editor.value = state.text;
@@ -528,6 +580,17 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
       hintBtn?.classList.add("hidden");
       pager?.pulseNext();
       render();
+    });
+  }
+
+  if (levelResetBtn) {
+    levelResetBtn.addEventListener("click", () => {
+      const confirmed = window.confirm(
+        "Reset your saved progress for this level and start over?",
+      );
+      if (!confirmed) return;
+      clearLevelProgress(levelId);
+      window.location.reload();
     });
   }
 

@@ -1,4 +1,5 @@
 import { applyTextTokenReplacements, applyOtherNames, appendStateObjects, boxValueMatchesSpec, clearNode, cloneBoxes, createSimpleSimulator, createStepper, bindBtnRefPulse, disableBoxEditing, ensurePanelizedMain, flashStatus, getNavLabelForHref, isMobileViewport, makeAnswerBox, normalizeBoxValueForContext, normalizeZeroDisplay, queryRole, randAddr, removeBoxDeleteButtons, renderCodePane, renderParts, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, typeInfo, } from "./shared-core.js";
+import { clearLevelProgress, currentLevelId, maybeRestoreLevelProgress, writeLevelProgress, } from "./shared-progress.js";
 function collectProgramElements(root = document) {
     const role = (name) => queryRole(name, root);
     return {
@@ -12,6 +13,7 @@ function collectProgramElements(root = document) {
         hintPanel: role("program-hint"),
         hintBtn: role("program-hint-btn"),
         checkBtn: role("program-check"),
+        levelResetBtn: role("program-reset-level"),
         addBtn: role("program-add"),
         resetBtn: role("program-reset"),
     };
@@ -68,12 +70,16 @@ function ensureProgramLayout() {
     const nextBtn = document.createElement("button");
     nextBtn.textContent = "Run line 1 ▶";
     nextBtn.dataset.stepper = "next";
+    const levelResetBtn = document.createElement("button");
+    levelResetBtn.dataset.role = "program-reset-level";
+    levelResetBtn.textContent = "Reset level";
     const controlsSpacer = document.createElement("span");
     controlsSpacer.className = "controls-spacer";
     controlsSpacer.setAttribute("aria-hidden", "true");
     controlsRow.appendChild(prevBtn);
     controlsRow.appendChild(nextBtn);
     controlsRow.appendChild(controlsSpacer);
+    controlsRow.appendChild(levelResetBtn);
     codePanel.appendChild(codeTitle);
     codePanel.appendChild(codeEl);
     const statePanel = document.createElement("div");
@@ -132,6 +138,7 @@ function ensureProgramLayout() {
         hintPanel,
         hintBtn,
         checkBtn,
+        levelResetBtn,
         addBtn,
         resetBtn,
     };
@@ -151,13 +158,13 @@ function createProgramTemplate(config) {
         throw new Error(message);
     };
     const simulator = createSimpleSimulator();
-    const { instructionsEl, codeEl, codeRoot, stageEl, controlsActionsEl, mobileActionsEl, statusEl, hintPanel, hintBtn, checkBtn, addBtn, resetBtn, } = ensureProgramLayout();
+    const { instructionsEl, codeEl, codeRoot, stageEl, controlsActionsEl, mobileActionsEl, statusEl, hintPanel, hintBtn, checkBtn, levelResetBtn, addBtn, resetBtn, } = ensureProgramLayout();
     function placeActionButtonsForViewport() {
         const mobileMode = isMobileViewport() && !!mobileActionsEl;
         const target = mobileMode ? mobileActionsEl : controlsActionsEl;
         if (!target)
             return;
-        [resetBtn, addBtn, hintBtn, checkBtn, statusEl].forEach((node) => {
+        [levelResetBtn, resetBtn, addBtn, hintBtn, checkBtn, statusEl].forEach((node) => {
             if (node && node.parentElement !== target)
                 target.appendChild(node);
         });
@@ -179,7 +186,7 @@ function createProgramTemplate(config) {
     function updateMobileActionsVisibility() {
         if (!mobileActionsEl)
             return;
-        const hasVisibleAction = [checkBtn, hintBtn, addBtn, resetBtn].some((btn) => !!btn && !btn.classList.contains("hidden"));
+        const hasVisibleAction = [levelResetBtn, checkBtn, hintBtn, addBtn, resetBtn].some((btn) => !!btn && !btn.classList.contains("hidden"));
         mobileActionsEl.classList.toggle("hidden", !hasVisibleAction);
     }
     placeActionButtonsForViewport();
@@ -329,6 +336,8 @@ function createProgramTemplate(config) {
         const safeLine = Math.max(0, Math.min(total - 1, Math.floor(line)));
         return stepByLine[safeLine] ?? null;
     }
+    const levelId = currentLevelId();
+    const restoredProgress = maybeRestoreLevelProgress(levelId, "this level");
     const state = {
         boundary: 0,
         executionSteps: -1,
@@ -736,6 +745,30 @@ function createProgramTemplate(config) {
     function runtimeStepClamp(stepCount) {
         const safeStep = Math.floor(stepCount);
         return Math.max(-1, Math.min(runtimeMaxStep(), safeStep));
+    }
+    function progressSnapshot() {
+        return {
+            executionSteps: state.executionSteps,
+            allocBase: state.allocBase,
+            runtimeLatestSolvedStage,
+            runtimeWorkspaceByStage: Array.from(runtimeWorkspaceByStage.entries())
+                .filter(([stageIndex]) => Number.isFinite(stageIndex))
+                .map(([stageIndex, boxes]) => ({
+                stageIndex,
+                boxes: boxes ? cloneBoxes(boxes) : null,
+            })),
+        };
+    }
+    function persistProgress() {
+        const snapshot = progressSnapshot();
+        const isDefault = snapshot.executionSteps === -1 &&
+            snapshot.runtimeLatestSolvedStage === -1 &&
+            snapshot.runtimeWorkspaceByStage.length === 0;
+        if (isDefault) {
+            clearLevelProgress(levelId);
+            return;
+        }
+        writeLevelProgress(snapshot, levelId);
     }
     function runtimeTraceForStage(stepCount) {
         if (!runtimeTraceByStep.length)
@@ -1748,6 +1781,18 @@ function createProgramTemplate(config) {
             }
         });
     }
+    if (stageEl) {
+        stageEl.addEventListener("input", () => {
+            save();
+            persistProgress();
+        });
+        stageEl.addEventListener("click", () => {
+            window.setTimeout(() => {
+                save();
+                persistProgress();
+            }, 0);
+        });
+    }
     function scrollInstructionsUpIfNeeded(instructionKey) {
         if (!instructionsEl || !instructionKey || instructionKey === state.lastInstructionKey)
             return;
@@ -1868,6 +1913,7 @@ function createProgramTemplate(config) {
         if (normalEditable && resetBtn)
             updateResetVisibility(key);
         ensureCodeLineVisible();
+        persistProgress();
     }
     function save() {
         const key = state.boundary;
@@ -1894,6 +1940,17 @@ function createProgramTemplate(config) {
             ensureNewVariableVisible(node);
             updateResetVisibility(state.boundary);
             refreshOtherNames();
+            save();
+            persistProgress();
+        });
+    }
+    if (levelResetBtn) {
+        levelResetBtn.addEventListener("click", () => {
+            const confirmed = window.confirm("Reset your saved progress for this level and start over?");
+            if (!confirmed)
+                return;
+            clearLevelProgress(levelId);
+            window.location.reload();
         });
     }
     if (resetBtn) {
@@ -2023,6 +2080,32 @@ function createProgramTemplate(config) {
             showHint(parts, runLabel);
         });
     }
+    if (restoredProgress) {
+        state.executionSteps = runtimeStepClamp(restoredProgress.executionSteps);
+        state.allocBase =
+            typeof restoredProgress.allocBase === "number"
+                ? restoredProgress.allocBase
+                : null;
+        const solvedStage = Math.floor(Number(restoredProgress.runtimeLatestSolvedStage));
+        runtimeLatestSolvedStage = Number.isFinite(solvedStage)
+            ? Math.max(-1, Math.min(runtimeMaxStep(), solvedStage))
+            : -1;
+        runtimeWorkspaceByStage.clear();
+        if (Array.isArray(restoredProgress.runtimeWorkspaceByStage)) {
+            restoredProgress.runtimeWorkspaceByStage.forEach((entry) => {
+                const stageIndex = Math.floor(Number(entry?.stageIndex));
+                if (!Number.isFinite(stageIndex))
+                    return;
+                if (stageIndex < 0 || stageIndex > runtimeMaxStep())
+                    return;
+                const stage = runtimeStages[stageIndex];
+                if (!stage || stage.editableMode !== "state")
+                    return;
+                const boxes = Array.isArray(entry?.boxes) ? cloneBoxes(entry.boxes) : null;
+                runtimeWorkspaceByStage.set(stageIndex, boxes);
+            });
+        }
+    }
     syncBoundaryFromStage();
     const pager = createStepper({
         root: codeRoot || codeEl?.closest(".panel") || document.body,
@@ -2038,7 +2121,10 @@ function createProgramTemplate(config) {
             }
             syncBoundaryFromStage();
         },
-        onBeforeChange: save,
+        onBeforeChange: () => {
+            save();
+            persistProgress();
+        },
         onAfterChange: render,
         isStepLocked: () => !!runtimePendingStage(),
         getStepBadge: () => runtimeStepBadge(),

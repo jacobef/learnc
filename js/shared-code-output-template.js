@@ -1,5 +1,6 @@
 import { applyTextTokenReplacements, appendStateObjects, bindBtnRefPulse, boxValueMatchesSpec, clearNode, createSimpleSimulator, createStepper, ensurePanelizedMain, flashStatus, formatValueForType, getNavLabelForHref, parseType, queryElement, queryRole, randAddr, renderParts, setPartsContent, syncDocumentTitleFromNav, typeInfo, } from "./shared-core.js";
 import { ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
+import { clearLevelProgress, currentLevelId, maybeRestoreLevelProgress, writeLevelProgress, } from "./shared-progress.js";
 const INT32_MIN = -2147483648n;
 const INT32_MAX = 2147483647n;
 function collectCodeOutputChallengeElements(root = document) {
@@ -16,6 +17,7 @@ function collectCodeOutputChallengeElements(root = document) {
         hintPanel: role("code-hint"),
         hintBtn: role("code-hint-btn"),
         checkBtn: role("code-check"),
+        levelResetBtn: role("code-reset-level"),
         rerollBtn: role("code-reroll"),
         showFailBtn: role("code-show-failing-case"),
         nextBtn: queryElement('button[data-stepper="next"]', root),
@@ -110,6 +112,9 @@ function ensureCodeOutputChallengeLayout({ textareaMinLines, }) {
     const checkBtn = document.createElement("button");
     checkBtn.dataset.role = "code-check";
     checkBtn.textContent = "Check";
+    const levelResetBtn = document.createElement("button");
+    levelResetBtn.dataset.role = "code-reset-level";
+    levelResetBtn.textContent = "Reset level";
     const showFailBtn = document.createElement("button");
     showFailBtn.dataset.role = "code-show-failing-case";
     showFailBtn.textContent = "Show failing case";
@@ -123,6 +128,7 @@ function ensureCodeOutputChallengeLayout({ textareaMinLines, }) {
     status.dataset.role = "code-status";
     status.className = "muted";
     controlsRow.appendChild(rerollBtn);
+    controlsRow.appendChild(levelResetBtn);
     controlsRow.appendChild(hintBtn);
     controlsRow.appendChild(checkBtn);
     controlsRow.appendChild(showFailBtn);
@@ -147,6 +153,7 @@ function ensureCodeOutputChallengeLayout({ textareaMinLines, }) {
         hintPanel,
         hintBtn,
         checkBtn,
+        levelResetBtn,
         rerollBtn,
         showFailBtn,
         nextBtn,
@@ -214,7 +221,7 @@ function createCodeOutputChallengeTemplate(config) {
     if (!solveCode.trim()) {
         failConfig("solve must be a non-empty C code string.");
     }
-    const { instructionsEl, lockedLineNumbers, lockedInputLine, editor, lineNumbers, stage, status, diagnosticEl, hintPanel, hintBtn, checkBtn, rerollBtn, showFailBtn, nextBtn, codeRoot, } = ensureCodeOutputChallengeLayout({ textareaMinLines });
+    const { instructionsEl, lockedLineNumbers, lockedInputLine, editor, lineNumbers, stage, status, diagnosticEl, hintPanel, hintBtn, checkBtn, levelResetBtn, rerollBtn, showFailBtn, nextBtn, codeRoot, } = ensureCodeOutputChallengeLayout({ textareaMinLines });
     const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
     bindBtnRefPulse(codeRoot || document);
     const simulator = createSimpleSimulator();
@@ -382,15 +389,37 @@ function createCodeOutputChallengeTemplate(config) {
         const item = candidates[index];
         return copyCase(item);
     }
+    function restoreCase(inputLiterals) {
+        if (!Array.isArray(inputLiterals) || inputLiterals.length !== inputSpecs.length) {
+            return null;
+        }
+        try {
+            return createChallengeCaseForInputRow(inputLiterals, "saved progress");
+        }
+        catch {
+            return null;
+        }
+    }
+    const levelId = currentLevelId();
+    const defaultText = normalizeUserCodeText(startCode);
+    const defaultVisibleCase = createChallengeCaseForInputRow(startInput, "startInput");
+    const restoredProgress = maybeRestoreLevelProgress(levelId, "this level");
+    const restoredVisibleCase = restoreCase(restoredProgress?.visibleCaseInputLiterals);
+    const restoredPendingCase = restoreCase(restoredProgress?.pendingFailingCaseInputLiterals);
+    const restoredHadRunChecks = restoredProgress?.hasRunChecks === true;
     const state = {
-        text: "",
-        pass: false,
-        allocBase: null,
-        visibleCase: createChallengeCaseForInputRow(startInput, "startInput"),
+        text: typeof restoredProgress?.text === "string"
+            ? normalizeUserCodeText(restoredProgress.text)
+            : defaultText,
+        pass: restoredProgress?.pass === true,
+        allocBase: typeof restoredProgress?.allocBase === "number"
+            ? restoredProgress.allocBase
+            : null,
+        visibleCase: restoredVisibleCase || copyCase(defaultVisibleCase),
         testCases,
         lastReport: null,
-        pendingFailingCase: null,
-        showFullShownOutput: false,
+        pendingFailingCase: restoredPendingCase,
+        showFullShownOutput: restoredProgress?.showFullShownOutput === true,
     };
     let pager = null;
     function normalizeUserCodeText(text) {
@@ -409,9 +438,6 @@ function createCodeOutputChallengeTemplate(config) {
                 removed += 1;
         }
         return Math.max(0, safePos - removed);
-    }
-    if (String(startCode || "") !== "") {
-        state.text = normalizeUserCodeText(startCode);
     }
     function allocFactory() {
         if (state.allocBase == null)
@@ -664,6 +690,36 @@ function createCodeOutputChallengeTemplate(config) {
             address: "<i>(any)</i>",
         }));
     }
+    function progressSnapshot() {
+        return {
+            text: getUserText(),
+            pass: state.pass,
+            allocBase: state.allocBase,
+            visibleCaseInputLiterals: state.visibleCase.inputLiterals.slice(),
+            pendingFailingCaseInputLiterals: state.pendingFailingCase
+                ? state.pendingFailingCase.inputLiterals.slice()
+                : null,
+            showFullShownOutput: state.showFullShownOutput,
+            hasRunChecks: !!state.lastReport,
+        };
+    }
+    function isDefaultProgress(snapshot) {
+        return (snapshot.text === defaultText &&
+            !snapshot.pass &&
+            caseInputKey({ inputLiterals: snapshot.visibleCaseInputLiterals }) ===
+                caseInputKey(defaultVisibleCase) &&
+            snapshot.pendingFailingCaseInputLiterals == null &&
+            !snapshot.showFullShownOutput &&
+            !snapshot.hasRunChecks);
+    }
+    function persistProgress() {
+        const snapshot = progressSnapshot();
+        if (isDefaultProgress(snapshot)) {
+            clearLevelProgress(levelId);
+            return;
+        }
+        writeLevelProgress(snapshot, levelId);
+    }
     function renderStatePanel(title, boxes, kind = "ok", opts = {}) {
         const { emptyMessage = "(no variables)", controls = null } = opts;
         const wrap = document.createElement("div");
@@ -735,6 +791,7 @@ function createCodeOutputChallengeTemplate(config) {
             toggle.addEventListener("click", () => {
                 state.showFullShownOutput = !state.showFullShownOutput;
                 renderStage();
+                persistProgress();
             });
             return toggle;
         })();
@@ -892,6 +949,7 @@ function createCodeOutputChallengeTemplate(config) {
             editor?.classList.add("readonly");
         if (nextBtn)
             nextBtn.disabled = !state.pass;
+        persistProgress();
     }
     function buildHintContext(currentResult, report) {
         return {
@@ -945,6 +1003,15 @@ function createCodeOutputChallengeTemplate(config) {
             const ro = new ResizeObserver(() => updateLineGutters(getProgramDiagnostic()));
             ro.observe(editor);
         }
+    }
+    if (levelResetBtn) {
+        levelResetBtn.addEventListener("click", () => {
+            const confirmed = window.confirm("Reset your saved progress for this level and start over?");
+            if (!confirmed)
+                return;
+            clearLevelProgress(levelId);
+            window.location.reload();
+        });
     }
     if (rerollBtn) {
         rerollBtn.addEventListener("click", () => {
@@ -1021,6 +1088,16 @@ function createCodeOutputChallengeTemplate(config) {
             setStatus("correct", "ok");
             flashStatus(status);
         });
+    }
+    if (restoredHadRunChecks && !state.pass) {
+        state.lastReport = runAllCases();
+        if (state.lastReport.pass) {
+            state.pendingFailingCase = null;
+        }
+        else if (!state.pendingFailingCase) {
+            const failingCase = state.lastReport.firstFailure?.testCase || null;
+            state.pendingFailingCase = failingCase ? copyCase(failingCase) : null;
+        }
     }
     pager = createStepper({
         root: codeRoot || editor?.closest(".panel") || document.body,
