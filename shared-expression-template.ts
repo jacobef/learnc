@@ -495,8 +495,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       step.boxes ?? [],
     );
     if ("error" in evaluated) {
-      const error = evaluated.error ?? "That expression is not valid here.";
-      return { error, kind: evaluated.kind } as const;
+      return { error: true, kind: evaluated.kind } as const;
     }
     return { result: evaluated.result } as const;
   }
@@ -509,7 +508,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
   function expectedAnswer(step: ExpressionStep): ExpressionHintContext["expected"] {
     const evaluated = evaluatedAnswer(step);
     if ("error" in evaluated) {
-      return { kind: "error", message: errorText(evaluated.error) };
+      return { kind: "error", message: errorText(evaluated.kind) };
     }
     if (evaluated.result.kind === "lvalue") {
       return { kind: "lvalue", address: String(evaluated.result.address || "") };
@@ -568,11 +567,10 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     };
   }
 
-  function errorText(
-    error: string | { text: string; html: string } | undefined,
-  ) {
-    if (!error) return "That expression is not valid here.";
-    return typeof error === "string" ? error : error.text;
+  function errorText(kind: "compile" | "ub" | undefined) {
+    return kind === "ub"
+      ? "This expression is undefined."
+      : "This expression is not valid.";
   }
 
   function renderCorrectAnswer(step: ExpressionStep) {
@@ -582,7 +580,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     if ("error" in evaluated) {
       const msg = document.createElement("div");
       msg.className = "expr-answer-empty muted";
-      msg.textContent = errorText(evaluated.error);
+      msg.textContent = errorText(evaluated.kind);
       answerResult.appendChild(msg);
       return;
     }
@@ -742,7 +740,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     if (!step.editable) return;
     const evaluation = evaluatedAnswer(step);
     if ("error" in evaluation) {
-      setStatus(errorText(evaluation.error), false);
+      setStatus(errorText(evaluation.kind), false);
       return;
     }
     if (activeMode === "selected") {

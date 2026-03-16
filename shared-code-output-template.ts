@@ -19,7 +19,18 @@ import {
   syncDocumentTitleFromNav,
   typeInfo,
 } from "./shared-core.js";
-import type { BoxState, LineStatus, Parts, SimpleSimulator, Stepper } from "./shared-core.js";
+import type {
+  BoxState,
+  Parts,
+  ProgramDiagnostic,
+  SimpleSimulator,
+  Stepper,
+} from "./shared-core.js";
+import {
+  ensureCodeSurfaceElements,
+  updateCodeSurface,
+  type CodeDecoration,
+} from "./shared-code-editor-surface.js";
 
 type ChallengeParts = Parts;
 type ChallengeScalar = string | number | bigint;
@@ -60,12 +71,11 @@ interface CodeOutputChallengeElements {
   instructionsEl: HTMLElement | null;
   lockedLineNumbers: HTMLElement | null;
   lockedInputLine: HTMLElement | null;
-  lockedErrorGutter: HTMLElement | null;
   editor: HTMLTextAreaElement | null;
   lineNumbers: HTMLElement | null;
-  errorGutter: HTMLElement | null;
   stage: HTMLElement | null;
   status: HTMLElement | null;
+  diagnosticEl: HTMLElement | null;
   hintPanel: HTMLElement | null;
   hintBtn: HTMLButtonElement | null;
   checkBtn: HTMLButtonElement | null;
@@ -137,12 +147,11 @@ function collectCodeOutputChallengeElements(
     instructionsEl: role<HTMLElement>("code-instructions"),
     lockedLineNumbers: role<HTMLElement>("code-locked-line-numbers"),
     lockedInputLine: role<HTMLElement>("code-locked-input-line"),
-    lockedErrorGutter: role<HTMLElement>("code-locked-error-gutter"),
     editor: role<HTMLTextAreaElement>("code-editor"),
     lineNumbers: role<HTMLElement>("code-line-numbers"),
-    errorGutter: role<HTMLElement>("code-error-gutter"),
     stage: role<HTMLElement>("code-stage"),
     status: role<HTMLElement>("code-status"),
+    diagnosticEl: role<HTMLElement>("code-diagnostic"),
     hintPanel: role<HTMLElement>("code-hint"),
     hintBtn: role<HTMLButtonElement>("code-hint-btn"),
     checkBtn: role<HTMLButtonElement>("code-check"),
@@ -202,13 +211,8 @@ function ensureCodeOutputChallengeLayout({
   const lockedInputLine = document.createElement("div");
   lockedInputLine.dataset.role = "code-locked-input-line";
   lockedInputLine.className = "code-locked-line";
-  const lockedErrorGutter = document.createElement("div");
-  lockedErrorGutter.dataset.role = "code-locked-error-gutter";
-  lockedErrorGutter.className = "code-error-gutter code-error-gutter-locked";
-  lockedErrorGutter.setAttribute("aria-hidden", "true");
   lockedRow.appendChild(lockedLineNumbers);
   lockedRow.appendChild(lockedInputLine);
-  lockedRow.appendChild(lockedErrorGutter);
   const codeRow = document.createElement("div");
   codeRow.className = "codepane-row";
   const lineNumbers = document.createElement("div");
@@ -224,13 +228,8 @@ function ensureCodeOutputChallengeLayout({
   const rows = Math.max(1, Number(textareaMinLines));
   editor.setAttribute("rows", String(rows));
   editorWrap.appendChild(editor);
-  const errorGutter = document.createElement("div");
-  errorGutter.dataset.role = "code-error-gutter";
-  errorGutter.className = "code-error-gutter";
-  errorGutter.setAttribute("aria-hidden", "true");
   codeRow.appendChild(lineNumbers);
   codeRow.appendChild(editorWrap);
-  codeRow.appendChild(errorGutter);
   codePane.appendChild(lockedRow);
   codePane.appendChild(codeRow);
   const nextBtn = document.createElement("button");
@@ -241,8 +240,12 @@ function ensureCodeOutputChallengeLayout({
   controlsSpacer.setAttribute("aria-hidden", "true");
   controlsRow.appendChild(nextBtn);
   controlsRow.appendChild(controlsSpacer);
+  const diagnosticEl = document.createElement("div");
+  diagnosticEl.dataset.role = "code-diagnostic";
+  diagnosticEl.className = "code-diagnostic hidden";
   codePanel.appendChild(codeTitle);
   codePanel.appendChild(codePane);
+  codePanel.appendChild(diagnosticEl);
 
   const stateCol = document.createElement("div");
   stateCol.className = "code-editor-state-col";
@@ -286,12 +289,11 @@ function ensureCodeOutputChallengeLayout({
     instructionsEl,
     lockedLineNumbers,
     lockedInputLine,
-    lockedErrorGutter,
     editor,
     lineNumbers,
-    errorGutter,
     stage,
     status,
+    diagnosticEl,
     hintPanel,
     hintBtn,
     checkBtn,
@@ -394,12 +396,11 @@ function createCodeOutputChallengeTemplate(
     instructionsEl,
     lockedLineNumbers,
     lockedInputLine,
-    lockedErrorGutter,
     editor,
     lineNumbers,
-    errorGutter,
     stage,
     status,
+    diagnosticEl,
     hintPanel,
     hintBtn,
     checkBtn,
@@ -408,6 +409,7 @@ function createCodeOutputChallengeTemplate(
     nextBtn,
     codeRoot,
   } = ensureCodeOutputChallengeLayout({ textareaMinLines });
+  const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
 
   bindBtnRefPulse(codeRoot || document);
 
@@ -685,108 +687,94 @@ function createCodeOutputChallengeTemplate(
     return raw.split(/\r?\n/);
   }
 
-  function classifyUserLineStatuses(): LineStatus {
-    const lines = getUserRawLines();
-    const fullText = fullProgramTextForCase(state.visibleCase);
-    const fullLines = fullText.split(/\r?\n/);
-    const fullStatus = simulator.classifyLineStatuses(fullLines, {
-      alloc: allocFactory(),
-    });
-    const mapIndex = (line: number) => line - preludeLineCount;
-    const isVisibleLine = (line: number) =>
-      line >= preludeLineCount && mapIndex(line) < Math.max(lines.length, 1);
-    const invalid = new Set<number>();
-    const incomplete = new Set<number>();
-    const errors = new Map<number, string | { text: string; html: string }>();
-    const errorKinds = new Map<number, string>();
-    const info = new Map<number, string | { text: string; html: string }>();
-    fullStatus.invalid.forEach((line) => {
-      if (!isVisibleLine(line)) return;
-      invalid.add(mapIndex(line));
-    });
-    fullStatus.incomplete.forEach((line) => {
-      if (!isVisibleLine(line)) return;
-      incomplete.add(mapIndex(line));
-    });
-    fullStatus.errors.forEach((value, line) => {
-      if (!isVisibleLine(line)) return;
-      errors.set(mapIndex(line), value);
-    });
-    fullStatus.errorKinds.forEach((value, line) => {
-      if (!isVisibleLine(line)) return;
-      errorKinds.set(mapIndex(line), value);
-    });
-    fullStatus.info.forEach((value, line) => {
-      if (!isVisibleLine(line)) return;
-      info.set(mapIndex(line), value);
-    });
-    return { invalid, incomplete, errors, errorKinds, info };
-  }
-
-  function getLineHeightPx(): number {
-    if (!editor) return 32;
-    const style = window.getComputedStyle(editor);
-    const lh = parseFloat(style.lineHeight);
-    return Number.isFinite(lh) ? lh : 32;
-  }
-
-  function autoSizeEditor() {
-    if (!editor) return;
-    editor.style.height = "auto";
-    editor.style.height = `${editor.scrollHeight}px`;
-  }
-
   function syncEditorLinkedScroll() {
     if (!editor) return;
     if (lineNumbers) lineNumbers.scrollTop = editor.scrollTop;
-    if (errorGutter) errorGutter.scrollTop = editor.scrollTop;
   }
 
-  function updateLineGutters() {
-    autoSizeEditor();
+  function getProgramDiagnostic(): ProgramDiagnostic | null {
+    const diagnostics = simulator.diagnoseProgram(
+      fullProgramTextForCase(state.visibleCase),
+      {
+        alloc: makeAllocFactory(4096),
+      },
+    );
+    const diagnostic = diagnostics[0] || null;
+    if (!diagnostic) return null;
+    if (diagnostic.range.startLine < preludeLineCount) return null;
+    return {
+      ...diagnostic,
+      range: {
+        startLine: diagnostic.range.startLine - preludeLineCount,
+        startCol: diagnostic.range.startCol,
+        endLine: diagnostic.range.endLine - preludeLineCount,
+        endCol: diagnostic.range.endCol,
+      },
+    };
+  }
+
+  function diagnosticDecoration(
+    diagnostic: ProgramDiagnostic | null,
+  ): CodeDecoration[] {
+    if (!diagnostic) return [];
+    return [
+      {
+        line: diagnostic.range.startLine,
+        startCol: diagnostic.range.startCol,
+        endCol: diagnostic.range.endCol,
+        className: "code-highlight-error",
+      },
+    ];
+  }
+
+  function renderDiagnostic(diagnostic: ProgramDiagnostic | null) {
+    if (!diagnosticEl) return;
+    if (!diagnostic) {
+      diagnosticEl.classList.add("hidden");
+      diagnosticEl.textContent = "";
+      editor?.removeAttribute("aria-invalid");
+      return;
+    }
+    diagnosticEl.classList.remove("hidden");
+    diagnosticEl.replaceChildren();
+    const heading = document.createElement("div");
+    heading.className = "code-diagnostic-title";
+    heading.textContent = `${
+      diagnostic.kind === "ub" ? "Undefined behavior" : "Error"
+    } on line ${diagnostic.range.startLine + preludeLineCount + 1}, column ${
+      diagnostic.range.startCol + 1
+    }`;
+    const message = document.createElement("div");
+    message.className = "code-diagnostic-message";
+    message.textContent = diagnostic.message;
+    diagnosticEl.append(heading, message);
+    if (diagnostic.tip) {
+      const tip = document.createElement("div");
+      tip.className = "code-diagnostic-tip";
+      tip.textContent = diagnostic.tip;
+      diagnosticEl.appendChild(tip);
+    }
+    editor?.setAttribute("aria-invalid", "true");
+  }
+
+  function updateLineGutters(diagnostic: ProgramDiagnostic | null = null) {
     const lines = getUserRawLines();
-    const count = Math.max(lines.length, 1);
-    const lineHeight = getLineHeightPx();
-    if (lineNumbers) {
-      const frag = document.createDocumentFragment();
-      for (let i = 1; i <= count; i++) {
-        const num = document.createElement("div");
-        num.className = "code-line-number";
-        num.style.height = `${lineHeight}px`;
-        num.textContent = String(i + preludeLineCount);
-        frag.appendChild(num);
-      }
-      clearNode(lineNumbers);
-      lineNumbers.appendChild(frag);
-      if (editor) lineNumbers.style.height = `${editor.clientHeight}px`;
+    const lineNumberClasses = new Map<number, string[]>();
+    if (diagnostic) {
+      lineNumberClasses.set(diagnostic.range.startLine, ["has-error"]);
     }
-    if (errorGutter) {
-      const status = classifyUserLineStatuses();
-      const frag = document.createDocumentFragment();
-      for (let i = 0; i < count; i++) {
-        const cell = document.createElement("div");
-        cell.className = "code-error-line";
-        cell.style.height = `${lineHeight}px`;
-        if (status.invalid.has(i)) {
-          cell.classList.add("is-invalid");
-          const kind = status.errorKinds?.get(i) || "compile";
-          cell.textContent = kind === "ub" ? "💣" : "🚫";
-          cell.title =
-            kind === "ub"
-              ? "Line causes undefined behavior"
-              : "Line does not compile";
-        } else if (status.incomplete.has(i)) {
-          cell.classList.add("is-incomplete");
-          cell.textContent = "...";
-          cell.title = "Line is incomplete";
-        }
-        frag.appendChild(cell);
-      }
-      clearNode(errorGutter);
-      errorGutter.appendChild(frag);
-      if (editor) errorGutter.style.height = `${editor.clientHeight}px`;
-    }
+    updateCodeSurface({
+      editor,
+      lineNumbers,
+      highlightEl,
+      measureEl,
+      lines,
+      lineNumberStart: preludeLineCount + 1,
+      decorations: diagnosticDecoration(diagnostic),
+      lineNumberClasses,
+    });
     syncEditorLinkedScroll();
+    renderDiagnostic(diagnostic);
   }
 
   type ProgramBehavior =
@@ -989,20 +977,7 @@ function createCodeOutputChallengeTemplate(
     }
     const grid = document.createElement("div");
     grid.className = "grid";
-    if (kind === "compile") {
-      const msg = document.createElement("div");
-      msg.className = "muted state-status";
-      msg.style.padding = "8px";
-      msg.textContent = "(this code is not valid)";
-      grid.appendChild(msg);
-    } else if (kind === "ub") {
-      const msg = document.createElement("div");
-      msg.className = "muted state-status";
-      msg.style.padding = "8px";
-      msg.textContent =
-        "(undefined behavior occurred; fix the code before checking output)";
-      grid.appendChild(msg);
-    } else if (!boxes || boxes.length === 0) {
+    if (!boxes || boxes.length === 0) {
       const msg = document.createElement("div");
       msg.className = "muted";
       msg.style.padding = "8px";
@@ -1115,16 +1090,6 @@ function createCodeOutputChallengeTemplate(
       clearNode(lockedLineNumbers);
       lockedLineNumbers.appendChild(frag);
     }
-    if (lockedErrorGutter) {
-      const frag = document.createDocumentFragment();
-      for (let i = 0; i < lines.length; i += 1) {
-        const cell = document.createElement("div");
-        cell.className = "code-error-line";
-        frag.appendChild(cell);
-      }
-      clearNode(lockedErrorGutter);
-      lockedErrorGutter.appendChild(frag);
-    }
   }
 
   function updateInstructions() {
@@ -1215,7 +1180,7 @@ function createCodeOutputChallengeTemplate(
     const currentResult = renderStage();
     updateLockedInputLine();
     updateInstructions();
-    updateLineGutters();
+    updateLineGutters(getProgramDiagnostic());
     if (state.pass) {
       setStatus("correct", "ok");
     } else if (state.lastReport && !state.lastReport.pass) {
@@ -1294,14 +1259,12 @@ function createCodeOutputChallengeTemplate(
       state.text = editor.value;
       state.lastReport = null;
       state.pendingFailingCase = null;
-      renderStage();
-      updateLineGutters();
+      render();
     });
     editor.addEventListener("scroll", syncEditorLinkedScroll);
-    editor.addEventListener("mouseup", updateLineGutters);
-    window.addEventListener("resize", updateLineGutters);
+    window.addEventListener("resize", () => updateLineGutters(getProgramDiagnostic()));
     if (typeof ResizeObserver !== "undefined") {
-      const ro = new ResizeObserver(() => updateLineGutters());
+      const ro = new ResizeObserver(() => updateLineGutters(getProgramDiagnostic()));
       ro.observe(editor);
     }
   }

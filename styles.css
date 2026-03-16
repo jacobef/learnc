@@ -1006,6 +1006,10 @@ body.panel-layout .panel-controls.controls-main {
     line-height: var(--code-line-height);
     text-align: right;
 }
+.codepane-row .code-line-number.has-error {
+    color: #b42318;
+    font-weight: 700;
+}
 .codepane-row .code-boundary-line {
     position: absolute;
     left: 0;
@@ -1021,7 +1025,7 @@ body.panel-layout .panel-controls.controls-main {
     opacity: 0.9;
     pointer-events: none;
 }
-[data-role="sandbox-code"] .code-textarea-highlight {
+.code-textarea-highlight {
     position: absolute;
     inset: 0;
     padding: 8px 10px;
@@ -1038,10 +1042,17 @@ body.panel-layout .panel-controls.controls-main {
     pointer-events: none;
     z-index: 0;
 }
-[data-role="sandbox-code"]
-    .code-textarea-highlight
-    .code-highlight-line.is-done {
+.code-textarea-highlight .code-highlight-line.is-done {
     color: var(--done);
+}
+.code-textarea-highlight .code-highlight-error {
+    background: rgba(180, 35, 24, 0.12);
+    border-radius: 3px;
+    text-decoration-line: underline;
+    text-decoration-style: wavy;
+    text-decoration-color: #d92d20;
+    text-decoration-thickness: 1.5px;
+    text-underline-offset: 0.14em;
 }
 .codepane-row .code-editor-wrap {
     flex: 1;
@@ -1065,9 +1076,6 @@ body.panel-layout .panel-controls.controls-main {
     white-space: pre;
     color: #4d5a75;
 }
-.codepane-row .code-error-gutter.code-error-gutter-locked .code-error-line {
-    color: transparent;
-}
 .codepane-row .code-textarea {
     width: 100%;
     min-height: calc(var(--code-line-height) * 4 + 16px);
@@ -1079,57 +1087,12 @@ body.panel-layout .panel-controls.controls-main {
     font-family: inherit;
     font-size: inherit;
     font-weight: inherit;
-    color: inherit;
+    color: transparent;
     box-sizing: border-box;
     line-height: var(--code-line-height);
-}
-[data-role="sandbox-code"] .code-textarea {
-    color: transparent;
     caret-color: var(--ink);
     position: relative;
     z-index: 1;
-}
-.codepane-row .code-error-gutter {
-    padding: 8px 0;
-    min-width: 28px;
-    margin-left: 8px;
-    margin-right: 8px;
-    text-align: center;
-    font-size: 18px;
-    user-select: none;
-    overflow: hidden;
-    box-sizing: border-box;
-}
-.codepane-row .code-error-line {
-    height: var(--code-line-height);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    line-height: var(--code-line-height);
-}
-.codepane-row .code-error-line.is-invalid {
-    color: #c0392b;
-}
-.codepane-row .code-error-line.is-incomplete {
-    color: #b58900;
-    font-weight: 600;
-}
-.codepane-row .error-info-btn {
-    width: 18px;
-    height: 18px;
-    border: 1px solid rgba(0, 0, 0, 0.2);
-    border-radius: 50%;
-    background: #fff;
-    color: #555;
-    font-size: 12px;
-    font-weight: 700;
-    line-height: 18px;
-    padding: 0;
-    cursor: pointer;
-}
-.codepane-row .error-info-btn:hover {
-    background: #f1f1f1;
 }
 .codepane-row .code-textarea-measure {
     position: absolute;
@@ -1152,6 +1115,26 @@ body.panel-layout .panel-controls.controls-main {
 }
 .codepane-row .code-textarea[readonly] {
     cursor: default;
+}
+.code-diagnostic {
+    margin: 10px;
+    margin-top: 0;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(185, 28, 28, 0.18);
+    background: linear-gradient(180deg, rgba(255, 244, 242, 0.96), rgba(255, 251, 250, 0.96));
+    color: #7a271a;
+}
+.code-diagnostic-title {
+    font-weight: 700;
+    color: #b42318;
+}
+.code-diagnostic-message {
+    margin-top: 4px;
+}
+.code-diagnostic-tip {
+    margin-top: 6px;
+    color: #9e3d1f;
 }
 
 .codecol {

@@ -25,12 +25,9 @@ import { ensureBaseLayout } from "./shared-core.js";
     ]);
     const mobileNote = document.createElement("p");
     mobileNote.className = "mobile-note";
-    appendTextLines(mobileNote, [
-        "It's a bit rough on mobile at the moment, sorry!",
-        "",
-    ]);
+    appendTextLines(mobileNote, ["It's a bit rough on mobile at the moment, sorry!", ""]);
     const updated = document.createElement("i");
-    updated.textContent = "Site last updated February 16, 2026";
+    updated.textContent = "Site last updated February 19, 2026";
     intro.appendChild(mainCopy);
     intro.appendChild(mobileNote);
     intro.appendChild(updated);
@@ -38,9 +35,7 @@ import { ensureBaseLayout } from "./shared-core.js";
     const startWrap = document.createElement("div");
     const startLink = document.createElement("a");
     const updateStartLink = () => {
-        const sidebarState = document.body.classList.contains("sidebar-collapsed")
-            ? "0"
-            : "1";
+        const sidebarState = document.body.classList.contains("sidebar-collapsed") ? "0" : "1";
         const startUrl = new URL("1-assignment-i.html", window.location.href);
         startUrl.searchParams.set("sidebar", sidebarState);
         startLink.href = startUrl.toString();

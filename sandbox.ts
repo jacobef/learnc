@@ -13,10 +13,16 @@ import {
 } from "./shared-core.js";
 import type {
   BoxState,
+  ProgramDiagnostic,
   StatementPart,
   IfBlockMap,
 } from "./shared-core.js";
 import { confettiRain } from "./confetti.js";
+import {
+  ensureCodeSurfaceElements,
+  updateCodeSurface,
+  type CodeDecoration,
+} from "./shared-code-editor-surface.js";
 
 const { main } = ensureBaseLayout();
 main.classList.add("main-panelized");
@@ -26,24 +32,14 @@ const role = <T extends Element>(name: string): T | null => queryRole<T>(name);
 const instructions = role<HTMLElement>("sandbox-instructions");
 const editor = role<HTMLTextAreaElement>("sandbox-editor");
 const lineNumbers = role<HTMLElement>("sandbox-line-numbers");
-const errorGutter = role<HTMLElement>("sandbox-error-gutter");
-const errorDetail = role<HTMLElement>("sandbox-error-detail");
 const exprInput = role<HTMLInputElement>("sandbox-expr");
 const exprResult = role<HTMLElement>("sandbox-expr-result");
-const exprError = role<HTMLElement>("sandbox-expr-error");
 const prevBtn = role<HTMLButtonElement>("sandbox-prev");
 const nextBtn = role<HTMLButtonElement>("sandbox-next");
 const prevButtons = [prevBtn].filter((btn): btn is HTMLButtonElement => !!btn);
 const nextButtons = [nextBtn].filter((btn): btn is HTMLButtonElement => !!btn);
 let finishedConfettiShown = false;
-const highlightEl = (() => {
-  if (!editor || !editor.parentElement) return null;
-  const el = document.createElement("pre");
-  el.className = "code-textarea-highlight";
-  el.setAttribute("aria-hidden", "true");
-  editor.parentElement.insertBefore(el, editor);
-  return el;
-})();
+const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
 const boundaryLine = (() => {
   if (!editor) return null;
   const row = editor.closest(".codepane-row");
@@ -54,22 +50,20 @@ const boundaryLine = (() => {
   row.appendChild(el);
   return el;
 })();
-const measureEl = (() => {
-  if (!editor || !editor.parentElement) return null;
+const diagnosticEl = (() => {
+  const codePane = role<HTMLElement>("sandbox-code");
+  if (!codePane) return null;
+  const existing = codePane.querySelector<HTMLElement>(".code-diagnostic");
+  if (existing) return existing;
   const el = document.createElement("div");
-  el.className = "code-textarea-measure";
-  el.setAttribute("aria-hidden", "true");
-  editor.parentElement.appendChild(el);
+  el.className = "code-diagnostic hidden";
+  codePane.appendChild(el);
   return el;
 })();
 
 type SandboxState = {
   text: string;
   allocBase: number | null;
-  errorDetailLine: number | null;
-  errorDetailMessage: string;
-  errorDetailHtml: string;
-  errorDetailKind: string;
   boundary: number | null;
   lineCount: number;
   otherNamesShown: Set<string>;
@@ -80,10 +74,6 @@ type SandboxState = {
 const sandbox: SandboxState = {
   text: editor ? editor.value : "",
   allocBase: null,
-  errorDetailLine: null,
-  errorDetailMessage: "",
-  errorDetailHtml: "",
-  errorDetailKind: "",
   boundary: null,
   lineCount: 0,
   otherNamesShown: new Set(),
@@ -92,12 +82,6 @@ const sandbox: SandboxState = {
 };
 
 const simulator = createSimpleSimulator();
-
-function showExprError(message: string) {
-  if (!exprError) return;
-  exprError.textContent = message || "";
-  exprError.classList.toggle("hidden", !message);
-}
 
 function allocFactory() {
   if (sandbox.allocBase == null) sandbox.allocBase = randAddr("int");
@@ -132,97 +116,6 @@ function updateInstructions() {
   } else {
     instructions.innerHTML = message;
   }
-}
-
-type ParsedMessage = { text: string; html: string };
-
-function parseErrorMessage(message: string | ParsedMessage) {
-  if (message && typeof message === "object") {
-    return {
-      text: String(message.text || ""),
-      html: message.html ? String(message.html) : "",
-    };
-  }
-  return { text: String(message || ""), html: "" };
-}
-
-function combineMessages(
-  primary: string | ParsedMessage,
-  secondary: string | ParsedMessage,
-) {
-  if (!secondary) return primary;
-  const p = parseErrorMessage(primary);
-  const s = parseErrorMessage(secondary);
-  const text = [p.text, s.text].filter(Boolean).join(" ");
-  const htmlParts = [p.html || p.text, s.html || s.text].filter(Boolean);
-  const html = htmlParts.join(" ");
-  return { text, html };
-}
-
-const GENERIC_COMPILE_ERRORS = new Set([
-  "Line has an error.",
-  'Declarations should look like "int name;" or "long name;" or "double name;" or "int name = value;".',
-  'Declarations should look like "int name;" or "long name;" or "double name;".',
-  'Assignments should look like "name = value;".',
-  "Line should be a declaration or assignment.",
-]);
-
-function isGenericCompileMessage(message: string | ParsedMessage) {
-  const parsed = parseErrorMessage(message);
-  const text = (parsed.text || "").trim();
-  if (!text) return true;
-  return GENERIC_COMPILE_ERRORS.has(text);
-}
-
-function showErrorDetail(message: string | ParsedMessage, kind: string) {
-  if (!errorDetail) return;
-  const parsed = parseErrorMessage(message);
-  clearNode(errorDetail);
-  if (kind === "ub") {
-    const base = document.createElement("span");
-    if (parsed.html) {
-      base.innerHTML = parsed.html;
-    } else {
-      base.textContent = parsed.text;
-    }
-    base.appendChild(
-      document.createTextNode(" This line causes undefined behavior. "),
-    );
-    errorDetail.appendChild(base);
-    const link = document.createElement("button");
-    link.type = "button";
-    link.className = "ub-explain-link";
-    link.textContent = "[What is undefined behavior?]";
-    const explain = document.createElement("div");
-    explain.className = "ub-explain hidden";
-    explain.textContent =
-      "Undefined behavior means the C standard does not define what happens. The program might crash, act strangely, or appear to work.";
-    link.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      explain.classList.toggle("hidden");
-    });
-    errorDetail.appendChild(link);
-    errorDetail.appendChild(explain);
-  } else if (parsed.html) {
-    errorDetail.innerHTML = parsed.html;
-  } else {
-    errorDetail.textContent = parsed.text;
-  }
-  errorDetail.classList.remove("hidden");
-  sandbox.errorDetailMessage = parsed.text;
-  sandbox.errorDetailHtml = parsed.html;
-  sandbox.errorDetailKind = kind || "compile";
-}
-
-function hideErrorDetail() {
-  if (!errorDetail) return;
-  errorDetail.textContent = "";
-  errorDetail.classList.add("hidden");
-  sandbox.errorDetailLine = null;
-  sandbox.errorDetailMessage = "";
-  sandbox.errorDetailHtml = "";
-  sandbox.errorDetailKind = "";
 }
 
 function getEditorText() {
@@ -368,10 +261,6 @@ function syncBoundaryWithLines(lines: string[]) {
   return { boundary: sandbox.boundary as number, total };
 }
 
-function classifyLineStatuses(lines: string[]) {
-  return simulator.classifyLineStatuses(lines, { alloc: allocFactory() });
-}
-
 function getProgramParts(lines: string[]) {
   const statementMap = simulator.buildStatementMap(lines);
   const parts = statementMap.parts || [];
@@ -379,44 +268,6 @@ function getProgramParts(lines: string[]) {
     lastLine: Math.max(0, lines.length - 1),
   });
   return { parts, ifBlocks, statementMap };
-}
-
-function summarizeStatus(lines: string[], fullLines?: string[]) {
-  const status = classifyLineStatuses(lines);
-  let hasCompile = status.incomplete.size > 0;
-  if (hasCompile && fullLines && fullLines.length >= lines.length) {
-    const activeTokens = simulator.tokenizeProgram(lines.join("\n"));
-    const fullTokens = simulator.tokenizeProgram(fullLines.join("\n"));
-    const activeParts = simulator.splitStatements(activeTokens);
-    const fullParts = simulator.splitStatements(fullTokens);
-    const activeIfs = simulator.buildIfStatementMap(activeParts, {
-      lastLine: Math.max(0, lines.length - 1),
-    });
-    const fullIfs = simulator.buildIfStatementMap(fullParts, {
-      lastLine: Math.max(0, fullLines.length - 1),
-    });
-    const ignoreIncomplete = new Set<number>();
-    for (let i = 0; i < activeParts.length; i++) {
-      if (fullIfs.map.has(i) && !activeIfs.map.has(i)) {
-        const endLine = activeParts[i]?.endLine;
-        if (Number.isFinite(endLine)) ignoreIncomplete.add(endLine);
-      }
-    }
-    if (ignoreIncomplete.size) {
-      const remaining = [...status.incomplete].filter(
-        (line) => !ignoreIncomplete.has(line),
-      );
-      hasCompile = remaining.length > 0;
-    }
-  }
-  let hasUb = false;
-  if (status.errorKinds) {
-    for (const kind of status.errorKinds.values()) {
-      if (kind === "ub") hasUb = true;
-      else hasCompile = true;
-    }
-  }
-  return { hasCompile, hasUb };
 }
 
 function runLabelForBoundary(
@@ -543,10 +394,10 @@ function getProgramOutcome(
     total,
   );
   const safeBoundary = clampBoundary(boundary, total);
-  const fullSummary = summarizeStatus(lines);
-  let globalKind: "ok" | "compile" | "ub" = "ok";
-  if (fullSummary.hasCompile) globalKind = "compile";
-  else if (fullSummary.hasUb) globalKind = "ub";
+  const fullResult = simulator.analyzeProgramParts(parts, {
+    alloc: allocFactory(),
+  });
+  const globalKind = fullResult.kind;
   const stopIndex = stopIndexForBoundary(parts, safeBoundary, total);
   const activeResult = simulator.analyzeProgramParts(parts, {
     alloc: allocFactory(),
@@ -567,6 +418,57 @@ function getProgramOutcome(
     boundary: safeBoundary,
     total,
   };
+}
+
+function getProgramDiagnostic(): ProgramDiagnostic | null {
+  const diagnostics = simulator.diagnoseProgram(getEditorText(), {
+    alloc: allocFactory(),
+  });
+  return diagnostics[0] || null;
+}
+
+function diagnosticDecoration(
+  diagnostic: ProgramDiagnostic | null,
+): CodeDecoration[] {
+  if (!diagnostic) return [];
+  return [
+    {
+      line: diagnostic.range.startLine,
+      startCol: diagnostic.range.startCol,
+      endCol: diagnostic.range.endCol,
+      className: "code-highlight-error",
+    },
+  ];
+}
+
+function renderDiagnostic(diagnostic: ProgramDiagnostic | null) {
+  if (!diagnosticEl) return;
+  if (!diagnostic) {
+    diagnosticEl.classList.add("hidden");
+    diagnosticEl.textContent = "";
+    editor?.removeAttribute("aria-invalid");
+    return;
+  }
+  diagnosticEl.classList.remove("hidden");
+  diagnosticEl.replaceChildren();
+  const heading = document.createElement("div");
+  heading.className = "code-diagnostic-title";
+  heading.textContent = `${
+    diagnostic.kind === "ub" ? "Undefined behavior" : "Error"
+  } on line ${diagnostic.range.startLine + 1}, column ${
+    diagnostic.range.startCol + 1
+  }`;
+  const message = document.createElement("div");
+  message.className = "code-diagnostic-message";
+  message.textContent = diagnostic.message;
+  diagnosticEl.append(heading, message);
+  if (diagnostic.tip) {
+    const tip = document.createElement("div");
+    tip.className = "code-diagnostic-tip";
+    tip.textContent = diagnostic.tip;
+    diagnosticEl.appendChild(tip);
+  }
+  editor?.setAttribute("aria-invalid", "true");
 }
 
 function renderStage() {
@@ -612,24 +514,13 @@ function renderExpression(outcome: { kind: string; state: BoxState[] | null }) {
   if (!exprResult || !exprInput) return;
   clearNode(exprResult);
   exprResult.classList.add("hidden");
-  showExprError("");
   const expr = exprInput.value.trim();
   if (!expr) return;
-  if (!outcome || outcome.kind !== "ok") {
-    showExprError("Fix the code before evaluating expressions.");
-    return;
-  }
+  if (!outcome || outcome.kind !== "ok") return;
   const evaluated = simulator.evaluateExpressionText(expr, outcome.state || [], {
     allowSideEffects: false,
   });
-  if ("error" in evaluated) {
-    const errorText =
-      typeof evaluated.error === "string"
-        ? evaluated.error
-        : evaluated.error.text;
-    showExprError(errorText);
-    return;
-  }
+  if ("error" in evaluated) return;
   const { result } = evaluated;
   const arrayBoxes = findArrayObjectBoxesForResult(result, outcome.state || []);
   if (arrayBoxes && arrayBoxes.length) {
@@ -733,42 +624,7 @@ function renderState(
     msg.style.padding = "8px";
     msg.textContent = "(the program is in the middle of executing a statement)";
     grid.appendChild(msg);
-  } else if (status === "compile") {
-    const msg = document.createElement("div");
-    msg.className = "muted state-status";
-    msg.style.padding = "8px";
-    msg.textContent = "(this code is not valid)";
-    grid.appendChild(msg);
-  } else if (status === "ub") {
-    const msg = document.createElement("div");
-    msg.className = "muted state-status";
-    msg.style.padding = "8px";
-    const label = document.createElement("span");
-    label.textContent = "Kaboom! ";
-    msg.appendChild(label);
-    const link = document.createElement("button");
-    link.type = "button";
-    link.className = "ub-explain-link";
-    link.textContent = "[What is undefined behavior?]";
-    const explain = document.createElement("div");
-    explain.className = "ub-explain hidden";
-    explain.textContent =
-      "Undefined behavior means the C standard does not define what happens. The program might crash, act strangely, or appear to work.";
-    link.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      explain.classList.toggle("hidden");
-    });
-    msg.appendChild(link);
-    msg.appendChild(explain);
-    grid.appendChild(msg);
-  } else if (boxes === null) {
-    const msg = document.createElement("div");
-    msg.className = "muted state-status";
-    msg.style.padding = "8px";
-    msg.textContent = "(this code is not valid)";
-    grid.appendChild(msg);
-  } else if (boxes.length === 0) {
+  } else if (!boxes || boxes.length === 0) {
     const msg = document.createElement("div");
     msg.className = "muted";
     msg.style.padding = "8px";
@@ -839,26 +695,30 @@ function measureWrapCounts(lines: string[]) {
 }
 
 function updateLineGutters(linesOverride?: string[]) {
-  autoSizeEditor();
   const lines = Array.isArray(linesOverride) ? linesOverride : getRawLines();
   const count = Math.max(lines.length, 1);
   const boundary = resolveBoundary(sandbox.boundary, count);
   const safeBoundary = clampBoundary(boundary, count);
-  const lineHeight = getLineHeightPx();
-  const wraps = measureWrapCounts(lines);
-  if (highlightEl) {
-    clearNode(highlightEl);
-    const frag = document.createDocumentFragment();
-    for (let i = 0; i < lines.length; i++) {
-      const span = document.createElement("span");
-      span.className = "code-highlight-line";
-      if (i < safeBoundary) span.classList.add("is-done");
-      span.textContent = lines[i] === "" ? " " : lines[i];
-      frag.appendChild(span);
-      if (i < lines.length - 1) frag.appendChild(document.createTextNode("\n"));
-    }
-    highlightEl.appendChild(frag);
+  const diagnostic = getProgramDiagnostic();
+  const lineClasses = new Map<number, string[]>();
+  for (let i = 0; i < count; i++) {
+    if (i < safeBoundary) lineClasses.set(i, ["is-done"]);
   }
+  const lineNumberClasses = new Map<number, string[]>();
+  if (diagnostic) {
+    lineNumberClasses.set(diagnostic.range.startLine, ["has-error"]);
+  }
+  const { wraps, lineHeight } = updateCodeSurface({
+    editor,
+    lineNumbers,
+    highlightEl,
+    measureEl,
+    lines,
+    lineClasses,
+    lineNumberClasses,
+    decorations: diagnosticDecoration(diagnostic),
+  });
+  renderDiagnostic(diagnostic);
   if (boundaryLine && editor) {
     const style = window.getComputedStyle(editor);
     const paddingTop = parseFloat(style.paddingTop) || 0;
@@ -869,134 +729,8 @@ function updateLineGutters(linesOverride?: string[]) {
     const top = Math.max(0, paddingTop + rows * lineHeight - 1);
     boundaryLine.style.top = `${top}px`;
   }
-  if (lineNumbers) {
-    const frag = document.createDocumentFragment();
-    for (let i = 1; i <= count; i++) {
-      const num = document.createElement("div");
-      num.className = "code-line-number";
-      num.style.height = `${(wraps[i - 1] || 1) * lineHeight}px`;
-      num.textContent = String(i);
-      frag.appendChild(num);
-    }
-    clearNode(lineNumbers);
-    lineNumbers.appendChild(frag);
-    if (editor) lineNumbers.style.height = `${editor.clientHeight}px`;
-  }
-  if (errorGutter) {
-    const { invalid, incomplete, errors, errorKinds, info } =
-      classifyLineStatuses(lines);
-    const frag = document.createDocumentFragment();
-    for (let i = 0; i < count; i++) {
-      const cell = document.createElement("div");
-      cell.className = "code-error-line";
-      cell.style.height = `${(wraps[i] || 1) * lineHeight}px`;
-      if (invalid.has(i)) {
-        cell.classList.add("is-invalid");
-        const icon = document.createElement("span");
-        const kind = errorKinds?.get(i) || "compile";
-        icon.textContent = kind === "ub" ? "💣" : "🚫";
-        icon.title =
-          kind === "ub"
-            ? "Line causes undefined behavior"
-            : "Line does not compile";
-        cell.appendChild(icon);
-        const baseMessage = errors.get(i) || "Line has an error.";
-        const hasInfo = info?.has(i);
-        const showInfo =
-          kind === "ub" || hasInfo || !isGenericCompileMessage(baseMessage);
-        if (showInfo) {
-          const message =
-            (errorKinds?.get(i) || "compile") === "compile" && hasInfo
-              ? combineMessages(baseMessage, info.get(i) || "")
-              : baseMessage;
-          const infoBtn = document.createElement("button");
-          infoBtn.type = "button";
-          infoBtn.className = "error-info-btn";
-          infoBtn.textContent = "i";
-          infoBtn.setAttribute("aria-label", "Explain error");
-          infoBtn.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const parsed = parseErrorMessage(message);
-            if (
-              sandbox.errorDetailLine === i &&
-              sandbox.errorDetailMessage === parsed.text &&
-              sandbox.errorDetailHtml === parsed.html &&
-              sandbox.errorDetailKind === kind
-            ) {
-              hideErrorDetail();
-            } else {
-              sandbox.errorDetailLine = i;
-              showErrorDetail(message, kind);
-            }
-          });
-          cell.appendChild(infoBtn);
-        }
-      } else if (incomplete.has(i)) {
-        cell.classList.add("is-incomplete");
-        cell.textContent = "...";
-        cell.title = "Line is incomplete";
-        if (info?.has(i)) {
-          const infoMsg = info.get(i);
-          if (!infoMsg) continue;
-          const parsed = parseErrorMessage(infoMsg);
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.className = "error-info-btn";
-          btn.textContent = "i";
-          btn.setAttribute("aria-label", "Explain statement");
-          btn.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (
-              sandbox.errorDetailLine === i &&
-              sandbox.errorDetailMessage === parsed.text &&
-              sandbox.errorDetailHtml === parsed.html &&
-              sandbox.errorDetailKind === "info"
-            ) {
-              hideErrorDetail();
-            } else {
-              sandbox.errorDetailLine = i;
-              showErrorDetail(infoMsg, "info");
-            }
-          });
-          cell.appendChild(btn);
-        }
-      } else if (info?.has(i)) {
-        const infoMsg = info.get(i);
-        if (!infoMsg) continue;
-        const parsed = parseErrorMessage(infoMsg);
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "error-info-btn";
-        btn.textContent = "i";
-        btn.setAttribute("aria-label", "Explain statement");
-        btn.addEventListener("click", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (
-            sandbox.errorDetailLine === i &&
-            sandbox.errorDetailMessage === parsed.text &&
-            sandbox.errorDetailHtml === parsed.html &&
-            sandbox.errorDetailKind === "info"
-          ) {
-            hideErrorDetail();
-          } else {
-            sandbox.errorDetailLine = i;
-            showErrorDetail(infoMsg, "info");
-          }
-        });
-        cell.appendChild(btn);
-      }
-      frag.appendChild(cell);
-    }
-    clearNode(errorGutter);
-    errorGutter.appendChild(frag);
-    if (editor) errorGutter.style.height = `${editor.clientHeight}px`;
-  }
   if (editor) {
     if (lineNumbers) lineNumbers.scrollTop = editor.scrollTop;
-    if (errorGutter) errorGutter.scrollTop = editor.scrollTop;
   }
 }
 
@@ -1005,7 +739,6 @@ if (editor) {
     const nextText = editor.value;
     adjustBoundaryForEdit(sandbox.text || "", nextText);
     sandbox.text = nextText;
-    hideErrorDetail();
     renderStage();
     updateLineGutters();
   });
@@ -1014,12 +747,6 @@ if (editor) {
       lineNumbers.scrollTop = editor.scrollTop;
     });
   }
-  if (errorGutter) {
-    editor.addEventListener("scroll", () => {
-      errorGutter.scrollTop = editor.scrollTop;
-    });
-  }
-  editor.addEventListener("mouseup", () => updateLineGutters());
   window.addEventListener("resize", () => updateLineGutters());
   if (typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(() => updateLineGutters());

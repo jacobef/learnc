@@ -19,11 +19,16 @@ import {
 } from "./shared-core.js";
 import type {
   BoxState,
-  LineStatus,
   Parts,
+  ProgramDiagnostic,
   SimpleSimulator,
   Stepper,
 } from "./shared-core.js";
+import {
+  ensureCodeSurfaceElements,
+  updateCodeSurface,
+  type CodeDecoration,
+} from "./shared-code-editor-surface.js";
 
 type CodeEditorParts = Parts;
 type CodeEditorPartsSpec =
@@ -35,9 +40,9 @@ interface CodeEditorElements {
   instructionsEl: HTMLElement | null;
   editor: HTMLTextAreaElement | null;
   lineNumbers: HTMLElement | null;
-  errorGutter: HTMLElement | null;
   stage: HTMLElement | null;
   status: HTMLElement | null;
+  diagnosticEl: HTMLElement | null;
   hintPanel: HTMLElement | null;
   hintBtn: HTMLButtonElement | null;
   checkBtn: HTMLButtonElement | null;
@@ -89,9 +94,9 @@ function collectCodeEditorElements(
     instructionsEl: role<HTMLElement>("code-instructions"),
     editor: role<HTMLTextAreaElement>("code-editor"),
     lineNumbers: role<HTMLElement>("code-line-numbers"),
-    errorGutter: role<HTMLElement>("code-error-gutter"),
     stage: role<HTMLElement>("code-stage"),
     status: role<HTMLElement>("code-status"),
+    diagnosticEl: role<HTMLElement>("code-diagnostic"),
     hintPanel: role<HTMLElement>("code-hint"),
     hintBtn: role<HTMLButtonElement>("code-hint-btn"),
     checkBtn: role<HTMLButtonElement>("code-check"),
@@ -150,13 +155,12 @@ function ensureCodeEditorLayout(
   editor.spellcheck = false;
   editor.rows = Math.max(1, Math.floor(textareaMinLines));
   editorWrap.appendChild(editor);
-  const errorGutter = document.createElement("div");
-  errorGutter.dataset.role = "code-error-gutter";
-  errorGutter.className = "code-error-gutter";
-  errorGutter.setAttribute("aria-hidden", "true");
-  codeRow.append(lineNumbers, editorWrap, errorGutter);
+  codeRow.append(lineNumbers, editorWrap);
   codePane.appendChild(codeRow);
-  codePanel.append(codeTitle, codePane);
+  const diagnosticEl = document.createElement("div");
+  diagnosticEl.dataset.role = "code-diagnostic";
+  diagnosticEl.className = "code-diagnostic hidden";
+  codePanel.append(codeTitle, codePane, diagnosticEl);
 
   const stateCol = document.createElement("div");
   stateCol.className = "code-editor-state-col";
@@ -194,9 +198,9 @@ function ensureCodeEditorLayout(
     instructionsEl,
     editor,
     lineNumbers,
-    errorGutter,
     stage,
     status,
+    diagnosticEl,
     hintPanel,
     hintBtn,
     checkBtn,
@@ -221,15 +225,16 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     instructionsEl,
     editor,
     lineNumbers,
-    errorGutter,
     stage,
     status,
+    diagnosticEl,
     hintPanel,
     hintBtn,
     checkBtn,
     nextBtn,
     codeRoot,
   } = ensureCodeEditorLayout(textareaMinLines);
+  const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
 
   bindBtnRefPulse(codeRoot || document);
   const simulator = createSimpleSimulator();
@@ -298,41 +303,73 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     return { kind: "ok", state: result.state };
   }
 
-  function updateLineGutters(statusInfo: LineStatus) {
+  function getProgramDiagnostic(): ProgramDiagnostic | null {
+    const diagnostics = simulator.diagnoseProgram(getEditorText(), {
+      alloc: allocFactory(),
+    });
+    return diagnostics[0] || null;
+  }
+
+  function diagnosticDecoration(
+    diagnostic: ProgramDiagnostic | null,
+  ): CodeDecoration[] {
+    if (!diagnostic) return [];
+    return [
+      {
+        line: diagnostic.range.startLine,
+        startCol: diagnostic.range.startCol,
+        endCol: diagnostic.range.endCol,
+        className: "code-highlight-error",
+      },
+    ];
+  }
+
+  function renderDiagnostic(diagnostic: ProgramDiagnostic | null) {
+    if (!diagnosticEl) return;
+    if (!diagnostic) {
+      diagnosticEl.classList.add("hidden");
+      diagnosticEl.textContent = "";
+      editor?.removeAttribute("aria-invalid");
+      return;
+    }
+    diagnosticEl.classList.remove("hidden");
+    diagnosticEl.replaceChildren();
+    const heading = document.createElement("div");
+    heading.className = "code-diagnostic-title";
+    heading.textContent = `${
+      diagnostic.kind === "ub" ? "Undefined behavior" : "Error"
+    } on line ${diagnostic.range.startLine + 1}, column ${
+      diagnostic.range.startCol + 1
+    }`;
+    const message = document.createElement("div");
+    message.className = "code-diagnostic-message";
+    message.textContent = diagnostic.message;
+    diagnosticEl.append(heading, message);
+    if (diagnostic.tip) {
+      const tip = document.createElement("div");
+      tip.className = "code-diagnostic-tip";
+      tip.textContent = diagnostic.tip;
+      diagnosticEl.appendChild(tip);
+    }
+    editor?.setAttribute("aria-invalid", "true");
+  }
+
+  function updateLineGutters(diagnostic: ProgramDiagnostic | null = null) {
     const lines = getEditorLines();
-    if (lineNumbers) {
-      clearNode(lineNumbers);
-      const frag = document.createDocumentFragment();
-      for (let i = 1; i <= lines.length; i += 1) {
-        const num = document.createElement("div");
-        num.className = "code-line-number";
-        num.textContent = String(i);
-        frag.appendChild(num);
-      }
-      lineNumbers.appendChild(frag);
-      if (editor) lineNumbers.style.height = `${editor.clientHeight}px`;
+    const lineNumberClasses = new Map<number, string[]>();
+    if (diagnostic) {
+      lineNumberClasses.set(diagnostic.range.startLine, ["has-error"]);
     }
-    if (errorGutter) {
-      clearNode(errorGutter);
-      const frag = document.createDocumentFragment();
-      for (let i = 0; i < lines.length; i += 1) {
-        const cell = document.createElement("div");
-        cell.className = "code-error-line";
-        if (statusInfo.invalid.has(i)) {
-          cell.classList.add("is-invalid");
-          const icon = document.createElement("span");
-          icon.className = "code-error-icon";
-          icon.textContent = "⚠";
-          icon.setAttribute("aria-hidden", "true");
-          cell.appendChild(icon);
-        } else if (statusInfo.incomplete.has(i)) {
-          cell.classList.add("is-incomplete");
-        }
-        frag.appendChild(cell);
-      }
-      errorGutter.appendChild(frag);
-      if (editor) errorGutter.style.height = `${editor.clientHeight}px`;
-    }
+    updateCodeSurface({
+      editor,
+      lineNumbers,
+      highlightEl,
+      measureEl,
+      lines,
+      decorations: diagnosticDecoration(diagnostic),
+      lineNumberClasses,
+    });
+    renderDiagnostic(diagnostic);
   }
 
   function isTargetMatch(outcome: CodeEditorOutcome): boolean {
@@ -362,13 +399,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     wrap.appendChild(heading);
     const grid = document.createElement("div");
     grid.className = "grid";
-    if (!boxes) {
-      const msg = document.createElement("div");
-      msg.className = "muted";
-      msg.style.padding = "8px";
-      msg.textContent = kind === "ub" ? "Undefined behavior." : "(compile error)";
-      grid.appendChild(msg);
-    } else if (!boxes.length) {
+    if (!boxes || !boxes.length) {
       const msg = document.createElement("div");
       msg.className = "muted";
       msg.style.padding = "8px";
@@ -444,10 +475,8 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
   }
 
   function render() {
-    const text = getEditorText();
-    const lines = text.split(/\r?\n/);
-    const statusInfo = simulator.classifyLineStatuses(lines, { alloc: allocFactory() });
-    updateLineGutters(statusInfo);
+    const diagnostic = getProgramDiagnostic();
+    updateLineGutters(diagnostic);
     const outcome = getProgramOutcome();
     renderStage(outcome);
     if (instructions) setPartsContent(instructionsEl, applyButtonTokens(instructions));
@@ -471,8 +500,12 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     });
     editor.addEventListener("scroll", () => {
       if (lineNumbers) lineNumbers.scrollTop = editor.scrollTop;
-      if (errorGutter) errorGutter.scrollTop = editor.scrollTop;
     });
+    window.addEventListener("resize", () => updateLineGutters(getProgramDiagnostic()));
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(() => updateLineGutters(getProgramDiagnostic()));
+      ro.observe(editor);
+    }
   }
 
   if (hintBtn) {
