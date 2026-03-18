@@ -25,6 +25,7 @@ import type {
   Stepper,
 } from "./shared-core.js";
 import {
+  bindCodeEditorTabKey,
   ensureCodeSurfaceElements,
   updateCodeSurface,
   type CodeDecoration,
@@ -542,6 +543,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
   }
 
   if (editor) {
+    bindCodeEditorTabKey(editor);
     editor.value = state.text;
     editor.addEventListener("input", () => {
       state.text = normalizeEditorText(editor.value);

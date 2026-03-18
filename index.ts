@@ -37,7 +37,7 @@ import {
   appendTextLines(mobileNote, ["It's a bit rough on mobile at the moment, sorry!", ""]);
 
   const updated = document.createElement("i");
-  updated.textContent = "Site last updated February 19, 2026";
+  updated.textContent = "Site last updated March 17, 2026";
 
   intro.appendChild(mainCopy);
   intro.appendChild(mobileNote);

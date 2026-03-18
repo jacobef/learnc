@@ -1,6 +1,6 @@
 import { applyOtherNames, appendStateObjects, clearNode, createSimpleSimulator, ensureBaseLayout, findArrayObjectBoxesForResult, formatValueForType, queryRole, randAddr, typeInfo, vbox, } from "./shared-core.js";
 import { confettiRain } from "./confetti.js";
-import { ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
+import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
 const { main } = ensureBaseLayout();
 main.classList.add("main-panelized");
 const role = (name) => queryRole(name);
@@ -15,6 +15,7 @@ const prevButtons = [prevBtn].filter((btn) => !!btn);
 const nextButtons = [nextBtn].filter((btn) => !!btn);
 let finishedConfettiShown = false;
 const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
+bindCodeEditorTabKey(editor);
 const boundaryLine = (() => {
     if (!editor)
         return null;

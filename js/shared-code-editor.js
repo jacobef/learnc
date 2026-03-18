@@ -1,5 +1,5 @@
 import { applyTextTokenReplacements, appendStateObjects, bindBtnRefPulse, boxValueMatchesSpec, clearNode, createSimpleSimulator, createStepper, ensurePanelizedMain, flashStatus, getNavLabelForHref, queryElement, queryRole, randAddr, renderParts, setPartsContent, syncDocumentTitleFromNav, typeInfo, } from "./shared-core.js";
-import { ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
+import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
 import { clearLevelProgress, currentLevelId, maybeRestoreLevelProgress, writeLevelProgress, } from "./shared-progress.js";
 function collectCodeEditorElements(root = document) {
     const role = (name) => queryRole(name, root);
@@ -391,6 +391,7 @@ function createCodeEditorTemplate(config) {
         persistProgress();
     }
     if (editor) {
+        bindCodeEditorTabKey(editor);
         editor.value = state.text;
         editor.addEventListener("input", () => {
             state.text = normalizeEditorText(editor.value);

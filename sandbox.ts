@@ -19,6 +19,7 @@ import type {
 } from "./shared-core.js";
 import { confettiRain } from "./confetti.js";
 import {
+  bindCodeEditorTabKey,
   ensureCodeSurfaceElements,
   updateCodeSurface,
   type CodeDecoration,
@@ -40,6 +41,7 @@ const prevButtons = [prevBtn].filter((btn): btn is HTMLButtonElement => !!btn);
 const nextButtons = [nextBtn].filter((btn): btn is HTMLButtonElement => !!btn);
 let finishedConfettiShown = false;
 const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
+bindCodeEditorTabKey(editor);
 const boundaryLine = (() => {
   if (!editor) return null;
   const row = editor.closest(".codepane-row");

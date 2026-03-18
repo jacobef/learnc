@@ -176,3 +176,71 @@ export function updateCodeSurface({ editor, lineNumbers = null, highlightEl = nu
     }
     return { wraps, lineHeight };
 }
+export function bindCodeEditorTabKey(editor) {
+    if (!editor || editor.dataset.codeTabBound === "1")
+        return;
+    editor.dataset.codeTabBound = "1";
+    const indentUnit = "  ";
+    const indentWidth = indentUnit.length;
+    editor.addEventListener("keydown", (event) => {
+        if (event.key !== "Tab" || event.altKey || event.ctrlKey || event.metaKey) {
+            return;
+        }
+        event.preventDefault();
+        const value = editor.value;
+        const start = editor.selectionStart ?? 0;
+        const end = editor.selectionEnd ?? start;
+        const lineStart = value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+        const blockSelectionEnd = end > start && value[end - 1] === "\n" ? end - 1 : end;
+        const lineEndBreak = value.indexOf("\n", blockSelectionEnd);
+        const blockEnd = lineEndBreak === -1 ? value.length : lineEndBreak;
+        const selectedText = value.slice(start, end);
+        const preserveScrollTop = editor.scrollTop;
+        const preserveScrollLeft = editor.scrollLeft;
+        const applyEdit = (nextValue, nextSelectionStart, nextSelectionEnd) => {
+            editor.value = nextValue;
+            editor.setSelectionRange(nextSelectionStart, nextSelectionEnd);
+            editor.scrollTop = preserveScrollTop;
+            editor.scrollLeft = preserveScrollLeft;
+            editor.dispatchEvent(new Event("input", { bubbles: true }));
+        };
+        if (event.shiftKey) {
+            const lines = value.slice(lineStart, blockEnd).split("\n");
+            const removedPerLine = lines.map((line) => {
+                if (line.startsWith("\t"))
+                    return 1;
+                const spaceMatch = line.match(/^ {1,2}/);
+                return spaceMatch ? spaceMatch[0].length : 0;
+            });
+            if (!removedPerLine.some((count) => count > 0))
+                return;
+            const outdented = lines
+                .map((line, index) => line.slice(removedPerLine[index] || 0))
+                .join("\n");
+            const nextValue = value.slice(0, lineStart) + outdented + value.slice(blockEnd);
+            if (start === end) {
+                const nextPos = Math.max(lineStart, start - Math.min(removedPerLine[0] || 0, start - lineStart));
+                applyEdit(nextValue, nextPos, nextPos);
+                return;
+            }
+            const removedBeforeStart = Math.min(removedPerLine[0] || 0, Math.max(0, start - lineStart));
+            const totalRemoved = removedPerLine.reduce((sum, count) => sum + count, 0);
+            const nextStart = Math.max(lineStart, start - removedBeforeStart);
+            const nextEnd = Math.max(nextStart, end - totalRemoved);
+            applyEdit(nextValue, nextStart, nextEnd);
+            return;
+        }
+        if (start !== end && selectedText.includes("\n")) {
+            const lines = value.slice(lineStart, blockEnd).split("\n");
+            const indented = lines.map((line) => `${indentUnit}${line}`).join("\n");
+            const nextValue = value.slice(0, lineStart) + indented + value.slice(blockEnd);
+            const nextStart = start + indentWidth;
+            const nextEnd = end + lines.length * indentWidth;
+            applyEdit(nextValue, nextStart, nextEnd);
+            return;
+        }
+        const nextValue = value.slice(0, start) + indentUnit + value.slice(end);
+        const nextPos = start + indentWidth;
+        applyEdit(nextValue, nextPos, nextPos);
+    });
+}

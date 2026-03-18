@@ -27,6 +27,7 @@ import type {
   Stepper,
 } from "./shared-core.js";
 import {
+  bindCodeEditorTabKey,
   ensureCodeSurfaceElements,
   updateCodeSurface,
   type CodeDecoration,
@@ -1322,6 +1323,7 @@ function createCodeOutputChallengeTemplate(
   }
 
   if (editor) {
+    bindCodeEditorTabKey(editor);
     if (!allowNewLines) {
       editor.addEventListener("keydown", (event) => {
         if (event.key === "Enter") event.preventDefault();
