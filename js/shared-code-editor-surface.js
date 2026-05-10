@@ -2,8 +2,6 @@ function textValueForLine(line) {
     return line === "" ? " " : line;
 }
 function clampColumn(value, lineLength) {
-    if (!Number.isFinite(value))
-        return 0;
     return Math.max(0, Math.min(lineLength, Math.floor(value)));
 }
 function normalizedDecorationsForLine(line, decorations) {
@@ -134,8 +132,8 @@ export function updateCodeSurface({ editor, lineNumbers = null, highlightEl = nu
         highlightEl.replaceChildren();
         const perLineDecorations = new Map();
         for (const decoration of decorations) {
-            const line = Math.floor(Number(decoration.line));
-            if (!Number.isFinite(line) || line < 0 || line >= safeLines.length)
+            const line = Math.floor(decoration.line);
+            if (line < 0 || line >= safeLines.length)
                 continue;
             const bucket = perLineDecorations.get(line) || [];
             bucket.push(decoration);

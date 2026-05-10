@@ -117,7 +117,6 @@ function disableAutoText(el?: Element | null) {
 }
 
 function applyAutoTextDefaults(root: ParentNode = document) {
-  if (!root) return;
   root
     .querySelectorAll(
       'input[type="text"], input:not([type]), textarea, [contenteditable="true"]',
@@ -134,7 +133,7 @@ function isMobileViewport(): boolean {
 const DEFAULT_NAV_ITEMS: NavItem[] = NAV_ITEMS;
 
 function resolveNavItems(items?: NavItem[]): NavItem[] {
-  return Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
+  return items?.length ? items : DEFAULT_NAV_ITEMS;
 }
 
 function normalizeNavHref(href = ""): string {
@@ -180,11 +179,10 @@ function buildNav(
   const nav = document.createElement("nav");
   nav.className = "tabs";
   list.forEach((item) => {
-    if (!item) return;
     const link = document.createElement("a");
-    link.href = item.href || "#";
-    link.textContent = item.label || "";
-    if (normalizeNavHref(item.href || "") === current) {
+    link.href = item.href;
+    link.textContent = item.label;
+    if (normalizeNavHref(item.href) === current) {
       link.classList.add("active");
       link.setAttribute("aria-current", "page");
     }
@@ -207,17 +205,15 @@ function findExistingLayoutNodes(wrap: HTMLElement | null): {
 function ensureWrapConnected(wrap: HTMLElement, nav: HTMLElement, main: HTMLElement) {
   if (wrap.isConnected) return;
   const mount = document.body;
-  const firstScript = mount?.querySelector("script");
+  const firstScript = mount.querySelector("script");
   const anchor =
     main.parentElement === mount ? main : nav.parentElement === mount ? nav : null;
-  if (!mount) return;
   if (anchor) mount.insertBefore(wrap, anchor);
   else if (firstScript) mount.insertBefore(wrap, firstScript);
   else mount.appendChild(wrap);
 }
 
-function updateSidebarToggleLabel(btn: HTMLButtonElement | null) {
-  if (!btn) return;
+function updateSidebarToggleLabel(btn: HTMLButtonElement) {
   const hidden = document.body.classList.contains("sidebar-collapsed");
   const label = hidden ? "Show sidebar" : "Hide sidebar";
   btn.classList.toggle("is-expanded", !hidden);
@@ -335,8 +331,7 @@ function ensurePanelizedMain(title = ""): HTMLElement {
   return main;
 }
 
-function centerActiveNavItem(nav: HTMLElement | null) {
-  if (!nav) return;
+function centerActiveNavItem(nav: HTMLElement) {
   const active = nav.querySelector("a.active") as HTMLElement | null;
   if (!active) return;
   const activeCenter = active.offsetTop + active.offsetHeight / 2;
@@ -354,10 +349,9 @@ function clampLineIndex(index: number, maxIndex: number): number {
 function normalizeLineRange(
   range: LineRange,
   maxIndex: number,
-): [number, number] | null {
+): [number, number] {
   const startRaw = Number(Array.isArray(range) ? range[0] : range.start);
   const endRaw = Number(Array.isArray(range) ? range[1] : range.end);
-  if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw)) return null;
   const start = clampLineIndex(Math.min(startRaw, endRaw), maxIndex);
   const end = clampLineIndex(Math.max(startRaw, endRaw), maxIndex);
   return [start, end];
@@ -384,8 +378,7 @@ function renderCodePane(
       if (typeof boundaryIndex === "number") {
         node.dataset.boundary = String(boundaryIndex);
         const selected =
-          typeof opts.selectedBoundary === "number" &&
-          Number.isFinite(opts.selectedBoundary) &&
+          opts.selectedBoundary != null &&
           Number(opts.selectedBoundary) === boundaryIndex;
         if (selected) node.classList.add("selected");
       }
@@ -406,32 +399,22 @@ function renderCodePane(
     Array<{ start: number; end: number }>
   >();
   let doneBoundary = boundary;
-  if (
-    typeof opts.doneBoundary === "number" &&
-    Number.isFinite(opts.doneBoundary)
-  ) {
+  if (typeof opts.doneBoundary === "number") {
     doneBoundary = Math.max(0, Math.min(lines.length, opts.doneBoundary));
   }
   if (progress) {
     const range = opts.progressRange;
     const maxIndex = Math.max(0, lines.length - 1);
-    const progressRange =
-      range && typeof range === "object" ? normalizeLineRange(range, maxIndex) : null;
+    const progressRange = range ? normalizeLineRange(range, maxIndex) : null;
     if (progressRange) {
       progressRangeStart = progressRange[0];
       progressRangeEnd = progressRange[1];
-      if (
-        typeof opts.progressIndex === "number" &&
-        Number.isFinite(opts.progressIndex)
-      ) {
+      if (typeof opts.progressIndex === "number") {
         progressIndex = clampLineIndex(opts.progressIndex, lines.length - 1);
       } else if (!opts.suppressProgressMid && progressRangeStart != null) {
         progressIndex = progressRangeStart;
       }
-    } else if (
-      typeof opts.progressIndex === "number" &&
-      Number.isFinite(opts.progressIndex)
-    ) {
+    } else if (typeof opts.progressIndex === "number") {
       progressIndex = Math.max(
         0,
         Math.min(lines.length - 1, opts.progressIndex),
@@ -442,7 +425,6 @@ function renderCodePane(
   }
   const appendStrike = (range: LineRange) => {
     const normalized = normalizeLineRange(range, Math.max(0, lines.length - 1));
-    if (!normalized) return;
     strikeRanges.push(normalized);
   };
   if (opts.strikeRange) appendStrike(opts.strikeRange);
@@ -451,13 +433,11 @@ function renderCodePane(
   }
   if (Array.isArray(opts.strikeFragments)) {
     opts.strikeFragments.forEach((frag) => {
-      if (!frag || !Number.isFinite(frag.line)) return;
       const line = clampLineIndex(frag.line, lines.length - 1);
       const text = lines[line] ?? "";
       const max = text.length;
       let start = Math.max(0, Math.min(max, Number(frag.start)));
       let end = Math.max(0, Math.min(max, Number(frag.end)));
-      if (!Number.isFinite(start) || !Number.isFinite(end)) return;
       if (end < start) [start, end] = [end, start];
       if (end <= start) return;
       const list = strikeFragmentsByLine.get(line) || [];
@@ -736,8 +716,7 @@ function removeBoxDeleteButtons(root?: Element | null) {
   scope.querySelectorAll(".vbox .delete, .arraybox .delete").forEach((btn) => btn.remove());
 }
 
-function readBoxState(root: Element | null): BoxState | null {
-  if (!root) return null;
+function readBoxState(root: Element): BoxState {
   const el = root as HTMLElement;
   const names = [...root.querySelectorAll(".name-text")]
     .map((el) => txt(el))
@@ -766,7 +745,7 @@ function readBoxState(root: Element | null): BoxState | null {
     if (stored != null && stored !== "") value = stored;
   }
   const allowDelete =
-    el?.dataset?.allowDelete === "true" || !!root.querySelector(".delete");
+    el.dataset.allowDelete === "true" || !!root.querySelector(".delete");
   return {
     address: txt(root.querySelector(".address")),
     type: typeText,
@@ -774,8 +753,8 @@ function readBoxState(root: Element | null): BoxState | null {
     rawValue,
     name: names[0] || "",
     names,
-    nameEditable: !!root.querySelector(".name-text[contenteditable]"),
-    typeEditable: !!root.querySelector(".type[contenteditable]"),
+    allowNameEdit: !!root.querySelector(".name-text[contenteditable]"),
+    allowTypeEdit: !!root.querySelector(".type[contenteditable]"),
     allowDelete,
     showDoubleExact: el.dataset.doubleDisplay === "exact",
   };
@@ -786,16 +765,13 @@ function boxAddress(box: BoxState | null | undefined): string {
   return raw.trim();
 }
 
-function collectStageBoxes(root: Element | null): BoxState[] {
-  if (!root) return [];
+function collectStageBoxes(root: Element): BoxState[] {
   return [...root.querySelectorAll(".vbox")]
     .map((node) => {
       const box = readBoxState(node);
-      if (!box) return null;
       box.node = node as HTMLElement;
       return box;
-    })
-    .filter((box): box is BoxState => !!box);
+    });
 }
 
 function buildOtherNamesMap(boxes: BoxState[]): Map<string, Set<string>> {
@@ -839,11 +815,10 @@ function sortOtherNames(list: Iterable<string>): string[] {
 }
 
 function updateOtherNamesList(
-  node: HTMLElement | null,
-  aliases: string[] | null | undefined,
+  node: HTMLElement,
+  aliases: string[],
   showAliases: boolean,
 ): void {
-  if (!node) return;
   const listInner = node.querySelector(".name-list-inner");
   if (!listInner) return;
   const tags = listInner.querySelectorAll(".name-tag");
@@ -858,7 +833,7 @@ function updateOtherNamesList(
   }
   [...listInner.children].slice(1).forEach((child) => child.remove());
   const hasAliases =
-    showAliases && Array.isArray(aliases) && aliases.length > 0;
+    showAliases && aliases.length > 0;
   baseTag.classList.toggle("single", !hasAliases);
   if (hasAliases) {
     aliases.forEach((alias) => {
@@ -876,10 +851,9 @@ function updateOtherNamesList(
 }
 
 function ensureOtherNamesToggle(
-  node: HTMLElement | null,
-  onToggle?: ((target: HTMLElement) => void) | null,
+  node: HTMLElement,
+  onToggle: (target: HTMLElement) => void,
 ): HTMLButtonElement | null {
-  if (!node) return null;
   const stack = node.querySelector(".name-stack");
   const label = node.querySelector(".lbl-name");
   if (!stack || !label) return null;
@@ -896,7 +870,7 @@ function ensureOtherNamesToggle(
     btn.dataset.bound = "true";
     btn.addEventListener("click", (event: MouseEvent) => {
       event.preventDefault();
-      if (node) onToggle?.(node);
+      onToggle(node);
     });
   }
   if (btn.parentElement !== stack || btn.nextElementSibling !== label) {
@@ -926,7 +900,7 @@ function applyOtherNames(
   const aliasSource =
     Array.isArray(sourceBoxes) && sourceBoxes.length ? sourceBoxes : boxes;
   const otherNamesByAddr = buildOtherNamesMap(aliasSource);
-  const useShownSet = shownAddrs && typeof shownAddrs.has === "function";
+  const useShownSet = shownAddrs !== null;
   const getShown = (node: HTMLElement, addr: string) =>
     useShownSet ? shownAddrs.has(addr) : node.dataset.otherNames === "on";
   const setShown = (node: HTMLElement, addr: string, value: boolean) => {
@@ -989,7 +963,6 @@ function nextPooledAddr(type: string = "int") {
 
 function makeAnswerBox({
   name = "",
-  names = null,
   type = "",
   value = "",
   address = null,
@@ -997,12 +970,9 @@ function makeAnswerBox({
   deletable = editable,
   allowNameEdit = null,
   allowTypeEdit = null,
-  nameEditable = null,
-  typeEditable = null,
   showDoubleExact = null,
 }: {
   name?: string;
-  names?: string[] | string | null;
   type?: string;
   value?: BoxValue;
   address?: string | number | null;
@@ -1010,24 +980,14 @@ function makeAnswerBox({
   deletable?: boolean;
   allowNameEdit?: boolean | null;
   allowTypeEdit?: boolean | null;
-  nameEditable?: boolean | null;
-  typeEditable?: boolean | null;
   showDoubleExact?: boolean | null;
 } = {}) {
   const resolvedAddr =
     address == null ? String(nextPooledAddr(type || "int")) : String(address);
   const resolvedNameEdit =
-    allowNameEdit !== null && allowNameEdit !== undefined
-      ? allowNameEdit
-      : nameEditable !== null && nameEditable !== undefined
-        ? nameEditable
-        : !name && !(Array.isArray(names) && names.length);
+    allowNameEdit !== null && allowNameEdit !== undefined ? allowNameEdit : !name;
   const resolvedTypeEdit =
-    allowTypeEdit !== null && allowTypeEdit !== undefined
-      ? allowTypeEdit
-      : typeEditable !== null && typeEditable !== undefined
-        ? typeEditable
-        : !type;
+    allowTypeEdit !== null && allowTypeEdit !== undefined ? allowTypeEdit : !type;
   const node = vbox({
     address: resolvedAddr,
     type,
@@ -1038,8 +998,6 @@ function makeAnswerBox({
     allowTypeEdit: resolvedTypeEdit,
     showDoubleExact: showDoubleExact ?? false,
   });
-  node.dataset.allowNameEdit = resolvedNameEdit ? "true" : "false";
-  node.dataset.allowTypeEdit = resolvedTypeEdit ? "true" : "false";
   if (deletable) {
     const del = el('<button class="delete" title="delete">×</button>');
     node.appendChild(del);
@@ -1131,7 +1089,7 @@ function inferArrayShapeFromEntries(
     if (entry.indices.length !== dims) return [];
     for (let i = 0; i < dims; i++) {
       const value = entry.indices[i]!;
-      if (!Number.isFinite(value) || value < 0) return [];
+      if (value < 0) return [];
       shape[i] = Math.max(shape[i]!, value + 1);
     }
   }
@@ -1225,7 +1183,7 @@ function groupStateObjects(boxes: BoxState[]): GroupedStateObject[] {
     let valid = true;
     for (const item of sorted) {
       const linear = arrayLinearIndex(item.indices, shape);
-      if (!Number.isFinite(linear) || linear == null || seenLinear.has(linear)) {
+      if (linear == null || seenLinear.has(linear)) {
         valid = false;
         break;
       }
@@ -1521,8 +1479,8 @@ function appendStateObjects(
         address: box.address ?? null,
         editable,
         deletable: allowDelete,
-        allowNameEdit: allowNameEdit ?? box.nameEditable ?? box.allowNameEdit,
-        allowTypeEdit: allowTypeEdit ?? box.typeEditable ?? box.allowTypeEdit,
+        allowNameEdit: allowNameEdit ?? box.allowNameEdit,
+        allowTypeEdit: allowTypeEdit ?? box.allowTypeEdit,
         showDoubleExact: box.showDoubleExact ?? null,
       });
       if (allowDelete) node.dataset.allowDelete = "true";
@@ -1617,8 +1575,7 @@ function serializeWorkspace(
       out.push(...readArrayBoxState(el));
       return;
     }
-    const box = readBoxState(el);
-    if (box) out.push(box);
+    out.push(readBoxState(el));
   });
   return out;
 }
@@ -1991,7 +1948,7 @@ function createStepper({
           typeof getPrevBoundary === "function"
             ? getPrevBoundary(current, total)
             : current - 1;
-        goTo(Number.isFinite(target) ? target : current - 1);
+        goTo(target);
       });
     });
 
@@ -2013,7 +1970,7 @@ function createStepper({
           typeof getNextBoundary === "function"
             ? getNextBoundary(current, total)
             : current + 1;
-        goTo(Number.isFinite(target) ? target : current + 1);
+        goTo(target);
       });
     });
   }

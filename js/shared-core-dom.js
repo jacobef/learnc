@@ -35,8 +35,6 @@ function disableAutoText(el) {
     el.setAttribute("spellcheck", "false");
 }
 function applyAutoTextDefaults(root = document) {
-    if (!root)
-        return;
     root
         .querySelectorAll('input[type="text"], input:not([type]), textarea, [contenteditable="true"]')
         .forEach((el) => disableAutoText(el));
@@ -47,7 +45,7 @@ function isMobileViewport() {
 }
 const DEFAULT_NAV_ITEMS = NAV_ITEMS;
 function resolveNavItems(items) {
-    return Array.isArray(items) && items.length ? items : DEFAULT_NAV_ITEMS;
+    return items?.length ? items : DEFAULT_NAV_ITEMS;
 }
 function normalizeNavHref(href = "") {
     const clean = String(href || "")
@@ -82,12 +80,10 @@ function buildNav(items = DEFAULT_NAV_ITEMS, { activeHref } = {}) {
     const nav = document.createElement("nav");
     nav.className = "tabs";
     list.forEach((item) => {
-        if (!item)
-            return;
         const link = document.createElement("a");
-        link.href = item.href || "#";
-        link.textContent = item.label || "";
-        if (normalizeNavHref(item.href || "") === current) {
+        link.href = item.href;
+        link.textContent = item.label;
+        if (normalizeNavHref(item.href) === current) {
             link.classList.add("active");
             link.setAttribute("aria-current", "page");
         }
@@ -106,10 +102,8 @@ function ensureWrapConnected(wrap, nav, main) {
     if (wrap.isConnected)
         return;
     const mount = document.body;
-    const firstScript = mount?.querySelector("script");
+    const firstScript = mount.querySelector("script");
     const anchor = main.parentElement === mount ? main : nav.parentElement === mount ? nav : null;
-    if (!mount)
-        return;
     if (anchor)
         mount.insertBefore(wrap, anchor);
     else if (firstScript)
@@ -118,8 +112,6 @@ function ensureWrapConnected(wrap, nav, main) {
         mount.appendChild(wrap);
 }
 function updateSidebarToggleLabel(btn) {
-    if (!btn)
-        return;
     const hidden = document.body.classList.contains("sidebar-collapsed");
     const label = hidden ? "Show sidebar" : "Hide sidebar";
     btn.classList.toggle("is-expanded", !hidden);
@@ -227,8 +219,6 @@ function ensurePanelizedMain(title = "") {
     return main;
 }
 function centerActiveNavItem(nav) {
-    if (!nav)
-        return;
     const active = nav.querySelector("a.active");
     if (!active)
         return;
@@ -243,8 +233,6 @@ function clampLineIndex(index, maxIndex) {
 function normalizeLineRange(range, maxIndex) {
     const startRaw = Number(Array.isArray(range) ? range[0] : range.start);
     const endRaw = Number(Array.isArray(range) ? range[1] : range.end);
-    if (!Number.isFinite(startRaw) || !Number.isFinite(endRaw))
-        return null;
     const start = clampLineIndex(Math.min(startRaw, endRaw), maxIndex);
     const end = clampLineIndex(Math.max(startRaw, endRaw), maxIndex);
     return [start, end];
@@ -263,8 +251,7 @@ function renderCodePane(root, lines, boundary, opts = {}) {
             node.classList.add("selectable");
             if (typeof boundaryIndex === "number") {
                 node.dataset.boundary = String(boundaryIndex);
-                const selected = typeof opts.selectedBoundary === "number" &&
-                    Number.isFinite(opts.selectedBoundary) &&
+                const selected = opts.selectedBoundary != null &&
                     Number(opts.selectedBoundary) === boundaryIndex;
                 if (selected)
                     node.classList.add("selected");
@@ -283,27 +270,24 @@ function renderCodePane(root, lines, boundary, opts = {}) {
     let strikeRanges = [];
     const strikeFragmentsByLine = new Map();
     let doneBoundary = boundary;
-    if (typeof opts.doneBoundary === "number" &&
-        Number.isFinite(opts.doneBoundary)) {
+    if (typeof opts.doneBoundary === "number") {
         doneBoundary = Math.max(0, Math.min(lines.length, opts.doneBoundary));
     }
     if (progress) {
         const range = opts.progressRange;
         const maxIndex = Math.max(0, lines.length - 1);
-        const progressRange = range && typeof range === "object" ? normalizeLineRange(range, maxIndex) : null;
+        const progressRange = range ? normalizeLineRange(range, maxIndex) : null;
         if (progressRange) {
             progressRangeStart = progressRange[0];
             progressRangeEnd = progressRange[1];
-            if (typeof opts.progressIndex === "number" &&
-                Number.isFinite(opts.progressIndex)) {
+            if (typeof opts.progressIndex === "number") {
                 progressIndex = clampLineIndex(opts.progressIndex, lines.length - 1);
             }
             else if (!opts.suppressProgressMid && progressRangeStart != null) {
                 progressIndex = progressRangeStart;
             }
         }
-        else if (typeof opts.progressIndex === "number" &&
-            Number.isFinite(opts.progressIndex)) {
+        else if (typeof opts.progressIndex === "number") {
             progressIndex = Math.max(0, Math.min(lines.length - 1, opts.progressIndex));
         }
         else if (!opts.suppressProgressMid && boundary > 0) {
@@ -312,8 +296,6 @@ function renderCodePane(root, lines, boundary, opts = {}) {
     }
     const appendStrike = (range) => {
         const normalized = normalizeLineRange(range, Math.max(0, lines.length - 1));
-        if (!normalized)
-            return;
         strikeRanges.push(normalized);
     };
     if (opts.strikeRange)
@@ -323,15 +305,11 @@ function renderCodePane(root, lines, boundary, opts = {}) {
     }
     if (Array.isArray(opts.strikeFragments)) {
         opts.strikeFragments.forEach((frag) => {
-            if (!frag || !Number.isFinite(frag.line))
-                return;
             const line = clampLineIndex(frag.line, lines.length - 1);
             const text = lines[line] ?? "";
             const max = text.length;
             let start = Math.max(0, Math.min(max, Number(frag.start)));
             let end = Math.max(0, Math.min(max, Number(frag.end)));
-            if (!Number.isFinite(start) || !Number.isFinite(end))
-                return;
             if (end < start)
                 [start, end] = [end, start];
             if (end <= start)
@@ -579,8 +557,6 @@ function removeBoxDeleteButtons(root) {
     scope.querySelectorAll(".vbox .delete, .arraybox .delete").forEach((btn) => btn.remove());
 }
 function readBoxState(root) {
-    if (!root)
-        return null;
     const el = root;
     const names = [...root.querySelectorAll(".name-text")]
         .map((el) => txt(el))
@@ -603,7 +579,7 @@ function readBoxState(root) {
         if (stored != null && stored !== "")
             value = stored;
     }
-    const allowDelete = el?.dataset?.allowDelete === "true" || !!root.querySelector(".delete");
+    const allowDelete = el.dataset.allowDelete === "true" || !!root.querySelector(".delete");
     return {
         address: txt(root.querySelector(".address")),
         type: typeText,
@@ -611,8 +587,8 @@ function readBoxState(root) {
         rawValue,
         name: names[0] || "",
         names,
-        nameEditable: !!root.querySelector(".name-text[contenteditable]"),
-        typeEditable: !!root.querySelector(".type[contenteditable]"),
+        allowNameEdit: !!root.querySelector(".name-text[contenteditable]"),
+        allowTypeEdit: !!root.querySelector(".type[contenteditable]"),
         allowDelete,
         showDoubleExact: el.dataset.doubleDisplay === "exact",
     };
@@ -622,17 +598,12 @@ function boxAddress(box) {
     return raw.trim();
 }
 function collectStageBoxes(root) {
-    if (!root)
-        return [];
     return [...root.querySelectorAll(".vbox")]
         .map((node) => {
         const box = readBoxState(node);
-        if (!box)
-            return null;
         box.node = node;
         return box;
-    })
-        .filter((box) => !!box);
+    });
 }
 function buildOtherNamesMap(boxes) {
     const byAddr = new Map();
@@ -678,8 +649,6 @@ function sortOtherNames(list) {
     });
 }
 function updateOtherNamesList(node, aliases, showAliases) {
-    if (!node)
-        return;
     const listInner = node.querySelector(".name-list-inner");
     if (!listInner)
         return;
@@ -694,7 +663,7 @@ function updateOtherNamesList(node, aliases, showAliases) {
         listInner.appendChild(baseTag);
     }
     [...listInner.children].slice(1).forEach((child) => child.remove());
-    const hasAliases = showAliases && Array.isArray(aliases) && aliases.length > 0;
+    const hasAliases = showAliases && aliases.length > 0;
     baseTag.classList.toggle("single", !hasAliases);
     if (hasAliases) {
         aliases.forEach((alias) => {
@@ -712,8 +681,6 @@ function updateOtherNamesList(node, aliases, showAliases) {
         label.textContent = hasAliases ? "names" : "name";
 }
 function ensureOtherNamesToggle(node, onToggle) {
-    if (!node)
-        return null;
     const stack = node.querySelector(".name-stack");
     const label = node.querySelector(".lbl-name");
     if (!stack || !label)
@@ -729,8 +696,7 @@ function ensureOtherNamesToggle(node, onToggle) {
         btn.dataset.bound = "true";
         btn.addEventListener("click", (event) => {
             event.preventDefault();
-            if (node)
-                onToggle?.(node);
+            onToggle(node);
         });
     }
     if (btn.parentElement !== stack || btn.nextElementSibling !== label) {
@@ -746,7 +712,7 @@ function applyOtherNames(root, opts = {}) {
     const currentAddrs = new Set(boxes.map((box) => boxAddress(box)));
     const aliasSource = Array.isArray(sourceBoxes) && sourceBoxes.length ? sourceBoxes : boxes;
     const otherNamesByAddr = buildOtherNamesMap(aliasSource);
-    const useShownSet = shownAddrs && typeof shownAddrs.has === "function";
+    const useShownSet = shownAddrs !== null;
     const getShown = (node, addr) => useShownSet ? shownAddrs.has(addr) : node.dataset.otherNames === "on";
     const setShown = (node, addr, value) => {
         if (useShownSet) {
@@ -809,18 +775,10 @@ function nextPooledAddr(type = "int") {
         return addrPool.free.pop();
     return randAddr(type);
 }
-function makeAnswerBox({ name = "", names = null, type = "", value = "", address = null, editable = true, deletable = editable, allowNameEdit = null, allowTypeEdit = null, nameEditable = null, typeEditable = null, showDoubleExact = null, } = {}) {
+function makeAnswerBox({ name = "", type = "", value = "", address = null, editable = true, deletable = editable, allowNameEdit = null, allowTypeEdit = null, showDoubleExact = null, } = {}) {
     const resolvedAddr = address == null ? String(nextPooledAddr(type || "int")) : String(address);
-    const resolvedNameEdit = allowNameEdit !== null && allowNameEdit !== undefined
-        ? allowNameEdit
-        : nameEditable !== null && nameEditable !== undefined
-            ? nameEditable
-            : !name && !(Array.isArray(names) && names.length);
-    const resolvedTypeEdit = allowTypeEdit !== null && allowTypeEdit !== undefined
-        ? allowTypeEdit
-        : typeEditable !== null && typeEditable !== undefined
-            ? typeEditable
-            : !type;
+    const resolvedNameEdit = allowNameEdit !== null && allowNameEdit !== undefined ? allowNameEdit : !name;
+    const resolvedTypeEdit = allowTypeEdit !== null && allowTypeEdit !== undefined ? allowTypeEdit : !type;
     const node = vbox({
         address: resolvedAddr,
         type,
@@ -831,8 +789,6 @@ function makeAnswerBox({ name = "", names = null, type = "", value = "", address
         allowTypeEdit: resolvedTypeEdit,
         showDoubleExact: showDoubleExact ?? false,
     });
-    node.dataset.allowNameEdit = resolvedNameEdit ? "true" : "false";
-    node.dataset.allowTypeEdit = resolvedTypeEdit ? "true" : "false";
     if (deletable) {
         const del = el('<button class="delete" title="delete">×</button>');
         node.appendChild(del);
@@ -893,7 +849,7 @@ function inferArrayShapeFromEntries(entries) {
             return [];
         for (let i = 0; i < dims; i++) {
             const value = entry.indices[i];
-            if (!Number.isFinite(value) || value < 0)
+            if (value < 0)
                 return [];
             shape[i] = Math.max(shape[i], value + 1);
         }
@@ -986,7 +942,7 @@ function groupStateObjects(boxes) {
         let valid = true;
         for (const item of sorted) {
             const linear = arrayLinearIndex(item.indices, shape);
-            if (!Number.isFinite(linear) || linear == null || seenLinear.has(linear)) {
+            if (linear == null || seenLinear.has(linear)) {
                 valid = false;
                 break;
             }
@@ -1254,8 +1210,8 @@ function appendStateObjects(container, boxes, opts = {}) {
                 address: box.address ?? null,
                 editable,
                 deletable: allowDelete,
-                allowNameEdit: allowNameEdit ?? box.nameEditable ?? box.allowNameEdit,
-                allowTypeEdit: allowTypeEdit ?? box.typeEditable ?? box.allowTypeEdit,
+                allowNameEdit: allowNameEdit ?? box.allowNameEdit,
+                allowTypeEdit: allowTypeEdit ?? box.allowTypeEdit,
                 showDoubleExact: box.showDoubleExact ?? null,
             });
             if (allowDelete)
@@ -1341,9 +1297,7 @@ function serializeWorkspace(target) {
             out.push(...readArrayBoxState(el));
             return;
         }
-        const box = readBoxState(el);
-        if (box)
-            out.push(box);
+        out.push(readBoxState(el));
     });
     return out;
 }
@@ -1661,7 +1615,7 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
                 const target = typeof getPrevBoundary === "function"
                     ? getPrevBoundary(current, total)
                     : current - 1;
-                goTo(Number.isFinite(target) ? target : current - 1);
+                goTo(target);
             });
         });
         getNextButtons().forEach((btn) => {
@@ -1684,7 +1638,7 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
                 const target = typeof getNextBoundary === "function"
                     ? getNextBoundary(current, total)
                     : current + 1;
-                goTo(Number.isFinite(target) ? target : current + 1);
+                goTo(target);
             });
         });
     }

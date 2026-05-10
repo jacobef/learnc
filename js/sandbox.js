@@ -3,25 +3,29 @@ import { confettiRain } from "./confetti.js";
 import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
 const { main } = ensureBaseLayout();
 main.classList.add("main-panelized");
-const role = (name) => queryRole(name);
-const instructions = role("sandbox-instructions");
-const editor = role("sandbox-editor");
-const lineNumbers = role("sandbox-line-numbers");
-const exprInput = role("sandbox-expr");
-const exprResult = role("sandbox-expr-result");
-const prevBtn = role("sandbox-prev");
-const nextBtn = role("sandbox-next");
-const prevButtons = [prevBtn].filter((btn) => !!btn);
-const nextButtons = [nextBtn].filter((btn) => !!btn);
+function requiredRole(name) {
+    const element = queryRole(name);
+    if (!element)
+        throw new Error(`Missing required sandbox element: ${name}`);
+    return element;
+}
+const instructions = requiredRole("sandbox-instructions");
+const editor = requiredRole("sandbox-editor");
+const lineNumbers = requiredRole("sandbox-line-numbers");
+const exprInput = requiredRole("sandbox-expr");
+const exprResult = requiredRole("sandbox-expr-result");
+const stage = requiredRole("sandbox-stage");
+const codePane = requiredRole("sandbox-code");
+const prevButtons = [requiredRole("sandbox-prev")];
+const nextButtons = [requiredRole("sandbox-next")];
 let finishedConfettiShown = false;
 const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
 bindCodeEditorTabKey(editor);
 const boundaryLine = (() => {
-    if (!editor)
-        return null;
     const row = editor.closest(".codepane-row");
-    if (!row)
-        return null;
+    if (!(row instanceof HTMLElement)) {
+        throw new Error("Missing sandbox code editor row.");
+    }
     const el = document.createElement("div");
     el.className = "code-boundary-line";
     el.setAttribute("aria-hidden", "true");
@@ -29,9 +33,6 @@ const boundaryLine = (() => {
     return el;
 })();
 const diagnosticEl = (() => {
-    const codePane = role("sandbox-code");
-    if (!codePane)
-        return null;
     const existing = codePane.querySelector(".code-diagnostic");
     if (existing)
         return existing;
@@ -40,11 +41,12 @@ const diagnosticEl = (() => {
     codePane.appendChild(el);
     return el;
 })();
+const initialLineCount = getRawLines().length;
 const sandbox = {
-    text: editor ? editor.value : "",
+    text: editor.value,
     allocBase: null,
-    boundary: null,
-    lineCount: 0,
+    boundary: initialLineCount,
+    lineCount: initialLineCount,
     otherNamesShown: new Set(),
     lastState: null,
     exprOtherNamesShown: new Set(),
@@ -67,8 +69,6 @@ function allocFactory() {
     };
 }
 function updateInstructions() {
-    if (!instructions)
-        return;
     const base = "This is the sandbox. The program state will update as you write code.";
     const message = base;
     const params = new URLSearchParams(window.location.search);
@@ -86,32 +86,22 @@ function updateInstructions() {
     }
 }
 function getEditorText() {
-    return editor ? editor.value : sandbox.text || "";
+    return editor.value;
 }
 function getRawLines() {
     return getEditorText().split(/\r?\n/);
 }
 function clampBoundary(value, total) {
-    if (!Number.isFinite(value))
-        return 0;
     return Math.max(0, Math.min(total, value));
-}
-function resolveBoundary(value, fallback) {
-    return Number.isFinite(value) ? value : fallback;
 }
 function stopIndexForBoundary(parts, boundary, totalLines) {
     const target = Math.max(0, Math.min(totalLines, boundary));
     if (!parts.length)
         return 0;
-    const idx = parts.findIndex((part) => {
-        const end = part?.endLine;
-        return Number.isFinite(end) && end >= target;
-    });
+    const idx = parts.findIndex((part) => part.endLine >= target);
     return idx === -1 ? parts.length : idx;
 }
 function headerIndexForLine(parts, ifBlocks, lineIndex) {
-    if (!Number.isFinite(lineIndex))
-        return null;
     let selected = null;
     for (let i = 0; i < parts.length; i++) {
         const block = ifBlocks.map.get(i);
@@ -119,12 +109,9 @@ function headerIndexForLine(parts, ifBlocks, lineIndex) {
             continue;
         if (block.headerStartLine !== lineIndex)
             continue;
-        const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
-            ? parts[block.closeIndex].endLine
-            : block.headerEndLine;
-        if (Number.isFinite(closeLine) && closeLine > lineIndex) {
+        const closeLine = parts[block.closeIndex].endLine;
+        if (closeLine > lineIndex)
             selected = i;
-        }
     }
     return selected;
 }
@@ -161,7 +148,7 @@ function adjustBoundaryForEdit(prevText, nextText) {
         return;
     const prevLines = prevText.split(/\r?\n/).length;
     const nextLines = nextText.split(/\r?\n/).length;
-    const boundary = resolveBoundary(sandbox.boundary, prevLines);
+    const boundary = clampBoundary(sandbox.boundary, prevLines);
     const { start, oldSegment, newSegment } = diffSegments(prevText, nextText);
     const beforeChange = prevText.slice(0, start);
     const changeLine = countNewlines(beforeChange);
@@ -179,7 +166,7 @@ function adjustBoundaryForEdit(prevText, nextText) {
     sandbox.boundary = clampBoundary(boundary + delta, nextLines);
 }
 function isBoundaryInsideBlockComment(lines, boundary) {
-    if (!Array.isArray(lines) || boundary <= 0)
+    if (boundary <= 0)
         return false;
     let inComment = false;
     const limit = Math.min(boundary, lines.length);
@@ -206,11 +193,7 @@ function isBoundaryInsideBlockComment(lines, boundary) {
 }
 function syncBoundaryWithLines(lines) {
     const total = lines.length;
-    const prevTotal = Number.isFinite(sandbox.lineCount)
-        ? sandbox.lineCount
-        : total;
-    const hasBoundary = Number.isFinite(sandbox.boundary);
-    const wasAtEnd = !hasBoundary || sandbox.boundary >= prevTotal;
+    const wasAtEnd = sandbox.boundary >= sandbox.lineCount;
     sandbox.lineCount = total;
     if (wasAtEnd) {
         sandbox.boundary = total;
@@ -222,7 +205,7 @@ function syncBoundaryWithLines(lines) {
 }
 function getProgramParts(lines) {
     const statementMap = simulator.buildStatementMap(lines);
-    const parts = statementMap.parts || [];
+    const parts = statementMap.parts;
     const ifBlocks = simulator.buildIfStatementMap(parts, {
         lastLine: Math.max(0, lines.length - 1),
     });
@@ -231,8 +214,6 @@ function getProgramParts(lines) {
 function runLabelForBoundary(boundary, totalLines, statementMap) {
     const range = simulator.statementRangeForLine(statementMap, boundary);
     if (range &&
-        typeof range.startLine === "number" &&
-        typeof range.endLine === "number" &&
         range.endLine > range.startLine) {
         const start = range.startLine + 1;
         const end = range.endLine + 1;
@@ -247,45 +228,37 @@ function stateBeforePart(parts, partIndex) {
         alloc,
         stop: Math.max(0, Math.min(parts.length, partIndex)),
     });
-    return Array.isArray(result) ? result : [];
+    return result ?? [];
 }
 function nextBoundaryForLine(current, parts, ifBlocks, statementMap, totalLines) {
-    if (!Number.isFinite(current))
-        return current + 1;
     if (current >= totalLines)
         return totalLines;
     const range = simulator.statementRangeForLine(statementMap, current);
-    const rangeStart = typeof range?.startLine === "number" ? range.startLine : current;
-    const rangeEnd = typeof range?.endLine === "number" ? range.endLine : current;
+    const rangeStart = range?.startLine ?? current;
+    const rangeEnd = range?.endLine ?? current;
     const headerIndex = headerIndexForLine(parts, ifBlocks, rangeStart);
     if (headerIndex == null) {
-        if (Number.isFinite(rangeEnd) && rangeEnd > current)
+        if (rangeEnd > current)
             return Math.min(totalLines, rangeEnd + 1);
         return Math.min(totalLines, current + 1);
     }
     const block = ifBlocks.map.get(headerIndex);
     if (!block) {
-        if (Number.isFinite(rangeEnd) && rangeEnd > current)
+        if (rangeEnd > current)
             return Math.min(totalLines, rangeEnd + 1);
         return Math.min(totalLines, current + 1);
     }
     const currentState = stateBeforePart(parts, headerIndex);
     const condition = simulator.evaluateCondition(block.expr, currentState);
     if ("error" in condition || condition.value) {
-        if (Number.isFinite(rangeEnd) && rangeEnd > current)
+        if (rangeEnd > current)
             return Math.min(totalLines, rangeEnd + 1);
         return Math.min(totalLines, current + 1);
     }
-    const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
-        ? parts[block.closeIndex].endLine
-        : block.headerEndLine;
-    if (!Number.isFinite(closeLine))
-        return Math.min(totalLines, current + 1);
+    const closeLine = parts[block.closeIndex].endLine;
     return Math.min(totalLines, closeLine + 1);
 }
 function prevBoundaryForLine(current, parts, ifBlocks, statementMap, totalLines) {
-    if (!Number.isFinite(current))
-        return current - 1;
     if (current <= 0)
         return current - 1;
     let boundary = 0;
@@ -306,13 +279,10 @@ function applyUserProgram(lines) {
     return simulator.applyProgram(text, { alloc: allocFactory() });
 }
 function getProgramOutcome(linesOverride, partsOverride, boundaryOverride) {
-    const lines = linesOverride || getRawLines();
-    const { parts } = Array.isArray(partsOverride)
-        ? { parts: partsOverride }
-        : getProgramParts(lines);
+    const lines = linesOverride ?? getRawLines();
+    const parts = partsOverride ?? getProgramParts(lines).parts;
     const total = lines.length;
-    const boundary = resolveBoundary(Number.isFinite(boundaryOverride) ? boundaryOverride : sandbox.boundary, total);
-    const safeBoundary = clampBoundary(boundary, total);
+    const safeBoundary = clampBoundary(boundaryOverride ?? sandbox.boundary, total);
     const fullResult = simulator.analyzeProgramParts(parts, {
         alloc: allocFactory(),
     });
@@ -357,12 +327,10 @@ function diagnosticDecoration(diagnostic) {
     ];
 }
 function renderDiagnostic(diagnostic) {
-    if (!diagnosticEl)
-        return;
     if (!diagnostic) {
         diagnosticEl.classList.add("hidden");
         diagnosticEl.textContent = "";
-        editor?.removeAttribute("aria-invalid");
+        editor.removeAttribute("aria-invalid");
         return;
     }
     diagnosticEl.classList.remove("hidden");
@@ -380,12 +348,9 @@ function renderDiagnostic(diagnostic) {
         tip.textContent = diagnostic.tip;
         diagnosticEl.appendChild(tip);
     }
-    editor?.setAttribute("aria-invalid", "true");
+    editor.setAttribute("aria-invalid", "true");
 }
 function renderStage() {
-    const stage = role("sandbox-stage");
-    if (!stage)
-        return;
     clearNode(stage);
     const lines = getRawLines();
     const { parts } = getProgramParts(lines);
@@ -423,8 +388,6 @@ function renderStage() {
     updateInstructions();
 }
 function renderExpression(outcome) {
-    if (!exprResult || !exprInput)
-        return;
     clearNode(exprResult);
     exprResult.classList.add("hidden");
     const expr = exprInput.value.trim();
@@ -488,25 +451,21 @@ function renderExpression(outcome) {
     }
 }
 function updateStepperControls(boundaryOverride, totalOverride) {
-    if (!prevButtons.length && !nextButtons.length)
-        return;
-    const totalLines = resolveBoundary(Number.isFinite(totalOverride) ? totalOverride : sandbox.lineCount, getRawLines().length);
-    const boundary = resolveBoundary(Number.isFinite(boundaryOverride) ? boundaryOverride : sandbox.boundary, totalLines);
+    const totalLines = totalOverride;
+    const boundary = clampBoundary(boundaryOverride, totalLines);
     prevButtons.forEach((btn) => {
         btn.disabled = boundary <= 0;
     });
-    if (nextButtons.length) {
-        const atEnd = boundary >= totalLines;
-        let label = "At end ▶";
-        if (!atEnd) {
-            const { statementMap } = getProgramParts(getRawLines());
-            label = runLabelForBoundary(boundary, totalLines, statementMap);
-        }
-        nextButtons.forEach((btn) => {
-            btn.textContent = label;
-            btn.disabled = atEnd;
-        });
+    const atEnd = boundary >= totalLines;
+    let label = "At end ▶";
+    if (!atEnd) {
+        const { statementMap } = getProgramParts(getRawLines());
+        label = runLabelForBoundary(boundary, totalLines, statementMap);
     }
+    nextButtons.forEach((btn) => {
+        btn.textContent = label;
+        btn.disabled = atEnd;
+    });
 }
 function renderState(title, boxes, status = "ok") {
     const wrap = document.createElement("div");
@@ -543,60 +502,21 @@ function renderState(title, boxes, status = "ok") {
     return wrap;
 }
 function refreshOtherNames() {
-    const stage = role("sandbox-stage");
-    if (stage) {
-        applyOtherNames(stage, {
-            shownAddrs: sandbox.otherNamesShown,
-            onToggle: refreshOtherNames,
-        });
-    }
-    if (exprResult) {
-        applyOtherNames(exprResult, {
-            shownAddrs: sandbox.exprOtherNamesShown,
-            onToggle: refreshOtherNames,
-            sourceBoxes: sandbox.lastState || [],
-            cleanupShownAddrs: false,
-        });
-    }
-}
-function getLineHeightPx() {
-    if (!editor)
-        return 32;
-    const style = window.getComputedStyle(editor);
-    const lh = parseFloat(style.lineHeight);
-    return Number.isFinite(lh) ? lh : 32;
-}
-function autoSizeEditor() {
-    if (!editor)
-        return;
-    editor.style.height = "auto";
-    editor.style.height = `${editor.scrollHeight}px`;
-}
-function measureWrapCounts(lines) {
-    if (!editor || !measureEl)
-        return lines.map(() => 1);
-    const style = window.getComputedStyle(editor);
-    const paddingLeft = parseFloat(style.paddingLeft) || 0;
-    const paddingRight = parseFloat(style.paddingRight) || 0;
-    const contentWidth = Math.max(1, editor.clientWidth - paddingLeft - paddingRight);
-    measureEl.style.width = `${contentWidth}px`;
-    measureEl.style.fontFamily = style.fontFamily;
-    measureEl.style.fontSize = style.fontSize;
-    measureEl.style.fontWeight = style.fontWeight;
-    measureEl.style.letterSpacing = style.letterSpacing;
-    measureEl.style.lineHeight = style.lineHeight;
-    const lineHeight = getLineHeightPx();
-    return lines.map((line) => {
-        measureEl.textContent = line === "" ? " " : line;
-        const h = measureEl.scrollHeight;
-        return Math.max(1, Math.ceil(h / lineHeight - 0.01));
+    applyOtherNames(stage, {
+        shownAddrs: sandbox.otherNamesShown,
+        onToggle: refreshOtherNames,
+    });
+    applyOtherNames(exprResult, {
+        shownAddrs: sandbox.exprOtherNamesShown,
+        onToggle: refreshOtherNames,
+        sourceBoxes: sandbox.lastState || [],
+        cleanupShownAddrs: false,
     });
 }
 function updateLineGutters(linesOverride) {
-    const lines = Array.isArray(linesOverride) ? linesOverride : getRawLines();
+    const lines = linesOverride ?? getRawLines();
     const count = Math.max(lines.length, 1);
-    const boundary = resolveBoundary(sandbox.boundary, count);
-    const safeBoundary = clampBoundary(boundary, count);
+    const safeBoundary = clampBoundary(sandbox.boundary, count);
     const diagnostic = getProgramDiagnostic();
     const lineClasses = new Map();
     for (let i = 0; i < count; i++) {
@@ -618,46 +538,37 @@ function updateLineGutters(linesOverride) {
         decorations: diagnosticDecoration(diagnostic),
     });
     renderDiagnostic(diagnostic);
-    if (boundaryLine && editor) {
-        const style = window.getComputedStyle(editor);
-        const paddingTop = parseFloat(style.paddingTop) || 0;
-        let rows = 0;
-        for (let i = 0; i < safeBoundary; i++) {
-            rows += wraps[i] || 1;
-        }
-        const top = Math.max(0, paddingTop + rows * lineHeight - 1);
-        boundaryLine.style.top = `${top}px`;
+    const style = window.getComputedStyle(editor);
+    const paddingTop = parseFloat(style.paddingTop) || 0;
+    let rows = 0;
+    for (let i = 0; i < safeBoundary; i++) {
+        rows += wraps[i] || 1;
     }
-    if (editor) {
-        if (lineNumbers)
-            lineNumbers.scrollTop = editor.scrollTop;
-    }
+    const top = Math.max(0, paddingTop + rows * lineHeight - 1);
+    boundaryLine.style.top = `${top}px`;
+    lineNumbers.scrollTop = editor.scrollTop;
 }
-if (editor) {
-    editor.addEventListener("input", () => {
-        const nextText = editor.value;
-        adjustBoundaryForEdit(sandbox.text || "", nextText);
-        sandbox.text = nextText;
-        renderStage();
-        updateLineGutters();
-    });
-    if (lineNumbers) {
-        editor.addEventListener("scroll", () => {
-            lineNumbers.scrollTop = editor.scrollTop;
-        });
-    }
-    window.addEventListener("resize", () => updateLineGutters());
-    if (typeof ResizeObserver !== "undefined") {
-        const ro = new ResizeObserver(() => updateLineGutters());
-        ro.observe(editor);
-    }
+editor.addEventListener("input", () => {
+    const nextText = editor.value;
+    adjustBoundaryForEdit(sandbox.text || "", nextText);
+    sandbox.text = nextText;
+    renderStage();
+    updateLineGutters();
+});
+editor.addEventListener("scroll", () => {
+    lineNumbers.scrollTop = editor.scrollTop;
+});
+window.addEventListener("resize", () => updateLineGutters());
+if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => updateLineGutters());
+    ro.observe(editor);
 }
 prevButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
         const lines = getRawLines();
         const { parts, ifBlocks, statementMap } = getProgramParts(lines);
         const total = lines.length;
-        const current = resolveBoundary(sandbox.boundary, total);
+        const current = clampBoundary(sandbox.boundary, total);
         if (current <= 0)
             return;
         const boundary = clampBoundary(current, total);
@@ -672,7 +583,7 @@ nextButtons.forEach((btn) => {
         const lines = getRawLines();
         const { parts, ifBlocks, statementMap } = getProgramParts(lines);
         const total = lines.length;
-        const current = resolveBoundary(sandbox.boundary, total);
+        const current = clampBoundary(sandbox.boundary, total);
         if (current >= total)
             return;
         const boundary = clampBoundary(current, total);
@@ -685,8 +596,6 @@ nextButtons.forEach((btn) => {
 updateInstructions();
 renderStage();
 updateLineGutters();
-if (exprInput) {
-    exprInput.addEventListener("input", () => {
-        renderExpression(getProgramOutcome());
-    });
-}
+exprInput.addEventListener("input", () => {
+    renderExpression(getProgramOutcome());
+});

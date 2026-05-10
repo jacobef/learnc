@@ -12,7 +12,6 @@ import {
 } from "./shared-core-utils.js";
 import {
   createParserTools,
-  type AssignmentOp,
   type BinaryOp,
   type DeclaredNames,
   type ExprNode,
@@ -112,7 +111,7 @@ export interface SimpleSimulator {
     opts?: { lastLine?: number },
   ) => WhileBlockMap;
   statementRangeForLine: (
-    statementMap: StatementMap | null,
+    statementMap: StatementMap,
     lineIndex: number,
   ) => StatementRange | null;
   getStatementContext: (lines: string[], boundary: number) => StatementContext;
@@ -280,14 +279,6 @@ export function createSimpleSimulator(): SimpleSimulator {
     recur(0);
   }
 
-  function makeArrayDeclaredNames(name: string, shape: number[]): string[] {
-    const out = [name];
-    forEachArrayIndex(shape, (indices) => {
-      out.push(arrayElementName(name, indices));
-    });
-    return out;
-  }
-
   function normalizeArrayDims(dims: unknown): number[] {
     if (!Array.isArray(dims)) return [];
     const out: number[] = [];
@@ -312,7 +303,7 @@ export function createSimpleSimulator(): SimpleSimulator {
     depth: number,
     pointeeArrayDims: number[],
   ): number {
-    if (!Array.isArray(pointeeArrayDims) || pointeeArrayDims.length === 0) return 0;
+    if (!pointeeArrayDims.length) return 0;
     const raw = Math.floor(Number(value));
     const normalized = Number.isFinite(raw) ? raw : 0;
     const maxInner = Math.max(0, Math.floor(Number(depth)) - 1);
@@ -365,10 +356,6 @@ export function createSimpleSimulator(): SimpleSimulator {
     return linear;
   }
 
-  function isBraceToken(tok: Token): boolean {
-    return tok.type === "sym" && (tok.value === "{" || tok.value === "}");
-  }
-
   function addDeclaredNames(
     scopes: ScopeStack,
     declared: DeclaredNames,
@@ -397,31 +384,20 @@ export function createSimpleSimulator(): SimpleSimulator {
     return { state: nextState };
   }
 
-  function resolveDeclType(
-    stars: number,
-    baseType: string = "int",
-  ): string | null {
-    if (!Number.isFinite(stars) || stars < 0) return null;
-    const base = canonicalizeBaseType(baseType);
-    if (!base) return null;
-    if (stars === 0) return base;
-    return `${base}${"*".repeat(stars)}`;
-  }
-
   function makePointerType(
     depth: number,
     base: string = "int",
     pointeeArrayDims: number[] = [],
     pointeeInnerDepth?: number,
   ): string | null {
-    if (!Number.isFinite(depth) || depth < 0) return null;
+    if (depth < 0) return null;
     const canonicalBase = canonicalizeBaseType(base);
     if (!canonicalBase) return null;
     const dims = normalizeArrayDims(pointeeArrayDims)
       .map((d) => `[${d}]`)
       .join("");
     if (depth === 0) return `${canonicalBase}${dims}`;
-    if (Array.isArray(pointeeArrayDims) && pointeeArrayDims.length > 0) {
+    if (pointeeArrayDims.length) {
       const rawInner = Math.floor(Number(pointeeInnerDepth));
       const innerDepth = Math.max(
         0,
@@ -695,18 +671,6 @@ export function createSimpleSimulator(): SimpleSimulator {
     return null;
   }
 
-  function signedVariantForBase(base: string): string | null {
-    if (base === "char" || base === "signed char" || base === "unsigned char")
-      return "signed char";
-    if (base === "short" || base === "unsigned short") return "short";
-    if (base === "int" || base === "unsigned int") return "int";
-    if (base === "long" || base === "unsigned long") return "long";
-    if (base === "long long" || base === "unsigned long long")
-      return "long long";
-    if (base === "bool") return "bool";
-    return null;
-  }
-
   function integerPromotionBase(base: string): string {
     const meta = integerMetaForBase(base);
     if (!meta) return "int";
@@ -770,7 +734,6 @@ export function createSimpleSimulator(): SimpleSimulator {
   const parser = createParserTools({
     evaluateArrayLengthExpr: (expr: ExprNode): number | null => {
       const evaluated = evaluateExpression(expr, [], {
-        targetType: "int",
         requireValue: true,
       });
       if (isScalarError(evaluated)) return null;
@@ -1444,7 +1407,6 @@ export function createSimpleSimulator(): SimpleSimulator {
         );
       }
       const evaluatedLength = evaluateExpression(parsedLength.expr, [], {
-        targetType: "int",
         requireValue: true,
       });
       if (
@@ -1598,8 +1560,7 @@ export function createSimpleSimulator(): SimpleSimulator {
     if (result.error) return result;
     const source = decayArrayValue(result);
     if (isEvalError(source)) return source;
-    if (!Number.isFinite(source.depth) || source.depth !== 0)
-      return makeCompileError();
+    if (source.depth !== 0) return makeCompileError();
     const raw = source.value;
     if (source.kind === "lvalue") {
       if (requireValue && String(raw ?? "") === "") return makeUbError();
@@ -1627,16 +1588,11 @@ export function createSimpleSimulator(): SimpleSimulator {
     expr: ExprNode,
     state: BoxState[],
     opts: {
-      targetType?: string;
       requireValue?: boolean;
       onSideEffect?: () => void;
     } = {},
   ): EvalResult | EvalError {
-    const {
-      targetType = "int",
-      requireValue = requireSourceValue,
-      onSideEffect,
-    } = opts;
+    const { requireValue = requireSourceValue, onSideEffect } = opts;
     const by = Object.fromEntries(state.map((b) => [b.name, b]));
     type ArrayInfo = {
       name: string;
@@ -1682,9 +1638,9 @@ export function createSimpleSimulator(): SimpleSimulator {
         const linearIndex =
           arrayLinearIndex(indices, metadataShape) ??
           (indices.length === 1 ? indices[0]! : null);
-        if (!Number.isFinite(linearIndex) || linearIndex! < 0) continue;
+        if (linearIndex == null || linearIndex < 0) continue;
         const parsedType = parseType(box.type);
-        if (!parsedType.base || !Number.isFinite(parsedType.depth)) continue;
+        if (!parsedType.base) continue;
         const elementPointeeArrayDims = normalizeArrayDims(box.pointeeArrayDims);
         const elementPointeeInnerDepth = normalizePointeeInnerDepth(
           box.pointeeInnerDepth ?? parsedType.pointeeInnerDepth,
@@ -1777,7 +1733,7 @@ export function createSimpleSimulator(): SimpleSimulator {
           pointeeInnerDepth,
         ) || base;
       const info = typeInfo(pointeeType);
-      const size = Number.isFinite(info.size) && info.size > 0 ? info.size : 1;
+      const size = info.size > 0 ? info.size : 1;
       return BigInt(size);
     };
 
@@ -1788,7 +1744,7 @@ export function createSimpleSimulator(): SimpleSimulator {
         pointeeArrayDims: parsedPointeeArrayDims,
         pointeeInnerDepth: parsedPointeeInnerDepth,
       } = parseType(box.type);
-      if (!base || !Number.isFinite(depth)) return makeCompileError();
+      if (!base) return makeCompileError();
       const pointeeArrayDims = (() => {
         const fromBox = normalizeArrayDims(box.pointeeArrayDims);
         if (fromBox.length) return fromBox;
@@ -1894,13 +1850,11 @@ export function createSimpleSimulator(): SimpleSimulator {
       if (isEvalError(decayed)) return decayed;
       const raw = decayed.value;
       if (mustHaveValue && String(raw ?? "") === "") {
-        const label = decayed.label || "That value";
         return makeUbError();
       }
       if (decayed.depth > 0) {
         const trimmed = String(raw ?? "").trim();
         if (!trimmed) {
-          const label = decayed.label || "That pointer";
           return makeUbError();
         }
         try {
@@ -1926,7 +1880,6 @@ export function createSimpleSimulator(): SimpleSimulator {
       if (isFloatingBase(decayed.base)) {
         const parsed = parseDoubleValueWithSign(raw);
         if (!parsed) {
-          const label = decayed.label || "That value";
           return makeCompileError();
         }
         return {
@@ -1964,7 +1917,6 @@ export function createSimpleSimulator(): SimpleSimulator {
           pointeeInnerDepth: 0,
         };
       } catch {
-        const label = decayed.label || "That value";
         return makeCompileError();
       }
     }
@@ -1997,7 +1949,7 @@ export function createSimpleSimulator(): SimpleSimulator {
       target: BoxState,
     ): boolean {
       const pointerBase = pointer.base || "int";
-      const pointerDepth = Number.isFinite(pointer.depth) ? Math.floor(pointer.depth) : 0;
+      const pointerDepth = Math.floor(pointer.depth);
       if (pointerDepth < 1) return false;
       const pointerPointeeArrayDims = normalizeArrayDims(pointer.pointeeArrayDims);
       const pointerPointeeInnerDepth = normalizePointeeInnerDepth(
@@ -2008,7 +1960,7 @@ export function createSimpleSimulator(): SimpleSimulator {
       const pointerOuterDepth = Math.max(0, pointerDepth - pointerPointeeInnerDepth);
 
       const parsedTarget = parseType(target.type || "int");
-      if (!parsedTarget.base || !Number.isFinite(parsedTarget.depth)) return false;
+      if (!parsedTarget.base) return false;
       if (parsedTarget.base !== pointerBase) return false;
       const targetDepth = Math.floor(parsedTarget.depth);
       const targetPointeeArrayDims = (() => {
@@ -2057,7 +2009,7 @@ export function createSimpleSimulator(): SimpleSimulator {
       }
       const targetType =
         makePointerType(
-          Number.isFinite(target.depth) ? target.depth : 0,
+          target.depth,
           target.base || "int",
           normalizeArrayDims(target.pointeeArrayDims),
           target.pointeeInnerDepth,
@@ -2495,14 +2447,14 @@ export function createSimpleSimulator(): SimpleSimulator {
       if (node.kind === "cast") {
         const target = parseType(node.targetType || "int");
         const targetBase = target.base;
-        const targetDepth = Number.isFinite(target.depth) ? target.depth : 0;
+        const targetDepth = target.depth;
         const targetPointeeArrayDims = normalizeArrayDims(target.pointeeArrayDims);
         const targetPointeeInnerDepth = normalizePointeeInnerDepth(
           target.pointeeInnerDepth,
           targetDepth,
           targetPointeeArrayDims,
         );
-        if (!targetBase || !Number.isFinite(targetDepth)) {
+        if (!targetBase) {
           return makeCompileError();
         }
         const rhs = evalNode(node.expr);
@@ -2640,7 +2592,7 @@ export function createSimpleSimulator(): SimpleSimulator {
           const targetParsedType = parseType(target.type);
           const targetPointeeInnerDepth = normalizePointeeInnerDepth(
             target.pointeeInnerDepth ?? targetParsedType.pointeeInnerDepth,
-            Number.isFinite(targetParsedType.depth) ? targetParsedType.depth : 0,
+            targetParsedType.depth,
             normalizeArrayDims(target.pointeeArrayDims),
           );
           const decayDims =
@@ -2689,7 +2641,7 @@ export function createSimpleSimulator(): SimpleSimulator {
             );
           }
           if (!rhs.address) return makeCompileError();
-          const nextDepth = Number.isFinite(rhsDepth) ? rhsDepth + 1 : 1;
+          const nextDepth = rhsDepth + 1;
           const nextBase = rhs.base || "int";
           return makeRvalue(
             String(rhs.address),
@@ -2703,7 +2655,7 @@ export function createSimpleSimulator(): SimpleSimulator {
         }
         if (node.op === "*") {
           const label = `*${rhs.label || ""}`;
-          if (!Number.isFinite(rhsDepth) || rhsDepth < 1) {
+          if (rhsDepth < 1) {
             return makeCompileError();
           }
           const ptrRaw = rhs.value;
@@ -2730,7 +2682,7 @@ export function createSimpleSimulator(): SimpleSimulator {
             const targetParsedType = parseType(target.type);
             const targetPointeeInnerDepth = normalizePointeeInnerDepth(
               target.pointeeInnerDepth ?? targetParsedType.pointeeInnerDepth,
-              Number.isFinite(targetParsedType.depth) ? targetParsedType.depth : 0,
+              targetParsedType.depth,
               normalizeArrayDims(target.pointeeArrayDims),
             );
             return {
@@ -2879,7 +2831,6 @@ export function createSimpleSimulator(): SimpleSimulator {
     expr: ExprNode,
     state: BoxState[],
     opts: {
-      targetType?: string;
       requireValue?: boolean;
     } = {},
   ): ScalarResult {
@@ -2895,9 +2846,7 @@ export function createSimpleSimulator(): SimpleSimulator {
     expr: ExprNode,
     state: BoxState[],
   ): ConditionResult {
-    const rawEvaluated = evaluateExpressionRaw(expr, state, {
-      targetType: "double",
-    });
+    const rawEvaluated = evaluateExpressionRaw(expr, state);
     if (isEvalError(rawEvaluated)) return rawEvaluated;
     const evaluated = decayArrayValue(rawEvaluated);
     if (isEvalError(evaluated)) return evaluated;
@@ -2934,9 +2883,7 @@ export function createSimpleSimulator(): SimpleSimulator {
     const parsed = parseType(clean);
     if (
       parsed.base &&
-      Number.isFinite(parsed.depth) &&
-      Array.isArray(parsed.arrayDims) &&
-      parsed.arrayDims.length > 0
+      parsed.arrayDims?.length
     ) {
       const dims = [dim, ...parsed.arrayDims]
         .map((value) => `[${value}]`)
@@ -2959,10 +2906,7 @@ export function createSimpleSimulator(): SimpleSimulator {
     if (!result.isArray) return null;
     const shape = normalizeArrayDims(result.arrayShape);
     if (!shape.length) return null;
-    const depth =
-      Number.isFinite(result.depth) && result.depth !== undefined
-        ? Math.floor(result.depth)
-        : 0;
+    const depth = Math.floor(result.depth);
     const pointeeArrayDims = normalizeArrayDims(result.pointeeArrayDims);
     const pointeeInnerDepth = normalizePointeeInnerDepth(
       result.pointeeInnerDepth,
@@ -3014,7 +2958,6 @@ export function createSimpleSimulator(): SimpleSimulator {
     let sawSideEffect = false;
     const evalState = allowSideEffects ? state : cloneBoxes(state);
     const rawEvaluated = evaluateExpressionRaw(parsed.expr, evalState, {
-      targetType: "double",
       onSideEffect: () => {
         sawSideEffect = true;
       },
@@ -3025,13 +2968,13 @@ export function createSimpleSimulator(): SimpleSimulator {
     const resultType = evaluated.isArray
       ? arrayExpressionType(evaluated) ||
         makePointerType(
-          Number.isFinite(evaluated.depth) ? evaluated.depth : 0,
+          evaluated.depth,
           evaluated.base || "int",
           normalizeArrayDims(evaluated.pointeeArrayDims),
           evaluated.pointeeInnerDepth,
         )
       : makePointerType(
-          Number.isFinite(evaluated.depth) ? evaluated.depth : 0,
+          evaluated.depth,
           evaluated.base || "int",
           normalizeArrayDims(evaluated.pointeeArrayDims),
           evaluated.pointeeInnerDepth,
@@ -3117,7 +3060,7 @@ export function createSimpleSimulator(): SimpleSimulator {
       pointeeArrayDims: targetPointeeArrayDimsRaw,
       pointeeInnerDepth: targetPointeeInnerDepthRaw,
     } = parseType(targetType);
-    if (!targetBase || !Number.isFinite(targetDepth)) {
+    if (!targetBase) {
       return makeCompileError();
     }
     const targetPointeeArrayDims = normalizeArrayDims(targetPointeeArrayDimsRaw);
@@ -3144,10 +3087,7 @@ export function createSimpleSimulator(): SimpleSimulator {
         nanSign: converted.nanSign,
       };
     }
-    const evalDepth =
-      Number.isFinite(source.depth) && source.depth !== undefined
-        ? source.depth
-        : 0;
+    const evalDepth = source.depth;
     const evalBase = source.base || "int";
     const evalPointeeArrayDims = normalizeArrayDims(source.pointeeArrayDims);
     const evalPointeeInnerDepth = normalizePointeeInnerDepth(
@@ -3204,9 +3144,7 @@ export function createSimpleSimulator(): SimpleSimulator {
     targetType: string,
     expr: ExprNode,
   ): EvalError | null {
-    const evaluated = evaluateExpressionRaw(expr, cloneBoxes(state), {
-      targetType,
-    });
+    const evaluated = evaluateExpressionRaw(expr, cloneBoxes(state));
     const converted = convertAssignmentValue(
       evaluated,
       targetType,
@@ -3226,9 +3164,7 @@ export function createSimpleSimulator(): SimpleSimulator {
     targetType: string,
     expr: ExprNode,
   ): BoxState[] | null {
-    const evaluated = evaluateExpressionRaw(expr, boxes, {
-      targetType,
-    });
+    const evaluated = evaluateExpressionRaw(expr, boxes);
     const converted = convertAssignmentValue(
       evaluated,
       targetType,
@@ -3250,9 +3186,7 @@ export function createSimpleSimulator(): SimpleSimulator {
   ):
     | { target: BoxState; targetType: string }
     | EvalError {
-    const evaluated = evaluateExpressionRaw(lhs, state, {
-      targetType: "int",
-    });
+    const evaluated = evaluateExpressionRaw(lhs, state);
     if (isEvalError(evaluated)) return evaluated;
     if (evaluated.kind !== "lvalue") {
       return makeCompileError();
@@ -3260,7 +3194,7 @@ export function createSimpleSimulator(): SimpleSimulator {
     const { base, depth } = evaluated;
     const targetType =
       makePointerType(
-        Number.isFinite(depth) ? depth : 0,
+        depth,
         base || "int",
         normalizeArrayDims(evaluated.pointeeArrayDims),
         evaluated.pointeeInnerDepth,
@@ -3286,7 +3220,7 @@ export function createSimpleSimulator(): SimpleSimulator {
     const by = Object.fromEntries(boxes.map((b) => [b.name, b]));
     if (stmt.kind === "decl") {
       const type = stmt.type || "int";
-      if (Array.isArray(stmt.arrayShape) && stmt.arrayShape.length > 0) {
+      if (stmt.arrayShape?.length) {
         const shape = stmt.arrayShape.map((d) => Math.max(0, Math.floor(Number(d))));
         if (!shape.length || shape.some((d) => d <= 0)) return null;
         let redeclare = false;
@@ -3339,9 +3273,6 @@ export function createSimpleSimulator(): SimpleSimulator {
           right: stmt.rhs,
         },
         boxes,
-        {
-          targetType: "double",
-        },
       );
       if (isEvalError(evaluated)) return null;
       return boxes;
@@ -3366,9 +3297,7 @@ export function createSimpleSimulator(): SimpleSimulator {
       return applyAssignmentToTarget(boxes, target, declType, stmt.expr);
     }
     if (stmt.kind === "expr") {
-      const evaluated = evaluateExpressionRaw(stmt.expr, boxes, {
-        targetType: "double",
-      });
+      const evaluated = evaluateExpressionRaw(stmt.expr, boxes);
       if (isEvalError(evaluated)) return null;
       return boxes;
     }
@@ -3490,37 +3419,11 @@ export function createSimpleSimulator(): SimpleSimulator {
     return -1;
   }
 
-  function sourceTypeText(result: EvalResult): string {
-    const source = decayArrayValue(result);
-    if (isEvalError(source)) return "value";
-    if (source.isArray) {
-      return (
-        arrayExpressionType(source) ||
-        makePointerType(
-          Number.isFinite(source.depth) ? source.depth : 0,
-          source.base || "int",
-          normalizeArrayDims(source.pointeeArrayDims),
-          source.pointeeInnerDepth,
-        ) ||
-        "value"
-      );
-    }
-    return (
-      makePointerType(
-        Number.isFinite(source.depth) ? source.depth : 0,
-        source.base || "int",
-        normalizeArrayDims(source.pointeeArrayDims),
-        source.pointeeInnerDepth,
-      ) || "value"
-    );
-  }
-
   function findDivisionByZero(expr: ExprNode, state: BoxState[]): boolean {
     let found = false;
     walkExpr(expr, (node) => {
       if (node.kind === "binary" && (node.op === "/" || node.op === "%")) {
         const right = evaluateExpression(node.right, cloneBoxes(state), {
-          targetType: "double",
           requireValue: true,
         });
         if ("error" in right) return false;
@@ -3542,7 +3445,6 @@ export function createSimpleSimulator(): SimpleSimulator {
         (node.op === "/=" || node.op === "%=")
       ) {
         const right = evaluateExpression(node.right, cloneBoxes(state), {
-          targetType: "double",
           requireValue: true,
         });
         if ("error" in right) return false;
@@ -3569,13 +3471,11 @@ export function createSimpleSimulator(): SimpleSimulator {
     const emptyLines = [""];
     walkExpr(expr, (node) => {
       if (node.kind !== "unary" || node.op !== "*") return false;
-      const evaluated = evaluateExpressionRaw(node.expr, cloneBoxes(state), {
-        targetType: "int",
-      });
+      const evaluated = evaluateExpressionRaw(node.expr, cloneBoxes(state));
       if (isEvalError(evaluated)) return false;
       const source = decayArrayValue(evaluated);
       if (isEvalError(source)) return false;
-      if (!Number.isFinite(source.depth) || source.depth < 1) {
+      if (source.depth < 1) {
         issue = {
           kind: "compile",
           message: "You can only dereference a pointer value.",
@@ -3683,9 +3583,7 @@ export function createSimpleSimulator(): SimpleSimulator {
         dereferenceIssue.tip,
       );
     }
-    const evaluated = evaluateExpressionRaw(expr, cloneBoxes(state), {
-      targetType,
-    });
+    const evaluated = evaluateExpressionRaw(expr, cloneBoxes(state));
     const converted = convertAssignmentValue(evaluated, targetType, requireSourceValue);
     if ("kind" in converted && converted.kind === "type-mismatch") {
       return makeDiagnostic(
@@ -3841,13 +3739,10 @@ export function createSimpleSimulator(): SimpleSimulator {
           right: parsed.rhs,
         },
         cloneBoxes(state),
-        { targetType: "double" },
       );
       if (isEvalError(checked)) return checked;
     } else if (parsed.kind === "expr") {
-      const checked = evaluateExpressionRaw(parsed.expr, cloneBoxes(state), {
-        targetType: "double",
-      });
+      const checked = evaluateExpressionRaw(parsed.expr, cloneBoxes(state));
       if (isEvalError(checked)) return checked;
     }
     const next = applyStatement(state, parsed, {
@@ -3859,21 +3754,21 @@ export function createSimpleSimulator(): SimpleSimulator {
   }
 
   function isBracePart(part: StatementPart, brace?: "{" | "}") {
-    if (!part?.tokens?.length || part.tokens.length !== 1) return false;
+    if (part.tokens.length !== 1) return false;
     const tok = part.tokens[0];
     if (tok.type !== "sym") return false;
     if (brace) return tok.value === brace;
     return tok.value === "{" || tok.value === "}";
   }
 
-  function isElsePart(part: StatementPart | null): boolean {
-    if (!part?.tokens?.length || part.tokens.length !== 1) return false;
+  function isElsePart(part: StatementPart | undefined): boolean {
+    if (!part || part.tokens.length !== 1) return false;
     const tok = part.tokens[0];
     return tok.type === "kw" && tok.value === "else";
   }
 
-  function isDeclarationPart(part: StatementPart | null): boolean {
-    if (!part?.tokens?.length) return false;
+  function isDeclarationPart(part: StatementPart | undefined): boolean {
+    if (!part || !part.tokens.length) return false;
     const parsed = parseStatementTokens(part.tokens);
     return parsed?.kind === "decl" || parsed?.kind === "declAssign";
   }
@@ -3888,14 +3783,8 @@ export function createSimpleSimulator(): SimpleSimulator {
     const ifMap = new Map<number, IfBlock>();
     const whileMap = new Map<number, WhileBlock>();
     const fallbackLastLine =
-      parts.length > 0
-        ? Number.isFinite(parts[parts.length - 1]?.endLine)
-          ? parts[parts.length - 1]!.endLine
-          : 0
-        : 0;
-    const lastLine = Number.isFinite(opts.lastLine)
-      ? Math.max(0, Number(opts.lastLine))
-      : Math.max(0, fallbackLastLine);
+      parts.length > 0 ? parts[parts.length - 1]!.endLine : 0;
+    const lastLine = Math.max(0, opts.lastLine ?? fallbackLastLine);
     type StatementExtent =
       | { kind: "ok"; endIndex: number }
       | { kind: "error" }
@@ -3903,9 +3792,6 @@ export function createSimpleSimulator(): SimpleSimulator {
     const extentMemo = new Map<number, StatementExtent>();
     const ifMemo = new Map<number, StatementExtent>();
     const whileMemo = new Map<number, StatementExtent>();
-    const lineForPart = (part?: StatementPart | null): number =>
-      Number.isFinite(part?.endLine) ? part!.endLine : lastLine;
-
     function parseStatementExtent(startIndex: number): StatementExtent {
       if (startIndex >= parts.length) {
         return { kind: "incomplete", line: lastLine };
@@ -3913,7 +3799,7 @@ export function createSimpleSimulator(): SimpleSimulator {
       const memoized = extentMemo.get(startIndex);
       if (memoized) return memoized;
       const part = parts[startIndex];
-      if (!part?.tokens?.length) {
+      if (!part.tokens.length) {
         const result: StatementExtent = { kind: "ok", endIndex: startIndex };
         extentMemo.set(startIndex, result);
         return result;
@@ -3968,8 +3854,8 @@ export function createSimpleSimulator(): SimpleSimulator {
       const memoized = ifMemo.get(headerIndex);
       if (memoized) return memoized;
       const header = parts[headerIndex];
-      const headerStartLine = header?.startLine ?? lineForPart(header);
-      const headerEndLine = header?.endLine ?? lineForPart(header);
+      const headerStartLine = header.startLine;
+      const headerEndLine = header.endLine;
       const openIndex = headerIndex + 1;
       const openPart = parts[openIndex];
       if (!openPart) {
@@ -4064,8 +3950,8 @@ export function createSimpleSimulator(): SimpleSimulator {
       const memoized = whileMemo.get(headerIndex);
       if (memoized) return memoized;
       const header = parts[headerIndex];
-      const headerStartLine = header?.startLine ?? lineForPart(header);
-      const headerEndLine = header?.endLine ?? lineForPart(header);
+      const headerStartLine = header.startLine;
+      const headerEndLine = header.endLine;
       const openIndex = headerIndex + 1;
       const openPart = parts[openIndex];
       if (!openPart) {
@@ -4108,7 +3994,7 @@ export function createSimpleSimulator(): SimpleSimulator {
 
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
-      if (!part?.tokens?.length) continue;
+      if (!part.tokens.length) continue;
       const ifParsed = parseIfHeaderTokens(part.tokens);
       if (ifParsed) {
         parseIfAt(i, ifParsed);
@@ -4149,8 +4035,6 @@ export function createSimpleSimulator(): SimpleSimulator {
       null,
     );
     parts.forEach((part) => {
-      if (!Number.isFinite(part.startLine) || !Number.isFinite(part.endLine))
-        return;
       const range: StatementRange = {
         startLine: part.startLine,
         endLine: part.endLine,
@@ -4164,11 +4048,9 @@ export function createSimpleSimulator(): SimpleSimulator {
   }
 
   function statementRangeForLine(
-    statementMap: StatementMap | null,
+    statementMap: StatementMap,
     lineIndex: number,
   ): StatementRange | null {
-    if (!statementMap || !Array.isArray(statementMap.byLine)) return null;
-    if (!Number.isFinite(lineIndex)) return null;
     if (lineIndex < 0 || lineIndex >= statementMap.byLine.length) return null;
     return statementMap.byLine[lineIndex];
   }
@@ -4180,17 +4062,13 @@ export function createSimpleSimulator(): SimpleSimulator {
     const statementMap = buildStatementMap(lines);
     const currentRange = statementRangeForLine(statementMap, boundary);
     const prevRange = statementRangeForLine(statementMap, boundary - 1);
-    const currentStart = currentRange?.startLine;
-    const currentEnd = currentRange?.endLine;
     const isMultiLine =
-      typeof currentStart === "number" &&
-      typeof currentEnd === "number" &&
-      Number.isFinite(currentStart) &&
-      Number.isFinite(currentEnd) &&
-      currentEnd > currentStart;
+      currentRange !== null && currentRange.endLine > currentRange.startLine;
     const midStatement =
-      isMultiLine && boundary > currentStart && boundary <= currentEnd;
-    const atStatementStart = isMultiLine && boundary === currentStart;
+      isMultiLine &&
+      boundary > currentRange.startLine &&
+      boundary <= currentRange.endLine;
+    const atStatementStart = isMultiLine && boundary === currentRange.startLine;
     return {
       statementMap,
       currentRange,
@@ -4350,16 +4228,12 @@ export function createSimpleSimulator(): SimpleSimulator {
     };
     const maxExecutedParts = Math.max(10000, parts.length * 2000);
     const fallbackEndLine =
-      parts.length > 0 && Number.isFinite(parts[parts.length - 1]?.endLine)
-        ? parts[parts.length - 1]!.endLine
-        : -1;
+      parts.length > 0 ? parts[parts.length - 1]!.endLine : -1;
     const terminalBoundary = Math.max(0, fallbackEndLine + 1);
     const boundaryForProgramIndex = (index: number): number => {
-      if (!Number.isFinite(index) || index >= parts.length) return terminalBoundary;
+      if (index >= parts.length) return terminalBoundary;
       const safeIndex = Math.max(0, Math.floor(index));
-      const line = parts[safeIndex]?.startLine;
-      if (!Number.isFinite(line)) return terminalBoundary;
-      return Math.max(0, line!);
+      return Math.max(0, parts[safeIndex]!.startLine);
     };
     let i = 0;
     let executedSteps = 0;
@@ -4530,14 +4404,10 @@ export function createSimpleSimulator(): SimpleSimulator {
     alloc || ((type?: string) => String(randAddr(type || "int")));
 
   const normalizeStop = (stop: number | undefined, max: number): number | null =>
-    Number.isFinite(stop) && stop !== undefined
-      ? Math.max(0, Math.min(max, Number(stop)))
-      : null;
+    stop === undefined ? null : Math.max(0, Math.min(max, stop));
 
   const normalizeStopSteps = (stopSteps: number | undefined): number | null =>
-    Number.isFinite(stopSteps) && stopSteps !== undefined
-      ? Math.max(0, Number(stopSteps))
-      : null;
+    stopSteps === undefined ? null : Math.max(0, stopSteps);
 
   function applyProgramParts(
     parts: StatementPart[],
@@ -4672,11 +4542,12 @@ export function createSimpleSimulator(): SimpleSimulator {
 
     while (i < parts.length) {
       if (executedParts >= maxExecutedParts) {
+        const rangePart = parts[Math.max(0, Math.min(i, parts.length - 1))]!;
         return [
           makeDiagnostic(
             "compile",
             "This program never settles into a finished state.",
-            rangeFromTokens(parts[Math.max(0, Math.min(i, parts.length - 1))]?.tokens || tokens, lines),
+            rangeFromTokens(rangePart.tokens, lines),
             lines,
             "Check for a loop that never stops.",
           ),
@@ -4684,7 +4555,7 @@ export function createSimpleSimulator(): SimpleSimulator {
       }
       executedParts += 1;
       const part = parts[i];
-      if (!part?.tokens?.length) {
+      if (!part.tokens.length) {
         i = continueCompletedWhileLoops(i + 1);
         continue;
       }

@@ -663,10 +663,8 @@ function createCodeOutputChallengeTemplate(
   const levelId = currentLevelId();
   const defaultText = normalizeUserCodeText(startCode);
   const defaultVisibleCase = createChallengeCaseForInputRow(startInput, "startInput");
-  const restoredProgress = maybeRestoreLevelProgress<CodeOutputChallengeProgress>(
-    levelId,
-    "this level",
-  );
+  const restoredProgress =
+    maybeRestoreLevelProgress<CodeOutputChallengeProgress>(levelId);
   const restoredVisibleCase = restoreCase(
     restoredProgress?.visibleCaseInputLiterals,
   );
@@ -702,15 +700,13 @@ function createCodeOutputChallengeTemplate(
 
   function adjustSelectionForCarriageReturns(
     text: string,
-    pos: number | null,
-  ): number | null {
-    if (!Number.isFinite(pos)) return pos;
-    const safePos = pos as number;
+    pos: number,
+  ): number {
     let removed = 0;
-    for (let i = 0; i < safePos && i < text.length; i++) {
+    for (let i = 0; i < pos && i < text.length; i++) {
       if (text[i] === "\r") removed += 1;
     }
-    return Math.max(0, safePos - removed);
+    return Math.max(0, pos - removed);
   }
 
   function allocFactory(): (type?: string) => string {
@@ -1049,7 +1045,6 @@ function createCodeOutputChallengeTemplate(
   function renderStatePanel(
     title: string,
     boxes: BoxState[] | null,
-    kind: "ok" | "compile" | "ub" = "ok",
     opts: { emptyMessage?: string; controls?: HTMLElement | null } = {},
   ): HTMLElement {
     const { emptyMessage = "(no variables)", controls = null } = opts;
@@ -1133,7 +1128,7 @@ function createCodeOutputChallengeTemplate(
       return toggle;
     })();
     group.appendChild(
-      renderStatePanel("Your code's output", shownBoxes, shownKind, {
+      renderStatePanel("Your code's output", shownBoxes, {
         emptyMessage: shownEmptyMessage,
         controls: shownControls,
       }),
@@ -1337,17 +1332,9 @@ function createCodeOutputChallengeTemplate(
         const start = adjustSelectionForCarriageReturns(raw, editor.selectionStart);
         const end = adjustSelectionForCarriageReturns(raw, editor.selectionEnd);
         editor.value = normalized;
-        if (
-          typeof start === "number" &&
-          typeof end === "number" &&
-          Number.isFinite(start) &&
-          Number.isFinite(end) &&
-          typeof editor.setSelectionRange === "function"
-        ) {
-          const clampedStart = Math.min(normalized.length, start);
-          const clampedEnd = Math.min(normalized.length, end);
-          editor.setSelectionRange(clampedStart, clampedEnd);
-        }
+        const clampedStart = Math.min(normalized.length, start);
+        const clampedEnd = Math.min(normalized.length, end);
+        editor.setSelectionRange(clampedStart, clampedEnd);
       }
       state.text = editor.value;
       state.lastReport = null;

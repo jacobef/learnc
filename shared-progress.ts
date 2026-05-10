@@ -103,7 +103,6 @@ export function clearAllLevelProgress(): void {
 
 export function maybeRestoreLevelProgress<T>(
   levelId: string = currentLevelId(),
-  _label = "this level",
 ): T | null {
   return readLevelProgress<T>(levelId);
 }

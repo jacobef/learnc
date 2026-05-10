@@ -27,7 +27,6 @@ function textValueForLine(line: string): string {
 }
 
 function clampColumn(value: number, lineLength: number): number {
-  if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(lineLength, Math.floor(value)));
 }
 
@@ -192,8 +191,8 @@ export function updateCodeSurface({
     highlightEl.replaceChildren();
     const perLineDecorations = new Map<number, CodeDecoration[]>();
     for (const decoration of decorations) {
-      const line = Math.floor(Number(decoration.line));
-      if (!Number.isFinite(line) || line < 0 || line >= safeLines.length) continue;
+      const line = Math.floor(decoration.line);
+      if (line < 0 || line >= safeLines.length) continue;
       const bucket = perLineDecorations.get(line) || [];
       bucket.push(decoration);
       perLineDecorations.set(line, bucket);

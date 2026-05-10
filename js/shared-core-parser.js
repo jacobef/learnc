@@ -940,9 +940,9 @@ export function createParserTools(opts) {
                 if (!lengthTokens.length)
                     return { kind: "partial" };
                 const length = parseArrayLengthTokens(lengthTokens);
-                if (!Number.isFinite(length) || (length || 0) <= 0)
+                if (length == null || length <= 0)
                     return { kind: "none" };
-                opsOutward.push({ kind: "array", length: Number(length) });
+                opsOutward.push({ kind: "array", length });
                 at++; // ]
             }
             return { kind: "ok", name, opsOutward, nextIndex: at };
@@ -1030,7 +1030,7 @@ export function createParserTools(opts) {
             return true;
         if (!parsed.hasInitializer)
             return true;
-        if (!Number.isFinite(parsed.rhsStart))
+        if (parsed.rhsStart == null)
             return true;
         return isExpressionPrefix(tokens.slice(parsed.rhsStart));
     }
@@ -1184,7 +1184,7 @@ export function createParserTools(opts) {
         }
         const declHead = parseDeclHead(tokens);
         if (declHead.kind === "full" && declHead.declType && declHead.name) {
-            if (Array.isArray(declHead.arrayShape) && declHead.arrayShape.length > 0) {
+            if (declHead.arrayShape?.length) {
                 if (declHead.hasInitializer)
                     return null;
                 const shape = declHead.arrayShape.map((d) => Math.max(0, Math.floor(Number(d))));
@@ -1210,7 +1210,7 @@ export function createParserTools(opts) {
                     declaredNames: [declHead.name],
                 };
             }
-            const rhsStart = Number.isFinite(declHead.rhsStart) ? declHead.rhsStart : -1;
+            const rhsStart = declHead.rhsStart ?? -1;
             if (rhsStart < 0)
                 return null;
             const rhs = parseAssignRhs(tokens, rhsStart);

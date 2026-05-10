@@ -110,17 +110,12 @@ export function parseType(type = "int") {
 }
 export function isPointerType(type = "int") {
     const { depth } = parseType(type);
-    return depth != null && Number.isFinite(depth) && depth > 0;
+    return depth > 0;
 }
 export function isRefCompatible(targetType = "int*", refType = "int") {
     const { base: targetBase, depth: targetDepth } = parseType(targetType);
     const { base: refBase, depth: refDepth } = parseType(refType);
-    if (!targetBase ||
-        !refBase ||
-        targetDepth == null ||
-        refDepth == null ||
-        !Number.isFinite(targetDepth) ||
-        !Number.isFinite(refDepth))
+    if (!targetBase || !refBase)
         return false;
     return targetBase === refBase && targetDepth === refDepth + 1;
 }
@@ -132,7 +127,7 @@ export function typeInfo(type = "int") {
     const { base, depth, arrayDims } = parseType(type);
     if (!base)
         return { size: 4, align: 4 };
-    if (Number.isFinite(depth) && depth > 0)
+    if (depth > 0)
         return { size: 8, align: 8 };
     const scalar = (() => {
         if (base === "long" ||
@@ -153,7 +148,7 @@ export function typeInfo(type = "int") {
         }
         return { size: 4, align: 4 };
     })();
-    if (Array.isArray(arrayDims) && arrayDims.length > 0) {
+    if (arrayDims?.length) {
         const count = arrayDims.reduce((acc, dim) => {
             const n = Math.max(0, Math.floor(Number(dim)));
             return acc * (n > 0 ? n : 0);
@@ -373,8 +368,8 @@ export function valueTypeMatchesTarget(valueType, targetType) {
         return base !== "float" && base !== "double";
     };
     const sameArrayDims = (left, right) => {
-        const a = Array.isArray(left) ? left : [];
-        const b = Array.isArray(right) ? right : [];
+        const a = left ?? [];
+        const b = right ?? [];
         if (a.length !== b.length)
             return false;
         for (let i = 0; i < a.length; i++) {

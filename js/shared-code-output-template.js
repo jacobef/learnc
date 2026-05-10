@@ -403,7 +403,7 @@ function createCodeOutputChallengeTemplate(config) {
     const levelId = currentLevelId();
     const defaultText = normalizeUserCodeText(startCode);
     const defaultVisibleCase = createChallengeCaseForInputRow(startInput, "startInput");
-    const restoredProgress = maybeRestoreLevelProgress(levelId, "this level");
+    const restoredProgress = maybeRestoreLevelProgress(levelId);
     const restoredVisibleCase = restoreCase(restoredProgress?.visibleCaseInputLiterals);
     const restoredPendingCase = restoreCase(restoredProgress?.pendingFailingCaseInputLiterals);
     const restoredHadRunChecks = restoredProgress?.hasRunChecks === true;
@@ -429,15 +429,12 @@ function createCodeOutputChallengeTemplate(config) {
         return normalized.replace(/\n/g, " ");
     }
     function adjustSelectionForCarriageReturns(text, pos) {
-        if (!Number.isFinite(pos))
-            return pos;
-        const safePos = pos;
         let removed = 0;
-        for (let i = 0; i < safePos && i < text.length; i++) {
+        for (let i = 0; i < pos && i < text.length; i++) {
             if (text[i] === "\r")
                 removed += 1;
         }
-        return Math.max(0, safePos - removed);
+        return Math.max(0, pos - removed);
     }
     function allocFactory() {
         if (state.allocBase == null)
@@ -720,7 +717,7 @@ function createCodeOutputChallengeTemplate(config) {
         }
         writeLevelProgress(snapshot, levelId);
     }
-    function renderStatePanel(title, boxes, kind = "ok", opts = {}) {
+    function renderStatePanel(title, boxes, opts = {}) {
         const { emptyMessage = "(no variables)", controls = null } = opts;
         const wrap = document.createElement("div");
         wrap.className = "state-panel state-panel-scrollable";
@@ -795,7 +792,7 @@ function createCodeOutputChallengeTemplate(config) {
             });
             return toggle;
         })();
-        group.appendChild(renderStatePanel("Your code's output", shownBoxes, shownKind, {
+        group.appendChild(renderStatePanel("Your code's output", shownBoxes, {
             emptyMessage: shownEmptyMessage,
             controls: shownControls,
         }));
@@ -983,15 +980,9 @@ function createCodeOutputChallengeTemplate(config) {
                 const start = adjustSelectionForCarriageReturns(raw, editor.selectionStart);
                 const end = adjustSelectionForCarriageReturns(raw, editor.selectionEnd);
                 editor.value = normalized;
-                if (typeof start === "number" &&
-                    typeof end === "number" &&
-                    Number.isFinite(start) &&
-                    Number.isFinite(end) &&
-                    typeof editor.setSelectionRange === "function") {
-                    const clampedStart = Math.min(normalized.length, start);
-                    const clampedEnd = Math.min(normalized.length, end);
-                    editor.setSelectionRange(clampedStart, clampedEnd);
-                }
+                const clampedStart = Math.min(normalized.length, start);
+                const clampedEnd = Math.min(normalized.length, end);
+                editor.setSelectionRange(clampedStart, clampedEnd);
             }
             state.text = editor.value;
             state.lastReport = null;

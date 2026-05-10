@@ -331,9 +331,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
   }
 
   function clampBoundary(value: number): number {
-    const safe = Math.floor(Number(value));
-    if (!Number.isFinite(safe)) return 0;
-    return Math.max(0, Math.min(normalizedSteps.length - 1, safe));
+    return Math.max(0, Math.min(normalizedSteps.length - 1, Math.floor(value)));
   }
 
   function sanitizedRecord<T>(
@@ -368,10 +366,8 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
 
   const levelId = currentLevelId();
   const defaultShowIntro = !!initialInstructions;
-  const restoredProgress = maybeRestoreLevelProgress<ExpressionTemplateProgress>(
-    levelId,
-    "this level",
-  );
+  const restoredProgress =
+    maybeRestoreLevelProgress<ExpressionTemplateProgress>(levelId);
   const restoredPasses = sanitizedRecord<boolean>(restoredProgress?.passes);
   const state: ExpressionTemplateState = {
     boundary: clampBoundary(restoredProgress?.boundary ?? 0),

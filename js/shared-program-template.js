@@ -203,8 +203,8 @@ function createProgramTemplate(config) {
     const stepInfos = [];
     const lineList = [];
     const isIfHeaderPart = (part) => {
-        const tokens = part?.tokens;
-        if (!tokens || tokens.length < 2)
+        const tokens = part.tokens;
+        if (tokens.length < 2)
             return false;
         const first = tokens[0];
         const second = tokens[1];
@@ -230,8 +230,8 @@ function createProgramTemplate(config) {
         return false;
     };
     const isWhileHeaderPart = (part) => {
-        const tokens = part?.tokens;
-        if (!tokens || tokens.length < 2)
+        const tokens = part.tokens;
+        if (tokens.length < 2)
             return false;
         const first = tokens[0];
         const second = tokens[1];
@@ -257,20 +257,20 @@ function createProgramTemplate(config) {
         return false;
     };
     const isElsePart = (part) => {
-        const tokens = part?.tokens;
-        if (!tokens || tokens.length !== 1)
+        const tokens = part.tokens;
+        if (tokens.length !== 1)
             return false;
         const first = tokens[0];
         return first.type === "kw" && first.value === "else";
     };
     const isOpenBracePart = (part) => {
-        if (!part?.tokens?.length || part.tokens.length !== 1)
+        if (part.tokens.length !== 1)
             return false;
         const tok = part.tokens[0];
         return tok.type === "sym" && tok.value === "{";
     };
     const isCloseBracePart = (part) => {
-        if (!part?.tokens?.length || part.tokens.length !== 1)
+        if (part.tokens.length !== 1)
             return false;
         const tok = part.tokens[0];
         return tok.type === "sym" && tok.value === "}";
@@ -331,13 +331,11 @@ function createProgramTemplate(config) {
         }
     });
     function stepForLine(line) {
-        if (!Number.isFinite(line))
-            return null;
         const safeLine = Math.max(0, Math.min(total - 1, Math.floor(line)));
         return stepByLine[safeLine] ?? null;
     }
     const levelId = currentLevelId();
-    const restoredProgress = maybeRestoreLevelProgress(levelId, "this level");
+    const restoredProgress = maybeRestoreLevelProgress(levelId);
     const state = {
         boundary: 0,
         executionSteps: -1,
@@ -364,21 +362,10 @@ function createProgramTemplate(config) {
     }
     function statementRangeEndingAt(statementMap, boundary) {
         const endLine = boundary - 1;
-        if (!Number.isFinite(endLine))
-            return null;
         return (statementMap.parts.find((part) => part.endLine === endLine && part.hasSemicolon) || null);
     }
-    function isMultiLineStatement(range) {
-        const startLine = range?.startLine;
-        const endLine = range?.endLine;
-        if (typeof startLine !== "number" || typeof endLine !== "number")
-            return false;
-        if (!Number.isFinite(startLine) || !Number.isFinite(endLine))
-            return false;
-        return endLine > startLine;
-    }
     const statementMap = simulator.buildStatementMap(lineList);
-    const parts = statementMap.parts || [];
+    const parts = statementMap.parts;
     const totalLines = total;
     const ifBlocks = simulator.buildIfStatementMap(parts, {
         lastLine: Math.max(0, total - 1),
@@ -474,8 +461,6 @@ function createProgramTemplate(config) {
     };
     const executablePartStartLines = new Set();
     parts.forEach((part) => {
-        if (!Number.isFinite(part?.startLine))
-            return;
         executablePartStartLines.add(clampBoundaryLine(part.startLine));
     });
     function pushRuntimeStage(stage) {
@@ -485,10 +470,10 @@ function createProgramTemplate(config) {
         });
     }
     function boundaryForPartIndex(partIndex) {
-        if (!Number.isFinite(partIndex) || partIndex >= parts.length)
+        if (partIndex >= parts.length)
             return totalLines;
         const part = parts[Math.max(0, Math.floor(partIndex))];
-        if (!part || !Number.isFinite(part.startLine))
+        if (!part)
             return totalLines;
         return clampBoundaryLine(part.startLine);
     }
@@ -519,16 +504,12 @@ function createProgramTemplate(config) {
                 const branchBoundary = condition.value
                     ? branchEntryLine(ifBlock, "true")
                     : branchEntryLine(ifBlock, "false");
-                if (Number.isFinite(branchBoundary)) {
-                    resolvedAfterBoundary = clampBoundaryLine(Number(branchBoundary));
+                if (branchBoundary != null) {
+                    resolvedAfterBoundary = clampBoundaryLine(branchBoundary);
                 }
             }
         }
-        const rawRunEnd = partIndex >= 0 && Number.isFinite(parts[partIndex]?.endLine)
-            ? Number(parts[partIndex].endLine)
-            : Number.isFinite(stepInfo?.endLine)
-                ? Number(stepInfo.endLine)
-                : runLine;
+        const rawRunEnd = partIndex >= 0 ? parts[partIndex].endLine : (stepInfo?.endLine ?? runLine);
         const maxLineIndex = Math.max(0, totalLines - 1);
         const runEndLine = Math.max(Math.max(0, Math.min(maxLineIndex, runLine)), Math.max(0, Math.min(maxLineIndex, rawRunEnd)));
         let editableMode = "none";
@@ -538,7 +519,6 @@ function createProgramTemplate(config) {
         let expectedState = null;
         let baselineState = null;
         const stageExitsStep = !!stepInfo &&
-            Number.isFinite(stepInfo.boundary) &&
             beforeBoundary < stepInfo.boundary &&
             resolvedAfterBoundary >= stepInfo.boundary;
         if (stepInfo && stepEditable) {
@@ -551,12 +531,10 @@ function createProgramTemplate(config) {
                     if (block) {
                         const trueLine = lineAfterWhileHeader(block);
                         const falseLine = lineAfterWhileClose(block);
-                        if (Number.isFinite(trueLine)) {
-                            branchTargets.push(Math.max(0, Math.min(totalLines, Number(trueLine))));
-                        }
-                        if (Number.isFinite(falseLine)) {
-                            branchTargets.push(Math.max(0, Math.min(totalLines, Number(falseLine))));
-                        }
+                        if (trueLine != null)
+                            branchTargets.push(clampBoundaryLine(trueLine));
+                        if (falseLine != null)
+                            branchTargets.push(clampBoundaryLine(falseLine));
                     }
                 }
                 else if (stepInfo.ifHeaderOnly) {
@@ -564,17 +542,14 @@ function createProgramTemplate(config) {
                     if (block) {
                         const trueLine = branchEntryLine(block, "true");
                         const falseLine = branchEntryLine(block, "false");
-                        if (Number.isFinite(trueLine)) {
-                            branchTargets.push(Math.max(0, Math.min(totalLines, Number(trueLine))));
-                        }
-                        if (Number.isFinite(falseLine)) {
-                            branchTargets.push(Math.max(0, Math.min(totalLines, Number(falseLine))));
-                        }
+                        if (trueLine != null)
+                            branchTargets.push(clampBoundaryLine(trueLine));
+                        if (falseLine != null)
+                            branchTargets.push(clampBoundaryLine(falseLine));
                     }
                 }
                 branchTargets = [...new Set(branchTargets)];
-                if (Number.isFinite(expectedBoundary) &&
-                    !branchTargets.includes(expectedBoundary)) {
+                if (expectedBoundary != null && !branchTargets.includes(expectedBoundary)) {
                     branchTargets.push(expectedBoundary);
                 }
             }
@@ -607,8 +582,6 @@ function createProgramTemplate(config) {
         };
     };
     const appendNoOpStagesInRange = ({ fromBoundary, toBoundary, traceIndex, stateSnapshot, }) => {
-        if (!Number.isFinite(fromBoundary) || !Number.isFinite(toBoundary))
-            return;
         if (toBoundary <= fromBoundary)
             return;
         const noOpStarts = stepStartLines
@@ -654,13 +627,13 @@ function createProgramTemplate(config) {
         const after = runtimeTraceByStep[index + 1];
         const partIndex = before.nextIndex;
         const part = parts[partIndex];
-        if (!part || !Number.isFinite(part.startLine))
+        if (!part)
             continue;
         const runLine = clampBoundaryLine(part.startLine);
         const beforeBoundary = boundaryForPartIndex(before.nextIndex);
         const rawAfterBoundary = boundaryForPartIndex(after.nextIndex);
         const isSequentialAdvance = after.nextIndex === partIndex + 1;
-        const immediateAfterBoundary = clampBoundaryLine((Number.isFinite(part.endLine) ? Number(part.endLine) : runLine) + 1);
+        const immediateAfterBoundary = clampBoundaryLine(part.endLine + 1);
         const stageAfterBoundary = isSequentialAdvance
             ? immediateAfterBoundary
             : rawAfterBoundary;
@@ -675,11 +648,8 @@ function createProgramTemplate(config) {
                 };
             }
             const nextPart = parts[after.nextIndex];
-            const nextRunLine = Number.isFinite(nextPart?.startLine)
-                ? clampBoundaryLine(Number(nextPart.startLine))
-                : null;
-            const nextStepInfo = Number.isFinite(nextRunLine)
-                ? stepForLine(Number(nextRunLine))
+            const nextStepInfo = nextPart
+                ? stepForLine(clampBoundaryLine(nextPart.startLine))
                 : null;
             const groupedStepCompleted = !nextStepInfo || nextStepInfo.index !== stepInfo.index;
             if (groupedStepCompleted) {
@@ -752,7 +722,6 @@ function createProgramTemplate(config) {
             allocBase: state.allocBase,
             runtimeLatestSolvedStage,
             runtimeWorkspaceByStage: Array.from(runtimeWorkspaceByStage.entries())
-                .filter(([stageIndex]) => Number.isFinite(stageIndex))
                 .map(([stageIndex, boxes]) => ({
                 stageIndex,
                 boxes: boxes ? cloneBoxes(boxes) : null,
@@ -784,8 +753,6 @@ function createProgramTemplate(config) {
     }
     function runtimeStageAt(stepCount) {
         const exactStep = Math.floor(stepCount);
-        if (!Number.isFinite(exactStep))
-            return null;
         if (exactStep < 0)
             return null;
         if (exactStep > runtimeMaxStep())
@@ -949,55 +916,29 @@ function createProgramTemplate(config) {
         return cloneBoxes(stage.baselineState);
     }
     function clampBoundaryLine(line) {
-        if (!Number.isFinite(line))
-            return line;
         return Math.max(0, Math.min(totalLines, line));
     }
     function lineAfterHeader(block) {
-        if (Number.isFinite(block.headerEndLine)) {
-            return clampBoundaryLine(block.headerEndLine + 1);
-        }
-        const truePart = parts[block.trueTarget];
-        if (Number.isFinite(truePart?.startLine)) {
-            return clampBoundaryLine(truePart.startLine);
-        }
-        return null;
+        return clampBoundaryLine(block.headerEndLine + 1);
     }
     function lineAfterWhileHeader(block) {
         const trueLine = lineForPartIndex(block.trueTarget);
-        if (Number.isFinite(trueLine))
-            return trueLine;
-        if (Number.isFinite(block.headerEndLine)) {
-            return clampBoundaryLine(block.headerEndLine + 1);
-        }
-        return null;
+        return trueLine ?? clampBoundaryLine(block.headerEndLine + 1);
     }
     function lineAfterClose(block) {
-        const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
-            ? parts[block.closeIndex].endLine
-            : block.headerEndLine;
-        if (!Number.isFinite(closeLine))
-            return null;
+        const closeLine = parts[block.closeIndex].endLine;
         return clampBoundaryLine(closeLine + 1);
     }
     function lineAfterWhileClose(block) {
         const afterLine = lineForPartIndex(block.afterIndex);
-        if (Number.isFinite(afterLine))
+        if (afterLine != null)
             return afterLine;
-        const closeLine = Number.isFinite(parts[block.closeIndex]?.endLine)
-            ? parts[block.closeIndex].endLine
-            : block.headerEndLine;
-        if (!Number.isFinite(closeLine))
-            return null;
+        const closeLine = parts[block.closeIndex].endLine;
         return clampBoundaryLine(closeLine + 1);
     }
     function lineForPartIndex(partIndex) {
-        if (partIndex == null || !Number.isFinite(partIndex))
-            return null;
         const part = parts[partIndex];
-        if (!Number.isFinite(part?.startLine))
-            return null;
-        return clampBoundaryLine(part.startLine);
+        return part ? clampBoundaryLine(part.startLine) : null;
     }
     function lineForFalseBranch(block) {
         if (block.elseIndex == null)
@@ -1006,7 +947,7 @@ function createProgramTemplate(config) {
             block.elseOpenIndex ??
             block.elseIndex;
         const elseEntryLine = lineForPartIndex(elseEntryIndex);
-        if (Number.isFinite(elseEntryLine))
+        if (elseEntryLine != null)
             return elseEntryLine;
         return lineAfterClose(block);
     }
@@ -1027,16 +968,14 @@ function createProgramTemplate(config) {
         const targets = [];
         const targetMap = new Map();
         stage.branchTargets.forEach((target) => {
-            if (!Number.isFinite(target))
-                return;
-            const normalized = Math.max(0, Math.min(totalLines, Number(target)));
+            const normalized = clampBoundaryLine(target);
             if (!targets.includes(normalized))
                 targets.push(normalized);
             targetMap.set(normalized, normalized);
         });
-        const expected = Number.isFinite(stage.expectedBoundary)
-            ? Math.max(0, Math.min(totalLines, Number(stage.expectedBoundary)))
-            : null;
+        const expected = stage.expectedBoundary == null
+            ? null
+            : clampBoundaryLine(stage.expectedBoundary);
         if (expected != null && !targetMap.has(expected)) {
             targets.push(expected);
             targetMap.set(expected, expected);
@@ -1051,8 +990,6 @@ function createProgramTemplate(config) {
     }
     function groupRangeEndingAt(boundary) {
         const endLine = boundary - 1;
-        if (!Number.isFinite(endLine))
-            return null;
         return groupRanges.find((group) => group.endLine === endLine) || null;
     }
     function stateBeforePart(partIndex) {
@@ -1062,7 +999,7 @@ function createProgramTemplate(config) {
             alloc,
             stop: safeIndex,
         });
-        return Array.isArray(result) ? result : [];
+        return result ?? [];
     }
     function getExpectedState(boundary) {
         const pendingExpected = runtimePendingEditableExpectedState(boundary);
@@ -1077,8 +1014,6 @@ function createProgramTemplate(config) {
         return [];
     }
     function normalizeState(list) {
-        if (!Array.isArray(list))
-            return [];
         return list
             .map((b) => ({
             name: (b.name || "").trim(),
@@ -1127,7 +1062,7 @@ function createProgramTemplate(config) {
         }
         const baseline = stage.baselineState || null;
         const current = serializeWorkspace(getWorkspaceEl()) || [];
-        const changed = Array.isArray(baseline) && !statesEqual(current, baseline);
+        const changed = !!baseline && !statesEqual(current, baseline);
         resetBtn.classList.toggle("hidden", !changed);
     }
     function attachResetWatcher(wrap, boundary) {
@@ -1161,12 +1096,12 @@ function createProgramTemplate(config) {
         const { size, align } = typeInfo(type || "int");
         if (maxAddr == null)
             return String(randAddr(type || "int"));
-        let next = maxAddr + (Number.isFinite(size) ? size : 4);
-        if (Number.isFinite(align) && align > 1 && next % align !== 0) {
+        let next = maxAddr + size;
+        if (align > 1 && next % align !== 0) {
             next = Math.ceil(next / align) * align;
         }
         while (used.has(String(next))) {
-            next += Number.isFinite(size) ? size : 4;
+            next += size;
         }
         return String(next);
     }
@@ -1176,8 +1111,6 @@ function createProgramTemplate(config) {
         applyOtherNames(stageEl, { onToggle: refreshOtherNames });
     }
     function boxesEqual(actual, expected) {
-        if (!Array.isArray(actual) || !Array.isArray(expected))
-            return false;
         const actualByName = new Map();
         for (const box of actual) {
             const name = String(box?.name || "").trim();
@@ -1256,7 +1189,7 @@ function createProgramTemplate(config) {
         return defaultsForBoundary(boundary);
     }
     function basicHintForBoxes(boxes, boundary) {
-        const actual = Array.isArray(boxes) ? boxes : [];
+        const actual = boxes;
         const expected = getExpectedState(boundary);
         const actualCount = actual.length;
         const expectedCount = expected.length;
@@ -1317,21 +1250,19 @@ function createProgramTemplate(config) {
             };
         }
         if (actualCount > expectedCount) {
-            const baselineCount = Array.isArray(baselineAtBoundary)
-                ? baselineAtBoundary.length
-                : 0;
+            const baselineCount = baselineAtBoundary.length;
             const expectedNew = Math.max(0, expectedCount - baselineCount);
             const actualNew = Math.max(0, actualCount - baselineCount);
             const extraCount = Math.max(0, actualNew - expectedNew);
             const groupRange = groupRangeEndingAt(boundary);
             const statementRange = statementRangeEndingAt(statementMap, boundary);
             let label = `Line ${boundary + 1}`;
-            if (groupRange && Number.isFinite(groupRange.startLine)) {
+            if (groupRange) {
                 const start = groupRange.startLine + 1;
                 const end = groupRange.endLine + 1;
                 label = start === end ? `Line ${start}` : `Lines ${start}-${end}`;
             }
-            else if (statementRange && isMultiLineStatement(statementRange)) {
+            else if (statementRange && statementRange.endLine > statementRange.startLine) {
                 const start = statementRange.startLine + 1;
                 const end = statementRange.endLine + 1;
                 label = start === end ? `Line ${start}` : `Lines ${start}-${end}`;
@@ -1486,9 +1417,9 @@ function createProgramTemplate(config) {
         let strikeFragments = [];
         const elseColumnForLine = (lineIndex, block) => {
             const rawLine = lineList[lineIndex] || "";
-            const elseTok = parts[block.elseIndex ?? -1]?.tokens?.[0];
-            if (Number.isFinite(elseTok?.col)) {
-                const col = Number(elseTok.col);
+            const elseTok = block.elseIndex == null ? null : parts[block.elseIndex].tokens[0];
+            if (elseTok) {
+                const col = elseTok.col;
                 if (col >= 0 && col <= rawLine.length)
                     return col;
             }
@@ -1509,10 +1440,8 @@ function createProgramTemplate(config) {
         };
         const headerStrikeStartForLine = (lineIndex, block) => {
             const rawLine = lineList[lineIndex] || "";
-            const headerTok = parts[block.headerIndex]?.tokens?.[0];
-            const ifCol = Number.isFinite(headerTok?.col)
-                ? Number(headerTok.col)
-                : -1;
+            const headerTok = parts[block.headerIndex].tokens[0];
+            const ifCol = headerTok.col;
             if (ifCol > 0 && ifCol <= rawLine.length) {
                 let foundElseCol = -1;
                 const re = /\belse\b/g;
@@ -1543,13 +1472,10 @@ function createProgramTemplate(config) {
                 return;
             const headerLine = block.headerStartLine;
             const headerText = lineList[headerLine] || "";
-            const blockElseLine = block.elseIndex != null &&
-                Number.isFinite(parts[block.elseIndex]?.startLine)
-                ? parts[block.elseIndex].startLine
-                : null;
+            const blockElseLine = block.elseIndex == null ? null : parts[block.elseIndex].startLine;
             if (headerText.includes("else") && blockElseLine === headerLine) {
                 const elseCol = elseColumnForLine(headerLine, block);
-                if (Number.isFinite(elseCol) && elseCol >= 0) {
+                if (elseCol >= 0) {
                     strikeFragments.push({
                         line: headerLine,
                         start: condition.value ? elseCol : 0,
@@ -1558,16 +1484,10 @@ function createProgramTemplate(config) {
                 }
                 return;
             }
-            const ifCloseLine = Number.isFinite(parts[block.closeIndex]?.endLine)
-                ? parts[block.closeIndex].endLine
-                : block.headerEndLine;
-            const ifOpenLine = Number.isFinite(parts[block.openIndex]?.startLine)
-                ? parts[block.openIndex].startLine
-                : block.headerEndLine;
+            const ifCloseLine = parts[block.closeIndex].endLine;
+            const ifOpenLine = parts[block.openIndex].startLine;
             if (!condition.value) {
-                if (Number.isFinite(ifOpenLine) &&
-                    Number.isFinite(headerLine) &&
-                    ifOpenLine > headerLine) {
+                if (ifOpenLine > headerLine) {
                     const headerStart = headerStrikeStartForLine(headerLine, block);
                     strikeFragments.push({
                         line: headerLine,
@@ -1577,46 +1497,35 @@ function createProgramTemplate(config) {
                 }
                 if (block.elseIndex != null &&
                     block.elseOpenIndex != null &&
-                    ifCloseLine ===
-                        (Number.isFinite(parts[block.elseIndex]?.startLine)
-                            ? parts[block.elseIndex].startLine
-                            : ifCloseLine)) {
+                    ifCloseLine === parts[block.elseIndex].startLine) {
                     const elseCol = elseColumnForLine(ifCloseLine, block);
-                    if (Number.isFinite(elseCol) && elseCol >= 0) {
+                    if (elseCol >= 0) {
                         strikeFragments.push({
                             line: ifCloseLine,
                             start: 0,
                             end: elseCol,
                         });
                     }
-                    if (Number.isFinite(ifOpenLine) &&
-                        Number.isFinite(ifCloseLine) &&
-                        ifCloseLine > ifOpenLine) {
+                    if (ifCloseLine > ifOpenLine) {
                         strikeRanges.push([ifOpenLine, ifCloseLine - 1]);
                     }
                 }
-                else if (Number.isFinite(ifOpenLine) && Number.isFinite(ifCloseLine)) {
+                else {
                     strikeRanges.push([ifOpenLine, ifCloseLine]);
                 }
                 return;
             }
             if (block.elseIndex == null || block.elseCloseIndex == null)
                 return;
-            const rawElseStart = Number.isFinite(parts[block.elseOpenIndex ?? block.elseIndex]?.startLine)
-                ? parts[block.elseOpenIndex ?? block.elseIndex].startLine
-                : ifCloseLine;
+            const rawElseStart = parts[block.elseOpenIndex ?? block.elseIndex].startLine;
             const elseStartLine = rawElseStart === ifCloseLine ? rawElseStart + 1 : rawElseStart;
-            const elseCloseLine = Number.isFinite(parts[block.elseCloseIndex]?.endLine)
-                ? parts[block.elseCloseIndex].endLine
-                : elseStartLine;
-            if (Number.isFinite(elseStartLine) &&
-                Number.isFinite(elseCloseLine) &&
-                elseStartLine <= elseCloseLine) {
+            const elseCloseLine = parts[block.elseCloseIndex].endLine;
+            if (elseStartLine <= elseCloseLine) {
                 const lineHasElse = (lineList[ifCloseLine] || "").includes("else");
                 const sameLine = lineHasElse || elseStartLine === ifCloseLine;
                 if (sameLine) {
                     const elseCol = elseColumnForLine(ifCloseLine, block);
-                    if (Number.isFinite(elseCol) && elseCol >= 0) {
+                    if (elseCol >= 0) {
                         strikeFragments.push({
                             line: ifCloseLine,
                             start: elseCol,
@@ -1658,8 +1567,6 @@ function createProgramTemplate(config) {
                 start: 0,
                 end: 0,
             };
-        if (!Number.isFinite(range.start) || !Number.isFinite(range.end))
-            return;
         if (range.start < 0 || range.start >= lineList.length)
             return;
         if (range.end < 0 || range.end >= lineList.length)

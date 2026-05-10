@@ -181,10 +181,7 @@ function createExpressionEvalTemplate(config) {
         return normalizedSteps[Math.max(0, Math.min(normalizedSteps.length - 1, index))];
     }
     function clampBoundary(value) {
-        const safe = Math.floor(Number(value));
-        if (!Number.isFinite(safe))
-            return 0;
-        return Math.max(0, Math.min(normalizedSteps.length - 1, safe));
+        return Math.max(0, Math.min(normalizedSteps.length - 1, Math.floor(value)));
     }
     function sanitizedRecord(value) {
         if (!value || typeof value !== "object")
@@ -210,7 +207,7 @@ function createExpressionEvalTemplate(config) {
     }
     const levelId = currentLevelId();
     const defaultShowIntro = !!initialInstructions;
-    const restoredProgress = maybeRestoreLevelProgress(levelId, "this level");
+    const restoredProgress = maybeRestoreLevelProgress(levelId);
     const restoredPasses = sanitizedRecord(restoredProgress?.passes);
     const state = {
         boundary: clampBoundary(restoredProgress?.boundary ?? 0),

@@ -1,139 +1,62 @@
 import { createCodeEditorTemplate } from "./shared-code-editor.js";
-import type { ExprNode, Statement } from "./shared-core.js";
+import { boxesByName, firstRedeclaredName, formatNames, missingSemicolonHint } from "./shared-code-editor-hints.js";
+import type { BoxState } from "./shared-core.js";
 
-function firstRedeclaration(statements: Statement[]) {
-  const seen = new Set<string>();
-  for (const stmt of statements) {
-    if (stmt.kind === "decl" || stmt.kind === "declAssign") {
-      if (seen.has(stmt.name)) return stmt.name;
-      seen.add(stmt.name);
-    }
-  }
-  return null;
+const targetState: BoxState[] = [
+  { name: "apple", type: "int", value: "10", address: "<i>(any)</i>" },
+  { name: "berry", type: "int", value: "5", address: "<i>(any)</i>" },
+];
+
+function missingTarget(boxes: Map<string, BoxState>): BoxState | null {
+  return targetState.find((expected) => !boxes.has(expected.name)) ?? null;
 }
 
-function assignedName(stmt: Statement): string | null {
-  if (stmt.kind === "declAssign") return stmt.name;
-  if (stmt.kind === "assign" && stmt.lhs.kind === "var") return stmt.lhs.name;
-  return null;
-}
-
-function assignedExpr(stmt: Statement): ExprNode | null {
-  if (stmt.kind === "declAssign") return stmt.expr;
-  if (stmt.kind === "assign") return stmt.rhs;
-  return null;
+function extraNames(boxes: BoxState[]): string[] {
+  const targetNames = new Set(targetState.map((box) => box.name));
+  return boxes.map((box) => box.name).filter((name) => name && !targetNames.has(name));
 }
 
 createCodeEditorTemplate({
   startCode: "",
   textareaMinLines: 4,
-  targetState: [
-    { name: "apple", type: "int", value: "10", address: "<i>(any)</i>" },
-    { name: "berry", type: "int", value: "5", address: "<i>(any)</i>" },
-  ],
+  targetState,
   next: "6-assignment-ii.html",
-  instructions: "Write the code yourself.",
+  instructions: "Write code yourself.",
   hints: (ctx) => {
-    const {
-      applyUserProgram,
-      targetState,
-      findMissingSemicolonLines,
-      text,
-      tokenizeProgram,
-      parseStatements,
-    } = ctx;
-    const currentState = applyUserProgram();
-    const expected = targetState || [];
-    if (currentState === null) {
-      const missingLines = findMissingSemicolonLines(text || "");
-      if (missingLines.length) {
-        const lineList = missingLines.map(String);
-        let formatted = lineList[0];
-        if (lineList.length === 2) {
-          formatted = `${lineList[0]} and ${lineList[1]}`;
-        } else if (lineList.length > 2) {
-          formatted = `${lineList.slice(0, -1).join(", ")}, and ${lineList[lineList.length - 1]}`;
-        }
-        return `You need ${missingLines.length === 1 ? "a semicolon" : "semicolons"} at the end of line${missingLines.length === 1 ? " " : "s "}${formatted}.`;
-      }
-      return "Your program has a problem that isn't covered by a hint, sorry. You can look at the earlier programs if you forget the syntax.";
+    const semicolonHint = missingSemicolonHint(ctx.findMissingSemicolonLines(ctx.text));
+    if (semicolonHint) return semicolonHint;
+
+    const statements = ctx.parseStatements(ctx.text);
+    const redeclared = firstRedeclaredName(statements);
+    if (redeclared) return `Declare $n{${redeclared}} only once.`;
+
+    const currentState = ctx.applyUserProgram();
+    if (!currentState) {
+      return "This code does not compile yet. Use simple declarations and assignments.";
     }
 
-    const missingLines = findMissingSemicolonLines(text || "");
-    if (missingLines.length) {
-      const lineList = missingLines.map(String);
-      let formatted = lineList[0];
-      if (lineList.length === 2) {
-        formatted = `${lineList[0]} and ${lineList[1]}`;
-      } else if (lineList.length > 2) {
-        formatted = `${lineList.slice(0, -1).join(", ")}, and ${lineList[lineList.length - 1]}`;
-      }
-      return `You need ${missingLines.length === 1 ? "a semicolon" : "semicolons"} at the end of line${missingLines.length === 1 ? " " : "s "}${formatted}.`;
+    const boxes = boxesByName(currentState);
+    const missing = missingTarget(boxes);
+    if (missing) {
+      return `Create a variable named $n{${missing.name}}.`;
     }
 
-    const tokens = tokenizeProgram(text || "");
-    const parsedStatements = parseStatements(text || "");
-    const redecl = firstRedeclaration(parsedStatements);
-    if (redecl) {
-      return `You declared $n{${redecl}} more than once.`;
+    const extra = extraNames(currentState);
+    if (extra.length) {
+      return `You only need ${formatNames(targetState.map((box) => box.name))}. Remove ${formatNames(extra)}.`;
     }
 
-    const hasTokens = tokens.some(
-      (t) => !(t.type === "sym" && t.value === ";"),
-    );
-    const declNames = new Set(
-      parsedStatements
-        .filter((s) => s.kind === "decl" || s.kind === "declAssign")
-        .map((s) => s.name),
-    );
-    if (!hasTokens || !declNames.has("apple")) {
-      return "You need to create a variable named $n{apple}. Look at how variables were created in the earlier programs.";
-    }
-    if (!declNames.has("berry")) {
-      return "You also need to create a variable named $n{berry}.";
-    }
-    if (Array.isArray(currentState)) {
-      const byName = Object.fromEntries(currentState.map((b) => [b.name, b]));
-      for (const exp of expected) {
-        const actual = byName[exp.name];
-        if (!actual) continue;
-        const actualVal = actual.value;
-        const expectedVal = exp.value;
-        if (actualVal !== "" && actualVal !== expectedVal) {
-          return `$n{${exp.name}}'s value should be $v{${expectedVal}}, not $v{${actualVal}}.`;
-        }
+    for (const expected of targetState) {
+      const actual = boxes.get(expected.name)!;
+      if (actual.type !== expected.type) {
+        return `$n{${expected.name}} should have type $t{${expected.type}}.`;
+      }
+      if (actual.value === "") {
+        return `$n{${expected.name}} needs value $v{${expected.value}}.`;
+      }
+      if (actual.value !== expected.value) {
+        return `$n{${expected.name}}'s value should be $v{${expected.value}}, not $v{${actual.value}}.`;
       }
     }
-    const appleAssign = parsedStatements.find(
-      (s) =>
-        (s.kind === "assign" || s.kind === "declAssign") &&
-        (() => {
-          const expr = assignedExpr(s);
-          return (
-            expr?.kind === "num" &&
-            assignedName(s) === "apple" &&
-            String(expr.value) === "10"
-          );
-        })(),
-    );
-    if (!appleAssign) {
-      return "$n{apple} needs to end up with a value. Check the target final state.";
-    }
-    const berryAssign = parsedStatements.find(
-      (s) =>
-        (s.kind === "assign" || s.kind === "declAssign") &&
-        (() => {
-          const expr = assignedExpr(s);
-          return (
-            expr?.kind === "num" &&
-            assignedName(s) === "berry" &&
-            String(expr.value) === "5"
-          );
-        })(),
-    );
-    if (!berryAssign) {
-      return "$n{berry} also needs to end up with a value. Check the target final state.";
-    }
-    return "Keep lines to simple declarations or assignments ending with semicolons.";
   },
 });

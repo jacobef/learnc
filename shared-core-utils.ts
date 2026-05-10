@@ -37,8 +37,6 @@ export interface BoxState {
   pointeeArrayDims?: number[] | null;
   pointeeInnerDepth?: number | null;
   names?: string[] | string | null;
-  nameEditable?: boolean | null;
-  typeEditable?: boolean | null;
   allowNameEdit?: boolean | null;
   allowTypeEdit?: boolean | null;
   allowDelete?: boolean | null;
@@ -163,7 +161,7 @@ export function parseType(type: string = "int"): ParsedType {
 
 export function isPointerType(type: string = "int"): boolean {
   const { depth } = parseType(type);
-  return depth != null && Number.isFinite(depth) && depth > 0;
+  return depth > 0;
 }
 
 export function isRefCompatible(
@@ -172,15 +170,7 @@ export function isRefCompatible(
 ): boolean {
   const { base: targetBase, depth: targetDepth } = parseType(targetType);
   const { base: refBase, depth: refDepth } = parseType(refType);
-  if (
-    !targetBase ||
-    !refBase ||
-    targetDepth == null ||
-    refDepth == null ||
-    !Number.isFinite(targetDepth) ||
-    !Number.isFinite(refDepth)
-  )
-    return false;
+  if (!targetBase || !refBase) return false;
   return targetBase === refBase && targetDepth === refDepth + 1;
 }
 
@@ -195,7 +185,7 @@ export function typeInfo(type: string = "int"): {
 } {
   const { base, depth, arrayDims } = parseType(type);
   if (!base) return { size: 4, align: 4 };
-  if (Number.isFinite(depth) && depth > 0) return { size: 8, align: 8 };
+  if (depth > 0) return { size: 8, align: 8 };
   const scalar = (() => {
     if (
       base === "long" ||
@@ -219,7 +209,7 @@ export function typeInfo(type: string = "int"): {
     }
     return { size: 4, align: 4 };
   })();
-  if (Array.isArray(arrayDims) && arrayDims.length > 0) {
+  if (arrayDims?.length) {
     const count = arrayDims.reduce((acc, dim) => {
       const n = Math.max(0, Math.floor(Number(dim)));
       return acc * (n > 0 ? n : 0);
@@ -475,8 +465,8 @@ export function valueTypeMatchesTarget(
     return base !== "float" && base !== "double";
   };
   const sameArrayDims = (left: number[] | undefined, right: number[] | undefined) => {
-    const a = Array.isArray(left) ? left : [];
-    const b = Array.isArray(right) ? right : [];
+    const a = left ?? [];
+    const b = right ?? [];
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) {
       if (a[i] !== b[i]) return false;

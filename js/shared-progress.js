@@ -95,6 +95,6 @@ export function clearAllLevelProgress() {
         // Ignore storage failures.
     }
 }
-export function maybeRestoreLevelProgress(levelId = currentLevelId(), _label = "this level") {
+export function maybeRestoreLevelProgress(levelId = currentLevelId()) {
     return readLevelProgress(levelId);
 }

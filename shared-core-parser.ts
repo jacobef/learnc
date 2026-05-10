@@ -1111,8 +1111,8 @@ export function createParserTools(opts: ParserOptions): ParserTools {
         if (at >= tokens.length || bracketDepth !== 0) return { kind: "partial" };
         if (!lengthTokens.length) return { kind: "partial" };
         const length = parseArrayLengthTokens(lengthTokens);
-        if (!Number.isFinite(length) || (length || 0) <= 0) return { kind: "none" };
-        opsOutward.push({ kind: "array", length: Number(length) });
+        if (length == null || length <= 0) return { kind: "none" };
+        opsOutward.push({ kind: "array", length });
         at++; // ]
       }
 
@@ -1196,8 +1196,8 @@ export function createParserTools(opts: ParserOptions): ParserTools {
     if (parsed.kind === "none") return false;
     if (parsed.kind === "partial") return true;
     if (!parsed.hasInitializer) return true;
-    if (!Number.isFinite(parsed.rhsStart)) return true;
-    return isExpressionPrefix(tokens.slice(parsed.rhsStart!));
+    if (parsed.rhsStart == null) return true;
+    return isExpressionPrefix(tokens.slice(parsed.rhsStart));
   }
 
   function isAssignPrefix(tokens: Token[]): boolean {
@@ -1361,7 +1361,7 @@ export function createParserTools(opts: ParserOptions): ParserTools {
     }
     const declHead = parseDeclHead(tokens);
     if (declHead.kind === "full" && declHead.declType && declHead.name) {
-      if (Array.isArray(declHead.arrayShape) && declHead.arrayShape.length > 0) {
+      if (declHead.arrayShape?.length) {
         if (declHead.hasInitializer) return null;
         const shape = declHead.arrayShape.map((d) => Math.max(0, Math.floor(Number(d))));
         const elementType = declHead.elementType || declHead.declType;
@@ -1386,7 +1386,7 @@ export function createParserTools(opts: ParserOptions): ParserTools {
           declaredNames: [declHead.name],
         };
       }
-      const rhsStart = Number.isFinite(declHead.rhsStart) ? declHead.rhsStart! : -1;
+      const rhsStart = declHead.rhsStart ?? -1;
       if (rhsStart < 0) return null;
       const rhs = parseAssignRhs(tokens, rhsStart);
       if (!rhs) return null;

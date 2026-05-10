@@ -125,7 +125,7 @@ function createCodeEditorTemplate(config) {
     const simulator = createSimpleSimulator();
     const levelId = currentLevelId();
     const defaultText = normalizeEditorText(startCode);
-    const restoredProgress = maybeRestoreLevelProgress(levelId, "this level");
+    const restoredProgress = maybeRestoreLevelProgress(levelId);
     const state = {
         text: typeof restoredProgress?.text === "string"
             ? normalizeEditorText(restoredProgress.text)
@@ -272,7 +272,7 @@ function createCodeEditorTemplate(config) {
         renderDiagnostic(diagnostic);
     }
     function isTargetMatch(outcome) {
-        if (outcome.kind !== "ok" || !Array.isArray(outcome.state))
+        if (outcome.kind !== "ok" || !outcome.state)
             return false;
         if (outcome.state.length !== targetState.length)
             return false;
@@ -292,7 +292,7 @@ function createCodeEditorTemplate(config) {
         const outcome = getProgramOutcome();
         return { ok: isTargetMatch(outcome), outcome };
     }
-    function renderState(title, boxes, kind = "ok") {
+    function renderState(title, boxes) {
         const wrap = document.createElement("div");
         wrap.className = "state-panel state-panel-scrollable";
         const heading = document.createElement("h3");
@@ -323,7 +323,7 @@ function createCodeEditorTemplate(config) {
         clearNode(stage);
         const group = document.createElement("div");
         group.className = "state-group two-col";
-        group.appendChild(renderState("Your code's final state", outcome.state, outcome.kind));
+        group.appendChild(renderState("Your code's final state", outcome.state));
         group.appendChild(renderState("Target final state", targetState));
         stage.appendChild(group);
     }
