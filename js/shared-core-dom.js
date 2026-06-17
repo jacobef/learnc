@@ -679,6 +679,13 @@ function updateOtherNamesList(node, aliases, showAliases) {
     const label = node.querySelector(".lbl-name");
     if (label)
         label.textContent = hasAliases ? "names" : "name";
+    const main = node.querySelector(".vbox-main");
+    const listWidth = listInner.getBoundingClientRect().width;
+    const mainWidth = main?.getBoundingClientRect().width ?? 0;
+    const overhang = hasAliases
+        ? Math.max(0, Math.ceil((listWidth - mainWidth) / 2))
+        : 0;
+    node.style.setProperty("--name-overhang", `${overhang}px`);
 }
 function ensureOtherNamesToggle(node, onToggle) {
     const stack = node.querySelector(".name-stack");
@@ -885,16 +892,27 @@ function sameDims(a, b) {
 }
 function groupStateObjects(boxes) {
     const arrayCandidates = new Map();
+    const arrayRoots = new Map();
     const scalars = [];
     boxes.forEach((box, index) => {
         let baseName = "";
         let indices = [];
         const metaShape = normalizeArrayDims(box.arrayShape);
+        const metaIndices = Array.isArray(box.arrayIndices)
+            ? box.arrayIndices
+                .map((value) => Math.floor(Number(value)))
+                .filter((value) => Number.isFinite(value) && value >= 0)
+            : [];
+        if (!box.arrayRoot && metaShape.length > 0 && metaIndices.length === 0) {
+            const rootName = String(box.name || "").trim();
+            if (rootName && !arrayRoots.has(rootName)) {
+                arrayRoots.set(rootName, { box, shape: metaShape, index });
+                return;
+            }
+        }
         if (box.arrayRoot && Array.isArray(box.arrayIndices) && box.arrayIndices.length > 0) {
             baseName = String(box.arrayRoot);
-            indices = box.arrayIndices
-                .map((value) => Math.floor(Number(value)))
-                .filter((value) => Number.isFinite(value) && value >= 0);
+            indices = metaIndices;
         }
         else {
             const parsed = parseArrayElementName(box.name || "");
@@ -912,15 +930,21 @@ function groupStateObjects(boxes) {
         arrayCandidates.set(baseName, list);
     });
     const out = [...scalars];
+    const consumedRoots = new Set();
     for (const [baseName, list] of arrayCandidates.entries()) {
         if (!list.length)
             continue;
         const sorted = list.slice().sort((a, b) => a.index - b.index);
         const first = sorted[0];
+        const root = arrayRoots.get(baseName) || null;
         const shapes = sorted
             .map((item) => item.shape)
             .filter((shape) => shape.length > 0);
-        let shape = shapes.length ? shapes[0].slice() : inferArrayShapeFromEntries(sorted);
+        let shape = root?.shape.length
+            ? root.shape.slice()
+            : shapes.length
+                ? shapes[0].slice()
+                : inferArrayShapeFromEntries(sorted);
         if (shape.length && shapes.some((candidate) => !sameDims(candidate, shape))) {
             shape = [];
         }
@@ -966,11 +990,21 @@ function groupStateObjects(boxes) {
             kind: "array",
             name: baseName,
             shape: shape.slice(),
-            index: first.index,
+            index: root?.index ?? first.index,
+            address: root?.box.address ?? first.box.address ?? null,
             elementType,
             entries,
-            allowDelete: entries.every((entry) => !!entry.box.allowDelete),
+            allowDelete: root?.box.allowDelete !== null && root?.box.allowDelete !== undefined
+                ? !!root.box.allowDelete
+                : entries.every((entry) => !!entry.box.allowDelete),
         });
+        if (root)
+            consumedRoots.add(baseName);
+    }
+    for (const [baseName, root] of arrayRoots.entries()) {
+        if (!consumedRoots.has(baseName)) {
+            out.push({ kind: "scalar", box: root.box, index: root.index });
+        }
     }
     out.sort((a, b) => a.index - b.index);
     return out;
@@ -1063,7 +1097,7 @@ function findArrayObjectBoxesForResult(result, state) {
     const expectedShape = normalizeArrayDims(parsed.arrayDims);
     if (!expectedShape.length)
         return null;
-    const baseAddress = String(result.value ?? "").trim();
+    const baseAddress = String(result.value ?? "").trim() || String(result.address ?? "").trim();
     if (!baseAddress)
         return null;
     const grouped = groupStateObjects(state);
@@ -1088,7 +1122,7 @@ function findArrayObjectBoxesForResult(result, state) {
 function makeArrayBox(group, opts) {
     const { editable, deletable } = opts;
     const typeText = `${group.elementType}${group.shape.map((d) => `[${d}]`).join("")}`;
-    const firstAddress = String(group.entries[0]?.box.address ?? "—");
+    const firstAddress = String(group.address ?? group.entries[0]?.box.address ?? "—");
     const node = el(`
     <div class="arraybox ${editable ? "is-editable" : ""}">
       <div class="arraybox-main">

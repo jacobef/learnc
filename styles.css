@@ -361,8 +361,179 @@ h2 {
     background: transparent;
     box-shadow: none;
 }
+.sandbox-interface-toggle {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+    border: 1px solid #cbd5e1;
+    border-radius: 7px;
+    background: #f1f5f9;
+}
+.sandbox-interface-toggle button {
+    min-width: 88px;
+    height: 30px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: #475569;
+    font: 700 13px var(--ui-font);
+}
+.sandbox-interface-toggle button.is-active {
+    background: #fff;
+    color: #155dc1;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.18);
+}
+.sandbox-implicit-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 36px;
+    color: #334155;
+    font: 700 13px var(--ui-font);
+    cursor: pointer;
+}
+.sandbox-implicit-main input {
+    width: 17px;
+    height: 17px;
+    margin: 0;
+    accent-color: #1e77ff;
+}
+.sandbox-mode-notice {
+    margin: 0 0 8px;
+    padding: 8px 10px;
+    border: 1px solid #f0c36d;
+    border-radius: 6px;
+    background: #fff8df;
+    color: #6b4f00;
+    font: 700 13px/1.35 var(--ui-font);
+}
+.sandbox-file-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    margin: 12px 0 8px;
+}
+.sandbox-file-tabs {
+    display: flex;
+    flex: 1 1 auto;
+    gap: 4px;
+    min-width: 0;
+    overflow-x: auto;
+}
+.sandbox-file-tab {
+    flex: 0 0 auto;
+    max-width: 220px;
+    padding: 5px 9px;
+    overflow: hidden;
+    border: 1px solid #cbd5e1;
+    border-radius: 5px;
+    background: #f8fafc;
+    color: #475569;
+    font: 700 13px var(--ui-font);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sandbox-file-tab.active {
+    border-color: #1e77ff;
+    background: #eaf2ff;
+    color: #155dc1;
+}
+.sandbox-file-action {
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    font-size: 21px;
+    line-height: 1;
+}
+.sandbox-file-create {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1 1 240px;
+    min-width: 0;
+}
+.sandbox-file-delete-confirm {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    color: #7a271a;
+    font: 700 13px var(--ui-font);
+}
+.sandbox-file-create.hidden,
+.sandbox-file-delete-confirm.hidden {
+    display: none;
+}
+.sandbox-file-name {
+    min-width: 100px;
+    flex: 1 1 auto;
+    height: 32px;
+    padding: 4px 8px;
+    box-sizing: border-box;
+    border: 1px solid #94a3b8;
+    border-radius: 5px;
+    background: #fff;
+    color: #172033;
+    font: 700 13px var(--ui-font);
+}
+.sandbox-terminal {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 12px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    min-height: 0;
+}
+.sandbox-terminal-section {
+    min-width: 0;
+}
+.sandbox-terminal-label {
+    display: block;
+    margin-bottom: 5px;
+    color: #445;
+    font: 700 13px var(--ui-font);
+}
+.sandbox-terminal-input,
+.sandbox-terminal-output {
+    width: 100%;
+    min-height: 74px;
+    max-height: 150px;
+    margin: 0;
+    padding: 8px 10px;
+    box-sizing: border-box;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    color: #111;
+    font: 14px/1.35 ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    resize: vertical;
+}
+.sandbox-terminal-output {
+    background: #f8fafc;
+    resize: none;
+}
+.sandbox-terminal-stderr {
+    margin-top: 8px;
+}
+.sandbox-blocked-notice {
+    margin: 8px 8px 14px;
+    padding: 8px 10px;
+    border-left: 4px solid #b7791f;
+    background: #fff8dc;
+    color: #5f430c;
+    font: 700 14px/1.4 var(--ui-font);
+}
 .expr-panel {
     margin-top: 16px;
+    padding-top: 14px;
+    border-top: 2px solid #d7dee8;
 }
 .expr-eval-stack {
     display: flex;
@@ -531,6 +702,23 @@ h2 {
 .sandbox-expr-row [data-role="sandbox-expr-result"] > .vbox,
 .sandbox-expr-row [data-role="sandbox-expr-result"] > .arraybox {
     flex: 0 0 auto;
+}
+.sandbox-expr-error {
+    width: min(520px, 100%);
+    padding: 10px 12px;
+    box-sizing: border-box;
+    border: 1px solid #e3a29a;
+    border-radius: 6px;
+    background: #fff4f2;
+    color: #7a271a;
+    font: 14px/1.4 var(--ui-font);
+}
+.sandbox-expr-error-title {
+    margin-bottom: 3px;
+    font-weight: 800;
+}
+.sandbox-expr-error-message {
+    overflow-wrap: anywhere;
 }
 @media (max-width: 900px) {
     .sandbox-expr-row {
@@ -813,6 +1001,9 @@ button {
 .controls-main .controls-left {
     width: 100%;
 }
+.controls-main .controls-right {
+    justify-content: flex-end;
+}
 .controls-spacer {
     flex: 0 0 20px;
     width: 20px;
@@ -839,6 +1030,34 @@ body.panel-layout .controls-bar {
 body.panel-layout .panel-controls.controls-main {
     margin: 0;
     padding: 12px;
+}
+body.panel-layout .sandbox-shell .panel-controls.controls-main {
+    padding: 8px 12px;
+}
+.sandbox-shell .controls-main {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+}
+.sandbox-shell .controls-main .controls-row {
+    width: auto;
+    min-width: 0;
+    flex-wrap: nowrap;
+}
+.sandbox-shell .controls-main .controls-left {
+    width: auto;
+    flex: 0 1 auto;
+}
+.sandbox-shell .controls-main .controls-right {
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+.sandbox-shell .controls-left button {
+    display: inline-flex;
+    align-items: center;
+    min-height: 36px;
+    padding: 0 12px;
 }
 
 .controls-bar-expr {
@@ -1277,24 +1496,24 @@ body.panel-layout .panel-controls.controls-main {
     display: flex;
     align-items: center;
     justify-content: center;
-    flex-wrap: wrap;
-    overflow: hidden;
-    white-space: normal;
-    width: 100%;
+    overflow: visible;
+    white-space: nowrap;
+    width: max-content;
+    max-width: none;
     margin: 0;
     color: var(--name);
     font-weight: 800;
 }
 .name-list-inner {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     justify-content: center;
     gap: 8px;
-    white-space: normal;
+    white-space: nowrap;
     position: relative;
-    width: 100%;
-    max-width: 100%;
+    width: max-content;
+    max-width: none;
 }
 .name-list .name-tag {
     border: none;
@@ -1440,6 +1659,7 @@ body.panel-layout .panel-controls.controls-main {
 
 .vbox {
     --box-main-width: 150px;
+    --name-overhang: 0px;
     position: relative;
     box-sizing: border-box;
     display: flex;
@@ -1447,6 +1667,7 @@ body.panel-layout .panel-controls.controls-main {
     gap: 10px;
     width: max-content;
     max-width: 100%;
+    padding-inline: var(--name-overhang);
     margin: 8px 0;
 }
 .vbox-main {
@@ -1671,16 +1892,25 @@ body.panel-layout .panel-controls.controls-main {
 }
 
 .vbox .cell {
+    --value-label-gap: 4px;
+    --value-label-center-shift: -8.25px;
     position: relative;
     border: 2.5px solid #000;
     border-radius: 12px;
     background: transparent;
     display: flex;
+    flex-direction: column;
     flex: 1 1 auto;
     min-height: 114px;
     align-items: center;
     justify-content: center;
-    padding: 24px 10px;
+    gap: var(--value-label-gap);
+    padding: 10px;
+}
+
+.vbox .cell > .lbl-value,
+.vbox .cell > .value {
+    transform: translateY(var(--value-label-center-shift));
 }
 
 .vbox .value {
@@ -1781,9 +2011,9 @@ body.panel-layout .panel-controls.controls-main {
     text-align: center;
 }
 .cell .lbl-value {
-    position: absolute;
-    top: 6px;
-    left: 10px;
+    position: static;
+    width: 100%;
+    text-align: center;
     font-size: 11px;
     color: #555;
 }
@@ -1935,6 +2165,21 @@ nav.tabs a.active:hover {
     }
     .controls-main .controls-left {
         width: 100%;
+    }
+    .sandbox-shell .controls-main {
+        flex-wrap: wrap;
+    }
+    .sandbox-shell .controls-main .controls-row {
+        width: auto;
+        flex-wrap: nowrap;
+    }
+    .sandbox-shell .controls-main .controls-left {
+        width: auto;
+    }
+    .sandbox-shell .controls-main .controls-right {
+        width: auto;
+        justify-content: flex-end;
+        margin-left: auto;
     }
     body:not(.sidebar-collapsed) {
         overflow: hidden;
@@ -2146,6 +2391,9 @@ nav.tabs a.active:hover {
     .sandbox-state-panel [data-role="sandbox-stage"] {
         overflow: visible;
         flex: 0 0 auto;
+    }
+    .sandbox-terminal {
+        grid-template-columns: 1fr;
     }
     .panel-body.codepane,
     .codepane {

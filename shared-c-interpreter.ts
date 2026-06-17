@@ -1,0 +1,1347 @@
+import { C_INTERPRETER_WASM_BASE64 } from "./shared-c-interpreter-wasm-data.js";
+import type {
+  BoxState,
+  ProgramDiagnostic,
+  ValueLiteralEvaluation,
+  ValueLiteralKind,
+} from "./shared-core-utils.js";
+
+type CInterpreterExports = WebAssembly.Exports & {
+  memory: WebAssembly.Memory;
+  cboxes_alloc: (len: number) => number;
+  cboxes_free: (ptr: number, len: number) => void;
+  cboxes_last_result_len: () => number;
+  cboxes_run_source: (
+    ptr: number,
+    len: number,
+    stdinPtr: number,
+    stdinLen: number,
+    syntheticAddressBase: number,
+  ) => number;
+  cboxes_run_files: (
+    bundlePtr: number,
+    bundleLen: number,
+    stdinPtr: number,
+    stdinLen: number,
+    syntheticAddressBase: number,
+    implicitMainRequested: number,
+  ) => number;
+  cboxes_eval_expression: (
+    sourcePtr: number,
+    sourceLen: number,
+    exprPtr: number,
+    exprLen: number,
+    eventIndex: number,
+    stdinPtr: number,
+    stdinLen: number,
+    syntheticAddressBase: number,
+  ) => number;
+  cboxes_eval_expression_files: (
+    bundlePtr: number,
+    bundleLen: number,
+    exprPtr: number,
+    exprLen: number,
+    eventIndex: number,
+    stdinPtr: number,
+    stdinLen: number,
+    syntheticAddressBase: number,
+    implicitMainRequested: number,
+  ) => number;
+};
+
+export type CSourceFile = {
+  path: string;
+  source: string;
+};
+
+type CInterpreterOk = {
+  ok: true;
+  stdout: string;
+  stderr: string;
+  exitStatus: number;
+  state: BoxState[];
+  mainClose?: {
+    file?: string;
+    line?: number;
+  } | null;
+  blocked?: {
+    file?: string;
+    startLine?: number;
+    endLine?: number;
+    function?: string;
+    state?: BoxState[];
+  } | null;
+  trace?: Array<{
+    kind?: string;
+    file?: string;
+    startLine: number;
+    endLine: number;
+    state: BoxState[];
+  }>;
+  implicitMainApplied?: boolean;
+  implicitMainNotice?: string | null;
+};
+
+type CInterpreterError = {
+  ok: false;
+  kind: "compile" | "ub";
+  message: string;
+  file: string | null;
+  line: number | null;
+  column: number | null;
+  implicitMainApplied?: boolean;
+  implicitMainNotice?: string | null;
+};
+
+type CInterpreterRawResult = CInterpreterOk | CInterpreterError;
+
+type CExpressionOk = {
+  ok: true;
+  result: {
+    kind: string;
+    type: string;
+    value: string;
+    address: string | null;
+    name?: string;
+    valueLiteral?: {
+      kind: string;
+      hasSuffix: boolean;
+    } | null;
+  };
+};
+
+type CExpressionRawResult = CExpressionOk | CInterpreterError;
+
+type CImplicitMainResult = {
+  implicitMainApplied?: boolean;
+  implicitMainNotice?: string | null;
+};
+
+export type CProgramResult = (
+  | {
+      kind: "ok";
+      state: BoxState[];
+      trace: CProgramTraceEvent[];
+      mainClose: CProgramSourceLocation | null;
+      blocked: CProgramBlocked | null;
+      stdout: string;
+      stderr: string;
+      exitStatus: number;
+    }
+  | { kind: "compile" | "ub"; diagnostic: ProgramDiagnostic }
+) &
+  CImplicitMainResult;
+
+export type CProgramTraceEvent = {
+  kind: string;
+  file: string;
+  startLine: number;
+  endLine: number;
+  state: BoxState[];
+};
+
+export type CProgramSourceLocation = {
+  file: string;
+  line: number;
+};
+
+export type CProgramBlocked = {
+  file: string;
+  startLine: number;
+  endLine: number;
+  function: string;
+  state: BoxState[];
+};
+
+export type CExpressionResult =
+  | {
+      kind: "ok";
+      result: {
+        kind: string;
+        type: string;
+        value: string;
+        address: string;
+        name?: string;
+        valueLiteral?: {
+          kind: ValueLiteralKind;
+          hasSuffix: boolean;
+        } | null;
+        nanSign?: -1 | 1;
+      };
+    }
+  | { kind: "compile" | "ub"; diagnostic: ProgramDiagnostic };
+
+let exportsCache: CInterpreterExports | null = null;
+const SYNTHETIC_ADDRESS_BASE_STORAGE_KEY =
+  `cboxes-synthetic-address-base-v2:${window.location.pathname}`;
+const MIN_SYNTHETIC_ADDRESS_BASE = 1000;
+const MAX_SYNTHETIC_ADDRESS_BASE = 9000;
+const SYNTHETIC_ADDRESS_ALIGNMENT = 16;
+
+export function createSyntheticAddressBase(): number {
+  const random = new Uint32Array(1);
+  crypto.getRandomValues(random);
+  const firstAlignedBase =
+    Math.ceil(MIN_SYNTHETIC_ADDRESS_BASE / SYNTHETIC_ADDRESS_ALIGNMENT) *
+    SYNTHETIC_ADDRESS_ALIGNMENT;
+  const baseCount =
+    Math.floor(
+      (MAX_SYNTHETIC_ADDRESS_BASE - firstAlignedBase) /
+        SYNTHETIC_ADDRESS_ALIGNMENT,
+    ) + 1;
+  return (
+    firstAlignedBase +
+    (random[0]! % baseCount) * SYNTHETIC_ADDRESS_ALIGNMENT
+  );
+}
+
+function loadSyntheticAddressBase(): number {
+  try {
+    const stored = Number.parseInt(
+      localStorage.getItem(SYNTHETIC_ADDRESS_BASE_STORAGE_KEY) ?? "",
+      10,
+    );
+    if (
+      Number.isSafeInteger(stored) &&
+      stored >= MIN_SYNTHETIC_ADDRESS_BASE &&
+      stored <= MAX_SYNTHETIC_ADDRESS_BASE &&
+      stored % SYNTHETIC_ADDRESS_ALIGNMENT === 0
+    ) {
+      return stored;
+    }
+
+    const generated = createSyntheticAddressBase();
+    localStorage.setItem(
+      SYNTHETIC_ADDRESS_BASE_STORAGE_KEY,
+      generated.toString(),
+    );
+    return generated;
+  } catch {
+    return createSyntheticAddressBase();
+  }
+}
+
+const syntheticAddressBase = loadSyntheticAddressBase();
+
+class WasiProcExit extends Error {
+  code: number;
+
+  constructor(code: number) {
+    super(`interpreter exited through WASI proc_exit(${code})`);
+    this.name = "WasiProcExit";
+    this.code = code;
+  }
+}
+
+function decodeBase64(data: string): Uint8Array {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function encodeSourceFiles(files: CSourceFile[]): Uint8Array {
+  const encoder = new TextEncoder();
+  const encoded = files.map((file) => ({
+    path: encoder.encode(file.path),
+    source: encoder.encode(file.source),
+  }));
+  const byteLength =
+    4 +
+    encoded.reduce(
+      (total, file) => total + 8 + file.path.length + file.source.length,
+      0,
+    );
+  const output = new Uint8Array(byteLength);
+  const view = new DataView(output.buffer);
+  let offset = 0;
+  view.setUint32(offset, encoded.length, true);
+  offset += 4;
+  for (const file of encoded) {
+    view.setUint32(offset, file.path.length, true);
+    view.setUint32(offset + 4, file.source.length, true);
+    offset += 8;
+    output.set(file.path, offset);
+    offset += file.path.length;
+    output.set(file.source, offset);
+    offset += file.source.length;
+  }
+  return output;
+}
+
+function writeU32(memory: WebAssembly.Memory, ptr: number, value: number) {
+  new DataView(memory.buffer).setUint32(ptr, value, true);
+}
+
+function wasiImports(getExports: () => CInterpreterExports | null) {
+  const errnoNosys = 52;
+  const ok = 0;
+  return {
+    environ_get: () => ok,
+    environ_sizes_get: (countPtr: number, sizePtr: number) => {
+      const memory = getExports()?.memory;
+      if (memory) {
+        writeU32(memory, countPtr, 0);
+        writeU32(memory, sizePtr, 0);
+      }
+      return ok;
+    },
+    fd_close: () => ok,
+    fd_seek: () => errnoNosys,
+    fd_write: (_fd: number, _iovs: number, _iovsLen: number, nwrittenPtr: number) => {
+      const memory = getExports()?.memory;
+      if (memory) writeU32(memory, nwrittenPtr, 0);
+      return ok;
+    },
+    proc_exit: (code: number) => {
+      throw new WasiProcExit(code);
+    },
+    random_get: (ptr: number, len: number) => {
+      const memory = getExports()?.memory;
+      if (!memory) return errnoNosys;
+      const bytes = new Uint8Array(memory.buffer, ptr, len);
+      for (let offset = 0; offset < bytes.length; offset += 65536) {
+        crypto.getRandomValues(bytes.subarray(offset, offset + 65536));
+      }
+      return ok;
+    },
+  };
+}
+
+function interpreterExports(): CInterpreterExports {
+  if (exportsCache) return exportsCache;
+  let current: CInterpreterExports | null = null;
+  const wasmBytes = decodeBase64(C_INTERPRETER_WASM_BASE64);
+  const moduleBytes = Uint8Array.from(wasmBytes);
+  const module = new WebAssembly.Module(moduleBytes as unknown as BufferSource);
+  const instance = new WebAssembly.Instance(module, {
+    env: {
+      clock: () => Math.floor(Date.now() / 1000),
+    },
+    wasi_snapshot_preview1: wasiImports(() => current),
+  });
+  current = instance.exports as CInterpreterExports;
+  exportsCache = current;
+  return current;
+}
+
+type FriendlyDiagnostic = {
+  message: string;
+  line?: number;
+  col?: number;
+  endCol?: number;
+};
+
+function sourceLines(source: string): string[] {
+  const lines = String(source || "").split(/\r?\n/);
+  return lines.length ? lines : [""];
+}
+
+function clampLine(line: number, lines: string[]): number {
+  return Math.max(0, Math.min(lines.length - 1, Math.floor(line)));
+}
+
+function lineEndColumn(lines: string[], line: number): number {
+  return Math.max(0, lines[clampLine(line, lines)]?.length ?? 0);
+}
+
+function lineAt(lines: string[], line: number): string {
+  return lines[clampLine(line, lines)] ?? "";
+}
+
+function previousCodeLine(lines: string[], line: number): number {
+  for (let index = Math.min(line - 1, lines.length - 1); index >= 0; index -= 1) {
+    if ((lines[index] || "").trim()) return index;
+  }
+  return clampLine(line - 1, lines);
+}
+
+function unmatchedOpeningBraceCount(source: string): number {
+  let depth = 0;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const ch = source[index] || "";
+    const next = source[index + 1] || "";
+    if (inLineComment) {
+      if (ch === "\n") inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (ch === "*" && next === "/") {
+        inBlockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      inLineComment = true;
+      index += 1;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      inBlockComment = true;
+      index += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    if (ch === "}") depth = Math.max(0, depth - 1);
+  }
+  return depth;
+}
+
+function commonTypeSuggestion(name: string): string | null {
+  if (name === "integer") return "C uses int for whole numbers. Try writing int instead of integer.";
+  if (name === "number") return "C does not have a type named number. Use int for whole numbers or double for decimals.";
+  if (name === "string") return "C does not have a beginner-friendly string type here. Use char arrays or char pointers when the tutorial introduces them.";
+  if (name === "boolean") return "C uses bool only after including <stdbool.h>. In these lessons, use int values like 0 and 1 for false and true.";
+  if (name === "doubl") return "Did you mean double? C needs the full type name.";
+  return null;
+}
+
+function lineLooksLikeForgottenComma(line: string): boolean {
+  return /^\s*(?:const\s+)?(?:unsigned\s+|signed\s+)?(?:int|double|float|char|short|long|bool)\s+\*?\s*[A-Za-z_]\w*\s+[A-Za-z_]\w*/.test(line);
+}
+
+function declaredAsPointerBefore(lines: string[], beforeLine: number, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const declaration = new RegExp(
+    `\\b(?:const\\s+)?(?:unsigned\\s+|signed\\s+)?(?:int|double|float|char|short|long|bool|void)\\s*\\*+\\s*${escaped}\\b`,
+  );
+  for (let index = 0; index < Math.min(beforeLine, lines.length); index += 1) {
+    if (declaration.test(lines[index] || "")) return true;
+  }
+  return false;
+}
+
+function dereferencedAssignmentName(line: string): string | null {
+  const match = /^\s*\*\s*([A-Za-z_]\w*)\s*=/.exec(line);
+  return match?.[1] ?? null;
+}
+
+function friendlyDiagnosticFor(
+  message: string,
+  source: string,
+  line: number,
+  col: number,
+): FriendlyDiagnostic {
+  const lines = sourceLines(source);
+  const safeLine = clampLine(line, lines);
+  const text = lineAt(lines, safeLine);
+  const atEnd = line >= lines.length;
+
+  if (/^expected Semicolon$/.test(message)) {
+    if (/\d+\.\.\d*|\d+\.\d+\./.test(text)) {
+      return { message: "This number has too many decimal points. Use one decimal point, like 1.2." };
+    }
+    if (/\band\b/.test(text)) {
+      return { message: "C uses && for logical and. It does not use the word and here." };
+    }
+    if (/\bor\b/.test(text)) {
+      return { message: "C uses || for logical or. It does not use the word or here." };
+    }
+    if (/\bint\s+mian\s*\(/.test(text)) {
+      return { message: "Did you mean main? cBoxes only treats a function named main as the program entry point." };
+    }
+    if (/^\s*(?:int|double|float|char|short|long|void)\s+[A-Za-z_]\w*\s*\{/.test(text)) {
+      return { message: "Function definitions need parentheses after the function name, like int f(void) { ... }." };
+    }
+    if (/^\s*(?:int|double|float|char|short|long|bool)\s+[A-Za-z_]\w*-[A-Za-z_]\w*/.test(text)) {
+      return { message: "C variable names cannot contain hyphens. Use an underscore instead, like my_var." };
+    }
+    if (text[col] === ")" || /\)\s*;/.test(text.slice(Math.max(0, col - 1)))) {
+      return { message: "There is an extra closing parenthesis ')' here." };
+    }
+    if (lineLooksLikeForgottenComma(text)) {
+      return {
+        message: "C expected this declaration to end here. If you meant to declare another variable, put a comma before its name, like int a, b;.",
+      };
+    }
+    if (atEnd || col <= 0) {
+      const previous = previousCodeLine(lines, line);
+      return {
+        message: "The previous statement is missing a semicolon (;). Add ; at the end of that line.",
+        line: previous,
+        col: lineEndColumn(lines, previous),
+      };
+    }
+    return {
+      message: "Add a semicolon (;) here to end the statement.",
+      col,
+    };
+  }
+
+  if (/^expected LParen$/.test(message)) {
+    const keyword = /\bwhile\b/.test(text) ? "while" : /\bif\b/.test(text) ? "if" : null;
+    if (keyword) {
+      return {
+        message: `Put the ${keyword} condition in parentheses, like ${keyword} (condition) { ... }.`,
+      };
+    }
+    return { message: "Add an opening parenthesis '(' here." };
+  }
+
+  if (/^expected RParen$/.test(message)) {
+    if (/\b(if|while)\b/.test(text)) {
+      return {
+        message: "Add a closing parenthesis ')' after the condition, before the opening brace.",
+      };
+    }
+    return { message: "Add a closing parenthesis ')' here." };
+  }
+
+  if (/^expected RBracket$/.test(message)) {
+    return { message: "Add a closing bracket ']' here." };
+  }
+
+  if (/^expected LBrace$/.test(message)) {
+    return { message: "Add an opening brace '{' to start this block." };
+  }
+
+  if (/^expected RBrace$/.test(message)) {
+    return { message: "Add a closing brace '}' to end this block." };
+  }
+
+  if (/^expected identifier$/.test(message)) {
+    if (/^\s*(?:const\s+)?(?:unsigned\s+|signed\s+)?(?:int|double|float|char|short|long|bool)\s+\d/.test(text)) {
+      return { message: "Variable names cannot start with a number. Start the name with a letter or underscore." };
+    }
+    if (/,\s*;/.test(text)) {
+      return {
+        message: "After a comma in a declaration, write another variable name, or remove the comma.",
+      };
+    }
+    return { message: "C expected a name here. Use a variable, function, member, or label name." };
+  }
+
+  if (/^expected expression$/.test(message)) {
+    if (/===/.test(text)) {
+      return { message: "C uses == to compare values. It does not have JavaScript's === operator." };
+    }
+    if (/\b(?:else\s+)?(?:if|while)\s*\(\s*\)/.test(text)) {
+      return { message: "Put a condition between the parentheses." };
+    }
+    if (/\b(?:if|while)\s*\([^)]*\)\s*:/.test(text)) {
+      return { message: "C does not use a colon after if or while. Use braces: if (condition) { ... }." };
+    }
+    if (/\bif\s*\([^)]*\)\s*else\b/.test(text)) {
+      return { message: "An if needs a statement or block before else. Usually you want if (condition) { ... } else { ... }." };
+    }
+    if (/\bsizeof\s+(?:int|double|float|char|short|long|bool)\b/.test(text)) {
+      return { message: "When using sizeof with a type, put the type in parentheses, like sizeof(int)." };
+    }
+    if (/^\s*else\b/.test(text)) {
+      return { message: "else must come right after an if block. Check that the if and its braces come before this else." };
+    }
+    if (/=\s*;/.test(text)) {
+      return { message: "Put a value or expression after the equals sign, before the semicolon." };
+    }
+    if (/[+\-*/%<>=!&|]\s*;/.test(text)) {
+      return { message: "This operator needs a value or expression on its right side." };
+    }
+    if (unmatchedOpeningBraceCount(source) > 0 && (atEnd || safeLine === lines.length - 1)) {
+      return {
+        message: "A block is missing a closing brace '}'. Add } to close the block before the program ends.",
+        line: lines.length - 1,
+        col: lineEndColumn(lines, lines.length - 1),
+      };
+    }
+    return { message: "C expected a value or expression here." };
+  }
+
+  const undeclared = /^use of undeclared identifier ([A-Za-z_]\w*)$/.exec(message);
+  if (undeclared) {
+    const name = undeclared[1] || "";
+    const typeSuggestion = commonTypeSuggestion(name);
+    if (typeSuggestion) return { message: typeSuggestion };
+    if (name === "Int") return { message: "C type names are lowercase. Write int, not Int." };
+    if (name === "let" || name === "var") {
+      return { message: "C declares variables with a type instead of let or var. Write something like int a = 3;." };
+    }
+    if (name === "not") return { message: "C uses ! for logical not. It does not use the word not here." };
+    if (name === "and") return { message: "C uses && for logical and. It does not use the word and here." };
+    if (name === "or") return { message: "C uses || for logical or. It does not use the word or here." };
+    if (name === "print") {
+      return { message: "C does not have Python-style print(...). Use printf(...) with #include <stdio.h>, or just assign values to variables in these lessons." };
+    }
+    if (name === "printf") return { message: "To use printf, add #include <stdio.h> at the top of the program." };
+    if (name === "scanf") return { message: "To use scanf, add #include <stdio.h> and make sure the variables you read into are declared." };
+    if (name === "malloc") return { message: "To use malloc, add #include <stdlib.h>. In the tutorial levels, you usually do not need malloc." };
+    if (name === "true" || name === "false") {
+      return { message: "In these lessons, use 1 for true and 0 for false. C bool values require #include <stdbool.h>." };
+    }
+    return {
+      message: `C does not know what ${name} is yet. Declare a variable named ${name} before using it, or check the spelling.`,
+    };
+  }
+
+  if (/^unsupported #include syntax$/.test(message)) {
+    return {
+      message: "This #include is incomplete. Write a header name like #include <stdio.h>, or remove the include.",
+    };
+  }
+
+  if (/^empty header name in #include$/.test(message)) {
+    return {
+      message: "Put a header name between < and >, like #include <stdio.h>, or remove the include.",
+    };
+  }
+
+  if (/unterminated quoted literal/.test(message) || /^unterminated string literal$/.test(message)) {
+    if (/^\s*#\s*include/.test(text)) {
+      return { message: "This #include is missing the closing quote or > for the header name." };
+    }
+    return { message: "This string is missing its closing double quote (\")." };
+  }
+
+  if (/^empty character constant$/.test(message)) {
+    return { message: "A character literal needs one character between the single quotes, like 'a'." };
+  }
+
+  if (/^unterminated character constant$/.test(message)) {
+    return { message: "This character literal is missing its closing single quote (')." };
+  }
+
+  if (/^unterminated block comment/.test(message)) {
+    return { message: "This block comment is missing its closing */." };
+  }
+
+  const unexpected = /^unexpected character (.+)$/.exec(message);
+  if (unexpected) {
+    return { message: `C does not use ${unexpected[1]} here. Remove it or replace it with the right C operator or punctuation.` };
+  }
+
+  if (/^operand of & must be an lvalue$/.test(message)) {
+    if (/&\s*(?:\d|')/.test(text)) {
+      return { message: "The & operator takes the address of a variable. A number or character literal does not have an address you can use here." };
+    }
+    return { message: "The & operator can only take the address of a variable, array element, or similar stored object." };
+  }
+
+  if (/^object type must be complete$/.test(message) && /\[\s*\]/.test(text)) {
+    return { message: "C needs to know the array size here. Write a size inside the brackets, like int a[3];." };
+  }
+
+  if (/^initializer for static storage duration object is not a compile-time constant$/.test(message)) {
+    return {
+      message: "A global variable can only be initialized with a constant value. Move this assignment into main, or use a literal constant here.",
+    };
+  }
+
+  if (/^left operand of assignment is not assignable$/.test(message)) {
+    return { message: "The left side of = must be something you can store into, like a variable, *pointer, or array element." };
+  }
+
+  if (/^left operand of assignment is not a modifiable lvalue$/.test(message)) {
+    if (/^\s*[A-Za-z_]\w*\s*=/.test(text)) {
+      return { message: "This variable cannot be changed here. It may be const, an array name, or another value C does not allow on the left side of =." };
+    }
+    return { message: "The left side of = must be a variable or location that C allows you to change." };
+  }
+
+  if (/^division by zero$/.test(message)) {
+    return { message: "This divides by zero, which C does not allow." };
+  }
+
+  if (/^remainder with a zero divisor$/.test(message)) {
+    return { message: "This uses % with zero on the right side, which C does not allow." };
+  }
+
+  if (/^dereference of a null pointer$/.test(message)) {
+    return { message: "This pointer is null (0), so it does not point to a variable you can use." };
+  }
+
+  if (/^pointer is not valid to dereference$/.test(message) && /\[[^\]]+\]/.test(text)) {
+    return { message: "This array index is outside the array. For int a[3], the valid indexes are 0, 1, and 2." };
+  }
+
+  if (/^pointer arithmetic produced a pointer outside the bounds of the object$/.test(message) && /\[[^\]]+\]/.test(text)) {
+    return { message: "This array index is outside the array bounds." };
+  }
+
+  if (/^unsupported operands for pointer arithmetic$/.test(message) && /\[[^\]]*\d+\.\d+[^\]]*\]/.test(text)) {
+    return { message: "Array indexes must be whole-number integer expressions, not decimals." };
+  }
+
+  if (/^integer expression is not a null pointer constant$/.test(message)) {
+    return { message: "A pointer can only be set to an address, like &a, or to 0/null. Use & if you meant the variable's address." };
+  }
+
+  if (/^equality comparison requires compatible pointer operand types$/.test(message)) {
+    return { message: "These pointers point to different types, so C will not compare them directly. Make the pointer types match first." };
+  }
+
+  const noMember = /^(.+) has no member named ([A-Za-z_]\w*)$/.exec(message);
+  if (noMember) {
+    return { message: `The . operator is for structs and unions. A value of type ${noMember[1]} does not have a field named ${noMember[2]}.` };
+  }
+
+  if (/^operand of \* must have pointer type$/.test(message)) {
+    if (/\*\*/.test(text)) {
+      return { message: "C does not use ** for powers. Multiply explicitly, or use pow from <math.h> when you need exponentiation." };
+    }
+    return { message: "The * dereference operator only works on pointers." };
+  }
+
+  if (/^break statement is not within a loop$/.test(message)) {
+    return { message: "break only works inside a loop or switch. Move it into a loop, or remove it." };
+  }
+
+  if (/^continue statement is not within a loop$/.test(message)) {
+    return { message: "continue only works inside a loop. Move it into a loop, or remove it." };
+  }
+
+  const missingHeader = /^header file "([^"]+)" is not available$/.exec(message);
+  if (missingHeader) {
+    return { message: `The header ${missingHeader[1]} was not found. Add that file to the project, correct the include name, or use a supported standard header.` };
+  }
+
+  if (/^expected declaration specifiers$/.test(message)) {
+    if (/^\s*}/.test(text)) {
+      return { message: "There is an extra closing brace '}' here, or an earlier block was already closed." };
+    }
+    return { message: "C expected a declaration here. This statement looks like it is outside main; move it into main or remove the explicit main and let cBoxes add it." };
+  }
+
+  if (/^object type cannot be void or function$/.test(message)) {
+    return { message: "You cannot make a variable with type void. Use void only for functions that return no value." };
+  }
+
+  if (/^array bound must be non-negative$/.test(message)) {
+    return { message: "Array sizes cannot be negative. Use a positive whole number inside the brackets." };
+  }
+
+  if (/^object type must be complete$/.test(message) && /\[\s*0\s*\]/.test(text)) {
+    return { message: "Array sizes must be positive. Use at least 1 inside the brackets." };
+  }
+
+  if (/^string literal is too long for the destination array$/.test(message)) {
+    return { message: "This string is too long for the char array. Leave room for every character plus the final '\\0' byte." };
+  }
+
+  if (/^left shift count is negative or too large$/.test(message)) {
+    return { message: "The shift amount must be between 0 and one less than the number of bits in the left value." };
+  }
+
+  if (/^signed integer overflow$/.test(message)) {
+    return { message: "This integer calculation is too large for type int. Signed integer overflow is undefined in C." };
+  }
+
+  if (/^floating to integer conversion is outside the range of the destination type$/.test(message)) {
+    return { message: "This decimal value is too large to fit in the destination integer type." };
+  }
+
+  const cannotConvert = /^cannot convert (.+) to (.+)$/.exec(message);
+  if (cannotConvert) {
+    return { message: `This value has type ${cannotConvert[1]}, but this location needs ${cannotConvert[2]}. Make the types match.` };
+  }
+
+  const undefinedFunction = /^call to undefined function ([A-Za-z_]\w*)$/.exec(message);
+  if (undefinedFunction) {
+    return { message: `cBoxes knows the name ${undefinedFunction[1]}, but this function is not available to run here. Check the include and function name.` };
+  }
+
+  if (/^read of uninitialized automatic object/.test(message)) {
+    if (/\b[A-Za-z_]\w*\s*==/.test(text)) {
+      return { message: "This reads a variable before it has a value. If you meant to assign a value, use = instead of ==." };
+    }
+    const derefName = dereferencedAssignmentName(text);
+    if (derefName && declaredAsPointerBefore(lines, safeLine, derefName)) {
+      return { message: `The pointer ${derefName} does not point anywhere yet. Set it to an address, like &a, before using *${derefName}.` };
+    }
+    if (derefName) {
+      return { message: "The * operator only works on pointers. Make sure this variable has a pointer type before writing through *." };
+    }
+    if (/^\s*(?:int|double|float|char|short|long|bool)\s+\*\s*[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*;/.test(text)) {
+      return { message: "A pointer stores an address. Use & before the variable name to store its address, like int *p = &a;." };
+    }
+    return { message: "This reads a variable before it has been given a value. Assign it a value first." };
+  }
+
+  if (/^invalid operands to binary/.test(message)) {
+    return { message: "This operator does not work with the types on its left and right sides." };
+  }
+
+  return { message };
+}
+
+function rustDiagnostic(raw: CInterpreterError, source: string): ProgramDiagnostic {
+  const rawLine = Math.max(0, Math.floor(Number(raw.line ?? 0)));
+  const rawCol = Math.max(0, Math.floor(Number(raw.column ?? 0)));
+  const lines = sourceLines(source);
+  const compact = compactDiagnosticMessage(raw.message);
+  const friendly = friendlyDiagnosticFor(compact, source, rawLine, rawCol);
+  const line = clampLine(friendly.line ?? rawLine, lines);
+  const col = Math.max(0, Math.min(lineEndColumn(lines, line), Math.floor(friendly.col ?? rawCol)));
+  const endCol = Math.max(col + 1, Math.floor(friendly.endCol ?? col + 1));
+  return {
+    kind: raw.kind,
+    message: friendly.message,
+    file: raw.file || undefined,
+    range: {
+      startLine: line,
+      startCol: col,
+      endLine: line,
+      endCol,
+    },
+  };
+}
+
+function compileDiagnostic(message: string): CProgramResult {
+  return {
+    kind: "compile",
+    diagnostic: {
+      kind: "compile",
+      message,
+      range: {
+        startLine: 0,
+        startCol: 0,
+        endLine: 0,
+        endCol: 1,
+      },
+    },
+  };
+}
+
+function crashDiagnostic(error: unknown): CProgramResult {
+  if (error instanceof WasiProcExit) {
+    return compileDiagnostic(
+      "The interpreter stopped while checking this program.",
+    );
+  }
+  const message =
+    error instanceof Error && error.message
+      ? `The interpreter stopped while checking this program: ${error.message}`
+      : "The interpreter stopped while checking this program.";
+  return compileDiagnostic(message);
+}
+
+function compileExpressionDiagnostic(message: string): CExpressionResult {
+  return {
+    kind: "compile",
+    diagnostic: {
+      kind: "compile",
+      message,
+      range: {
+        startLine: 0,
+        startCol: 0,
+        endLine: 0,
+        endCol: 1,
+      },
+    },
+  };
+}
+
+function crashExpressionDiagnostic(error: unknown): CExpressionResult {
+  if (error instanceof WasiProcExit) {
+    return compileExpressionDiagnostic(
+      "The interpreter stopped while checking this expression.",
+    );
+  }
+  const message =
+    error instanceof Error && error.message
+      ? `The interpreter stopped while checking this expression: ${error.message}`
+      : "The interpreter stopped while checking this expression.";
+  return compileExpressionDiagnostic(message);
+}
+
+function compactDiagnosticMessage(message: string): string {
+  const firstLine = String(message || "").split(/\r?\n/, 1)[0] || "The program did not compile.";
+  return firstLine
+    .replace(/^error:\s*/i, "")
+    .replace(/^undefined behavior:\s*/i, "");
+}
+
+function normalizeState(rawState: unknown): BoxState[] {
+  if (!Array.isArray(rawState)) return [];
+  return rawState.map((item) => {
+    const box = item as Record<string, unknown>;
+    return {
+      name: String(box.name ?? ""),
+      type: String(box.type ?? "int"),
+      value: String(box.value ?? ""),
+      address: box.address == null ? null : String(box.address),
+      arrayRoot: box.arrayRoot == null ? null : String(box.arrayRoot),
+      arrayShape: Array.isArray(box.arrayShape)
+        ? box.arrayShape.map((value) => Number(value)).filter(Number.isFinite)
+        : null,
+      arrayIndices: Array.isArray(box.arrayIndices)
+        ? box.arrayIndices.map((value) => Number(value)).filter(Number.isFinite)
+        : null,
+    };
+  });
+}
+
+function normalizeTrace(rawTrace: unknown): CProgramTraceEvent[] {
+  if (!Array.isArray(rawTrace)) return [];
+  return rawTrace.map((item) => {
+    const event = item as Record<string, unknown>;
+    return {
+      kind: String(event.kind ?? ""),
+      file: String(event.file ?? "program.c"),
+      startLine: Math.max(0, Math.floor(Number(event.startLine ?? 0))),
+      endLine: Math.max(0, Math.floor(Number(event.endLine ?? event.startLine ?? 0))),
+      state: normalizeState(event.state),
+    };
+  });
+}
+
+function normalizeSourceLocation(rawLocation: unknown): CProgramSourceLocation | null {
+  if (!rawLocation || typeof rawLocation !== "object") return null;
+  const location = rawLocation as Record<string, unknown>;
+  const line = Number(location.line);
+  if (!Number.isFinite(line)) return null;
+  return {
+    file: String(location.file ?? "program.c"),
+    line: Math.max(0, Math.floor(line)),
+  };
+}
+
+function normalizeBlocked(rawBlocked: unknown): CProgramBlocked | null {
+  if (!rawBlocked || typeof rawBlocked !== "object") return null;
+  const blocked = rawBlocked as Record<string, unknown>;
+  const startLine = Number(blocked.startLine);
+  const endLine = Number(blocked.endLine ?? blocked.startLine);
+  if (!Number.isFinite(startLine) || !Number.isFinite(endLine)) return null;
+  return {
+    file: String(blocked.file ?? "program.c"),
+    startLine: Math.max(0, Math.floor(startLine)),
+    endLine: Math.max(0, Math.floor(endLine)),
+    function: String(blocked.function ?? "input"),
+    state: normalizeState(blocked.state),
+  };
+}
+
+export function runCProgram(
+  source: string,
+  addressBase: number = syntheticAddressBase,
+  stdin: string = "",
+): CProgramResult {
+  let interpreter: CInterpreterExports;
+  let inputPtr: number | null = null;
+  let stdinPtr: number | null = null;
+  let outputPtr: number | null = null;
+  let outputLen = 0;
+  try {
+    interpreter = interpreterExports();
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const input = encoder.encode(source);
+    const stdinInput = encoder.encode(stdin);
+    inputPtr = interpreter.cboxes_alloc(input.length);
+    new Uint8Array(interpreter.memory.buffer).set(input, inputPtr);
+    stdinPtr = interpreter.cboxes_alloc(stdinInput.length);
+    new Uint8Array(interpreter.memory.buffer).set(stdinInput, stdinPtr);
+    outputPtr = interpreter.cboxes_run_source(
+      inputPtr,
+      input.length,
+      stdinPtr,
+      stdinInput.length,
+      addressBase,
+    );
+    interpreter.cboxes_free(inputPtr, input.length);
+    inputPtr = null;
+    interpreter.cboxes_free(stdinPtr, stdinInput.length);
+    stdinPtr = null;
+    outputLen = interpreter.cboxes_last_result_len();
+    const output = decoder.decode(
+      new Uint8Array(interpreter.memory.buffer, outputPtr, outputLen),
+    );
+    interpreter.cboxes_free(outputPtr, outputLen);
+    outputPtr = null;
+    const parsed = JSON.parse(output) as CInterpreterRawResult;
+    if (!parsed.ok) {
+      return { kind: parsed.kind, diagnostic: rustDiagnostic(parsed, source) };
+    }
+    return {
+      kind: "ok",
+      state: normalizeState(parsed.state),
+      trace: normalizeTrace(parsed.trace),
+      mainClose: normalizeSourceLocation(parsed.mainClose),
+      blocked: normalizeBlocked(parsed.blocked),
+      stdout: String(parsed.stdout ?? ""),
+      stderr: String(parsed.stderr ?? ""),
+      exitStatus: Number(parsed.exitStatus ?? 0),
+    };
+  } catch (error) {
+    exportsCache = null;
+    return crashDiagnostic(error);
+  } finally {
+    const cached = exportsCache;
+    if (cached && inputPtr != null) {
+      try {
+        cached.cboxes_free(inputPtr, new TextEncoder().encode(source).length);
+      } catch {
+        exportsCache = null;
+      }
+    }
+    if (cached && stdinPtr != null) {
+      try {
+        cached.cboxes_free(stdinPtr, new TextEncoder().encode(stdin).length);
+      } catch {
+        exportsCache = null;
+      }
+    }
+    if (cached && outputPtr != null && outputLen > 0) {
+      try {
+        cached.cboxes_free(outputPtr, outputLen);
+      } catch {
+        exportsCache = null;
+      }
+    }
+  }
+}
+
+export function runCFiles(
+  files: CSourceFile[],
+  addressBase: number = syntheticAddressBase,
+  stdin: string = "",
+  implicitMain: boolean = true,
+): CProgramResult {
+  let interpreter: CInterpreterExports;
+  let bundlePtr: number | null = null;
+  let stdinPtr: number | null = null;
+  let outputPtr: number | null = null;
+  let outputLen = 0;
+  const bundle = encodeSourceFiles(files);
+  const stdinInput = new TextEncoder().encode(stdin);
+  try {
+    interpreter = interpreterExports();
+    const decoder = new TextDecoder();
+    bundlePtr = interpreter.cboxes_alloc(bundle.length);
+    new Uint8Array(interpreter.memory.buffer).set(bundle, bundlePtr);
+    stdinPtr = interpreter.cboxes_alloc(stdinInput.length);
+    new Uint8Array(interpreter.memory.buffer).set(stdinInput, stdinPtr);
+    outputPtr = interpreter.cboxes_run_files(
+      bundlePtr,
+      bundle.length,
+      stdinPtr,
+      stdinInput.length,
+      addressBase,
+      implicitMain ? 1 : 0,
+    );
+    interpreter.cboxes_free(bundlePtr, bundle.length);
+    bundlePtr = null;
+    interpreter.cboxes_free(stdinPtr, stdinInput.length);
+    stdinPtr = null;
+    outputLen = interpreter.cboxes_last_result_len();
+    const output = decoder.decode(
+      new Uint8Array(interpreter.memory.buffer, outputPtr, outputLen),
+    );
+    interpreter.cboxes_free(outputPtr, outputLen);
+    outputPtr = null;
+    const parsed = JSON.parse(output) as CInterpreterRawResult;
+    if (!parsed.ok) {
+      const diagnosticSource =
+        files.find((file) => file.path === parsed.file)?.source ??
+        files[0]?.source ??
+        "";
+      return {
+        kind: parsed.kind,
+        diagnostic: rustDiagnostic(parsed, diagnosticSource),
+        implicitMainApplied: parsed.implicitMainApplied,
+        implicitMainNotice: parsed.implicitMainNotice,
+      };
+    }
+    return {
+      kind: "ok",
+      state: normalizeState(parsed.state),
+      trace: normalizeTrace(parsed.trace),
+      mainClose: normalizeSourceLocation(parsed.mainClose),
+      blocked: normalizeBlocked(parsed.blocked),
+      stdout: String(parsed.stdout ?? ""),
+      stderr: String(parsed.stderr ?? ""),
+      exitStatus: Number(parsed.exitStatus ?? 0),
+      implicitMainApplied: parsed.implicitMainApplied,
+      implicitMainNotice: parsed.implicitMainNotice,
+    };
+  } catch (error) {
+    exportsCache = null;
+    return crashDiagnostic(error);
+  } finally {
+    const cached = exportsCache;
+    if (cached && bundlePtr != null) {
+      try {
+        cached.cboxes_free(bundlePtr, bundle.length);
+      } catch {
+        exportsCache = null;
+      }
+    }
+    if (cached && stdinPtr != null) {
+      try {
+        cached.cboxes_free(stdinPtr, stdinInput.length);
+      } catch {
+        exportsCache = null;
+      }
+    }
+    if (cached && outputPtr != null && outputLen > 0) {
+      try {
+        cached.cboxes_free(outputPtr, outputLen);
+      } catch {
+        exportsCache = null;
+      }
+    }
+  }
+}
+
+export function evaluateCExpression(
+  source: string,
+  eventIndex: number,
+  expression: string,
+  addressBase: number = syntheticAddressBase,
+  stdin: string = "",
+): CExpressionResult {
+  let interpreter: CInterpreterExports;
+  let sourcePtr: number | null = null;
+  let exprPtr: number | null = null;
+  let stdinPtr: number | null = null;
+  let outputPtr: number | null = null;
+  let outputLen = 0;
+  const encoder = new TextEncoder();
+  const sourceInput = encoder.encode(source);
+  const exprInput = encoder.encode(expression);
+  const stdinInput = encoder.encode(stdin);
+  try {
+    interpreter = interpreterExports();
+    const decoder = new TextDecoder();
+    sourcePtr = interpreter.cboxes_alloc(sourceInput.length);
+    new Uint8Array(interpreter.memory.buffer).set(sourceInput, sourcePtr);
+    exprPtr = interpreter.cboxes_alloc(exprInput.length);
+    new Uint8Array(interpreter.memory.buffer).set(exprInput, exprPtr);
+    stdinPtr = interpreter.cboxes_alloc(stdinInput.length);
+    new Uint8Array(interpreter.memory.buffer).set(stdinInput, stdinPtr);
+    outputPtr = interpreter.cboxes_eval_expression(
+      sourcePtr,
+      sourceInput.length,
+      exprPtr,
+      exprInput.length,
+      Math.max(0, Math.floor(eventIndex)),
+      stdinPtr,
+      stdinInput.length,
+      addressBase,
+    );
+    interpreter.cboxes_free(sourcePtr, sourceInput.length);
+    sourcePtr = null;
+    interpreter.cboxes_free(exprPtr, exprInput.length);
+    exprPtr = null;
+    interpreter.cboxes_free(stdinPtr, stdinInput.length);
+    stdinPtr = null;
+    outputLen = interpreter.cboxes_last_result_len();
+    const output = decoder.decode(
+      new Uint8Array(interpreter.memory.buffer, outputPtr, outputLen),
+    );
+    interpreter.cboxes_free(outputPtr, outputLen);
+    outputPtr = null;
+    const parsed = JSON.parse(output) as CExpressionRawResult;
+    if (!parsed.ok) {
+      return { kind: parsed.kind, diagnostic: rustDiagnostic(parsed, expression) };
+    }
+    const result = parsed.result || {};
+    return {
+      kind: "ok",
+      result: {
+        kind: String(result.kind ?? "rvalue"),
+        type: String(result.type ?? "int"),
+        value: String(result.value ?? ""),
+        address: result.address == null ? "" : String(result.address),
+        name: result.name == null ? undefined : String(result.name),
+        valueLiteral:
+          result.valueLiteral?.kind === "integer" ||
+          result.valueLiteral?.kind === "floating"
+            ? {
+                kind: result.valueLiteral.kind,
+                hasSuffix: result.valueLiteral.hasSuffix === true,
+              }
+            : null,
+      },
+    };
+  } catch (error) {
+    exportsCache = null;
+    return crashExpressionDiagnostic(error);
+  } finally {
+    const cached = exportsCache;
+    if (cached && sourcePtr != null) {
+      try {
+        cached.cboxes_free(sourcePtr, sourceInput.length);
+      } catch {
+        exportsCache = null;
+      }
+    }
+    if (cached && exprPtr != null) {
+      try {
+        cached.cboxes_free(exprPtr, exprInput.length);
+      } catch {
+        exportsCache = null;
+      }
+    }
+    if (cached && stdinPtr != null) {
+      try {
+        cached.cboxes_free(stdinPtr, stdinInput.length);
+      } catch {
+        exportsCache = null;
+      }
+    }
+    if (cached && outputPtr != null && outputLen > 0) {
+      try {
+        cached.cboxes_free(outputPtr, outputLen);
+      } catch {
+        exportsCache = null;
+      }
+    }
+  }
+}
+
+export function evaluateCExpressionFiles(
+  files: CSourceFile[],
+  eventIndex: number,
+  expression: string,
+  addressBase: number = syntheticAddressBase,
+  stdin: string = "",
+  implicitMain: boolean = true,
+): CExpressionResult {
+  let interpreter: CInterpreterExports;
+  let bundlePtr: number | null = null;
+  let exprPtr: number | null = null;
+  let stdinPtr: number | null = null;
+  let outputPtr: number | null = null;
+  let outputLen = 0;
+  const encoder = new TextEncoder();
+  const bundle = encodeSourceFiles(files);
+  const exprInput = encoder.encode(expression);
+  const stdinInput = encoder.encode(stdin);
+  try {
+    interpreter = interpreterExports();
+    const decoder = new TextDecoder();
+    bundlePtr = interpreter.cboxes_alloc(bundle.length);
+    new Uint8Array(interpreter.memory.buffer).set(bundle, bundlePtr);
+    exprPtr = interpreter.cboxes_alloc(exprInput.length);
+    new Uint8Array(interpreter.memory.buffer).set(exprInput, exprPtr);
+    stdinPtr = interpreter.cboxes_alloc(stdinInput.length);
+    new Uint8Array(interpreter.memory.buffer).set(stdinInput, stdinPtr);
+    outputPtr = interpreter.cboxes_eval_expression_files(
+      bundlePtr,
+      bundle.length,
+      exprPtr,
+      exprInput.length,
+      Math.max(0, Math.floor(eventIndex)),
+      stdinPtr,
+      stdinInput.length,
+      addressBase,
+      implicitMain ? 1 : 0,
+    );
+    interpreter.cboxes_free(bundlePtr, bundle.length);
+    bundlePtr = null;
+    interpreter.cboxes_free(exprPtr, exprInput.length);
+    exprPtr = null;
+    interpreter.cboxes_free(stdinPtr, stdinInput.length);
+    stdinPtr = null;
+    outputLen = interpreter.cboxes_last_result_len();
+    const output = decoder.decode(
+      new Uint8Array(interpreter.memory.buffer, outputPtr, outputLen),
+    );
+    interpreter.cboxes_free(outputPtr, outputLen);
+    outputPtr = null;
+    const parsed = JSON.parse(output) as CExpressionRawResult;
+    if (!parsed.ok) {
+      const diagnosticSource =
+        parsed.file === "<expression>"
+          ? expression
+          : (files.find((file) => file.path === parsed.file)?.source ??
+            files[0]?.source ??
+            "");
+      return {
+        kind: parsed.kind,
+        diagnostic: rustDiagnostic(parsed, diagnosticSource),
+      };
+    }
+    const result = parsed.result || {};
+    return {
+      kind: "ok",
+      result: {
+        kind: String(result.kind ?? "rvalue"),
+        type: String(result.type ?? "int"),
+        value: String(result.value ?? ""),
+        address: result.address == null ? "" : String(result.address),
+        name: result.name == null ? undefined : String(result.name),
+        valueLiteral:
+          result.valueLiteral?.kind === "integer" ||
+          result.valueLiteral?.kind === "floating"
+            ? {
+                kind: result.valueLiteral.kind,
+                hasSuffix: result.valueLiteral.hasSuffix === true,
+              }
+            : null,
+      },
+    };
+  } catch (error) {
+    exportsCache = null;
+    return crashExpressionDiagnostic(error);
+  } finally {
+    const cached = exportsCache;
+    if (cached && bundlePtr != null) {
+      try {
+        cached.cboxes_free(bundlePtr, bundle.length);
+      } catch {
+        exportsCache = null;
+      }
+    }
+    if (cached && exprPtr != null) {
+      try {
+        cached.cboxes_free(exprPtr, exprInput.length);
+      } catch {
+        exportsCache = null;
+      }
+    }
+    if (cached && stdinPtr != null) {
+      try {
+        cached.cboxes_free(stdinPtr, stdinInput.length);
+      } catch {
+        exportsCache = null;
+      }
+    }
+    if (cached && outputPtr != null && outputLen > 0) {
+      try {
+        cached.cboxes_free(outputPtr, outputLen);
+      } catch {
+        exportsCache = null;
+      }
+    }
+  }
+}
+
+export function parseCValueLiteral(literal: string): ValueLiteralEvaluation {
+  const evaluated = evaluateCExpression("0;", 0, literal);
+  if (evaluated.kind !== "ok") {
+    return { error: true, kind: evaluated.kind };
+  }
+  if (!evaluated.result.valueLiteral) {
+    return { error: true, kind: "compile" };
+  }
+  return {
+    result: {
+      kind: evaluated.result.kind,
+      type: evaluated.result.type,
+      value: evaluated.result.value,
+      valueLiteral: evaluated.result.valueLiteral,
+      nanSign: evaluated.result.nanSign,
+    },
+  };
+}

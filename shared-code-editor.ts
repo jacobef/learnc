@@ -4,24 +4,20 @@ import {
   bindBtnRefPulse,
   boxValueMatchesSpec,
   clearNode,
-  createSimpleSimulator,
   createStepper,
   ensurePanelizedMain,
   flashStatus,
   getNavLabelForHref,
   queryElement,
   queryRole,
-  randAddr,
   renderParts,
   setPartsContent,
   syncDocumentTitleFromNav,
-  typeInfo,
 } from "./shared-core.js";
 import type {
   BoxState,
   Parts,
   ProgramDiagnostic,
-  SimpleSimulator,
   Stepper,
 } from "./shared-core.js";
 import {
@@ -30,6 +26,7 @@ import {
   updateCodeSurface,
   type CodeDecoration,
 } from "./shared-code-editor-surface.js";
+import { parseCValueLiteral, runCProgram } from "./shared-c-interpreter.js";
 import {
   clearLevelProgress,
   currentLevelId,
@@ -66,9 +63,7 @@ interface CodeEditorOutcome {
 interface CodeEditorContext {
   text: string;
   targetState: BoxState[];
-  tokenizeProgram: SimpleSimulator["tokenizeProgram"];
-  parseStatements: SimpleSimulator["parseStatements"];
-  findMissingSemicolonLines: SimpleSimulator["findMissingSemicolonLines"];
+  diagnostic: ProgramDiagnostic | null;
   applyUserProgram: () => BoxState[] | null;
 }
 
@@ -257,7 +252,6 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
   const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
 
   bindBtnRefPulse(codeRoot || document);
-  const simulator = createSimpleSimulator();
   const levelId = currentLevelId();
   const defaultText = normalizeEditorText(startCode);
   const restoredProgress = maybeRestoreLevelProgress<CodeEditorProgress>(levelId);
@@ -289,20 +283,6 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     ["$showAliasesButton", "$b{Show aliases}"],
   ] as const;
 
-  function allocFactory() {
-    if (state.allocBase == null) state.allocBase = randAddr("int");
-    let nextAddr = Number(state.allocBase);
-    return (type = "int") => {
-      const info = typeInfo(type || "int");
-      const size = info.size || 4;
-      const align = info.align || 1;
-      if (nextAddr % align !== 0) nextAddr = Math.ceil(nextAddr / align) * align;
-      const addr = nextAddr;
-      nextAddr += size;
-      return String(addr);
-    };
-  }
-
   function normalizeEditorText(text: string): string {
     if (allowNewLines) return text;
     return text.replace(/\r\n/g, "\n").replace(/\n/g, " ");
@@ -316,9 +296,13 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     };
   }
 
+  function isDefaultProgress(snapshot: CodeEditorProgress): boolean {
+    return snapshot.text === defaultText && !snapshot.pass;
+  }
+
   function persistProgress() {
     const snapshot = progressSnapshot();
-    if (snapshot.text === defaultText && !snapshot.pass) {
+    if (isDefaultProgress(snapshot)) {
       clearLevelProgress(levelId);
       return;
     }
@@ -340,24 +324,19 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
   }
 
   function applyUserProgram(): BoxState[] | null {
-    const tokens = simulator.tokenizeProgram(getEditorText());
-    const parts = simulator.splitStatements(tokens);
-    return simulator.applyProgramParts(parts, { alloc: allocFactory() });
+    const result = runCProgram(getEditorText());
+    return result.kind === "ok" ? result.state : null;
   }
 
   function getProgramOutcome(): CodeEditorOutcome {
-    const tokens = simulator.tokenizeProgram(getEditorText());
-    const parts = simulator.splitStatements(tokens);
-    const result = simulator.analyzeProgramParts(parts, { alloc: allocFactory() });
+    const result = runCProgram(getEditorText());
     if (result.kind !== "ok") return { kind: result.kind, state: null };
     return { kind: "ok", state: result.state };
   }
 
   function getProgramDiagnostic(): ProgramDiagnostic | null {
-    const diagnostics = simulator.diagnoseProgram(getEditorText(), {
-      alloc: allocFactory(),
-    });
-    return diagnostics[0] || null;
+    const result = runCProgram(getEditorText());
+    return result.kind === "ok" ? null : result.diagnostic;
   }
 
   function diagnosticDecoration(
@@ -430,7 +409,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
       const actual = byName.get(expected.name);
       if (!actual) return false;
       if ((actual.type || "") !== (expected.type || "")) return false;
-      if (!boxValueMatchesSpec(simulator, actual, expected).ok) return false;
+      if (!boxValueMatchesSpec(parseCValueLiteral, actual, expected).ok) return false;
     }
     return true;
   }
@@ -479,9 +458,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     return {
       text: getEditorText(),
       targetState,
-      tokenizeProgram: simulator.tokenizeProgram,
-      parseStatements: simulator.parseStatements,
-      findMissingSemicolonLines: simulator.findMissingSemicolonLines,
+      diagnostic: getProgramDiagnostic(),
       applyUserProgram,
     };
   }
@@ -536,6 +513,9 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     }
     nextBtn?.classList.remove("hidden");
     pager?.update();
+    if (levelResetBtn) {
+      levelResetBtn.disabled = isDefaultProgress(progressSnapshot());
+    }
     persistProgress();
   }
 

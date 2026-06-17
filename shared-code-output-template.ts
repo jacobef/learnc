@@ -4,7 +4,6 @@ import {
   bindBtnRefPulse,
   boxValueMatchesSpec,
   clearNode,
-  createSimpleSimulator,
   createStepper,
   ensurePanelizedMain,
   flashStatus,
@@ -13,17 +12,14 @@ import {
   parseType,
   queryElement,
   queryRole,
-  randAddr,
   renderParts,
   setPartsContent,
   syncDocumentTitleFromNav,
-  typeInfo,
 } from "./shared-core.js";
 import type {
   BoxState,
   Parts,
   ProgramDiagnostic,
-  SimpleSimulator,
   Stepper,
 } from "./shared-core.js";
 import {
@@ -32,6 +28,7 @@ import {
   updateCodeSurface,
   type CodeDecoration,
 } from "./shared-code-editor-surface.js";
+import { parseCValueLiteral, runCProgram } from "./shared-c-interpreter.js";
 import {
   clearLevelProgress,
   currentLevelId,
@@ -138,9 +135,6 @@ interface CodeOutputChallengeHintContext {
   currentCase: ChallengeCase;
   currentResult: ChallengeCaseResult;
   report: ChallengeRunReport;
-  tokenizeProgram: SimpleSimulator["tokenizeProgram"];
-  parseStatements: SimpleSimulator["parseStatements"];
-  findMissingSemicolonLines: SimpleSimulator["findMissingSemicolonLines"];
   behavesLike: (program: string) => boolean;
 }
 
@@ -438,23 +432,6 @@ function createCodeOutputChallengeTemplate(
 
   bindBtnRefPulse(codeRoot || document);
 
-  const simulator = createSimpleSimulator();
-
-  function makeAllocFactory(start: number): (type?: string) => string {
-    let next = Math.max(0, Math.floor(Number(start)));
-    return (type = "int") => {
-      const info = typeInfo(type || "int");
-      const size = info.size || 4;
-      const align = info.align || 1;
-      if (next % align !== 0) {
-        next = Math.ceil(next / align) * align;
-      }
-      const addr = next;
-      next = addr + size;
-      return String(addr);
-    };
-  }
-
   function normalizeProgramBody(text: string): string {
     const normalized = String(text || "").replace(/\r\n/g, "\n");
     return normalized === "" || normalized.endsWith("\n")
@@ -562,11 +539,7 @@ function createCodeOutputChallengeTemplate(
     label: string,
   ): string[] {
     const text = fullProgramTextForBody(testCase, solveCode);
-    const tokens = simulator.tokenizeProgram(text);
-    const parts = simulator.splitStatements(tokens);
-    const analyzed = simulator.analyzeProgramParts(parts, {
-      alloc: makeAllocFactory(4096),
-    });
+    const analyzed = runCProgram(text);
     const solvedState = analyzed.kind === "ok" ? analyzed.state : null;
     if (!solvedState) {
       if (analyzed.kind === "compile") {
@@ -709,11 +682,6 @@ function createCodeOutputChallengeTemplate(
     return Math.max(0, pos - removed);
   }
 
-  function allocFactory(): (type?: string) => string {
-    if (state.allocBase == null) state.allocBase = randAddr("int");
-    return makeAllocFactory(state.allocBase);
-  }
-
   function getEditorText(): string {
     return fullProgramTextForCase(state.visibleCase);
   }
@@ -744,14 +712,9 @@ function createCodeOutputChallengeTemplate(
   }
 
   function getProgramDiagnostic(): ProgramDiagnostic | null {
-    const diagnostics = simulator.diagnoseProgram(
-      fullProgramTextForCase(state.visibleCase),
-      {
-        alloc: makeAllocFactory(4096),
-      },
-    );
-    const diagnostic = diagnostics[0] || null;
-    if (!diagnostic) return null;
+    const result = runCProgram(fullProgramTextForCase(state.visibleCase));
+    if (result.kind === "ok") return null;
+    const diagnostic = result.diagnostic;
     if (diagnostic.range.startLine < preludeLineCount) return null;
     return {
       ...diagnostic,
@@ -861,11 +824,7 @@ function createCodeOutputChallengeTemplate(
     testCase: ChallengeCase,
   ): ProgramBehavior {
     const text = fullProgramTextForBody(testCase, body);
-    const tokens = simulator.tokenizeProgram(text);
-    const parts = simulator.splitStatements(tokens);
-    const analyzed = simulator.analyzeProgramParts(parts, {
-      alloc: makeAllocFactory(4096),
-    });
+    const analyzed = runCProgram(text);
     if (analyzed.kind !== "ok") {
       return { kind: analyzed.kind };
     }
@@ -894,7 +853,7 @@ function createCodeOutputChallengeTemplate(
       for (let index = 0; index < outputSpecs.length; index += 1) {
         if (
           !boxValueMatchesSpec(
-            simulator,
+            parseCValueLiteral,
             userBehavior.outputBoxes[index]!,
             candidateBehavior.outputBoxes[index]!,
           ).ok
@@ -908,11 +867,7 @@ function createCodeOutputChallengeTemplate(
 
   function evaluateCase(testCase: ChallengeCase): ChallengeCaseResult {
     const text = fullProgramTextForCase(testCase);
-    const tokens = simulator.tokenizeProgram(text);
-    const parts = simulator.splitStatements(tokens);
-    const analyzed = simulator.analyzeProgramParts(parts, {
-      alloc: allocFactory(),
-    });
+    const analyzed = runCProgram(text);
     const expectedBoxes = expectedBoxesForCase(testCase);
     const fallbackExpected = expectedBoxes[0] || null;
     const fallbackOutput = outputSpecs[0] || null;
@@ -952,7 +907,7 @@ function createCodeOutputChallengeTemplate(
           failingOutput: outputSpec,
         };
       }
-      if (!boxValueMatchesSpec(simulator, actual, expected).ok) {
+      if (!boxValueMatchesSpec(parseCValueLiteral, actual, expected).ok) {
         return {
           ok: false,
           kind: "wrong-output-value",
@@ -1221,19 +1176,8 @@ function createCodeOutputChallengeTemplate(
   }
 
   function defaultHint(current: ChallengeCaseResult, report: ChallengeRunReport): string {
-    const missingLines = simulator.findMissingSemicolonLines(getEditorText() || "");
-    if (missingLines.length) {
-      const lineList = missingLines.map(String);
-      let formatted = lineList[0];
-      if (lineList.length === 2) {
-        formatted = `${lineList[0]} and ${lineList[1]}`;
-      } else if (lineList.length > 2) {
-        formatted = `${lineList.slice(0, -1).join(", ")}, and ${lineList[lineList.length - 1]}`;
-      }
-      return `You need ${missingLines.length === 1 ? "a semicolon" : "semicolons"} at the end of line${missingLines.length === 1 ? " " : "s "}${formatted}.`;
-    }
     if (current.kind === "compile") {
-      return "The shown case does not compile yet. Fix syntax errors first.";
+      return getProgramDiagnostic()?.message || "The shown case does not compile yet. Fix syntax errors first.";
     }
     if (current.kind === "ub") {
       return "The shown case has undefined behavior. Avoid invalid pointer/math operations.";
@@ -1292,7 +1236,11 @@ function createCodeOutputChallengeTemplate(
     }
     if (editor) editor.readOnly = !editable;
     if (!editable) editor?.classList.add("readonly");
-    if (nextBtn) nextBtn.disabled = !state.pass;
+    nextBtn?.classList.remove("hidden");
+    pager?.update();
+    if (levelResetBtn) {
+      levelResetBtn.disabled = isDefaultProgress(progressSnapshot());
+    }
     persistProgress();
   }
 
@@ -1310,9 +1258,6 @@ function createCodeOutputChallengeTemplate(
       currentCase: state.visibleCase,
       currentResult,
       report,
-      tokenizeProgram: simulator.tokenizeProgram,
-      parseStatements: simulator.parseStatements,
-      findMissingSemicolonLines: simulator.findMissingSemicolonLines,
       behavesLike: behavesLikeProgramOnTestInputs,
     };
   }
@@ -1453,7 +1398,7 @@ function createCodeOutputChallengeTemplate(
     getBoundary: () => 0,
     setBoundary: () => {},
     onAfterChange: render,
-    isStepLocked: () => false,
+    isStepLocked: () => !state.pass,
   });
 
   pager.update();

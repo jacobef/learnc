@@ -43,6 +43,21 @@ export interface BoxState {
   showDoubleExact?: boolean | null;
   node?: HTMLElement;
 }
+
+export type ProgramDiagnosticRange = {
+  startLine: number;
+  startCol: number;
+  endLine: number;
+  endCol: number;
+};
+
+export type ProgramDiagnostic = {
+  kind: "compile" | "ub";
+  message: string;
+  file?: string;
+  tip?: string;
+  range: ProgramDiagnosticRange;
+};
 export type RandAddr = ((type?: string) => number) & {
   reset: (seed?: number | null) => void;
 };
@@ -384,7 +399,9 @@ export function formatValueForType(
   return raw;
 }
 
-export type ValueExpressionResult =
+export type ValueLiteralKind = "integer" | "floating";
+
+export type ValueLiteralResult =
   | { kind: "empty"; trimmed: "" }
   | { kind: "invalid"; trimmed: string }
   | {
@@ -392,59 +409,43 @@ export type ValueExpressionResult =
       trimmed: string;
       type: string;
       value: BoxValue | bigint | number;
+      literalKind: ValueLiteralKind;
+      hasSuffix: boolean;
       nanSign?: -1 | 1;
     };
 
-export type ValueExpressionEvaluator = {
-  tokenizeProgram: (src: string) => Array<{ type: string; value: string }>;
-  evaluateExpressionText: (
-    expr: string,
-    state: BoxState[],
-  ) =>
-    | {
-        result: {
-          kind: string;
-          type: string;
-          value: BoxValue | bigint | number;
-          nanSign?: -1 | 1;
+export type ValueLiteralEvaluation =
+  | {
+      result: {
+        kind: string;
+        type: string;
+        value: BoxValue | bigint | number;
+        valueLiteral: {
+          kind: ValueLiteralKind;
+          hasSuffix: boolean;
         };
-      }
-    | { error: unknown; kind: "compile" | "ub" };
-};
+        nanSign?: -1 | 1;
+      };
+    }
+  | { error: unknown; kind: "compile" | "ub" };
 
-function isNumericLiteralTokens(
-  tokens: Array<{ type: string; value: string }>,
-): boolean {
-  if (tokens.length === 1) {
-    return tokens[0]?.type === "number";
-  }
-  if (tokens.length === 2) {
-    return (
-      tokens[0]?.type === "sym" &&
-      tokens[0]?.value === "-" &&
-      tokens[1]?.type === "number"
-    );
-  }
-  return false;
-}
+export type ValueLiteralEvaluator = (literal: string) => ValueLiteralEvaluation;
 
-export function parseValueExpressionInput(
-  evaluator: ValueExpressionEvaluator,
+export function parseValueLiteralInput(
+  evaluator: ValueLiteralEvaluator,
   raw: BoxValue,
-): ValueExpressionResult {
+): ValueLiteralResult {
   const trimmed = raw.trim();
   if (!trimmed) return { kind: "empty", trimmed: "" };
-  const tokens = evaluator.tokenizeProgram(trimmed);
-  if (!tokens.length) return { kind: "invalid", trimmed };
-  if (tokens.some((t) => t.type === "unknown"))
-    return { kind: "invalid", trimmed };
-  if (!isNumericLiteralTokens(tokens))
-    return { kind: "invalid", trimmed };
-  const evaluated = evaluator.evaluateExpressionText(trimmed, []);
+  const evaluated = evaluator(trimmed);
   if ("error" in evaluated) return { kind: "invalid", trimmed };
   const result = evaluated.result;
   if (!result || result.kind !== "rvalue")
     return { kind: "invalid", trimmed };
+  const literal = result.valueLiteral;
+  if (!literal || (literal.kind !== "integer" && literal.kind !== "floating")) {
+    return { kind: "invalid", trimmed };
+  }
   const type = String(result.type || "").trim();
   if (!type) return { kind: "invalid", trimmed };
   return {
@@ -452,42 +453,31 @@ export function parseValueExpressionInput(
     trimmed,
     type,
     value: result.value,
+    literalKind: literal.kind,
+    hasSuffix: literal.hasSuffix === true,
     nanSign: result.nanSign,
   };
 }
 
-export function valueTypeMatchesTarget(
-  valueType: string,
+export function valueLiteralMatchesTarget(
+  value: ValueLiteralResult,
   targetType: string,
 ): boolean {
-  const isIntegerScalarBase = (base: BaseType | null): boolean => {
-    if (!base) return false;
-    return base !== "float" && base !== "double";
-  };
-  const sameArrayDims = (left: number[] | undefined, right: number[] | undefined) => {
-    const a = left ?? [];
-    const b = right ?? [];
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-      if (a[i] !== b[i]) return false;
-    }
-    return true;
-  };
+  if (value.kind !== "ok") return false;
   const target = parseType(targetType || "int");
-  const value = parseType(valueType || "int");
-  if (!target.base || !value.base) return false;
-  if (target.depth > 0 && value.depth === 0) {
-    return isIntegerScalarBase(value.base);
+  const literalType = parseType(value.type || "int");
+  if (!target.base || !literalType.base || target.arrayDims?.length) return false;
+  if (target.depth > 0) {
+    return value.literalKind === "integer" && !value.hasSuffix;
   }
-  if (target.depth > 0 || value.depth > 0) {
-    return (
-      target.base === value.base &&
-      target.depth === value.depth &&
-      sameArrayDims(target.pointeeArrayDims, value.pointeeArrayDims) &&
-      (target.pointeeInnerDepth || 0) === (value.pointeeInnerDepth || 0)
-    );
+  if (value.literalKind === "integer") {
+    if (target.base === "float" || target.base === "double") return false;
+    return !value.hasSuffix || literalType.base === target.base;
   }
-  return true;
+  if (target.base === "float") {
+    return literalType.base === "float" || literalType.base === "double";
+  }
+  return target.base === "double" && literalType.base === "double";
 }
 
 function doubleValuesEqual(
@@ -503,29 +493,28 @@ function doubleValuesEqual(
   return Object.is(actualValue, expectedValue);
 }
 
-export function parsedValuesEqual(
-  actual: ValueExpressionResult,
-  expected: ValueExpressionResult,
+export function parsedLiteralValuesEqual(
+  actual: ValueLiteralResult,
+  expected: ValueLiteralResult,
+  targetType: string,
 ): boolean {
   if (actual.kind !== "ok" || expected.kind !== "ok") return false;
-  const parsedExpectedType = parseType(expected.type);
-  if (
-    parsedExpectedType.depth === 0 &&
-    (parsedExpectedType.base === "float" || parsedExpectedType.base === "double")
-  ) {
+  const target = parseType(targetType);
+  if (target.depth === 0 && target.base === "float") {
+    return doubleValuesEqual(
+      Math.fround(Number(actual.value)),
+      Math.fround(Number(expected.value)),
+      actual.nanSign,
+      expected.nanSign,
+    );
+  }
+  if (target.depth === 0 && target.base === "double") {
     return doubleValuesEqual(
       Number(actual.value),
       Number(expected.value),
       actual.nanSign,
       expected.nanSign,
     );
-  }
-  if (parsedExpectedType.depth > 0) {
-    try {
-      return BigInt(actual.value as bigint) === BigInt(expected.value as bigint);
-    } catch {
-      return String(actual.value ?? "").trim() === String(expected.value ?? "").trim();
-    }
   }
   try {
     return BigInt(actual.value as bigint) === BigInt(expected.value as bigint);
@@ -535,11 +524,11 @@ export function parsedValuesEqual(
 }
 
 export function normalizeBoxValueForContext(
-  evaluator: ValueExpressionEvaluator,
+  evaluator: ValueLiteralEvaluator,
   box: BoxState,
 ): BoxState {
   const raw = box.rawValue ?? box.value ?? "";
-  const parsed = parseValueExpressionInput(evaluator, raw);
+  const parsed = parseValueLiteralInput(evaluator, raw);
   if (parsed.kind !== "ok") {
     return { ...box, value: parsed.trimmed };
   }
@@ -550,7 +539,7 @@ export function normalizeBoxValueForContext(
 }
 
 export function boxValueMatchesSpec(
-  evaluator: ValueExpressionEvaluator,
+  evaluator: ValueLiteralEvaluator,
   actual: BoxState,
   expected: BoxState,
 ): { ok: boolean; normalized: string } {
@@ -563,18 +552,15 @@ export function boxValueMatchesSpec(
     const ok = actualTrimmed === "" && expectedTrimmed === "";
     return { ok, normalized: "" };
   }
-  const parsedActual = parseValueExpressionInput(evaluator, actualRaw);
-  const parsedExpected = parseValueExpressionInput(evaluator, expectedRaw);
+  const parsedActual = parseValueLiteralInput(evaluator, actualRaw);
+  const parsedExpected = parseValueLiteralInput(evaluator, expectedRaw);
   if (parsedActual.kind !== "ok" || parsedExpected.kind !== "ok") {
     return { ok: false, normalized: "" };
   }
-  if (!valueTypeMatchesTarget(parsedActual.type, targetType)) {
+  if (!valueLiteralMatchesTarget(parsedActual, targetType)) {
     return { ok: false, normalized: "" };
   }
-  if (!valueTypeMatchesTarget(parsedExpected.type, targetType)) {
-    return { ok: false, normalized: "" };
-  }
-  const ok = parsedValuesEqual(parsedActual, parsedExpected);
+  const ok = parsedLiteralValuesEqual(parsedActual, parsedExpected, targetType);
   if (!ok) return { ok: false, normalized: "" };
   const normalized = formatValueForType(parsedExpected.value, targetType, {
     nanSign: parsedExpected.nanSign,

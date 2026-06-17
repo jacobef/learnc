@@ -1,6 +1,8 @@
 import { ensureBaseLayout } from "./shared-core.js";
 import {
   clearAllLevelProgress,
+  clearSandboxProgress,
+  hasSandboxProgress,
   savedLevelCount,
 } from "./shared-progress.js";
 
@@ -37,7 +39,7 @@ import {
   appendTextLines(mobileNote, ["It's a bit rough on mobile at the moment, sorry!", ""]);
 
   const updated = document.createElement("i");
-  updated.textContent = "Site last updated March 17, 2026";
+  updated.textContent = "Site last updated June 17, 2026";
 
   intro.appendChild(mainCopy);
   intro.appendChild(mobileNote);
@@ -74,19 +76,20 @@ import {
   startWrap.appendChild(startLink);
   const resetProgressBtn = document.createElement("button");
   const updateResetProgressButton = (): void => {
-    const count = savedLevelCount();
+    const count = savedLevelCount() + (hasSandboxProgress() ? 1 : 0);
     resetProgressBtn.textContent =
       count > 0 ? `Reset all progress (${count})` : "Reset all progress";
     resetProgressBtn.disabled = count === 0;
   };
   resetProgressBtn.textContent = "Reset all progress";
   resetProgressBtn.addEventListener("click", () => {
-    if (savedLevelCount() <= 0) return;
+    if (savedLevelCount() <= 0 && !hasSandboxProgress()) return;
     const confirmed = window.confirm(
-      "Reset all saved progress? This clears every level's saved state.",
+      "Reset all saved progress? This clears every level's saved state and the sandbox.",
     );
     if (!confirmed) return;
     clearAllLevelProgress();
+    clearSandboxProgress();
     updateResetProgressButton();
   });
   updateResetProgressButton();

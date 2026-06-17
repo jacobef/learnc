@@ -1,5 +1,4 @@
 import { createCodeEditorTemplate } from "./shared-code-editor.js";
-import { missingSemicolonHint } from "./shared-code-editor-hints.js";
 
 const targetName = "cloud";
 
@@ -12,12 +11,9 @@ createCodeEditorTemplate({
   instructions:
     'Until now, you have been editing the program state to match the code. Now you will be editing the code to match the program state. Edit the line so that "Your code\'s final state" matches the "Target final state", then press $checkButton.',
   hints: (ctx) => {
-    const semicolonHint = missingSemicolonHint(ctx.findMissingSemicolonLines(ctx.text));
-    if (semicolonHint) return semicolonHint;
-
     const currentState = ctx.applyUserProgram();
     if (!currentState) {
-      return `This line does not compile yet. You need to create a variable named $n{${targetName}}. Look back at the earlier levels if you forget how this is done.`;
+      return ctx.diagnostic?.message || `This line does not compile yet. You need to create a variable named $n{${targetName}}. Look back at the earlier levels if you forget how this is done.`;
     }
 
     if (currentState.length > 1) {

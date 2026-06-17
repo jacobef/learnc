@@ -1,9 +1,9 @@
 import {
   appendStateObjects,
+  applyTextTokenReplacements,
   bindBtnRefPulse,
   boxValueMatchesSpec,
   clearNode,
-  createSimpleSimulator,
   createStepper,
   disableBoxEditing,
   ensurePanelizedMain,
@@ -20,6 +20,12 @@ import {
 } from "./shared-core.js";
 import type { BoxState, Parts, Stepper } from "./shared-core.js";
 import {
+  createSyntheticAddressBase,
+  evaluateCExpression,
+  parseCValueLiteral,
+  runCProgram,
+} from "./shared-c-interpreter.js";
+import {
   clearLevelProgress,
   currentLevelId,
   maybeRestoreLevelProgress,
@@ -31,7 +37,7 @@ type ExpressionHint = (ctx: ExpressionHintContext) => Parts | null | undefined;
 
 interface ExpressionStep {
   expression: string;
-  boxes?: BoxState[];
+  setup?: string;
   instructions?: Parts;
   hints?: Parts | ExpressionHint;
   editable?: boolean;
@@ -295,6 +301,18 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     ...step,
     editable: step.editable === true,
   }));
+  const usedAddressBases = new Set<number>();
+  const addressBases = normalizedSteps.map(() => {
+    let addressBase = createSyntheticAddressBase();
+    while (usedAddressBases.has(addressBase)) {
+      addressBase = createSyntheticAddressBase();
+    }
+    usedAddressBases.add(addressBase);
+    return addressBase;
+  });
+  const addressBaseByStep = new Map<ExpressionStep, number>(
+    normalizedSteps.map((step, index) => [step, addressBases[index]!] as const),
+  );
 
   const {
     instructionsEl,
@@ -318,8 +336,6 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
 
   bindBtnRefPulse(sectionEl || document);
 
-  const simulator = createSimpleSimulator();
-
   let pager: Stepper | null = null;
   let selectedName: string | null = null;
   let activeMode: AnswerMode = "selected";
@@ -328,6 +344,10 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     return normalizedSteps[
       Math.max(0, Math.min(normalizedSteps.length - 1, index))
     ]!;
+  }
+
+  function addressBaseForStep(step: ExpressionStep): number {
+    return addressBaseByStep.get(step) ?? addressBases[0]!;
   }
 
   function clampBoundary(value: number): number {
@@ -407,7 +427,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
 
   function showHint(text: Parts | null | undefined) {
     if (!hintPanel) return;
-    setPartsContent(hintPanel, text ?? null);
+    renderHint(text);
     hintPanel.classList.remove("hidden");
     flashStatus(hintPanel);
   }
@@ -415,6 +435,47 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
   function hideHint() {
     if (!hintPanel) return;
     hintPanel.classList.add("hidden");
+  }
+
+  function visibleButtonLabel(
+    button: HTMLButtonElement | null,
+    fallback: string,
+  ): string {
+    return (button?.textContent || fallback).trim();
+  }
+
+  function nextButtonEl(): HTMLButtonElement | null {
+    const button = document.querySelector('button[data-stepper="next"]');
+    return button instanceof HTMLButtonElement ? button : null;
+  }
+
+  function buttonReplacements() {
+    const nextLabel = visibleButtonLabel(nextButtonEl(), "Next ▶");
+    return [
+      ["$nextButton", `$b{${nextLabel}}`],
+      ["$runLineButton", `$b{${nextLabel}}`],
+      ["$backButton", "$b{Back ◀}"],
+      ["$checkButton", "$b{Check}"],
+      ["$hintButton", "$b{Hint}"],
+      ["$resetButton", "$b{Reset level}"],
+      ["$continueButton", "$b{Continue}"],
+      ["$fromStateButton", "$b{From state}"],
+      ["$typeBoxButton", "$b{Type box}"],
+    ] as const;
+  }
+
+  function applyButtonTokens(parts: Parts | null): Parts | null {
+    return applyTextTokenReplacements(parts, buttonReplacements()) as
+      | Parts
+      | null;
+  }
+
+  function renderInstructions(parts: Parts | null) {
+    setPartsContent(instructionsEl, applyButtonTokens(parts));
+  }
+
+  function renderHint(parts: Parts | null | undefined) {
+    setPartsContent(hintPanel, applyButtonTokens(parts ?? null));
   }
 
   function setActiveMode(mode: AnswerMode, editable: boolean) {
@@ -446,9 +507,49 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     });
   }
 
+  function sourceForStep(step: ExpressionStep): string {
+    const setup = String(step.setup ?? "").trim();
+    return setup ? `${setup}\n0;` : "0;";
+  }
+
+  function runtimeForStep(step: ExpressionStep):
+    | {
+        source: string;
+        state: BoxState[];
+        eventIndex: number;
+        addressBase: number;
+      }
+    | { error: true; kind: "compile" | "ub" } {
+    const source = sourceForStep(step);
+    const addressBase = addressBaseForStep(step);
+    const result = runCProgram(source, addressBase);
+    if (result.kind !== "ok") return { error: true, kind: result.kind };
+    const trace = result.trace || [];
+    if (!trace.length) {
+      return {
+        source,
+        state: result.state,
+        eventIndex: 0,
+        addressBase,
+      };
+    }
+    const eventIndex = trace.length - 1;
+    return {
+      source,
+      state: trace[eventIndex]?.state ?? result.state,
+      eventIndex,
+      addressBase,
+    };
+  }
+
+  function boxesForStep(step: ExpressionStep): BoxState[] {
+    const runtime = runtimeForStep(step);
+    return "error" in runtime ? [] : runtime.state;
+  }
+
   function selectedBox(step: ExpressionStep): BoxState | null {
     if (!selectedName) return null;
-    const boxes = step.boxes ?? [];
+    const boxes = boxesForStep(step);
     return boxes.find((box) => box.name === selectedName) || null;
   }
 
@@ -515,7 +616,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
   ) {
     if (!stageEl) return;
     clearNode(stageEl);
-    const boxes = step.boxes ?? [];
+    const boxes = boxesForStep(step);
     const disableHover = !editable || fixedMode === "entered";
     boxes.forEach((box) => {
       const node = vbox({
@@ -558,13 +659,15 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
   }
 
   function evaluatedAnswer(step: ExpressionStep) {
-    const evaluated = simulator.evaluateExpressionText(
+    const runtime = runtimeForStep(step);
+    if ("error" in runtime) return runtime;
+    const evaluated = evaluateCExpression(
+      runtime.source,
+      runtime.eventIndex,
       step.expression,
-      step.boxes ?? [],
+      runtime.addressBase,
     );
-    if ("error" in evaluated) {
-      return { error: true, kind: evaluated.kind } as const;
-    }
+    if (evaluated.kind !== "ok") return { error: true, kind: evaluated.kind } as const;
     return { result: evaluated.result } as const;
   }
 
@@ -603,18 +706,22 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
 
   function persistProgress() {
     const snapshot = progressSnapshot();
-    const isDefault =
+    if (isDefaultProgress(snapshot)) {
+      clearLevelProgress(levelId);
+      return;
+    }
+    writeLevelProgress(snapshot, levelId);
+  }
+
+  function isDefaultProgress(snapshot: ExpressionTemplateProgress): boolean {
+    return (
       snapshot.boundary === 0 &&
       Object.keys(snapshot.passes).length === 0 &&
       Object.keys(snapshot.selections).length === 0 &&
       Object.keys(snapshot.entered).length === 0 &&
       Object.keys(snapshot.modes).length === 0 &&
-      snapshot.showIntro === defaultShowIntro;
-    if (isDefault) {
-      clearLevelProgress(levelId);
-      return;
-    }
-    writeLevelProgress(snapshot, levelId);
+      snapshot.showIntro === defaultShowIntro
+    );
   }
 
   function expectedAnswer(step: ExpressionStep): ExpressionHintContext["expected"] {
@@ -647,7 +754,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     const selected = selectedBox(step);
     const entered = readEnteredBox();
     const enteredForContext = entered
-      ? normalizeBoxValueForContext(simulator, entered)
+      ? normalizeBoxValueForContext(parseCValueLiteral, entered)
       : null;
     let ok = false;
     if (expected.kind === "lvalue") {
@@ -665,7 +772,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
         activeMode === "entered" &&
         !!entered &&
         String(entered.type || "").trim() === expected.type &&
-        boxValueMatchesSpec(simulator, entered, expectedBox).ok;
+        boxValueMatchesSpec(parseCValueLiteral, entered, expectedBox).ok;
     }
     return {
       step,
@@ -675,7 +782,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       enteredBox: enteredForContext,
       expected,
       ok,
-      hasState: Array.isArray(step.boxes),
+      hasState: boxesForStep(step).length > 0,
     };
   }
 
@@ -697,7 +804,8 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       return;
     }
     const { result } = evaluated;
-    const arrayBoxes = findArrayObjectBoxesForResult(result, step.boxes ?? []);
+    const boxes = boxesForStep(step);
+    const arrayBoxes = findArrayObjectBoxesForResult(result, boxes);
     if (arrayBoxes && arrayBoxes.length) {
       const wrap = document.createElement("div");
       appendStateObjects(wrap, arrayBoxes, { editable: false, deletable: false });
@@ -709,7 +817,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     }
     if (result.kind === "lvalue") {
       const match =
-        (step.boxes ?? []).find(
+        boxes.find(
           (box) => String(box.address) === result.address,
         ) || null;
       const node = match
@@ -772,10 +880,14 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
 
   function render() {
     const step = stepFor(state.boundary);
-    const hasState = Array.isArray(step.boxes);
+    const hasState = boxesForStep(step).length > 0;
     const showExprResultPane = shouldShowExprResultPane(step);
+    pager?.update();
+    if (levelResetBtn) {
+      levelResetBtn.disabled = isDefaultProgress(progressSnapshot());
+    }
     if (state.showIntro) {
-      setPartsContent(instructionsEl, initialInstructions || null);
+      renderInstructions(initialInstructions || null);
       setControlVisible(continueBtn, true);
       setControlVisible(sectionEl, false);
       setControlVisible(hintBtn, false);
@@ -787,7 +899,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     setControlVisible(sectionEl, true);
     setControlVisible(answerPanel, showExprResultPane);
     const instructionText = step.instructions ?? null;
-    setPartsContent(instructionsEl, instructionText);
+    renderInstructions(instructionText);
     if (expressionEl) expressionEl.textContent = step.expression;
     clearStatus();
     hideHint();
@@ -838,7 +950,6 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     } else if (checkBtn) {
       checkBtn.disabled = false;
     }
-    pager?.update();
     persistProgress();
   }
 
@@ -850,6 +961,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     disableBoxEditing(answerSlot);
     pager?.pulseNext();
     pager?.update();
+    renderInstructions(stepFor(state.boundary).instructions ?? null);
     persistProgress();
   }
 
@@ -903,7 +1015,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       type: expectedType,
       value: expectedValue,
     };
-    const match = boxValueMatchesSpec(simulator, entry, expectedBox);
+    const match = boxValueMatchesSpec(parseCValueLiteral, entry, expectedBox);
     const ok = entryType === expectedType && match.ok;
     setStatus(ok ? "correct" : "incorrect", ok);
     if (ok) {

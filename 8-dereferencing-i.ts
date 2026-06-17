@@ -1,71 +1,77 @@
 import { createExpressionEvalTemplate } from "./shared-expression-template.js";
 
-const defBoxes = [
-  { name: "d", type: "int", value: "5", address: "292" },
-  { name: "e", type: "int*", value: "292", address: "296" },
-  { name: "f", type: "int**", value: "296", address: "308" },
-];
-const ghijklBoxes = [
-  { name: "g", type: "int***", value: "292", address: "254" },
-  { name: "h", type: "int*", value: "278", address: "262" },
-  { name: "i", type: "int**", value: "286", address: "270" },
-  { name: "j", type: "int", value: "0", address: "278" },
-  { name: "k", type: "int*", value: "278", address: "286" },
-  { name: "l", type: "int**", value: "262", address: "292" },
-];
+const abcSetup = `
+int a;
+int b;
+int *c = &a;
+`;
+
+const defSetup = `
+int d = 5;
+int *e = &d;
+int **f = &e;
+`;
+
+const ghijklSetup = `
+int ***g;
+int *h;
+int **i;
+int j = 0;
+int *k;
+int **l;
+h = &j;
+k = &j;
+i = &k;
+l = &h;
+g = &l;
+`;
+
 createExpressionEvalTemplate({
   steps: [
     {
       expression: "*c",
-      boxes: [
-        { name: "a", type: "int", value: "", address: "108" },
-        { name: "b", type: "int", value: "", address: "112" },
-        { name: "c", type: "int*", value: "108", address: "116" },
-      ],
+      setup: abcSetup,
       instructions:
-        "In general, $c{*X} refers to the variable whose address is $n{X}'s value. Here, $c{*c} refers to $n{a}, so for example, $c{*c = 11;} would be equivalent to $c{a = 11;}.\nNote that this use of $c{*} is unrelated to the use of $c{*} in a type, like $t{int*}.",
+        "Here, the expression $c{*c} refers to $n{a}. For example, if the line $c{*c = 1;} were run, it would be equivalent to $c{a = 1;}.\nClick $nextButton to continue.",
     },
     {
       expression: "*f",
-      boxes: defBoxes,
+      setup: defSetup,
       instructions:
-        "In general, $c{*X} refers to the variable whose address is $n{X}'s value. Here, $c{*f} refers to $n{e}.",
+        "Here, $c{*f} refers to $n{e}. In general, $c{*X} refers to the variable whose address is $n{X}'s value.\nNote that this use of $c{*} is unrelated to the use of $c{*} in a type, like $t{int*}.\nClick $nextButton to continue.",
     },
     {
       expression: "*e",
-      boxes: defBoxes,
+      setup: defSetup,
       instructions:
-        "In general, $c{*X} refers to the variable whose address is $n{X}'s value. Here, $c{*e} refers to $n{d}.",
-    },
-    {
-      expression: "*l",
-      editable: true,
-      fixValueCategory: true,
-      boxes: ghijklBoxes,
-      instructions:
-        "Select the variable that the expression refers to, then press $b{Check}.",
-      hints: () => {
-        return "$c{*l} refers to the variable whose address equals $n{l}'s value.";
-      },
+        "Here, $c{*e} refers to $n{d}. In general, $c{*X} refers to the variable whose address is $n{X}'s value.\nClick $nextButton to continue.",
     },
     {
       expression: "*k",
       editable: true,
       fixValueCategory: true,
-      boxes: ghijklBoxes,
-      instructions:
-        "Select the variable that the expression refers to, then press $b{Check}.",
+      setup: ghijklSetup,
+      instructions: "Select the variable that the expression refers to, then press $checkButton.",
       hints: () => {
         return "$c{*k} refers to the variable whose address equals $n{k}'s value.";
+      },
+    },
+    {
+      expression: "*l",
+      editable: true,
+      fixValueCategory: true,
+      setup: ghijklSetup,
+      instructions: "Select the variable that the expression refers to, then press $checkButton.",
+      hints: () => {
+        return "$c{*l} refers to the variable whose address equals $n{l}'s value.";
       },
     },
     {
       expression: "**l",
       editable: true,
       fixValueCategory: true,
-      boxes: ghijklBoxes,
-      instructions:
-        "Select the variable that the expression refers to, then press $b{Check}.",
+      setup: ghijklSetup,
+      instructions: "Select the variable that the expression refers to, then press $checkButton.",
       hints: (ctx) => {
         if (ctx.selectedBox && ctx.selectedBox.name === "l") {
           return "The $c{*}s don't cancel out, if that's what you were thinking. $c{**l} means $c{*(*l)}; that is, first determine what $c{*l} refers to, then apply $c{*} to that variable. For example, if $c{*l} refered to a variable named $n{x}, then $c{**l} would be equivalent to $c{*x}.";
@@ -80,9 +86,8 @@ createExpressionEvalTemplate({
       expression: "***g",
       editable: true,
       fixValueCategory: true,
-      boxes: ghijklBoxes,
-      instructions:
-        "Select the variable that the expression refers to, then press $b{Check}.",
+      setup: ghijklSetup,
+      instructions: "Select the variable that the expression refers to, then press $checkButton.",
       hints: (ctx) => {
         if (ctx.selectedBox && ctx.selectedBox.name === "l") {
           return "$n{l} is $c{*g}, not $c{***g}. You need to go 2 levels deeper; that is, $c{***g} is equivalent to $c{**l}.";

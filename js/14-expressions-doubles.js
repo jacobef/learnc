@@ -8,10 +8,10 @@ createExpressionEvalTemplate({
         { expression: "7/3" },
         {
             expression: "x+3",
-            boxes: [
-                { name: "x", type: "int", value: "5", address: "108" },
-                { name: "y", type: "int*", value: "108", address: "112" },
-            ],
+            setup: `
+int x = 5;
+int *y = &x;
+`,
             fixValueCategory: true,
             editable: true,
             hints: (ctx) => {
@@ -59,7 +59,7 @@ createExpressionEvalTemplate({
         },
         {
             expression: "(1.0+2.0)/x",
-            boxes: [{ name: "x", type: "double", value: "12.0", address: "402" }],
+            setup: "double x = 12.0;",
             fixValueCategory: true,
             editable: true,
             hints: (ctx) => {

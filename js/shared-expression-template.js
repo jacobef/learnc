@@ -1,4 +1,5 @@
-import { appendStateObjects, bindBtnRefPulse, boxValueMatchesSpec, clearNode, createSimpleSimulator, createStepper, disableBoxEditing, ensurePanelizedMain, findArrayObjectBoxesForResult, flashStatus, formatValueForType, getNavLabelForHref, normalizeBoxValueForContext, readBoxState, queryRole, setPartsContent, syncDocumentTitleFromNav, vbox, } from "./shared-core.js";
+import { appendStateObjects, applyTextTokenReplacements, bindBtnRefPulse, boxValueMatchesSpec, clearNode, createStepper, disableBoxEditing, ensurePanelizedMain, findArrayObjectBoxesForResult, flashStatus, formatValueForType, getNavLabelForHref, normalizeBoxValueForContext, readBoxState, queryRole, setPartsContent, syncDocumentTitleFromNav, vbox, } from "./shared-core.js";
+import { createSyntheticAddressBase, evaluateCExpression, parseCValueLiteral, runCProgram, } from "./shared-c-interpreter.js";
 import { clearLevelProgress, currentLevelId, maybeRestoreLevelProgress, writeLevelProgress, } from "./shared-progress.js";
 function collectExpressionElements(root = document) {
     const role = (name) => queryRole(name, root);
@@ -171,14 +172,26 @@ function createExpressionEvalTemplate(config) {
         ...step,
         editable: step.editable === true,
     }));
+    const usedAddressBases = new Set();
+    const addressBases = normalizedSteps.map(() => {
+        let addressBase = createSyntheticAddressBase();
+        while (usedAddressBases.has(addressBase)) {
+            addressBase = createSyntheticAddressBase();
+        }
+        usedAddressBases.add(addressBase);
+        return addressBase;
+    });
+    const addressBaseByStep = new Map(normalizedSteps.map((step, index) => [step, addressBases[index]]));
     const { instructionsEl, continueBtn, levelResetBtn, sectionEl, expressionEl, answerPanel, answerSlot, answerResult, toggleWrap, hintPanel, hintBtn, useSelectedBtn, useEnteredBtn, checkBtn, statusEl, stageEl, statePanel, } = ensureExpressionLayout();
     bindBtnRefPulse(sectionEl || document);
-    const simulator = createSimpleSimulator();
     let pager = null;
     let selectedName = null;
     let activeMode = "selected";
     function stepFor(index) {
         return normalizedSteps[Math.max(0, Math.min(normalizedSteps.length - 1, index))];
+    }
+    function addressBaseForStep(step) {
+        return addressBaseByStep.get(step) ?? addressBases[0];
     }
     function clampBoundary(value) {
         return Math.max(0, Math.min(normalizedSteps.length - 1, Math.floor(value)));
@@ -241,7 +254,7 @@ function createExpressionEvalTemplate(config) {
     function showHint(text) {
         if (!hintPanel)
             return;
-        setPartsContent(hintPanel, text ?? null);
+        renderHint(text);
         hintPanel.classList.remove("hidden");
         flashStatus(hintPanel);
     }
@@ -249,6 +262,36 @@ function createExpressionEvalTemplate(config) {
         if (!hintPanel)
             return;
         hintPanel.classList.add("hidden");
+    }
+    function visibleButtonLabel(button, fallback) {
+        return (button?.textContent || fallback).trim();
+    }
+    function nextButtonEl() {
+        const button = document.querySelector('button[data-stepper="next"]');
+        return button instanceof HTMLButtonElement ? button : null;
+    }
+    function buttonReplacements() {
+        const nextLabel = visibleButtonLabel(nextButtonEl(), "Next ▶");
+        return [
+            ["$nextButton", `$b{${nextLabel}}`],
+            ["$runLineButton", `$b{${nextLabel}}`],
+            ["$backButton", "$b{Back ◀}"],
+            ["$checkButton", "$b{Check}"],
+            ["$hintButton", "$b{Hint}"],
+            ["$resetButton", "$b{Reset level}"],
+            ["$continueButton", "$b{Continue}"],
+            ["$fromStateButton", "$b{From state}"],
+            ["$typeBoxButton", "$b{Type box}"],
+        ];
+    }
+    function applyButtonTokens(parts) {
+        return applyTextTokenReplacements(parts, buttonReplacements());
+    }
+    function renderInstructions(parts) {
+        setPartsContent(instructionsEl, applyButtonTokens(parts));
+    }
+    function renderHint(parts) {
+        setPartsContent(hintPanel, applyButtonTokens(parts ?? null));
     }
     function setActiveMode(mode, editable) {
         activeMode = mode;
@@ -272,10 +315,41 @@ function createExpressionEvalTemplate(config) {
             el.classList.toggle("quiz-selected", isSelected);
         });
     }
+    function sourceForStep(step) {
+        const setup = String(step.setup ?? "").trim();
+        return setup ? `${setup}\n0;` : "0;";
+    }
+    function runtimeForStep(step) {
+        const source = sourceForStep(step);
+        const addressBase = addressBaseForStep(step);
+        const result = runCProgram(source, addressBase);
+        if (result.kind !== "ok")
+            return { error: true, kind: result.kind };
+        const trace = result.trace || [];
+        if (!trace.length) {
+            return {
+                source,
+                state: result.state,
+                eventIndex: 0,
+                addressBase,
+            };
+        }
+        const eventIndex = trace.length - 1;
+        return {
+            source,
+            state: trace[eventIndex]?.state ?? result.state,
+            eventIndex,
+            addressBase,
+        };
+    }
+    function boxesForStep(step) {
+        const runtime = runtimeForStep(step);
+        return "error" in runtime ? [] : runtime.state;
+    }
     function selectedBox(step) {
         if (!selectedName)
             return null;
-        const boxes = step.boxes ?? [];
+        const boxes = boxesForStep(step);
         return boxes.find((box) => box.name === selectedName) || null;
     }
     function getFixedMode(step) {
@@ -338,7 +412,7 @@ function createExpressionEvalTemplate(config) {
         if (!stageEl)
             return;
         clearNode(stageEl);
-        const boxes = step.boxes ?? [];
+        const boxes = boxesForStep(step);
         const disableHover = !editable || fixedMode === "entered";
         boxes.forEach((box) => {
             const node = vbox({
@@ -378,10 +452,12 @@ function createExpressionEvalTemplate(config) {
         }
     }
     function evaluatedAnswer(step) {
-        const evaluated = simulator.evaluateExpressionText(step.expression, step.boxes ?? []);
-        if ("error" in evaluated) {
+        const runtime = runtimeForStep(step);
+        if ("error" in runtime)
+            return runtime;
+        const evaluated = evaluateCExpression(runtime.source, runtime.eventIndex, step.expression, runtime.addressBase);
+        if (evaluated.kind !== "ok")
             return { error: true, kind: evaluated.kind };
-        }
         return { result: evaluated.result };
     }
     function readEnteredBox() {
@@ -407,17 +483,19 @@ function createExpressionEvalTemplate(config) {
     }
     function persistProgress() {
         const snapshot = progressSnapshot();
-        const isDefault = snapshot.boundary === 0 &&
-            Object.keys(snapshot.passes).length === 0 &&
-            Object.keys(snapshot.selections).length === 0 &&
-            Object.keys(snapshot.entered).length === 0 &&
-            Object.keys(snapshot.modes).length === 0 &&
-            snapshot.showIntro === defaultShowIntro;
-        if (isDefault) {
+        if (isDefaultProgress(snapshot)) {
             clearLevelProgress(levelId);
             return;
         }
         writeLevelProgress(snapshot, levelId);
+    }
+    function isDefaultProgress(snapshot) {
+        return (snapshot.boundary === 0 &&
+            Object.keys(snapshot.passes).length === 0 &&
+            Object.keys(snapshot.selections).length === 0 &&
+            Object.keys(snapshot.entered).length === 0 &&
+            Object.keys(snapshot.modes).length === 0 &&
+            snapshot.showIntro === defaultShowIntro);
     }
     function expectedAnswer(step) {
         const evaluated = evaluatedAnswer(step);
@@ -452,7 +530,7 @@ function createExpressionEvalTemplate(config) {
         const selected = selectedBox(step);
         const entered = readEnteredBox();
         const enteredForContext = entered
-            ? normalizeBoxValueForContext(simulator, entered)
+            ? normalizeBoxValueForContext(parseCValueLiteral, entered)
             : null;
         let ok = false;
         if (expected.kind === "lvalue") {
@@ -471,7 +549,7 @@ function createExpressionEvalTemplate(config) {
                 activeMode === "entered" &&
                     !!entered &&
                     String(entered.type || "").trim() === expected.type &&
-                    boxValueMatchesSpec(simulator, entered, expectedBox).ok;
+                    boxValueMatchesSpec(parseCValueLiteral, entered, expectedBox).ok;
         }
         return {
             step,
@@ -481,7 +559,7 @@ function createExpressionEvalTemplate(config) {
             enteredBox: enteredForContext,
             expected,
             ok,
-            hasState: Array.isArray(step.boxes),
+            hasState: boxesForStep(step).length > 0,
         };
     }
     function errorText(kind) {
@@ -502,7 +580,8 @@ function createExpressionEvalTemplate(config) {
             return;
         }
         const { result } = evaluated;
-        const arrayBoxes = findArrayObjectBoxesForResult(result, step.boxes ?? []);
+        const boxes = boxesForStep(step);
+        const arrayBoxes = findArrayObjectBoxesForResult(result, boxes);
         if (arrayBoxes && arrayBoxes.length) {
             const wrap = document.createElement("div");
             appendStateObjects(wrap, arrayBoxes, { editable: false, deletable: false });
@@ -513,7 +592,7 @@ function createExpressionEvalTemplate(config) {
             }
         }
         if (result.kind === "lvalue") {
-            const match = (step.boxes ?? []).find((box) => String(box.address) === result.address) || null;
+            const match = boxes.find((box) => String(box.address) === result.address) || null;
             const node = match
                 ? vbox({
                     address: match.address ?? undefined,
@@ -575,10 +654,14 @@ function createExpressionEvalTemplate(config) {
     }
     function render() {
         const step = stepFor(state.boundary);
-        const hasState = Array.isArray(step.boxes);
+        const hasState = boxesForStep(step).length > 0;
         const showExprResultPane = shouldShowExprResultPane(step);
+        pager?.update();
+        if (levelResetBtn) {
+            levelResetBtn.disabled = isDefaultProgress(progressSnapshot());
+        }
         if (state.showIntro) {
-            setPartsContent(instructionsEl, initialInstructions || null);
+            renderInstructions(initialInstructions || null);
             setControlVisible(continueBtn, true);
             setControlVisible(sectionEl, false);
             setControlVisible(hintBtn, false);
@@ -590,7 +673,7 @@ function createExpressionEvalTemplate(config) {
         setControlVisible(sectionEl, true);
         setControlVisible(answerPanel, showExprResultPane);
         const instructionText = step.instructions ?? null;
-        setPartsContent(instructionsEl, instructionText);
+        renderInstructions(instructionText);
         if (expressionEl)
             expressionEl.textContent = step.expression;
         clearStatus();
@@ -646,7 +729,6 @@ function createExpressionEvalTemplate(config) {
         else if (checkBtn) {
             checkBtn.disabled = false;
         }
-        pager?.update();
         persistProgress();
     }
     function markCurrentStepPassed() {
@@ -657,6 +739,7 @@ function createExpressionEvalTemplate(config) {
         disableBoxEditing(answerSlot);
         pager?.pulseNext();
         pager?.update();
+        renderInstructions(stepFor(state.boundary).instructions ?? null);
         persistProgress();
     }
     function checkAnswer() {
@@ -705,7 +788,7 @@ function createExpressionEvalTemplate(config) {
             type: expectedType,
             value: expectedValue,
         };
-        const match = boxValueMatchesSpec(simulator, entry, expectedBox);
+        const match = boxValueMatchesSpec(parseCValueLiteral, entry, expectedBox);
         const ok = entryType === expectedType && match.ok;
         setStatus(ok ? "correct" : "incorrect", ok);
         if (ok) {

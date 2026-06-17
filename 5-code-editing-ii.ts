@@ -1,5 +1,5 @@
 import { createCodeEditorTemplate } from "./shared-code-editor.js";
-import { boxesByName, firstRedeclaredName, formatNames, missingSemicolonHint } from "./shared-code-editor-hints.js";
+import { boxesByName, formatNames } from "./shared-code-editor-hints.js";
 import type { BoxState } from "./shared-core.js";
 
 const targetState: BoxState[] = [
@@ -21,18 +21,11 @@ createCodeEditorTemplate({
   textareaMinLines: 4,
   targetState,
   next: "6-assignment-ii.html",
-  instructions: "Write code yourself.",
+  instructions: "Write the code yourself.",
   hints: (ctx) => {
-    const semicolonHint = missingSemicolonHint(ctx.findMissingSemicolonLines(ctx.text));
-    if (semicolonHint) return semicolonHint;
-
-    const statements = ctx.parseStatements(ctx.text);
-    const redeclared = firstRedeclaredName(statements);
-    if (redeclared) return `Declare $n{${redeclared}} only once.`;
-
     const currentState = ctx.applyUserProgram();
     if (!currentState) {
-      return "This code does not compile yet. Use simple declarations and assignments.";
+      return ctx.diagnostic?.message || "This code does not compile yet. Use simple declarations and assignments.";
     }
 
     const boxes = boxesByName(currentState);

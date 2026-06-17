@@ -322,34 +322,20 @@ export function formatValueForType(value, type, opts = {}) {
     }
     return raw;
 }
-function isNumericLiteralTokens(tokens) {
-    if (tokens.length === 1) {
-        return tokens[0]?.type === "number";
-    }
-    if (tokens.length === 2) {
-        return (tokens[0]?.type === "sym" &&
-            tokens[0]?.value === "-" &&
-            tokens[1]?.type === "number");
-    }
-    return false;
-}
-export function parseValueExpressionInput(evaluator, raw) {
+export function parseValueLiteralInput(evaluator, raw) {
     const trimmed = raw.trim();
     if (!trimmed)
         return { kind: "empty", trimmed: "" };
-    const tokens = evaluator.tokenizeProgram(trimmed);
-    if (!tokens.length)
-        return { kind: "invalid", trimmed };
-    if (tokens.some((t) => t.type === "unknown"))
-        return { kind: "invalid", trimmed };
-    if (!isNumericLiteralTokens(tokens))
-        return { kind: "invalid", trimmed };
-    const evaluated = evaluator.evaluateExpressionText(trimmed, []);
+    const evaluated = evaluator(trimmed);
     if ("error" in evaluated)
         return { kind: "invalid", trimmed };
     const result = evaluated.result;
     if (!result || result.kind !== "rvalue")
         return { kind: "invalid", trimmed };
+    const literal = result.valueLiteral;
+    if (!literal || (literal.kind !== "integer" && literal.kind !== "floating")) {
+        return { kind: "invalid", trimmed };
+    }
     const type = String(result.type || "").trim();
     if (!type)
         return { kind: "invalid", trimmed };
@@ -358,40 +344,30 @@ export function parseValueExpressionInput(evaluator, raw) {
         trimmed,
         type,
         value: result.value,
+        literalKind: literal.kind,
+        hasSuffix: literal.hasSuffix === true,
         nanSign: result.nanSign,
     };
 }
-export function valueTypeMatchesTarget(valueType, targetType) {
-    const isIntegerScalarBase = (base) => {
-        if (!base)
-            return false;
-        return base !== "float" && base !== "double";
-    };
-    const sameArrayDims = (left, right) => {
-        const a = left ?? [];
-        const b = right ?? [];
-        if (a.length !== b.length)
-            return false;
-        for (let i = 0; i < a.length; i++) {
-            if (a[i] !== b[i])
-                return false;
-        }
-        return true;
-    };
-    const target = parseType(targetType || "int");
-    const value = parseType(valueType || "int");
-    if (!target.base || !value.base)
+export function valueLiteralMatchesTarget(value, targetType) {
+    if (value.kind !== "ok")
         return false;
-    if (target.depth > 0 && value.depth === 0) {
-        return isIntegerScalarBase(value.base);
+    const target = parseType(targetType || "int");
+    const literalType = parseType(value.type || "int");
+    if (!target.base || !literalType.base || target.arrayDims?.length)
+        return false;
+    if (target.depth > 0) {
+        return value.literalKind === "integer" && !value.hasSuffix;
     }
-    if (target.depth > 0 || value.depth > 0) {
-        return (target.base === value.base &&
-            target.depth === value.depth &&
-            sameArrayDims(target.pointeeArrayDims, value.pointeeArrayDims) &&
-            (target.pointeeInnerDepth || 0) === (value.pointeeInnerDepth || 0));
+    if (value.literalKind === "integer") {
+        if (target.base === "float" || target.base === "double")
+            return false;
+        return !value.hasSuffix || literalType.base === target.base;
     }
-    return true;
+    if (target.base === "float") {
+        return literalType.base === "float" || literalType.base === "double";
+    }
+    return target.base === "double" && literalType.base === "double";
 }
 function doubleValuesEqual(actualValue, expectedValue, actualNanSign, expectedNanSign) {
     if (Number.isNaN(actualValue) || Number.isNaN(expectedValue)) {
@@ -401,21 +377,15 @@ function doubleValuesEqual(actualValue, expectedValue, actualNanSign, expectedNa
     }
     return Object.is(actualValue, expectedValue);
 }
-export function parsedValuesEqual(actual, expected) {
+export function parsedLiteralValuesEqual(actual, expected, targetType) {
     if (actual.kind !== "ok" || expected.kind !== "ok")
         return false;
-    const parsedExpectedType = parseType(expected.type);
-    if (parsedExpectedType.depth === 0 &&
-        (parsedExpectedType.base === "float" || parsedExpectedType.base === "double")) {
-        return doubleValuesEqual(Number(actual.value), Number(expected.value), actual.nanSign, expected.nanSign);
+    const target = parseType(targetType);
+    if (target.depth === 0 && target.base === "float") {
+        return doubleValuesEqual(Math.fround(Number(actual.value)), Math.fround(Number(expected.value)), actual.nanSign, expected.nanSign);
     }
-    if (parsedExpectedType.depth > 0) {
-        try {
-            return BigInt(actual.value) === BigInt(expected.value);
-        }
-        catch {
-            return String(actual.value ?? "").trim() === String(expected.value ?? "").trim();
-        }
+    if (target.depth === 0 && target.base === "double") {
+        return doubleValuesEqual(Number(actual.value), Number(expected.value), actual.nanSign, expected.nanSign);
     }
     try {
         return BigInt(actual.value) === BigInt(expected.value);
@@ -426,7 +396,7 @@ export function parsedValuesEqual(actual, expected) {
 }
 export function normalizeBoxValueForContext(evaluator, box) {
     const raw = box.rawValue ?? box.value ?? "";
-    const parsed = parseValueExpressionInput(evaluator, raw);
+    const parsed = parseValueLiteralInput(evaluator, raw);
     if (parsed.kind !== "ok") {
         return { ...box, value: parsed.trimmed };
     }
@@ -445,18 +415,15 @@ export function boxValueMatchesSpec(evaluator, actual, expected) {
         const ok = actualTrimmed === "" && expectedTrimmed === "";
         return { ok, normalized: "" };
     }
-    const parsedActual = parseValueExpressionInput(evaluator, actualRaw);
-    const parsedExpected = parseValueExpressionInput(evaluator, expectedRaw);
+    const parsedActual = parseValueLiteralInput(evaluator, actualRaw);
+    const parsedExpected = parseValueLiteralInput(evaluator, expectedRaw);
     if (parsedActual.kind !== "ok" || parsedExpected.kind !== "ok") {
         return { ok: false, normalized: "" };
     }
-    if (!valueTypeMatchesTarget(parsedActual.type, targetType)) {
+    if (!valueLiteralMatchesTarget(parsedActual, targetType)) {
         return { ok: false, normalized: "" };
     }
-    if (!valueTypeMatchesTarget(parsedExpected.type, targetType)) {
-        return { ok: false, normalized: "" };
-    }
-    const ok = parsedValuesEqual(parsedActual, parsedExpected);
+    const ok = parsedLiteralValuesEqual(parsedActual, parsedExpected, targetType);
     if (!ok)
         return { ok: false, normalized: "" };
     const normalized = formatValueForType(parsedExpected.value, targetType, {

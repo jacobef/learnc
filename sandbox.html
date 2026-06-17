@@ -26,13 +26,125 @@
                                     Run line 1 ▶
                                 </button>
                             </div>
-                            <div class="controls-row controls-right"></div>
+                            <div class="controls-row controls-right">
+                                <div
+                                    class="sandbox-interface-toggle"
+                                    role="group"
+                                    aria-label="Sandbox interface"
+                                >
+                                    <button
+                                        data-role="sandbox-mode-simple"
+                                        class="is-active"
+                                        aria-pressed="true"
+                                    >
+                                        Simple
+                                    </button>
+                                    <button
+                                        data-role="sandbox-mode-advanced"
+                                        aria-pressed="false"
+                                    >
+                                        Advanced
+                                    </button>
+                                </div>
+                                <label
+                                    data-role="sandbox-implicit-main-control"
+                                    class="sandbox-implicit-main hidden"
+                                >
+                                    <input
+                                        data-role="sandbox-implicit-main"
+                                        type="checkbox"
+                                        checked
+                                    />
+                                    <span>Implicit main</span>
+                                </label>
+                            </div>
                         </div>
                         <p data-role="sandbox-instructions" class="intro"></p>
+                        <div
+                            data-role="sandbox-implicit-main-notice"
+                            class="sandbox-mode-notice hidden"
+                            role="status"
+                        ></div>
                     </div>
                     <div class="row panel-row">
                         <div class="panel panel-scroll code-panel-shell">
                             <div class="panel-title code-title">Code</div>
+                            <div
+                                data-role="sandbox-file-bar"
+                                class="sandbox-file-bar hidden"
+                            >
+                                <div
+                                    data-role="sandbox-file-tabs"
+                                    class="sandbox-file-tabs"
+                                    role="tablist"
+                                ></div>
+                                <button
+                                    data-role="sandbox-file-add"
+                                    class="sandbox-file-action"
+                                    title="Add file"
+                                    aria-label="Add file"
+                                >
+                                    +
+                                </button>
+                                <button
+                                    data-role="sandbox-file-delete"
+                                    class="sandbox-file-action"
+                                    title="Delete current file"
+                                    aria-label="Delete current file"
+                                >
+                                    ×
+                                </button>
+                                <div
+                                    data-role="sandbox-file-create"
+                                    class="sandbox-file-create hidden"
+                                >
+                                    <input
+                                        data-role="sandbox-file-name"
+                                        class="sandbox-file-name"
+                                        type="text"
+                                        spellcheck="false"
+                                        aria-label="New file name"
+                                    />
+                                    <button
+                                        data-role="sandbox-file-confirm"
+                                        class="sandbox-file-action"
+                                        title="Create file"
+                                        aria-label="Create file"
+                                    >
+                                        ✓
+                                    </button>
+                                    <button
+                                        data-role="sandbox-file-cancel"
+                                        class="sandbox-file-action"
+                                        title="Cancel"
+                                        aria-label="Cancel"
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                                <div
+                                    data-role="sandbox-file-delete-confirm"
+                                    class="sandbox-file-delete-confirm hidden"
+                                >
+                                    <span data-role="sandbox-file-delete-label"></span>
+                                    <button
+                                        data-role="sandbox-file-delete-yes"
+                                        class="sandbox-file-action"
+                                        title="Confirm delete"
+                                        aria-label="Confirm delete"
+                                    >
+                                        ✓
+                                    </button>
+                                    <button
+                                        data-role="sandbox-file-delete-no"
+                                        class="sandbox-file-action"
+                                        title="Cancel"
+                                        aria-label="Cancel delete"
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                            </div>
                             <div
                                 data-role="sandbox-code"
                                 class="codepane panel-body"
@@ -50,6 +162,40 @@
                                             spellcheck="false"
                                             rows="4"
                                         ></textarea>
+                                    </div>
+                                </div>
+                            </div>
+                            <div
+                                data-role="sandbox-terminal"
+                                class="sandbox-terminal hidden"
+                            >
+                                <div class="sandbox-terminal-section">
+                                    <label class="sandbox-terminal-label" for="sandbox-stdin">
+                                        stdin
+                                    </label>
+                                    <textarea
+                                        id="sandbox-stdin"
+                                        data-role="sandbox-stdin"
+                                        class="sandbox-terminal-input"
+                                        spellcheck="false"
+                                        rows="3"
+                                    ></textarea>
+                                </div>
+                                <div class="sandbox-terminal-section sandbox-terminal-output-wrap">
+                                    <div class="sandbox-terminal-label">stdout</div>
+                                    <pre
+                                        data-role="sandbox-stdout"
+                                        class="sandbox-terminal-output"
+                                    ></pre>
+                                    <div
+                                        data-role="sandbox-stderr-wrap"
+                                        class="sandbox-terminal-stderr hidden"
+                                    >
+                                        <div class="sandbox-terminal-label">stderr</div>
+                                        <pre
+                                            data-role="sandbox-stderr"
+                                            class="sandbox-terminal-output"
+                                        ></pre>
                                     </div>
                                 </div>
                             </div>
@@ -72,11 +218,11 @@
                                             spellcheck="false"
                                         />
                                     </div>
-                                <div
-                                    data-role="sandbox-expr-result"
-                                    class="grid"
-                                ></div>
-                            </div>
+                                    <div
+                                        data-role="sandbox-expr-result"
+                                        class="grid"
+                                    ></div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -84,6 +230,6 @@
             </div>
         </div>
 
-        <script type="module" src="js/sandbox.js"></script>
+        <script type="module" src="js/sandbox.js?v=sandbox-state-persistence-2"></script>
     </body>
 </html>
