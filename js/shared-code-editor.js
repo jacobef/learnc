@@ -187,12 +187,16 @@ function createCodeEditorTemplate(config) {
     }
     function applyUserProgram() {
         const result = runCProgram(getEditorText());
-        return result.kind === "ok" ? result.state : null;
+        return result.kind === "ok" && !result.executionLimit
+            ? result.state
+            : null;
     }
     function getProgramOutcome() {
         const result = runCProgram(getEditorText());
         if (result.kind !== "ok")
             return { kind: result.kind, state: null };
+        if (result.executionLimit)
+            return { kind: "ok", state: null };
         return { kind: "ok", state: result.state };
     }
     function getProgramDiagnostic() {

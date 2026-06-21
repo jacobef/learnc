@@ -47,6 +47,7 @@ type ChallengePartsSpec =
 type ChallengeFailureKind =
   | "compile"
   | "ub"
+  | "step-limit"
   | "missing-output"
   | "wrong-output-type"
   | "wrong-output-value";
@@ -540,7 +541,10 @@ function createCodeOutputChallengeTemplate(
   ): string[] {
     const text = fullProgramTextForBody(testCase, solveCode);
     const analyzed = runCProgram(text);
-    const solvedState = analyzed.kind === "ok" ? analyzed.state : null;
+    const solvedState =
+      analyzed.kind === "ok" && !analyzed.executionLimit
+        ? analyzed.state
+        : null;
     if (!solvedState) {
       if (analyzed.kind === "compile") {
         failConfig(`solve does not compile for ${label}.`);
@@ -792,7 +796,14 @@ function createCodeOutputChallengeTemplate(
   }
 
   type ProgramBehavior =
-    | { kind: "compile" | "ub" | "missing-output" | "wrong-output-type" }
+    | {
+        kind:
+          | "compile"
+          | "ub"
+          | "step-limit"
+          | "missing-output"
+          | "wrong-output-type";
+      }
     | { kind: "ok"; outputBoxes: BoxState[] };
 
   function validateOutputBoxes(
@@ -827,6 +838,9 @@ function createCodeOutputChallengeTemplate(
     const analyzed = runCProgram(text);
     if (analyzed.kind !== "ok") {
       return { kind: analyzed.kind };
+    }
+    if (analyzed.executionLimit) {
+      return { kind: "step-limit" };
     }
     const checked = validateOutputBoxes(analyzed.state);
     if (checked.kind !== "ok") {
@@ -876,6 +890,16 @@ function createCodeOutputChallengeTemplate(
         ok: false,
         kind: analyzed.kind,
         state: null,
+        outputBox: null,
+        expected: fallbackExpected,
+        failingOutput: fallbackOutput,
+      };
+    }
+    if (analyzed.executionLimit) {
+      return {
+        ok: false,
+        kind: "step-limit",
+        state: analyzed.state,
         outputBox: null,
         expected: fallbackExpected,
         failingOutput: fallbackOutput,
@@ -1181,6 +1205,9 @@ function createCodeOutputChallengeTemplate(
     }
     if (current.kind === "ub") {
       return "The shown case has undefined behavior. Avoid invalid pointer/math operations.";
+    }
+    if (current.kind === "step-limit") {
+      return "The shown case runs for too many steps. Check whether a loop can finish.";
     }
     if (current.kind === "missing-output") {
       if (current.failingOutput) {

@@ -499,8 +499,11 @@ pub struct ProgramOutput {
     pub trace: Vec<ProgramTraceEvent>,
     pub main_close: ProgramSourceLocation,
     pub blocked: Option<ProgramBlocked>,
+    pub execution_limit: Option<ProgramExecutionLimit>,
     pub expression: Option<ProgramExpressionResult>,
 }
+
+const CBOXES_STEP_LIMIT_TRACE_PREFIX_CAP: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct ProgramSourceLocation {
@@ -515,6 +518,14 @@ pub struct ProgramBlocked {
     pub end_line: usize,
     pub function: String,
     pub state: Vec<ProgramStateBox>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProgramExecutionLimit {
+    pub file: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub trace_position: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -627,6 +638,7 @@ pub struct Interpreter<'a> {
     cboxes_trace: Vec<ProgramTraceEvent>,
     cboxes_expression_request: Option<ProgramExpressionEvalRequest>,
     cboxes_expression_result: Option<ProgramExpressionResult>,
+    execution_steps_remaining: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2162,6 +2174,7 @@ impl<'a> Interpreter<'a> {
             cboxes_trace: Vec::new(),
             cboxes_expression_request: None,
             cboxes_expression_result: None,
+            execution_steps_remaining: run_options.execution_step_limit,
         }
     }
 
@@ -2195,25 +2208,34 @@ impl<'a> Interpreter<'a> {
                 &mut objects,
             )
         }));
-        let (exit_status, blocked) = match entry {
+        let (exit_status, blocked, execution_limit_span) = match entry {
             Ok(Ok(result)) => {
                 let exit_status = if main.return_type == CType::Void {
                     0
                 } else {
                     result.to_int()? as c_int
                 };
-                (exit_status, None)
+                (exit_status, None, None)
             }
             Ok(Err(diag)) => {
-                let Some((function_name, span)) = diag.blocked_info() else {
-                    return Err(diag);
-                };
-                (0, Some(self.cboxes_blocked_result(function_name, span)))
+                if let Some(span) = diag.execution_step_limit_span() {
+                    (0, None, Some(span))
+                } else {
+                    let Some((function_name, span)) = diag.blocked_info() else {
+                        return Err(diag);
+                    };
+                    (
+                        0,
+                        Some(self.cboxes_blocked_result(function_name, span)),
+                        None,
+                    )
+                }
             }
             Err(payload) => {
                 if let Some(signal) = payload.downcast_ref::<TerminationSignal>().copied() {
                     let mut exit_status = signal.status;
                     let mut blocked = None;
+                    let mut execution_limit_span = None;
                     if signal.run_atexit {
                         let handlers = catch_unwind(AssertUnwindSafe(|| {
                             self.run_atexit_handlers(&mut objects, main.span)
@@ -2221,10 +2243,14 @@ impl<'a> Interpreter<'a> {
                         match handlers {
                             Ok(Ok(())) => {}
                             Ok(Err(diag)) => {
-                                let Some((function_name, span)) = diag.blocked_info() else {
-                                    return Err(diag);
-                                };
-                                blocked = Some(self.cboxes_blocked_result(function_name, span));
+                                if let Some(span) = diag.execution_step_limit_span() {
+                                    execution_limit_span = Some(span);
+                                } else {
+                                    let Some((function_name, span)) = diag.blocked_info() else {
+                                        return Err(diag);
+                                    };
+                                    blocked = Some(self.cboxes_blocked_result(function_name, span));
+                                }
                             }
                             Err(payload) => {
                                 if let Some(signal) =
@@ -2237,7 +2263,7 @@ impl<'a> Interpreter<'a> {
                             }
                         }
                     }
-                    (exit_status, blocked)
+                    (exit_status, blocked, execution_limit_span)
                 } else {
                     resume_unwind(payload);
                 }
@@ -2254,10 +2280,19 @@ impl<'a> Interpreter<'a> {
             main_close_offset,
             main_close_offset.saturating_add(1),
         ));
-        let state = blocked
-            .as_ref()
-            .map(|blocked| blocked.state.clone())
-            .unwrap_or_else(|| self.cboxes_main_state.clone());
+        let (execution_limit, execution_limit_state) = if let Some(span) = execution_limit_span {
+            let (limit, state) = self.rewind_cboxes_trace_before_repeated_execution(span);
+            (Some(limit), Some(state))
+        } else {
+            (None, None)
+        };
+        let state = if let Some(blocked) = blocked.as_ref() {
+            blocked.state.clone()
+        } else if let Some(state) = execution_limit_state {
+            state
+        } else {
+            self.cboxes_main_state.clone()
+        };
         let stdout = self.capture_stream_contents(CaptureStream::Stdout)?;
         let stderr = self.capture_stream_contents(CaptureStream::Stderr)?;
         Ok(ProgramOutput {
@@ -2271,8 +2306,102 @@ impl<'a> Interpreter<'a> {
                 line: main_close_line.saturating_sub(1),
             },
             blocked,
+            execution_limit,
             expression: self.cboxes_expression_result.clone(),
         })
+    }
+
+    fn consume_execution_step(&mut self, span: Span) -> Result<(), Diagnostic> {
+        let Some(remaining) = self.execution_steps_remaining.as_mut() else {
+            return Ok(());
+        };
+        if *remaining == 0 {
+            return Err(Diagnostic::execution_step_limit(span));
+        }
+        *remaining -= 1;
+        Ok(())
+    }
+
+    fn rewind_cboxes_trace_before_repeated_execution(
+        &mut self,
+        fallback_span: Span,
+    ) -> (ProgramExecutionLimit, Vec<ProgramStateBox>) {
+        let repeated_start = {
+            let mut locations: HashMap<(&str, usize, usize, &str), (usize, usize)> =
+                HashMap::default();
+            for (index, event) in self.cboxes_trace.iter().enumerate() {
+                let stats = locations
+                    .entry((
+                        event.file.as_str(),
+                        event.start_line,
+                        event.end_line,
+                        event.kind.as_str(),
+                    ))
+                    .or_insert((0, index));
+                stats.0 += 1;
+            }
+            locations
+                .values()
+                .filter(|(count, _)| *count > 1)
+                .copied()
+                .max_by(|(left_count, left_first), (right_count, right_first)| {
+                    left_count
+                        .cmp(right_count)
+                        .then_with(|| right_first.cmp(left_first))
+                })
+                .map(|(_, first)| first)
+        };
+
+        let stop_index = repeated_start.unwrap_or(self.cboxes_trace.len());
+        let following_limit = self.run_options.execution_trace_following_limit;
+        let location = self
+            .cboxes_trace
+            .get(stop_index)
+            .map(|event| (event.file.clone(), event.start_line, event.end_line));
+        let state_before = stop_index
+            .checked_sub(1)
+            .and_then(|index| self.cboxes_trace.get(index))
+            .map(|event| event.state.clone())
+            .unwrap_or_default();
+        let trace_position = if stop_index > CBOXES_STEP_LIMIT_TRACE_PREFIX_CAP {
+            let immediately_before = self.cboxes_trace[stop_index - 1].clone();
+            let following_end = self
+                .cboxes_trace
+                .len()
+                .min(stop_index.saturating_add(following_limit));
+            let following = self.cboxes_trace[stop_index..following_end].to_vec();
+            self.cboxes_trace
+                .truncate(CBOXES_STEP_LIMIT_TRACE_PREFIX_CAP - 1);
+            self.cboxes_trace.push(immediately_before);
+            let trace_position = self.cboxes_trace.len();
+            self.cboxes_trace.extend(following);
+            trace_position
+        } else {
+            let following_end = self
+                .cboxes_trace
+                .len()
+                .min(stop_index.saturating_add(following_limit));
+            self.cboxes_trace.truncate(following_end);
+            stop_index
+        };
+
+        let (file, start_line, end_line) = location.unwrap_or_else(|| {
+            let (file, start_line, end_line) = self.sources.span_location(fallback_span);
+            (
+                file.display().to_string(),
+                start_line.saturating_sub(1),
+                end_line.saturating_sub(1),
+            )
+        });
+        (
+            ProgramExecutionLimit {
+                file,
+                start_line,
+                end_line,
+                trace_position,
+            },
+            state_before,
+        )
     }
 
     pub fn set_cboxes_expression_eval(&mut self, request: ProgramExpressionEvalRequest) {
@@ -6445,6 +6574,7 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<Flow, Diagnostic> {
+        self.consume_execution_step(statement_span(stmt))?;
         match stmt {
             Statement::Block(block) => self.exec_block(block, frame, objects),
             Statement::Break(_) => Ok(Flow::LoopBreak),
@@ -35764,6 +35894,8 @@ mod tests {
             stdin: String::new(),
             expression_eval: None,
             synthetic_address_base: 0x1000,
+            execution_step_limit: None,
+            execution_trace_following_limit: 256,
         };
         let result = run_files_with_options([main_file], &options).unwrap();
         assert_eq!(result.stdout, "13\n");

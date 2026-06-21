@@ -22,7 +22,7 @@ createCodeOutputChallengeTemplate({
     testInputs,
     solve: "int rounded = n + 0.5;",
     textareaMinLines: 6,
-    instructions: "Write code that creates an $t{int} variable named $n{rounded}, which is $n{n} rounded to the nearest integer. In this level, you can assume $n{n} will not be negative.\nRecall that assigning an $t{int} to a $t{double} drops the decimal part, which provides a means of rounding down.",
+    instructions: "Write code that creates an $t{int} variable named $n{rounded}, which is $n{n} rounded to the nearest integer. In this level, you can assume $n{n} will not be negative.\nRecall that assigning a $t{double} to an $t{int} drops the decimal part, which provides a means of rounding down.",
     hints: (ctx) => {
         if (ctx.behavesLike("int rounded = n;")) {
             return "You're always rounding down. Values like $v{2.75} should become $v{3}, not $v{2}.";

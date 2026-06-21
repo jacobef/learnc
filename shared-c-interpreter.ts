@@ -25,6 +25,8 @@ type CInterpreterExports = WebAssembly.Exports & {
     stdinLen: number,
     syntheticAddressBase: number,
     implicitMainRequested: number,
+    executionStepLimit: number,
+    executionTraceFollowingLimit: number,
   ) => number;
   cboxes_eval_expression: (
     sourcePtr: number,
@@ -46,12 +48,18 @@ type CInterpreterExports = WebAssembly.Exports & {
     stdinLen: number,
     syntheticAddressBase: number,
     implicitMainRequested: number,
+    executionStepLimit: number,
   ) => number;
 };
 
 export type CSourceFile = {
   path: string;
   source: string;
+};
+
+export type CExecutionBudget = {
+  stepLimit: number;
+  followingTraceLimit: number;
 };
 
 type CInterpreterOk = {
@@ -70,6 +78,12 @@ type CInterpreterOk = {
     endLine?: number;
     function?: string;
     state?: BoxState[];
+  } | null;
+  executionLimit?: {
+    file?: string;
+    startLine?: number;
+    endLine?: number;
+    tracePosition?: number;
   } | null;
   trace?: Array<{
     kind?: string;
@@ -124,6 +138,7 @@ export type CProgramResult = (
       trace: CProgramTraceEvent[];
       mainClose: CProgramSourceLocation | null;
       blocked: CProgramBlocked | null;
+      executionLimit: CProgramExecutionLimit | null;
       stdout: string;
       stderr: string;
       exitStatus: number;
@@ -153,6 +168,13 @@ export type CProgramBlocked = {
   state: BoxState[];
 };
 
+export type CProgramExecutionLimit = {
+  file: string;
+  startLine: number;
+  endLine: number;
+  tracePosition: number;
+};
+
 export type CExpressionResult =
   | {
       kind: "ok";
@@ -177,6 +199,19 @@ const SYNTHETIC_ADDRESS_BASE_STORAGE_KEY =
 const MIN_SYNTHETIC_ADDRESS_BASE = 1000;
 const MAX_SYNTHETIC_ADDRESS_BASE = 9000;
 const SYNTHETIC_ADDRESS_ALIGNMENT = 16;
+const DEFAULT_EXECUTION_BUDGET: CExecutionBudget = {
+  stepLimit: 10_000,
+  followingTraceLimit: 256,
+};
+
+function normalizeExecutionBudget(
+  budget: CExecutionBudget,
+): CExecutionBudget {
+  return {
+    stepLimit: Math.max(1, Math.floor(budget.stepLimit)),
+    followingTraceLimit: Math.max(1, Math.floor(budget.followingTraceLimit)),
+  };
+}
 
 export function createSyntheticAddressBase(): number {
   const random = new Uint32Array(1);
@@ -930,6 +965,29 @@ function normalizeBlocked(rawBlocked: unknown): CProgramBlocked | null {
   };
 }
 
+function normalizeExecutionLimit(
+  rawLimit: unknown,
+): CProgramExecutionLimit | null {
+  if (!rawLimit || typeof rawLimit !== "object") return null;
+  const limit = rawLimit as Record<string, unknown>;
+  const startLine = Number(limit.startLine);
+  const endLine = Number(limit.endLine ?? limit.startLine);
+  const tracePosition = Number(limit.tracePosition);
+  if (
+    !Number.isFinite(startLine) ||
+    !Number.isFinite(endLine) ||
+    !Number.isFinite(tracePosition)
+  ) {
+    return null;
+  }
+  return {
+    file: String(limit.file ?? "program.c"),
+    startLine: Math.max(0, Math.floor(startLine)),
+    endLine: Math.max(0, Math.floor(endLine)),
+    tracePosition: Math.max(0, Math.floor(tracePosition)),
+  };
+}
+
 export function runCProgram(
   source: string,
   addressBase: number = syntheticAddressBase,
@@ -977,6 +1035,7 @@ export function runCProgram(
       trace: normalizeTrace(parsed.trace),
       mainClose: normalizeSourceLocation(parsed.mainClose),
       blocked: normalizeBlocked(parsed.blocked),
+      executionLimit: normalizeExecutionLimit(parsed.executionLimit),
       stdout: String(parsed.stdout ?? ""),
       stderr: String(parsed.stderr ?? ""),
       exitStatus: Number(parsed.exitStatus ?? 0),
@@ -1015,6 +1074,7 @@ export function runCFiles(
   addressBase: number = syntheticAddressBase,
   stdin: string = "",
   implicitMain: boolean = true,
+  executionBudget: CExecutionBudget = DEFAULT_EXECUTION_BUDGET,
 ): CProgramResult {
   let interpreter: CInterpreterExports;
   let bundlePtr: number | null = null;
@@ -1023,6 +1083,7 @@ export function runCFiles(
   let outputLen = 0;
   const bundle = encodeSourceFiles(files);
   const stdinInput = new TextEncoder().encode(stdin);
+  const budget = normalizeExecutionBudget(executionBudget);
   try {
     interpreter = interpreterExports();
     const decoder = new TextDecoder();
@@ -1037,6 +1098,8 @@ export function runCFiles(
       stdinInput.length,
       addressBase,
       implicitMain ? 1 : 0,
+      budget.stepLimit,
+      budget.followingTraceLimit,
     );
     interpreter.cboxes_free(bundlePtr, bundle.length);
     bundlePtr = null;
@@ -1067,6 +1130,7 @@ export function runCFiles(
       trace: normalizeTrace(parsed.trace),
       mainClose: normalizeSourceLocation(parsed.mainClose),
       blocked: normalizeBlocked(parsed.blocked),
+      executionLimit: normalizeExecutionLimit(parsed.executionLimit),
       stdout: String(parsed.stdout ?? ""),
       stderr: String(parsed.stderr ?? ""),
       exitStatus: Number(parsed.exitStatus ?? 0),
@@ -1216,6 +1280,7 @@ export function evaluateCExpressionFiles(
   addressBase: number = syntheticAddressBase,
   stdin: string = "",
   implicitMain: boolean = true,
+  executionBudget: CExecutionBudget = DEFAULT_EXECUTION_BUDGET,
 ): CExpressionResult {
   let interpreter: CInterpreterExports;
   let bundlePtr: number | null = null;
@@ -1227,6 +1292,7 @@ export function evaluateCExpressionFiles(
   const bundle = encodeSourceFiles(files);
   const exprInput = encoder.encode(expression);
   const stdinInput = encoder.encode(stdin);
+  const budget = normalizeExecutionBudget(executionBudget);
   try {
     interpreter = interpreterExports();
     const decoder = new TextDecoder();
@@ -1246,6 +1312,7 @@ export function evaluateCExpressionFiles(
       stdinInput.length,
       addressBase,
       implicitMain ? 1 : 0,
+      budget.stepLimit,
     );
     interpreter.cboxes_free(bundlePtr, bundle.length);
     bundlePtr = null;

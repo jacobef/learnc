@@ -35,6 +35,7 @@ pub struct Diagnostic {
 #[derive(Debug, Clone, Copy)]
 enum DiagnosticControl {
     Blocked(&'static str),
+    ExecutionStepLimit,
 }
 
 impl Diagnostic {
@@ -79,8 +80,26 @@ impl Diagnostic {
     }
 
     pub fn blocked_info(&self) -> Option<(&'static str, Span)> {
-        let DiagnosticControl::Blocked(function_name) = self.control?;
-        Some((function_name, self.span?))
+        match self.control? {
+            DiagnosticControl::Blocked(function_name) => Some((function_name, self.span?)),
+            DiagnosticControl::ExecutionStepLimit => None,
+        }
+    }
+
+    pub fn execution_step_limit(span: Span) -> Self {
+        Self {
+            severity: Severity::Error,
+            message: "execution step limit reached".to_owned(),
+            span: Some(span),
+            notes: Vec::new(),
+            standard_reference: None,
+            rendered_with_sources: None,
+            control: Some(DiagnosticControl::ExecutionStepLimit),
+        }
+    }
+
+    pub fn execution_step_limit_span(&self) -> Option<Span> {
+        matches!(self.control, Some(DiagnosticControl::ExecutionStepLimit)).then_some(self.span?)
     }
 
     #[cfg(test)]

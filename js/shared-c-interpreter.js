@@ -4,6 +4,16 @@ const SYNTHETIC_ADDRESS_BASE_STORAGE_KEY = `cboxes-synthetic-address-base-v2:${w
 const MIN_SYNTHETIC_ADDRESS_BASE = 1000;
 const MAX_SYNTHETIC_ADDRESS_BASE = 9000;
 const SYNTHETIC_ADDRESS_ALIGNMENT = 16;
+const DEFAULT_EXECUTION_BUDGET = {
+    stepLimit: 10000,
+    followingTraceLimit: 256,
+};
+function normalizeExecutionBudget(budget) {
+    return {
+        stepLimit: Math.max(1, Math.floor(budget.stepLimit)),
+        followingTraceLimit: Math.max(1, Math.floor(budget.followingTraceLimit)),
+    };
+}
 export function createSyntheticAddressBase() {
     const random = new Uint32Array(1);
     crypto.getRandomValues(random);
@@ -668,6 +678,25 @@ function normalizeBlocked(rawBlocked) {
         state: normalizeState(blocked.state),
     };
 }
+function normalizeExecutionLimit(rawLimit) {
+    if (!rawLimit || typeof rawLimit !== "object")
+        return null;
+    const limit = rawLimit;
+    const startLine = Number(limit.startLine);
+    const endLine = Number(limit.endLine ?? limit.startLine);
+    const tracePosition = Number(limit.tracePosition);
+    if (!Number.isFinite(startLine) ||
+        !Number.isFinite(endLine) ||
+        !Number.isFinite(tracePosition)) {
+        return null;
+    }
+    return {
+        file: String(limit.file ?? "program.c"),
+        startLine: Math.max(0, Math.floor(startLine)),
+        endLine: Math.max(0, Math.floor(endLine)),
+        tracePosition: Math.max(0, Math.floor(tracePosition)),
+    };
+}
 export function runCProgram(source, addressBase = syntheticAddressBase, stdin = "") {
     let interpreter;
     let inputPtr = null;
@@ -703,6 +732,7 @@ export function runCProgram(source, addressBase = syntheticAddressBase, stdin = 
             trace: normalizeTrace(parsed.trace),
             mainClose: normalizeSourceLocation(parsed.mainClose),
             blocked: normalizeBlocked(parsed.blocked),
+            executionLimit: normalizeExecutionLimit(parsed.executionLimit),
             stdout: String(parsed.stdout ?? ""),
             stderr: String(parsed.stderr ?? ""),
             exitStatus: Number(parsed.exitStatus ?? 0),
@@ -740,7 +770,7 @@ export function runCProgram(source, addressBase = syntheticAddressBase, stdin = 
         }
     }
 }
-export function runCFiles(files, addressBase = syntheticAddressBase, stdin = "", implicitMain = true) {
+export function runCFiles(files, addressBase = syntheticAddressBase, stdin = "", implicitMain = true, executionBudget = DEFAULT_EXECUTION_BUDGET) {
     let interpreter;
     let bundlePtr = null;
     let stdinPtr = null;
@@ -748,6 +778,7 @@ export function runCFiles(files, addressBase = syntheticAddressBase, stdin = "",
     let outputLen = 0;
     const bundle = encodeSourceFiles(files);
     const stdinInput = new TextEncoder().encode(stdin);
+    const budget = normalizeExecutionBudget(executionBudget);
     try {
         interpreter = interpreterExports();
         const decoder = new TextDecoder();
@@ -755,7 +786,7 @@ export function runCFiles(files, addressBase = syntheticAddressBase, stdin = "",
         new Uint8Array(interpreter.memory.buffer).set(bundle, bundlePtr);
         stdinPtr = interpreter.cboxes_alloc(stdinInput.length);
         new Uint8Array(interpreter.memory.buffer).set(stdinInput, stdinPtr);
-        outputPtr = interpreter.cboxes_run_files(bundlePtr, bundle.length, stdinPtr, stdinInput.length, addressBase, implicitMain ? 1 : 0);
+        outputPtr = interpreter.cboxes_run_files(bundlePtr, bundle.length, stdinPtr, stdinInput.length, addressBase, implicitMain ? 1 : 0, budget.stepLimit, budget.followingTraceLimit);
         interpreter.cboxes_free(bundlePtr, bundle.length);
         bundlePtr = null;
         interpreter.cboxes_free(stdinPtr, stdinInput.length);
@@ -782,6 +813,7 @@ export function runCFiles(files, addressBase = syntheticAddressBase, stdin = "",
             trace: normalizeTrace(parsed.trace),
             mainClose: normalizeSourceLocation(parsed.mainClose),
             blocked: normalizeBlocked(parsed.blocked),
+            executionLimit: normalizeExecutionLimit(parsed.executionLimit),
             stdout: String(parsed.stdout ?? ""),
             stderr: String(parsed.stderr ?? ""),
             exitStatus: Number(parsed.exitStatus ?? 0),
@@ -915,7 +947,7 @@ export function evaluateCExpression(source, eventIndex, expression, addressBase 
         }
     }
 }
-export function evaluateCExpressionFiles(files, eventIndex, expression, addressBase = syntheticAddressBase, stdin = "", implicitMain = true) {
+export function evaluateCExpressionFiles(files, eventIndex, expression, addressBase = syntheticAddressBase, stdin = "", implicitMain = true, executionBudget = DEFAULT_EXECUTION_BUDGET) {
     let interpreter;
     let bundlePtr = null;
     let exprPtr = null;
@@ -926,6 +958,7 @@ export function evaluateCExpressionFiles(files, eventIndex, expression, addressB
     const bundle = encodeSourceFiles(files);
     const exprInput = encoder.encode(expression);
     const stdinInput = encoder.encode(stdin);
+    const budget = normalizeExecutionBudget(executionBudget);
     try {
         interpreter = interpreterExports();
         const decoder = new TextDecoder();
@@ -935,7 +968,7 @@ export function evaluateCExpressionFiles(files, eventIndex, expression, addressB
         new Uint8Array(interpreter.memory.buffer).set(exprInput, exprPtr);
         stdinPtr = interpreter.cboxes_alloc(stdinInput.length);
         new Uint8Array(interpreter.memory.buffer).set(stdinInput, stdinPtr);
-        outputPtr = interpreter.cboxes_eval_expression_files(bundlePtr, bundle.length, exprPtr, exprInput.length, Math.max(0, Math.floor(eventIndex)), stdinPtr, stdinInput.length, addressBase, implicitMain ? 1 : 0);
+        outputPtr = interpreter.cboxes_eval_expression_files(bundlePtr, bundle.length, exprPtr, exprInput.length, Math.max(0, Math.floor(eventIndex)), stdinPtr, stdinInput.length, addressBase, implicitMain ? 1 : 0, budget.stepLimit);
         interpreter.cboxes_free(bundlePtr, bundle.length);
         bundlePtr = null;
         interpreter.cboxes_free(exprPtr, exprInput.length);

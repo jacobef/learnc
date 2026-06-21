@@ -21,8 +21,9 @@ use ast::{
 };
 use diag::Diagnostic;
 use interpreter::{
-    Interpreter, ProgramBlocked, ProgramExpressionEvalRequest, ProgramExpressionResult,
-    ProgramOutput, ProgramSourceLocation, ProgramStateBox, ProgramTraceEvent, ProgramValueLiteral,
+    Interpreter, ProgramBlocked, ProgramExecutionLimit, ProgramExpressionEvalRequest,
+    ProgramExpressionResult, ProgramOutput, ProgramSourceLocation, ProgramStateBox,
+    ProgramTraceEvent, ProgramValueLiteral,
 };
 use lexer::Lexer;
 use parser::Parser;
@@ -39,6 +40,7 @@ struct RunResult {
     pub trace: Vec<ProgramTraceEvent>,
     pub main_close: ProgramSourceLocation,
     pub blocked: Option<ProgramBlocked>,
+    pub execution_limit: Option<ProgramExecutionLimit>,
     pub expression: Option<ProgramExpressionResult>,
 }
 
@@ -55,6 +57,8 @@ struct RunOptions {
     pub stdin: String,
     pub expression_eval: Option<RunExpressionEvalRequest>,
     pub synthetic_address_base: u64,
+    pub execution_step_limit: Option<usize>,
+    pub execution_trace_following_limit: usize,
 }
 
 type VirtualSource = (PathBuf, String);
@@ -85,6 +89,8 @@ impl Default for RunOptions {
             stdin: String::new(),
             expression_eval: None,
             synthetic_address_base: 0x1000,
+            execution_step_limit: None,
+            execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
         }
     }
 }
@@ -214,6 +220,7 @@ where
         trace,
         main_close,
         blocked,
+        execution_limit,
         expression: _,
     } = Interpreter::new(&sources, translation_unit, options)
         .run()
@@ -226,6 +233,7 @@ where
         trace,
         main_close,
         blocked,
+        execution_limit,
         expression: None,
     })
 }
@@ -424,11 +432,15 @@ fn cboxes_run_virtual_sources_without_expression(
                 stdin: options.stdin.clone(),
                 expression_eval: None,
                 synthetic_address_base: options.synthetic_address_base,
+                execution_step_limit: options.execution_step_limit,
+                execution_trace_following_limit: options.execution_trace_following_limit,
             },
         )
     }
 }
 
+const CBOXES_BROWSER_EXECUTION_STEP_LIMIT: usize = 10_000;
+const CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT: usize = 256;
 static CBOXES_LAST_RESULT_LEN: AtomicUsize = AtomicUsize::new(0);
 
 #[unsafe(no_mangle)]
@@ -525,6 +537,8 @@ pub unsafe extern "C" fn cboxes_run_source(
                 stdin: stdin.to_owned(),
                 expression_eval: None,
                 synthetic_address_base: synthetic_address_base.into(),
+                execution_step_limit: Some(CBOXES_BROWSER_EXECUTION_STEP_LIMIT),
+                execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
             },
         )
     });
@@ -552,6 +566,8 @@ pub unsafe extern "C" fn cboxes_run_files(
     stdin_len: usize,
     synthetic_address_base: u32,
     implicit_main_requested: u32,
+    execution_step_limit: u32,
+    execution_trace_following_limit: u32,
 ) -> *mut u8 {
     if bundle_ptr.is_null() {
         return cboxes_store_json(cboxes_error_json(
@@ -594,6 +610,8 @@ pub unsafe extern "C" fn cboxes_run_files(
         stdin: stdin.to_owned(),
         expression_eval: None,
         synthetic_address_base: synthetic_address_base.into(),
+        execution_step_limit: Some(execution_step_limit.max(1) as usize),
+        execution_trace_following_limit: execution_trace_following_limit.max(1) as usize,
     };
     let result = std::panic::catch_unwind(|| {
         cboxes_run_virtual_sources(files, &options, implicit_main_requested != 0)
@@ -711,6 +729,8 @@ pub unsafe extern "C" fn cboxes_eval_expression(
                     event_index,
                 }),
                 synthetic_address_base: synthetic_address_base.into(),
+                execution_step_limit: Some(CBOXES_BROWSER_EXECUTION_STEP_LIMIT),
+                execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
             },
         )
     });
@@ -748,6 +768,7 @@ pub unsafe extern "C" fn cboxes_eval_expression_files(
     stdin_len: usize,
     synthetic_address_base: u32,
     implicit_main_requested: u32,
+    execution_step_limit: u32,
 ) -> *mut u8 {
     if bundle_ptr.is_null() {
         return cboxes_store_json(cboxes_error_json(
@@ -814,6 +835,8 @@ pub unsafe extern "C" fn cboxes_eval_expression_files(
             event_index,
         }),
         synthetic_address_base: synthetic_address_base.into(),
+        execution_step_limit: Some(execution_step_limit.max(1) as usize),
+        execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
     };
     let result = std::panic::catch_unwind(|| {
         cboxes_run_virtual_sources(files, &options, implicit_main_requested != 0)
@@ -929,14 +952,15 @@ fn cboxes_implicit_main_json(mut json: String, implicit_main: &CboxesImplicitMai
 
 fn cboxes_success_json(result: &RunResult, source_display: &SourceDisplayMap) -> String {
     format!(
-        "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"exitStatus\":{},\"state\":{},\"trace\":{},\"mainClose\":{},\"blocked\":{}}}",
+        "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"exitStatus\":{},\"state\":{},\"trace\":{},\"mainClose\":{},\"blocked\":{},\"executionLimit\":{}}}",
         cboxes_json_string(&result.stdout),
         cboxes_json_string(&result.stderr),
         result.exit_status,
         cboxes_state_json(&result.state),
         cboxes_trace_json(&result.trace, source_display),
         cboxes_source_location_json(&result.main_close, source_display),
-        cboxes_blocked_json(result.blocked.as_ref(), source_display)
+        cboxes_blocked_json(result.blocked.as_ref(), source_display),
+        cboxes_execution_limit_json(result.execution_limit.as_ref(), source_display),
     )
 }
 
@@ -1172,6 +1196,34 @@ fn cboxes_blocked_json(
     )
 }
 
+fn cboxes_execution_limit_json(
+    execution_limit: Option<&ProgramExecutionLimit>,
+    source_display: &SourceDisplayMap,
+) -> String {
+    let Some(execution_limit) = execution_limit else {
+        return "null".to_owned();
+    };
+    let (line_offset, line_count) = source_display
+        .get(&execution_limit.file)
+        .copied()
+        .unwrap_or((0, usize::MAX));
+    let start_line = execution_limit.start_line.saturating_sub(line_offset);
+    if start_line >= line_count {
+        return "null".to_owned();
+    }
+    let end_line = execution_limit
+        .end_line
+        .saturating_sub(line_offset)
+        .min(line_count.saturating_sub(1));
+    format!(
+        "{{\"file\":{},\"startLine\":{},\"endLine\":{},\"tracePosition\":{}}}",
+        cboxes_json_string(&execution_limit.file),
+        start_line,
+        end_line,
+        execution_limit.trace_position,
+    )
+}
+
 fn cboxes_usize_array_json(values: &[usize]) -> String {
     let mut out = String::from("[");
     for (index, value) in values.iter().enumerate() {
@@ -1257,6 +1309,7 @@ fn run_translation_unit(
         trace,
         main_close,
         blocked,
+        execution_limit,
         expression,
     } = interpreter
         .run()
@@ -1269,6 +1322,7 @@ fn run_translation_unit(
         trace,
         main_close,
         blocked,
+        execution_limit,
         expression,
     })
 }
@@ -3239,6 +3293,107 @@ mod browser_api_tests {
         assert_eq!(result.main_close.file, "program.c");
         assert_eq!(result.main_close.line, 2);
         assert!(json.contains("\"mainClose\":{\"file\":\"program.c\",\"line\":2}"));
+    }
+
+    #[test]
+    fn execution_step_limit_returns_the_trace_before_an_infinite_loop() {
+        let source = "int main(void) {\n  int before = 1;\n  while (1) {\n    before++;\n  }\n  int after = 2;\n}\n";
+        let result = run_source_with_options(
+            "program.c",
+            source,
+            &RunOptions {
+                execution_step_limit: Some(40),
+                execution_trace_following_limit: 2,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        let source_display = HashMap::from([(
+            "program.c".to_owned(),
+            (0, cboxes_source_line_count(source)),
+        )]);
+        let json = cboxes_success_json(&result, &source_display);
+
+        let execution_limit = result.execution_limit.as_ref().unwrap();
+        assert_eq!(execution_limit.start_line, 2);
+        assert_eq!(execution_limit.trace_position, 1);
+        assert_eq!(result.trace.len(), execution_limit.trace_position + 2);
+        assert!(result.trace.iter().all(|event| event.start_line < 5));
+        assert_eq!(
+            result.state.first().map(|item| (&item.name, &item.value)),
+            result
+                .trace
+                .get(execution_limit.trace_position - 1)
+                .and_then(|event| event.state.first())
+                .map(|item| (&item.name, &item.value)),
+        );
+        assert!(
+            json.contains(
+                "\"executionLimit\":{\"file\":\"program.c\",\"startLine\":2,\"endLine\":2,\"tracePosition\":1}"
+            )
+        );
+
+        let expanded = run_source_with_options(
+            "program.c",
+            source,
+            &RunOptions {
+                execution_step_limit: Some(80),
+                execution_trace_following_limit: 4,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        let expanded_limit = expanded.execution_limit.as_ref().unwrap();
+        assert_eq!(
+            expanded_limit.trace_position,
+            execution_limit.trace_position
+        );
+        assert_eq!(expanded.trace.len(), expanded_limit.trace_position + 4);
+    }
+
+    #[test]
+    fn execution_step_limit_rewinds_before_a_goto_cycle() {
+        let source = "int main(void) {\n  int before = 1;\nrepeat:\n  before++;\n  goto repeat;\n  int after = 2;\n}\n";
+        let result = run_source_with_options(
+            "program.c",
+            source,
+            &RunOptions {
+                execution_step_limit: Some(600),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+
+        let execution_limit = result.execution_limit.as_ref().unwrap();
+        assert_eq!(execution_limit.start_line, 3);
+        assert_eq!(execution_limit.trace_position, 1);
+        assert!(result.trace.len() > execution_limit.trace_position);
+        assert_eq!(result.state[0].name, "before");
+        assert_eq!(result.state[0].value, "1");
+    }
+
+    #[test]
+    fn execution_step_limit_preserves_trace_when_no_location_repeats() {
+        let mut source = "int main(void) {\n  int value = 0;\n".to_owned();
+        for _ in 0..50 {
+            source.push_str("  value++;\n");
+        }
+        source.push_str("}\n");
+        let result = run_source_with_options(
+            "program.c",
+            source,
+            &RunOptions {
+                execution_step_limit: Some(20),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+
+        let execution_limit = result.execution_limit.as_ref().unwrap();
+        assert_eq!(result.state[0].name, "value");
+        assert!(result.state[0].value.parse::<usize>().unwrap() > 0);
+        assert!(execution_limit.start_line > result.trace.last().unwrap().end_line);
+        assert_eq!(execution_limit.trace_position, result.trace.len());
     }
 
     #[test]

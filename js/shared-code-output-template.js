@@ -312,7 +312,9 @@ function createCodeOutputChallengeTemplate(config) {
     function expectedLiteralsFromSolve(testCase, label) {
         const text = fullProgramTextForBody(testCase, solveCode);
         const analyzed = runCProgram(text);
-        const solvedState = analyzed.kind === "ok" ? analyzed.state : null;
+        const solvedState = analyzed.kind === "ok" && !analyzed.executionLimit
+            ? analyzed.state
+            : null;
         if (!solvedState) {
             if (analyzed.kind === "compile") {
                 failConfig(`solve does not compile for ${label}.`);
@@ -537,6 +539,9 @@ function createCodeOutputChallengeTemplate(config) {
         if (analyzed.kind !== "ok") {
             return { kind: analyzed.kind };
         }
+        if (analyzed.executionLimit) {
+            return { kind: "step-limit" };
+        }
         const checked = validateOutputBoxes(analyzed.state);
         if (checked.kind !== "ok") {
             return { kind: checked.kind };
@@ -577,6 +582,16 @@ function createCodeOutputChallengeTemplate(config) {
                 ok: false,
                 kind: analyzed.kind,
                 state: null,
+                outputBox: null,
+                expected: fallbackExpected,
+                failingOutput: fallbackOutput,
+            };
+        }
+        if (analyzed.executionLimit) {
+            return {
+                ok: false,
+                kind: "step-limit",
+                state: analyzed.state,
                 outputBox: null,
                 expected: fallbackExpected,
                 failingOutput: fallbackOutput,
@@ -844,6 +859,9 @@ function createCodeOutputChallengeTemplate(config) {
         }
         if (current.kind === "ub") {
             return "The shown case has undefined behavior. Avoid invalid pointer/math operations.";
+        }
+        if (current.kind === "step-limit") {
+            return "The shown case runs for too many steps. Check whether a loop can finish.";
         }
         if (current.kind === "missing-output") {
             if (current.failingOutput) {
