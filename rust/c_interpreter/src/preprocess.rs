@@ -1430,6 +1430,7 @@ struct IfExprParser {
     tokens: Vec<IfToken>,
     idx: usize,
     span: Span,
+    evaluating: bool,
 }
 
 impl IfExprParser {
@@ -1438,6 +1439,7 @@ impl IfExprParser {
             tokens,
             idx: 0,
             span,
+            evaluating: true,
         }
     }
 
@@ -1455,10 +1457,20 @@ impl IfExprParser {
     fn parse_conditional(&mut self) -> Result<i128, Diagnostic> {
         let condition = self.parse_logical_or()?;
         if self.consume_simple(IfToken::Question) {
+            let outer_evaluating = self.evaluating;
+            self.evaluating = outer_evaluating && condition != 0;
             let if_true = self.parse_conditional()?;
             self.expect_simple(IfToken::Colon, "expected : in conditional expression")?;
+            self.evaluating = outer_evaluating && condition == 0;
             let if_false = self.parse_conditional()?;
-            return Ok(if condition != 0 { if_true } else { if_false });
+            self.evaluating = outer_evaluating;
+            return Ok(if !outer_evaluating {
+                0
+            } else if condition != 0 {
+                if_true
+            } else {
+                if_false
+            });
         }
         Ok(condition)
     }
@@ -1466,8 +1478,15 @@ impl IfExprParser {
     fn parse_logical_or(&mut self) -> Result<i128, Diagnostic> {
         let mut value = self.parse_logical_and()?;
         while self.consume_simple(IfToken::OrOr) {
+            let outer_evaluating = self.evaluating;
+            self.evaluating = outer_evaluating && value == 0;
             let rhs = self.parse_logical_and()?;
-            value = bool_to_int(value != 0 || rhs != 0);
+            self.evaluating = outer_evaluating;
+            value = if outer_evaluating {
+                bool_to_int(value != 0 || rhs != 0)
+            } else {
+                0
+            };
         }
         Ok(value)
     }
@@ -1475,8 +1494,15 @@ impl IfExprParser {
     fn parse_logical_and(&mut self) -> Result<i128, Diagnostic> {
         let mut value = self.parse_bitwise_or()?;
         while self.consume_simple(IfToken::AndAnd) {
+            let outer_evaluating = self.evaluating;
+            self.evaluating = outer_evaluating && value != 0;
             let rhs = self.parse_bitwise_or()?;
-            value = bool_to_int(value != 0 && rhs != 0);
+            self.evaluating = outer_evaluating;
+            value = if outer_evaluating {
+                bool_to_int(value != 0 && rhs != 0)
+            } else {
+                0
+            };
         }
         Ok(value)
     }
@@ -1546,12 +1572,16 @@ impl IfExprParser {
         loop {
             if self.consume_simple(IfToken::Shl) {
                 let rhs = self.parse_additive()?;
-                let shift = to_shift_count(rhs, self.span)?;
-                value = value.wrapping_shl(shift);
+                if self.evaluating {
+                    let shift = to_shift_count(rhs, self.span)?;
+                    value = value.wrapping_shl(shift);
+                }
             } else if self.consume_simple(IfToken::Shr) {
                 let rhs = self.parse_additive()?;
-                let shift = to_shift_count(rhs, self.span)?;
-                value >>= shift;
+                if self.evaluating {
+                    let shift = to_shift_count(rhs, self.span)?;
+                    value >>= shift;
+                }
             } else {
                 return Ok(value);
             }
@@ -1578,22 +1608,36 @@ impl IfExprParser {
                 value = value.wrapping_mul(self.parse_unary()?);
             } else if self.consume_simple(IfToken::Slash) {
                 let rhs = self.parse_unary()?;
-                if rhs == 0 {
-                    return Err(Diagnostic::error(
-                        "division by zero in #if expression",
-                        self.span,
-                    ));
+                if self.evaluating {
+                    value = value.checked_div(rhs).ok_or_else(|| {
+                        Diagnostic::error(
+                            if rhs == 0 {
+                                "division by zero in #if expression"
+                            } else {
+                                "integer overflow in #if expression"
+                            },
+                            self.span,
+                        )
+                    })?;
+                } else {
+                    value = 0;
                 }
-                value /= rhs;
             } else if self.consume_simple(IfToken::Percent) {
                 let rhs = self.parse_unary()?;
-                if rhs == 0 {
-                    return Err(Diagnostic::error(
-                        "division by zero in #if expression",
-                        self.span,
-                    ));
+                if self.evaluating {
+                    value = value.checked_rem(rhs).ok_or_else(|| {
+                        Diagnostic::error(
+                            if rhs == 0 {
+                                "division by zero in #if expression"
+                            } else {
+                                "integer overflow in #if expression"
+                            },
+                            self.span,
+                        )
+                    })?;
+                } else {
+                    value = 0;
                 }
-                value %= rhs;
             } else {
                 return Ok(value);
             }

@@ -10,6 +10,7 @@ import {
   ensurePanelizedMain,
   flashStatus,
   getNavLabelForHref,
+  getPreviousNavHref,
   makeAnswerBox,
   normalizeZeroDisplay,
   queryRole,
@@ -126,7 +127,117 @@ type RuntimeStage = {
   instructions?: Part;
   hints?: ProgramHint;
   branchTargets: number[];
+  traceEndIndex: number | null;
 };
+
+type StrikeFragment = { line: number; start: number; end: number };
+
+function ifKeywordColumnsByLine(lines: string[]): Map<number, number[]> {
+  const columnsByLine = new Map<number, number[]>();
+  let inBlockComment = false;
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex] ?? "";
+    const columns: number[] = [];
+    let quote: "'" | '"' | null = null;
+    let escaped = false;
+    for (let column = 0; column < line.length; column += 1) {
+      const ch = line[column] ?? "";
+      const next = line[column + 1] ?? "";
+      if (inBlockComment) {
+        if (ch === "*" && next === "/") {
+          inBlockComment = false;
+          column += 1;
+        }
+        continue;
+      }
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === "/" && next === "/") break;
+      if (ch === "/" && next === "*") {
+        inBlockComment = true;
+        column += 1;
+        continue;
+      }
+      if (ch === "'" || ch === '"') {
+        quote = ch;
+        continue;
+      }
+      if (ch !== "i" || next !== "f") continue;
+      const before = line[column - 1] ?? "";
+      const after = line[column + 2] ?? "";
+      if (/[A-Za-z0-9_]/.test(before) || /[A-Za-z0-9_]/.test(after)) {
+        continue;
+      }
+      let cursor = column + 2;
+      while (/\s/.test(line[cursor] ?? "")) cursor += 1;
+      if (line[cursor] === "(") columns.push(column);
+    }
+    if (columns.length) columnsByLine.set(lineIndex, columns);
+  }
+  return columnsByLine;
+}
+
+function strikeFragmentsForTrace(
+  lines: string[],
+  trace: Array<{
+    kind: string;
+    file: string;
+    startLine: number;
+    skippedRange: {
+      file: string;
+      startLine: number;
+      startColumn: number;
+      endLine: number;
+      endColumn: number;
+    } | null;
+  }>,
+  traceEndIndex: number,
+): StrikeFragment[] {
+  type SkippedRange = NonNullable<(typeof trace)[number]["skippedRange"]>;
+  const latestRangeByBranch = new Map<string, SkippedRange | null>();
+  const ifColumns = ifKeywordColumnsByLine(lines);
+  const nextBranchSiteByLine = new Map<string, number>();
+  for (let index = 0; index <= traceEndIndex && index < trace.length; index += 1) {
+    const event = trace[index]!;
+    if (event.kind !== "branch") continue;
+    const lineKey = `${event.file}:${event.startLine}`;
+    const columns = ifColumns.get(event.startLine) ?? [];
+    const range = event.skippedRange;
+    let siteIndex = -1;
+    if (range?.startLine === event.startLine) {
+      siteIndex = columns.indexOf(range.startColumn);
+    }
+    if (siteIndex < 0 && columns.length === 1) siteIndex = 0;
+    if (siteIndex < 0 && columns.length > 1) {
+      siteIndex = (nextBranchSiteByLine.get(lineKey) ?? 0) % columns.length;
+    }
+    if (siteIndex >= 0 && columns.length) {
+      nextBranchSiteByLine.set(lineKey, (siteIndex + 1) % columns.length);
+    }
+    const branchKey =
+      siteIndex >= 0
+        ? `${lineKey}:${siteIndex}`
+        : range
+          ? `${lineKey}:${range.startLine}:${range.startColumn}:${range.endLine}:${range.endColumn}`
+          : lineKey;
+    latestRangeByBranch.set(branchKey, range);
+  }
+  const fragments: StrikeFragment[] = [];
+  latestRangeByBranch.forEach((range) => {
+    if (!range) return;
+    for (let line = range.startLine; line <= range.endLine && line < lines.length; line += 1) {
+      const lineText = lines[line] ?? "";
+      const start = line === range.startLine ? range.startColumn : 0;
+      const end = line === range.endLine ? range.endColumn : lineText.length;
+      if (end > start) fragments.push({ line, start, end });
+    }
+  });
+  return fragments;
+}
 
 function collectProgramElements(root: ParentNode = document): ProgramElements {
   const role = <T extends Element>(name: string) => queryRole<T>(name, root);
@@ -203,9 +314,11 @@ function ensureProgramLayout(): ProgramElements {
 
   const prevBtn = document.createElement("button");
   prevBtn.dataset.role = "program-prev";
+  prevBtn.dataset.stepper = "prev";
   prevBtn.textContent = "Back ◀";
   const nextBtn = document.createElement("button");
   nextBtn.dataset.role = "program-next";
+  nextBtn.dataset.stepper = "next";
   nextBtn.textContent = "Run line 1 ▶";
   const levelResetBtn = document.createElement("button");
   levelResetBtn.dataset.role = "program-reset-level";
@@ -269,9 +382,80 @@ function editableForVisit(step: StepInfo | null, visitIndex: number): boolean {
   return editable === true;
 }
 
+function isArrayRootStateBox(box: BoxState): boolean {
+  if (box.arrayRoot) return false;
+  const shape = Array.isArray(box.arrayShape) ? box.arrayShape : [];
+  const indices = Array.isArray(box.arrayIndices) ? box.arrayIndices : [];
+  if (shape.length > 0 && indices.length === 0) return true;
+  return /\[\s*\d+\s*\]\s*$/.test(String(box.type || ""));
+}
+
+function stateWithArrayRoots(boxes: BoxState[]): BoxState[] {
+  const result = boxes.slice();
+  const rootNames = new Set(
+    result
+      .filter((box) => isArrayRootStateBox(box))
+      .map((box) => String(box.name || "").trim())
+      .filter(Boolean),
+  );
+  const firstElementByRoot = new Map<string, BoxState>();
+  for (const box of result) {
+    const rootName = String(box.arrayRoot || "").trim();
+    if (rootName && !firstElementByRoot.has(rootName)) {
+      firstElementByRoot.set(rootName, box);
+    }
+  }
+  for (const [rootName, first] of firstElementByRoot) {
+    if (rootNames.has(rootName)) continue;
+    const shape = Array.isArray(first.arrayShape)
+      ? first.arrayShape
+          .map((value) => Math.floor(Number(value)))
+          .filter((value) => Number.isFinite(value) && value > 0)
+      : [];
+    if (!shape.length) continue;
+    result.push({
+      ...first,
+      name: rootName,
+      type: `${first.type}${shape.map((value) => `[${value}]`).join("")}`,
+      value: "",
+      rawValue: "",
+      arrayRoot: null,
+      arrayShape: shape,
+      arrayIndices: [],
+    });
+  }
+  return result;
+}
+
+function comparableStateBoxes(boxes: BoxState[]): BoxState[] {
+  return boxes.filter((box) => !isArrayRootStateBox(box));
+}
+
+function comparableStateBoxKey(box: BoxState): string {
+  const arrayRoot = String(box.arrayRoot || "").trim();
+  if (arrayRoot) {
+    const indices = Array.isArray(box.arrayIndices)
+      ? box.arrayIndices.map((value) => Math.floor(Number(value))).join(",")
+      : "";
+    return `array:${arrayRoot}:${indices || box.name}`;
+  }
+  return `scalar:${box.name}`;
+}
+
+function visibleStateBoxes(boxes: BoxState[]): BoxState[] {
+  return stateWithArrayRoots(boxes).filter((box) => !box.arrayRoot);
+}
+
 function stateMatches(actual: BoxState[], expected: BoxState[]): boolean {
-  const actualByName = new Map(actual.filter((box) => !box.arrayRoot).map((box) => [box.name, box]));
-  const expectedByName = new Map(expected.filter((box) => !box.arrayRoot).map((box) => [box.name, box]));
+  const actualByName = new Map(
+    comparableStateBoxes(actual).map((box) => [comparableStateBoxKey(box), box]),
+  );
+  const expectedByName = new Map(
+    comparableStateBoxes(expected).map((box) => [
+      comparableStateBoxKey(box),
+      box,
+    ]),
+  );
   if (actualByName.size !== expectedByName.size) return false;
   for (const [name, expectedBox] of expectedByName.entries()) {
     const actualBox = actualByName.get(name);
@@ -295,9 +479,9 @@ function basicHintForBoxes(
   baseline: BoxState[],
   stage: RuntimeStage,
 ): ProgramContext["_basicHintTopic"] & { message: string } | null {
-  const visibleActual = actual.filter((box) => !box.arrayRoot);
-  const visibleExpected = expected.filter((box) => !box.arrayRoot);
-  const visibleBaseline = baseline.filter((box) => !box.arrayRoot);
+  const visibleActual = visibleStateBoxes(actual);
+  const visibleExpected = visibleStateBoxes(expected);
+  const visibleBaseline = visibleStateBoxes(baseline);
   const actualCount = visibleActual.length;
   const expectedCount = visibleExpected.length;
   const nameOf = (box: BoxState | null | undefined) =>
@@ -446,6 +630,58 @@ function basicHintForBoxes(
     }
   }
 
+  const actualElementsByName = new Map(
+    comparableStateBoxes(actual)
+      .filter((box) => !!box.arrayRoot)
+      .map((box) => [box.name, box]),
+  );
+  const baselineElementsByName = new Map(
+    comparableStateBoxes(baseline)
+      .filter((box) => !!box.arrayRoot)
+      .map((box) => [box.name, box]),
+  );
+  for (const expectedBox of comparableStateBoxes(expected).filter(
+    (box) => !!box.arrayRoot,
+  )) {
+    const name = nameOf(expectedBox);
+    if (!name) continue;
+    const actualBox = actualElementsByName.get(name);
+    if (!actualBox) {
+      return {
+        message: `The $n{${name}} array element is missing.`,
+        kind: "value",
+        variable: name,
+      };
+    }
+    const expectedType = typeOf(expectedBox);
+    if (typeOf(actualBox) !== expectedType) {
+      return {
+        message: `$n{${name}}'s type should be $t{${expectedType}}.`,
+        kind: "type",
+        variable: name,
+      };
+    }
+    if (boxValueMatchesSpec(parseCValueLiteral, actualBox, expectedBox).ok) {
+      continue;
+    }
+    const expectedValue = (expectedBox.value ?? "").trim();
+    const label =
+      expectedValue === ""
+        ? "empty"
+        : `$v{${normalizeZeroDisplay(expectedValue)}}`;
+    const baselineBox = baselineElementsByName.get(name);
+    const shouldRemain = baselineBox
+      ? boxValueMatchesSpec(parseCValueLiteral, baselineBox, expectedBox).ok
+      : false;
+    const message = `$n{${name}}'s value should ${shouldRemain ? "remain" : "be"} ${label}.`;
+    if (shouldRemain) {
+      return { message, kind: "value", variable: name };
+    }
+    if (!deferredBe) {
+      deferredBe = { message, kind: "value", variable: name };
+    }
+  }
+
   return deferredBe;
 }
 
@@ -563,6 +799,11 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     const label = getNavLabelForHref(next);
     return label ? `Next: ${label}` : "Next Program";
   })();
+  const previous = getPreviousNavHref();
+  const previousLabel = (() => {
+    const label = getNavLabelForHref(previous);
+    return label ? `Prev: ${label}` : "Previous Program";
+  })();
 
   const stepInfos: StepInfo[] = [];
   const lineList: string[] = [];
@@ -665,6 +906,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
         branchTargets: editable && headerEditable
           ? Array.from({ length: totalLines + 1 }, (_, index) => index)
           : [],
+        traceEndIndex: null,
       });
       visitCounts.set(step.index, visitIndex + 1);
       const isLastGapStep = step === gapSteps[gapSteps.length - 1];
@@ -772,6 +1014,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       instructions: resolveIndexed(step.instructions, visitIndex),
       hints: resolveIndexed(step.hints, visitIndex),
       branchTargets,
+      traceEndIndex: j,
     });
     visitCounts.set(step.index, visitIndex + 1);
     previousBoundary = afterBoundary;
@@ -815,6 +1058,13 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     return runtimeStages[executionSteps + 1] || null;
   };
   const nextProgramLabel = () => `${endLabel} ▶▶`;
+  const previousProgramLabel = () => `${previousLabel} ◀◀`;
+  const previousButtonLabel = () =>
+    executionSteps < 0
+      ? previous
+        ? previousProgramLabel()
+        : "At start"
+      : "Back ◀";
   const nextButtonLabel = () => {
     const stage = currentStage();
     if (stageNeedsSolve(stage) && stage?.editableMode === "boundary") {
@@ -894,7 +1144,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   const buttonReplacements = () =>
     [
       ["$runLineButton", `$b{${nextButtonLabel()}}`],
-      ["$backButton", "$b{Back ◀}"],
+      ["$backButton", `$b{${previousButtonLabel()}}`],
       ["$checkButton", "$b{Check}"],
       ["$resetButton", "$b{Reset}"],
       ["$newVariableButton", "$b{+ New variable}"],
@@ -1013,6 +1263,19 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       stage && solving && stage.editableMode === "boundary"
         ? stage.branchTargets
         : [];
+    const lastResolvedStageIndex = solving && stage ? stage.index - 1 : executionSteps;
+    let resolvedTraceEnd = -1;
+    for (let index = 0; index <= lastResolvedStageIndex; index += 1) {
+      resolvedTraceEnd = Math.max(
+        resolvedTraceEnd,
+        runtimeStages[index]?.traceEndIndex ?? -1,
+      );
+    }
+    const strikeFragments = strikeFragmentsForTrace(
+      lineList,
+      trace,
+      resolvedTraceEnd,
+    );
     renderCodePane(codeEl, lineList, displayBoundary, {
       progress: solving,
       progressRange: solving && stage ? { start: stage.runLine, end: stage.runEndLine } : undefined,
@@ -1027,6 +1290,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       boundaryTargets: selectable.length > 0,
       selectableBoundaries: selectable,
       selectedBoundary: stage ? selectedBoundaryByStage.get(stage.index) ?? null : null,
+      strikeFragments,
     });
     codeEl.querySelectorAll<HTMLElement>(".boundary.selectable").forEach((node) => {
       node.addEventListener("click", () => {
@@ -1054,10 +1318,16 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   }
 
   function hintContext(stage: RuntimeStage): ProgramContext {
-    const boxes = stage.editableMode === "state" && stageNeedsSolve(stage)
+    const rawBoxes = stage.editableMode === "state" && stageNeedsSolve(stage)
       ? readWorkspace()
       : cloneBoxes(stage.stateAfter);
-    const basic = basicHintForBoxes(boxes, stage.stateAfter, stage.stateBefore, stage);
+    const boxes = stateWithArrayRoots(rawBoxes);
+    const basic = basicHintForBoxes(
+      rawBoxes,
+      stage.stateAfter,
+      stage.stateBefore,
+      stage,
+    );
     return {
       boxes,
       basicHint: basic?.message ?? null,
@@ -1124,12 +1394,17 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   function renderControls() {
     const stage = currentStage();
     const locked = stageNeedsSolve(stage);
-    if (prevBtn) prevBtn.disabled = executionSteps < 0;
+    if (prevBtn) {
+      prevBtn.disabled = executionSteps < 0 && !previous;
+      prevBtn.textContent = previousButtonLabel();
+      prevBtn.dataset.stepperStart = String(executionSteps < 0);
+    }
     if (nextBtn) {
       const complete = executionSteps >= runtimeStages.length - 1 && !locked;
       nextBtn.disabled = locked;
       const label = complete ? nextProgramLabel() : nextButtonLabel();
       nextBtn.textContent = locked ? `${label} 🔒` : label;
+      nextBtn.dataset.stepperEnd = String(complete);
     }
     if (checkBtn) checkBtn.classList.toggle("hidden", !locked);
     if (hintBtn) hintBtn.classList.toggle("hidden", !(locked && stage?.editableMode === "state"));
@@ -1297,7 +1572,11 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   }
 
   prevBtn?.addEventListener("click", () => {
-    if (executionSteps < 0) return;
+    if (executionSteps < 0) {
+      const previousUrl = withSidebarParam(previous);
+      if (previousUrl) window.location.href = previousUrl;
+      return;
+    }
     clearNextPulse();
     executionSteps -= 1;
     setStatus("", "muted");
@@ -1412,12 +1691,6 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     hideHint();
     clearLevelProgress(levelId);
     render();
-  });
-
-  window.addEventListener("keydown", (event) => {
-    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
-    if (event.key === "ArrowRight") nextBtn?.click();
-    if (event.key === "ArrowLeft") prevBtn?.click();
   });
 
   render();

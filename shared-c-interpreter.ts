@@ -91,6 +91,7 @@ type CInterpreterOk = {
     startLine: number;
     endLine: number;
     state: BoxState[];
+    skippedRange?: CProgramSourceRange | null;
   }>;
   implicitMainApplied?: boolean;
   implicitMainNotice?: string | null;
@@ -153,6 +154,15 @@ export type CProgramTraceEvent = {
   startLine: number;
   endLine: number;
   state: BoxState[];
+  skippedRange: CProgramSourceRange | null;
+};
+
+export type CProgramSourceRange = {
+  file: string;
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
 };
 
 export type CProgramSourceLocation = {
@@ -935,8 +945,21 @@ function normalizeTrace(rawTrace: unknown): CProgramTraceEvent[] {
       startLine: Math.max(0, Math.floor(Number(event.startLine ?? 0))),
       endLine: Math.max(0, Math.floor(Number(event.endLine ?? event.startLine ?? 0))),
       state: normalizeState(event.state),
+      skippedRange: normalizeProgramSourceRange(event.skippedRange),
     };
   });
+}
+
+function normalizeProgramSourceRange(rawRange: unknown): CProgramSourceRange | null {
+  if (!rawRange || typeof rawRange !== "object") return null;
+  const range = rawRange as Record<string, unknown>;
+  return {
+    file: String(range.file ?? "program.c"),
+    startLine: Math.max(0, Math.floor(Number(range.startLine ?? 0))),
+    startColumn: Math.max(0, Math.floor(Number(range.startColumn ?? 0))),
+    endLine: Math.max(0, Math.floor(Number(range.endLine ?? range.startLine ?? 0))),
+    endColumn: Math.max(0, Math.floor(Number(range.endColumn ?? 0))),
+  };
 }
 
 function normalizeSourceLocation(rawLocation: unknown): CProgramSourceLocation | null {

@@ -59,6 +59,7 @@ pub struct Parameter {
     pub ty: CType,
     pub vla_bounds: Vec<Option<Expr>>,
     pub static_array_bound: Option<Expr>,
+    pub adjusted_from_array_or_function: bool,
     pub storage_class: Option<StorageClass>,
     pub span: Span,
 }
@@ -143,6 +144,8 @@ pub enum Statement {
         condition: Expr,
         then_branch: Box<Statement>,
         else_branch: Option<Box<Statement>>,
+        else_keyword_span: Option<Span>,
+        branch_keyword_span: Span,
         span: Span,
     },
     Labeled {
@@ -166,6 +169,26 @@ pub enum Statement {
         body: Box<Statement>,
         span: Span,
     },
+}
+
+impl Statement {
+    pub fn span(&self) -> Span {
+        match self {
+            Statement::Block(block) => block.span,
+            Statement::Break(span)
+            | Statement::Continue(span)
+            | Statement::DoWhile { span, .. }
+            | Statement::Expression(_, span)
+            | Statement::For { span, .. }
+            | Statement::Goto { span, .. }
+            | Statement::If { span, .. }
+            | Statement::Labeled { span, .. }
+            | Statement::Return(_, span)
+            | Statement::Switch { span, .. }
+            | Statement::UserLabeled { span, .. }
+            | Statement::While { span, .. } => *span,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +225,11 @@ pub enum Expr {
         op: BinaryOp,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
+        span: Span,
+    },
+    Subscript {
+        base: Box<Expr>,
+        index: Box<Expr>,
         span: Span,
     },
     Assign {
@@ -289,6 +317,7 @@ impl Expr {
             | Expr::Unary { span, .. }
             | Expr::Postfix { span, .. }
             | Expr::Binary { span, .. }
+            | Expr::Subscript { span, .. }
             | Expr::Assign { span, .. }
             | Expr::CompoundAssign { span, .. }
             | Expr::SizeofType { span, .. }

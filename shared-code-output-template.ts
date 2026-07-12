@@ -87,6 +87,7 @@ interface CodeOutputChallengeElements {
   levelResetBtn: HTMLButtonElement | null;
   rerollBtn: HTMLButtonElement | null;
   showFailBtn: HTMLButtonElement | null;
+  prevBtn: HTMLButtonElement | null;
   nextBtn: HTMLButtonElement | null;
   codeRoot: HTMLElement | null;
 }
@@ -171,6 +172,7 @@ function collectCodeOutputChallengeElements(
     levelResetBtn: role<HTMLButtonElement>("code-reset-level"),
     rerollBtn: role<HTMLButtonElement>("code-reroll"),
     showFailBtn: role<HTMLButtonElement>("code-show-failing-case"),
+    prevBtn: queryElement<HTMLButtonElement>('button[data-stepper="prev"]', root),
     nextBtn: queryElement<HTMLButtonElement>('button[data-stepper="next"]', root),
     codeRoot: role<HTMLElement>("code-root"),
   };
@@ -246,12 +248,16 @@ function ensureCodeOutputChallengeLayout({
   codeRow.appendChild(editorWrap);
   codePane.appendChild(lockedRow);
   codePane.appendChild(codeRow);
+  const prevBtn = document.createElement("button");
+  prevBtn.textContent = "Back ◀";
+  prevBtn.dataset.stepper = "prev";
   const nextBtn = document.createElement("button");
   nextBtn.textContent = "Next Program ▶▶";
   nextBtn.dataset.stepper = "next";
   const controlsSpacer = document.createElement("span");
   controlsSpacer.className = "controls-spacer";
   controlsSpacer.setAttribute("aria-hidden", "true");
+  controlsRow.appendChild(prevBtn);
   controlsRow.appendChild(nextBtn);
   controlsRow.appendChild(controlsSpacer);
   const diagnosticEl = document.createElement("div");
@@ -318,6 +324,7 @@ function ensureCodeOutputChallengeLayout({
     levelResetBtn,
     rerollBtn,
     showFailBtn,
+    prevBtn,
     nextBtn,
     codeRoot: section,
   };
@@ -426,6 +433,7 @@ function createCodeOutputChallengeTemplate(
     levelResetBtn,
     rerollBtn,
     showFailBtn,
+    prevBtn,
     nextBtn,
     codeRoot,
   } = ensureCodeOutputChallengeLayout({ textareaMinLines });
@@ -1119,16 +1127,19 @@ function createCodeOutputChallengeTemplate(
     return currentResult;
   }
 
-  const buttonReplacements = [
-    ["$checkButton", "$b{Check}"],
-    ["$newInputButton", "$b{New input}"],
-    ["$showFailingCaseButton", "$b{Show failing case}"],
-    ["$runLineButton", "$b{Run line}"],
-    ["$backButton", "$b{Back ◀}"],
-  ] as const;
+  function buttonReplacements() {
+    const backLabel = (prevBtn?.textContent || "Back ◀").trim();
+    return [
+      ["$checkButton", "$b{Check}"],
+      ["$newInputButton", "$b{New input}"],
+      ["$showFailingCaseButton", "$b{Show failing case}"],
+      ["$runLineButton", "$b{Run line}"],
+      ["$backButton", `$b{${backLabel}}`],
+    ] as const;
+  }
 
   function applyButtonTokens(parts: ChallengeParts | null): ChallengeParts | null {
-    return applyTextTokenReplacements(parts, buttonReplacements) as
+    return applyTextTokenReplacements(parts, buttonReplacements()) as
       | ChallengeParts
       | null;
   }

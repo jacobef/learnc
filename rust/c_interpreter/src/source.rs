@@ -178,4 +178,29 @@ impl SourceManager {
             end_line.max(start_line),
         )
     }
+
+    pub fn span_display_range(&self, span: Span) -> (PathBuf, usize, usize, usize, usize) {
+        let generated = self.file(span.file);
+        let (generated_start_line, start_column) = generated.line_col(span.start);
+        let (generated_end_line, end_column) = generated.line_col(span.end.max(span.start));
+        let start_origin = generated.line_origin(generated_start_line);
+        let end_origin = generated.line_origin(generated_end_line);
+        let display_file = start_origin
+            .map(|origin| self.file(origin.file))
+            .unwrap_or(generated);
+        let start_line = start_origin
+            .map(|origin| origin.line_number)
+            .unwrap_or(generated_start_line);
+        let end_line = end_origin
+            .filter(|origin| self.file(origin.file).path() == display_file.path())
+            .map(|origin| origin.line_number)
+            .unwrap_or(generated_end_line);
+        (
+            display_file.path().clone(),
+            start_line.saturating_sub(1),
+            start_column.saturating_sub(1),
+            end_line.saturating_sub(1),
+            end_column.saturating_sub(1),
+        )
+    }
 }

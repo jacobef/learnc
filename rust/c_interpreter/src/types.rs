@@ -268,7 +268,7 @@ impl CType {
                 if *len == 0 {
                     None
                 } else {
-                    inner.size_of().map(|size| size * len)
+                    inner.size_of().and_then(|size| size.checked_mul(*len))
                 }
             }
             CType::Qualified(_, _) => unreachable!("unqualified() strips top-level qualifiers"),

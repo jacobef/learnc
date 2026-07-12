@@ -51,6 +51,7 @@ interface CodeEditorElements {
   hintBtn: HTMLButtonElement | null;
   checkBtn: HTMLButtonElement | null;
   levelResetBtn: HTMLButtonElement | null;
+  prevBtn: HTMLButtonElement | null;
   nextBtn: HTMLButtonElement | null;
   codeRoot: HTMLElement | null;
 }
@@ -110,6 +111,7 @@ function collectCodeEditorElements(
     hintBtn: role<HTMLButtonElement>("code-hint-btn"),
     checkBtn: role<HTMLButtonElement>("code-check"),
     levelResetBtn: role<HTMLButtonElement>("code-reset-level"),
+    prevBtn: queryElement<HTMLButtonElement>('button[data-stepper="prev"]', root),
     nextBtn: queryElement<HTMLButtonElement>('button[data-stepper="next"]', root),
     codeRoot: role<HTMLElement>("code-root"),
   };
@@ -179,6 +181,9 @@ function ensureCodeEditorLayout(
   stage.className = "code-editor-state-stage";
   stateCol.appendChild(stage);
 
+  const prevBtn = document.createElement("button");
+  prevBtn.dataset.stepper = "prev";
+  prevBtn.textContent = "Back ◀";
   const nextBtn = document.createElement("button");
   nextBtn.dataset.stepper = "next";
   nextBtn.textContent = "Next Program ▶▶";
@@ -199,7 +204,15 @@ function ensureCodeEditorLayout(
   const spacer = document.createElement("span");
   spacer.className = "controls-spacer";
   spacer.setAttribute("aria-hidden", "true");
-  controlsRow.append(nextBtn, spacer, levelResetBtn, hintBtn, checkBtn, status);
+  controlsRow.append(
+    prevBtn,
+    nextBtn,
+    spacer,
+    levelResetBtn,
+    hintBtn,
+    checkBtn,
+    status,
+  );
 
   const hintPanel = document.createElement("div");
   hintPanel.dataset.role = "code-hint";
@@ -218,6 +231,7 @@ function ensureCodeEditorLayout(
     hintBtn,
     checkBtn,
     levelResetBtn,
+    prevBtn,
     nextBtn,
     codeRoot: section,
   };
@@ -246,6 +260,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     hintBtn,
     checkBtn,
     levelResetBtn,
+    prevBtn,
     nextBtn,
     codeRoot,
   } = ensureCodeEditorLayout(textareaMinLines);
@@ -274,14 +289,17 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     return label ? `Next: ${label}` : "Next Program";
   })();
 
-  const buttonReplacements = [
-    ["$checkButton", "$b{Check}"],
-    ["$resetButton", "$b{Reset}"],
-    ["$newVariableButton", "$b{+ New variable}"],
-    ["$runLineButton", "$b{Run line}"],
-    ["$backButton", "$b{Back ◀}"],
-    ["$showAliasesButton", "$b{Show aliases}"],
-  ] as const;
+  function buttonReplacements() {
+    const backLabel = (prevBtn?.textContent || "Back ◀").trim();
+    return [
+      ["$checkButton", "$b{Check}"],
+      ["$resetButton", "$b{Reset}"],
+      ["$newVariableButton", "$b{+ New variable}"],
+      ["$runLineButton", "$b{Run line}"],
+      ["$backButton", `$b{${backLabel}}`],
+      ["$showAliasesButton", "$b{Show aliases}"],
+    ] as const;
+  }
 
   function normalizeEditorText(text: string): string {
     if (allowNewLines) return text;
@@ -467,7 +485,10 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
   }
 
   function applyButtonTokens(parts: CodeEditorParts | null): CodeEditorParts | null {
-    return applyTextTokenReplacements(parts, buttonReplacements) as CodeEditorParts | null;
+    return applyTextTokenReplacements(
+      parts,
+      buttonReplacements(),
+    ) as CodeEditorParts | null;
   }
 
   function hideHint() {

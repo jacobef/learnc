@@ -1,5 +1,6 @@
 mod ast;
 mod diag;
+mod integer;
 mod interpreter;
 mod lexer;
 mod parser;
@@ -22,8 +23,8 @@ use ast::{
 use diag::Diagnostic;
 use interpreter::{
     Interpreter, ProgramBlocked, ProgramExecutionLimit, ProgramExpressionEvalRequest,
-    ProgramExpressionResult, ProgramOutput, ProgramSourceLocation, ProgramStateBox,
-    ProgramTraceEvent, ProgramValueLiteral,
+    ProgramExpressionResult, ProgramOutput, ProgramSourceLocation, ProgramSourceRange,
+    ProgramStateBox, ProgramTraceEvent, ProgramValueLiteral,
 };
 use lexer::Lexer;
 use parser::Parser;
@@ -50,12 +51,23 @@ struct RunExpressionEvalRequest {
     pub event_index: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum UbDetectionMode {
+    /// Preserve the interpreter's standards-oriented behavior.
+    #[default]
+    Standard,
+    /// Also reject a small set of legal-but-dangerous beginner patterns.
+    /// This remains an internal execution option until the frontend deliberately exposes it.
+    Simple,
+}
+
 #[derive(Clone, Debug)]
 struct RunOptions {
     #[cfg(test)]
     pub include_dirs: Vec<PathBuf>,
     pub stdin: String,
     pub expression_eval: Option<RunExpressionEvalRequest>,
+    pub ub_detection_mode: UbDetectionMode,
     pub synthetic_address_base: u64,
     pub execution_step_limit: Option<usize>,
     pub execution_trace_following_limit: usize,
@@ -88,6 +100,7 @@ impl Default for RunOptions {
             include_dirs: Vec::new(),
             stdin: String::new(),
             expression_eval: None,
+            ub_detection_mode: UbDetectionMode::Standard,
             synthetic_address_base: 0x1000,
             execution_step_limit: None,
             execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
@@ -431,6 +444,7 @@ fn cboxes_run_virtual_sources_without_expression(
                 include_dirs: options.include_dirs.clone(),
                 stdin: options.stdin.clone(),
                 expression_eval: None,
+                ub_detection_mode: options.ub_detection_mode,
                 synthetic_address_base: options.synthetic_address_base,
                 execution_step_limit: options.execution_step_limit,
                 execution_trace_following_limit: options.execution_trace_following_limit,
@@ -536,6 +550,7 @@ pub unsafe extern "C" fn cboxes_run_source(
                 include_dirs: Vec::new(),
                 stdin: stdin.to_owned(),
                 expression_eval: None,
+                ub_detection_mode: UbDetectionMode::Standard,
                 synthetic_address_base: synthetic_address_base.into(),
                 execution_step_limit: Some(CBOXES_BROWSER_EXECUTION_STEP_LIMIT),
                 execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
@@ -609,6 +624,7 @@ pub unsafe extern "C" fn cboxes_run_files(
         include_dirs: Vec::new(),
         stdin: stdin.to_owned(),
         expression_eval: None,
+        ub_detection_mode: UbDetectionMode::Standard,
         synthetic_address_base: synthetic_address_base.into(),
         execution_step_limit: Some(execution_step_limit.max(1) as usize),
         execution_trace_following_limit: execution_trace_following_limit.max(1) as usize,
@@ -728,6 +744,7 @@ pub unsafe extern "C" fn cboxes_eval_expression(
                     expression,
                     event_index,
                 }),
+                ub_detection_mode: UbDetectionMode::Standard,
                 synthetic_address_base: synthetic_address_base.into(),
                 execution_step_limit: Some(CBOXES_BROWSER_EXECUTION_STEP_LIMIT),
                 execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
@@ -834,6 +851,7 @@ pub unsafe extern "C" fn cboxes_eval_expression_files(
             expression,
             event_index,
         }),
+        ub_detection_mode: UbDetectionMode::Standard,
         synthetic_address_base: synthetic_address_base.into(),
         execution_step_limit: Some(execution_step_limit.max(1) as usize),
         execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
@@ -1142,10 +1160,44 @@ fn cboxes_trace_json(trace: &[ProgramTraceEvent], source_display: &SourceDisplay
         out.push_str(&end_line.min(line_count.saturating_sub(1)).to_string());
         out.push_str(",\"state\":");
         out.push_str(&cboxes_state_json(&event.state));
+        out.push_str(",\"skippedRange\":");
+        out.push_str(&cboxes_source_range_json(
+            event.skipped_range.as_ref(),
+            source_display,
+        ));
         out.push('}');
     }
     out.push(']');
     out
+}
+
+fn cboxes_source_range_json(
+    range: Option<&ProgramSourceRange>,
+    source_display: &SourceDisplayMap,
+) -> String {
+    let Some(range) = range else {
+        return "null".to_owned();
+    };
+    let (line_offset, line_count) = source_display
+        .get(&range.file)
+        .copied()
+        .unwrap_or((0, usize::MAX));
+    let start_line = range.start_line.saturating_sub(line_offset);
+    if start_line >= line_count {
+        return "null".to_owned();
+    }
+    let end_line = range
+        .end_line
+        .saturating_sub(line_offset)
+        .min(line_count.saturating_sub(1));
+    format!(
+        "{{\"file\":{},\"startLine\":{},\"startColumn\":{},\"endLine\":{},\"endColumn\":{}}}",
+        cboxes_json_string(&range.file),
+        start_line,
+        range.start_column,
+        end_line,
+        range.end_column,
+    )
 }
 
 fn cboxes_source_location_json(
@@ -2205,6 +2257,11 @@ fn validate_inline_expr(
             validate_inline_expr(expr, internal_linkage_names, records, local_scopes)
         }
         Expr::Binary { lhs, rhs, .. }
+        | Expr::Subscript {
+            base: lhs,
+            index: rhs,
+            ..
+        }
         | Expr::Assign { lhs, rhs, .. }
         | Expr::CompoundAssign { lhs, rhs, .. } => {
             validate_inline_expr(lhs, internal_linkage_names, records, local_scopes)?;
@@ -2483,6 +2540,7 @@ fn remap_parameter(
         static_array_bound: param
             .static_array_bound
             .map(|expr| remap_expr(expr, record_map, enum_map)),
+        adjusted_from_array_or_function: param.adjusted_from_array_or_function,
         storage_class: param.storage_class,
         span: param.span,
     }
@@ -2565,12 +2623,16 @@ fn remap_statement(
             condition,
             then_branch,
             else_branch,
+            else_keyword_span,
+            branch_keyword_span,
             span,
         } => Statement::If {
             condition: remap_expr(condition, record_map, enum_map),
             then_branch: Box::new(remap_statement(*then_branch, record_map, enum_map)),
             else_branch: else_branch
                 .map(|stmt| Box::new(remap_statement(*stmt, record_map, enum_map))),
+            else_keyword_span,
+            branch_keyword_span,
             span,
         },
         Statement::Labeled {
@@ -2725,6 +2787,11 @@ fn remap_expr(
             op,
             lhs: Box::new(remap_expr(*lhs, record_map, enum_map)),
             rhs: Box::new(remap_expr(*rhs, record_map, enum_map)),
+            span,
+        },
+        Expr::Subscript { base, index, span } => Expr::Subscript {
+            base: Box::new(remap_expr(*base, record_map, enum_map)),
+            index: Box::new(remap_expr(*index, record_map, enum_map)),
             span,
         },
         Expr::Assign { lhs, rhs, span } => Expr::Assign {
@@ -2917,6 +2984,7 @@ fn function_decl_from_type(
                 ty,
                 vla_bounds: Vec::new(),
                 static_array_bound: None,
+                adjusted_from_array_or_function: false,
                 storage_class: None,
                 span,
             })
@@ -3276,6 +3344,27 @@ mod browser_api_tests {
         assert!(json.contains("\"startLine\":1"));
         assert!(!json.contains("\"startLine\":2"));
         assert!(json.contains("\"mainClose\":null"));
+    }
+
+    #[test]
+    fn branch_trace_reports_the_exact_skipped_source_range() {
+        let original = "if (0) {\n  int first = 1;\n} else if (0) {\n  int second = 2;\n} else {\n  int taken = 3;\n}\n";
+        let (files, source_display, implicit_main) = cboxes_prepare_virtual_sources(
+            vec![(PathBuf::from("program.c"), original.to_owned())],
+            true,
+        )
+        .unwrap();
+        let result = run_virtual_sources_with_options(&files, &RunOptions::default()).unwrap();
+        let json = cboxes_success_json(&result, &source_display);
+
+        assert!(implicit_main.applied);
+        assert!(json.contains("\"kind\":\"branch\""));
+        assert!(json.contains(
+            "\"skippedRange\":{\"file\":\"program.c\",\"startLine\":0,\"startColumn\":0,\"endLine\":2,\"endColumn\":1}"
+        ));
+        assert!(json.contains(
+            "\"skippedRange\":{\"file\":\"program.c\",\"startLine\":2,\"startColumn\":2,\"endLine\":4,\"endColumn\":1}"
+        ));
     }
 
     #[test]

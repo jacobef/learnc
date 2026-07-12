@@ -21,6 +21,7 @@ function collectCodeOutputChallengeElements(root = document) {
         levelResetBtn: role("code-reset-level"),
         rerollBtn: role("code-reroll"),
         showFailBtn: role("code-show-failing-case"),
+        prevBtn: queryElement('button[data-stepper="prev"]', root),
         nextBtn: queryElement('button[data-stepper="next"]', root),
         codeRoot: role("code-root"),
     };
@@ -88,12 +89,16 @@ function ensureCodeOutputChallengeLayout({ textareaMinLines, }) {
     codeRow.appendChild(editorWrap);
     codePane.appendChild(lockedRow);
     codePane.appendChild(codeRow);
+    const prevBtn = document.createElement("button");
+    prevBtn.textContent = "Back ◀";
+    prevBtn.dataset.stepper = "prev";
     const nextBtn = document.createElement("button");
     nextBtn.textContent = "Next Program ▶▶";
     nextBtn.dataset.stepper = "next";
     const controlsSpacer = document.createElement("span");
     controlsSpacer.className = "controls-spacer";
     controlsSpacer.setAttribute("aria-hidden", "true");
+    controlsRow.appendChild(prevBtn);
     controlsRow.appendChild(nextBtn);
     controlsRow.appendChild(controlsSpacer);
     const diagnosticEl = document.createElement("div");
@@ -157,6 +162,7 @@ function ensureCodeOutputChallengeLayout({ textareaMinLines, }) {
         levelResetBtn,
         rerollBtn,
         showFailBtn,
+        prevBtn,
         nextBtn,
         codeRoot: section,
     };
@@ -222,7 +228,7 @@ function createCodeOutputChallengeTemplate(config) {
     if (!solveCode.trim()) {
         failConfig("solve must be a non-empty C code string.");
     }
-    const { instructionsEl, lockedLineNumbers, lockedInputLine, editor, lineNumbers, stage, status, diagnosticEl, hintPanel, hintBtn, checkBtn, levelResetBtn, rerollBtn, showFailBtn, nextBtn, codeRoot, } = ensureCodeOutputChallengeLayout({ textareaMinLines });
+    const { instructionsEl, lockedLineNumbers, lockedInputLine, editor, lineNumbers, stage, status, diagnosticEl, hintPanel, hintBtn, checkBtn, levelResetBtn, rerollBtn, showFailBtn, prevBtn, nextBtn, codeRoot, } = ensureCodeOutputChallengeLayout({ textareaMinLines });
     const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
     bindBtnRefPulse(codeRoot || document);
     function normalizeProgramBody(text) {
@@ -782,15 +788,18 @@ function createCodeOutputChallengeTemplate(config) {
         stage.appendChild(group);
         return currentResult;
     }
-    const buttonReplacements = [
-        ["$checkButton", "$b{Check}"],
-        ["$newInputButton", "$b{New input}"],
-        ["$showFailingCaseButton", "$b{Show failing case}"],
-        ["$runLineButton", "$b{Run line}"],
-        ["$backButton", "$b{Back ◀}"],
-    ];
+    function buttonReplacements() {
+        const backLabel = (prevBtn?.textContent || "Back ◀").trim();
+        return [
+            ["$checkButton", "$b{Check}"],
+            ["$newInputButton", "$b{New input}"],
+            ["$showFailingCaseButton", "$b{Show failing case}"],
+            ["$runLineButton", "$b{Run line}"],
+            ["$backButton", `$b{${backLabel}}`],
+        ];
+    }
     function applyButtonTokens(parts) {
-        return applyTextTokenReplacements(parts, buttonReplacements);
+        return applyTextTokenReplacements(parts, buttonReplacements());
     }
     function setStatus(text, cls = "muted") {
         if (!status)

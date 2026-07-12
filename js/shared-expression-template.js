@@ -270,12 +270,17 @@ function createExpressionEvalTemplate(config) {
         const button = document.querySelector('button[data-stepper="next"]');
         return button instanceof HTMLButtonElement ? button : null;
     }
+    function previousButtonEl() {
+        const button = document.querySelector('button[data-stepper="prev"]');
+        return button instanceof HTMLButtonElement ? button : null;
+    }
     function buttonReplacements() {
         const nextLabel = visibleButtonLabel(nextButtonEl(), "Next ▶");
+        const previousLabel = visibleButtonLabel(previousButtonEl(), "Back ◀");
         return [
             ["$nextButton", `$b{${nextLabel}}`],
             ["$runLineButton", `$b{${nextLabel}}`],
-            ["$backButton", "$b{Back ◀}"],
+            ["$backButton", `$b{${previousLabel}}`],
             ["$checkButton", "$b{Check}"],
             ["$hintButton", "$b{Hint}"],
             ["$resetButton", "$b{Reset level}"],

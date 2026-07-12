@@ -6,6 +6,7 @@ use crate::ast::{
     PostfixOp, Statement, StorageClass, SwitchLabel, TranslationUnit, UnaryOp,
 };
 use crate::diag::Diagnostic;
+use crate::integer::parse_integer_literal;
 use crate::source::{SourceManager, Span};
 use crate::token::{Keyword, Token, TokenKind};
 use crate::types::{
@@ -26,11 +27,32 @@ enum SymbolKind {
     EnumConstant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TagKind {
+    Record(RecordKind),
+    Enum,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TagBinding {
+    kind: TagKind,
+    id: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ScopeEntry {
     ordinary: Option<SymbolKind>,
+    ordinary_ty: Option<CType>,
+    ordinary_storage_class: Option<ParsedStorageClass>,
+    ordinary_has_linkage: bool,
     typedef_ty: Option<CType>,
     enum_constant: Option<i128>,
+}
+
+#[derive(Debug, Clone)]
+struct ConstantInteger {
+    ty: CType,
+    value: i128,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +111,7 @@ enum ParsedDeclarator {
         inner: Box<ParsedDeclarator>,
         params: Vec<Parameter>,
         is_variadic: bool,
+        parameter_tags: HashMap<String, TagBinding>,
         span: Span,
     },
 }
@@ -98,6 +121,8 @@ struct ParsedArraySpec {
     bound: ParsedArrayBound,
     static_bound: Option<Expr>,
 }
+
+type ParsedFunctionInfo = (Vec<Parameter>, bool, HashMap<String, TagBinding>);
 
 impl ParsedDeclarator {
     fn span(&self) -> Span {
@@ -115,9 +140,9 @@ pub struct Parser<'a> {
     _sources: &'a SourceManager,
     tokens: Vec<Token>,
     index: usize,
-    record_tags: HashMap<(RecordKind, String), usize>,
+    file_tags: HashMap<String, TagBinding>,
+    block_tag_scopes: Vec<HashMap<String, TagBinding>>,
     records: HashMap<usize, RecordType>,
-    enum_tags: HashMap<String, usize>,
     enums: HashMap<usize, EnumType>,
     enum_constants: HashMap<String, i128>,
     next_tag_id: usize,
@@ -134,6 +159,9 @@ impl<'a> Parser<'a> {
             "va_list".to_owned(),
             ScopeEntry {
                 ordinary: None,
+                ordinary_ty: None,
+                ordinary_storage_class: None,
+                ordinary_has_linkage: false,
                 typedef_ty: Some(CType::VaList),
                 enum_constant: None,
             },
@@ -142,9 +170,9 @@ impl<'a> Parser<'a> {
             _sources: sources,
             tokens,
             index: 0,
-            record_tags: HashMap::new(),
+            file_tags: HashMap::new(),
+            block_tag_scopes: Vec::new(),
             records: HashMap::new(),
-            enum_tags: HashMap::new(),
             enums: HashMap::new(),
             enum_constants: HashMap::new(),
             next_tag_id: 0,
@@ -232,7 +260,7 @@ impl<'a> Parser<'a> {
         if ty.is_function() && function_params.is_none() {
             self.validate_function_decl_specifiers(&specs, base_span)?;
             let mut decls = Vec::new();
-            self.declare_ordinary_symbol(&name, SymbolKind::Function);
+            self.declare_function_symbol(&name, &ty, base_span, DeclContext::FileScope)?;
             decls.push(self.build_function_declaration(
                 name,
                 ty,
@@ -255,7 +283,7 @@ impl<'a> Parser<'a> {
                         span,
                     ));
                 }
-                self.declare_ordinary_symbol(&name, SymbolKind::Function);
+                self.declare_function_symbol(&name, &ty, span, DeclContext::FileScope)?;
                 decls.push(self.build_function_declaration(
                     name,
                     ty,
@@ -270,7 +298,7 @@ impl<'a> Parser<'a> {
             }
             return Ok(ExternalDecl::FunctionDeclarations(decls));
         }
-        let Some((params, is_variadic)) = function_params else {
+        let Some((params, is_variadic, parameter_tags)) = function_params else {
             return Ok(ExternalDecl::Globals(self.finish_declarator_list(
                 name,
                 ty,
@@ -288,11 +316,17 @@ impl<'a> Parser<'a> {
             ));
         }
         self.validate_function_decl_specifiers(&specs, base_span)?;
-        self.declare_ordinary_symbol(&name, SymbolKind::Function);
+        self.declare_function_symbol(&name, &ty, base_span, DeclContext::FileScope)?;
         let return_type = match ty.unqualified() {
             CType::Function(return_type, _, _) => (**return_type).clone(),
             _ => unreachable!("outermost function declarator must produce a function type"),
         };
+        if matches!(return_type.unqualified(), CType::Array(_, _)) {
+            return Err(Diagnostic::error(
+                "a function cannot return an array type",
+                base_span,
+            ));
+        }
         if self.eat(TokenKind::Semicolon) {
             return Ok(ExternalDecl::FunctionDeclarations(vec![FunctionDecl {
                 name,
@@ -305,9 +339,16 @@ impl<'a> Parser<'a> {
             }]));
         }
         self.push_block_scope();
+        self.current_tag_scope_mut().extend(parameter_tags);
         for param in &params {
             if let Some(name) = &param.name {
-                self.declare_ordinary_symbol(name, SymbolKind::Object);
+                self.declare_object_symbol(
+                    name,
+                    &param.ty,
+                    None,
+                    param.span,
+                    DeclContext::Parameter,
+                )?;
             }
         }
         let body = self.parse_block()?;
@@ -347,6 +388,7 @@ impl<'a> Parser<'a> {
                 ty,
                 vla_bounds: Vec::new(),
                 static_array_bound: None,
+                adjusted_from_array_or_function: false,
                 storage_class: None,
                 span,
             })
@@ -362,7 +404,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_parameter_list(&mut self) -> Result<(Vec<Parameter>, bool), Diagnostic> {
+    fn parse_parameter_list(&mut self) -> Result<ParsedFunctionInfo, Diagnostic> {
         self.expect(TokenKind::LParen)?;
         self.push_block_scope();
         let result = (|| {
@@ -377,6 +419,7 @@ impl<'a> Parser<'a> {
                         ty: CType::Void,
                         vla_bounds: Vec::new(),
                         static_array_bound: None,
+                        adjusted_from_array_or_function: false,
                         storage_class: None,
                         span: void_tok.span,
                     }],
@@ -401,6 +444,7 @@ impl<'a> Parser<'a> {
                         ty: self.adjust_parameter_type(specs.base_type),
                         vla_bounds: Vec::new(),
                         static_array_bound: None,
+                        adjusted_from_array_or_function: false,
                         storage_class: specs.storage_class.and_then(ast_storage_class),
                         span: start,
                     });
@@ -412,9 +456,19 @@ impl<'a> Parser<'a> {
                 let (name, ty, vla_bounds, static_array_bound, span, _) =
                     self.parse_declarator(specs.base_type.clone(), DeclContext::Parameter)?;
                 self.validate_parameter_decl_specifiers(&specs, span)?;
-                self.declare_ordinary_symbol(&name, SymbolKind::Object);
+                self.declare_object_symbol(
+                    &name,
+                    &ty,
+                    specs.storage_class,
+                    span,
+                    DeclContext::Parameter,
+                )?;
                 params.push(Parameter {
                     name: Some(name),
+                    adjusted_from_array_or_function: matches!(
+                        ty.unqualified(),
+                        CType::Array(_, _) | CType::Function(..)
+                    ),
                     ty: self.adjust_parameter_type(ty),
                     vla_bounds,
                     static_array_bound,
@@ -427,8 +481,9 @@ impl<'a> Parser<'a> {
             }
             Ok((params, is_variadic))
         })();
+        let parameter_tags = self.block_tag_scopes.last().cloned().unwrap_or_default();
         self.pop_block_scope();
-        result
+        result.map(|(params, is_variadic)| (params, is_variadic, parameter_tags))
     }
 
     fn parse_block(&mut self) -> Result<Block, Diagnostic> {
@@ -465,10 +520,21 @@ impl<'a> Parser<'a> {
         let (first_name, first_ty, first_vla_bounds, _, first_span, first_function_params) =
             self.parse_declarator(specs.base_type, DeclContext::BlockScope)?;
         let redecl_base = self.base_type_for_redeclaration(&first_ty);
-        let first_init = if self.eat(TokenKind::Equal) {
-            Some(self.parse_initializer()?)
+        let (first_init, first_predeclared) = if self.eat(TokenKind::Equal) {
+            let predeclared = first_function_params.is_none()
+                && specs.storage_class != Some(ParsedStorageClass::Typedef);
+            if predeclared {
+                self.declare_object_symbol(
+                    &first_name,
+                    &first_ty,
+                    specs.storage_class,
+                    first_span,
+                    DeclContext::BlockScope,
+                )?;
+            }
+            (Some(self.parse_initializer()?), predeclared)
         } else {
-            None
+            (None, false)
         };
         self.finish_single_block_declarator(
             &mut items,
@@ -479,16 +545,28 @@ impl<'a> Parser<'a> {
             specs.storage_class,
             specs.is_inline,
             first_init,
+            first_predeclared,
             first_span,
         )?;
 
         while self.eat(TokenKind::Comma) {
             let (name, ty, vla_bounds, _, span, function_params) =
                 self.parse_declarator(redecl_base.clone(), DeclContext::BlockScope)?;
-            let init = if self.eat(TokenKind::Equal) {
-                Some(self.parse_initializer()?)
+            let (init, predeclared) = if self.eat(TokenKind::Equal) {
+                let predeclared = function_params.is_none()
+                    && specs.storage_class != Some(ParsedStorageClass::Typedef);
+                if predeclared {
+                    self.declare_object_symbol(
+                        &name,
+                        &ty,
+                        specs.storage_class,
+                        span,
+                        DeclContext::BlockScope,
+                    )?;
+                }
+                (Some(self.parse_initializer()?), predeclared)
             } else {
-                None
+                (None, false)
             };
             self.finish_single_block_declarator(
                 &mut items,
@@ -499,6 +577,7 @@ impl<'a> Parser<'a> {
                 specs.storage_class,
                 specs.is_inline,
                 init,
+                predeclared,
                 span,
             )?;
         }
@@ -567,10 +646,20 @@ impl<'a> Parser<'a> {
         }
         let is_typedef = storage_class == Some(ParsedStorageClass::Typedef);
         let mut declarations = Vec::new();
-        let first_init = if self.eat(TokenKind::Equal) {
-            Some(self.parse_initializer()?)
+        let (first_init, first_predeclared) = if self.eat(TokenKind::Equal) {
+            let predeclared = !is_typedef && !first_ty.is_function();
+            if predeclared {
+                self.declare_object_symbol(
+                    &first_name,
+                    &first_ty,
+                    storage_class,
+                    first_span,
+                    context,
+                )?;
+            }
+            (Some(self.parse_initializer()?), predeclared)
         } else {
-            None
+            (None, false)
         };
         self.finish_single_declarator(
             &mut declarations,
@@ -579,6 +668,7 @@ impl<'a> Parser<'a> {
             first_vla_bounds,
             storage_class,
             first_init,
+            first_predeclared,
             first_span,
             context,
         )?;
@@ -591,10 +681,14 @@ impl<'a> Parser<'a> {
                     span,
                 ));
             }
-            let init = if self.eat(TokenKind::Equal) {
-                Some(self.parse_initializer()?)
+            let (init, predeclared) = if self.eat(TokenKind::Equal) {
+                let predeclared = !is_typedef && !ty.is_function();
+                if predeclared {
+                    self.declare_object_symbol(&name, &ty, storage_class, span, context)?;
+                }
+                (Some(self.parse_initializer()?), predeclared)
             } else {
-                None
+                (None, false)
             };
             self.finish_single_declarator(
                 &mut declarations,
@@ -603,6 +697,7 @@ impl<'a> Parser<'a> {
                 vla_bounds,
                 storage_class,
                 init,
+                predeclared,
                 span,
                 context,
             )?;
@@ -622,10 +717,11 @@ impl<'a> Parser<'a> {
         name: String,
         ty: CType,
         vla_bounds: Vec<Option<Expr>>,
-        function_params: Option<(Vec<Parameter>, bool)>,
+        function_params: Option<ParsedFunctionInfo>,
         storage_class: Option<ParsedStorageClass>,
         is_inline: bool,
         init: Option<Initializer>,
+        symbol_predeclared: bool,
         span: Span,
     ) -> Result<(), Diagnostic> {
         if is_inline
@@ -649,7 +745,7 @@ impl<'a> Parser<'a> {
                 is_inline,
             };
             self.validate_function_decl_specifiers(&specs, span)?;
-            self.declare_ordinary_symbol(&name, SymbolKind::Function);
+            self.declare_function_symbol(&name, &ty, span, DeclContext::BlockScope)?;
             items.push(BlockItem::FunctionDeclaration(
                 self.build_function_declaration(name, ty, span, storage_class, is_inline)?,
             ));
@@ -663,6 +759,7 @@ impl<'a> Parser<'a> {
             vla_bounds,
             storage_class,
             init,
+            symbol_predeclared,
             span,
             DeclContext::BlockScope,
         )?;
@@ -678,6 +775,7 @@ impl<'a> Parser<'a> {
         vla_bounds: Vec<Option<Expr>>,
         storage_class: Option<ParsedStorageClass>,
         init: Option<Initializer>,
+        symbol_predeclared: bool,
         span: Span,
         context: DeclContext,
     ) -> Result<(), Diagnostic> {
@@ -712,7 +810,7 @@ impl<'a> Parser<'a> {
                     span,
                 ));
             }
-            self.declare_typedef_name(&name, ty);
+            self.declare_typedef_name(&name, ty, span)?;
             return Ok(());
         }
         if context == DeclContext::BlockScope
@@ -724,7 +822,9 @@ impl<'a> Parser<'a> {
                 span,
             ));
         }
-        self.declare_ordinary_symbol(&name, SymbolKind::Object);
+        if !symbol_predeclared {
+            self.declare_object_symbol(&name, &ty, storage_class, span, context)?;
+        }
         declarations.push(Declaration {
             name,
             ty,
@@ -974,6 +1074,7 @@ impl<'a> Parser<'a> {
                     ));
                 }
             };
+            self.validate_switch_labels(&body)?;
             let span = start.merge(body.span);
             return Ok(Statement::Switch { expr, body, span });
         }
@@ -983,11 +1084,19 @@ impl<'a> Parser<'a> {
             let condition = self.parse_expression()?;
             self.expect(TokenKind::RParen)?;
             let then_branch = Box::new(self.parse_statement()?);
-            let else_branch = if self.at_keyword(Keyword::Else) {
-                self.bump();
-                Some(Box::new(self.parse_statement()?))
+            let (else_keyword_span, else_branch) = if self.at_keyword(Keyword::Else) {
+                let else_span = self.bump().span;
+                let mut else_statement = self.parse_statement()?;
+                if let Statement::If {
+                    branch_keyword_span,
+                    ..
+                } = &mut else_statement
+                {
+                    *branch_keyword_span = else_span;
+                }
+                (Some(else_span), Some(Box::new(else_statement)))
             } else {
-                None
+                (None, None)
             };
             let span = else_branch
                 .as_ref()
@@ -997,6 +1106,8 @@ impl<'a> Parser<'a> {
                 condition,
                 then_branch,
                 else_branch,
+                else_keyword_span,
+                branch_keyword_span: start,
                 span,
             });
         }
@@ -1442,17 +1553,10 @@ impl<'a> Parser<'a> {
             if self.eat(TokenKind::LBracket) {
                 let index = self.parse_expression()?;
                 let end = self.expect(TokenKind::RBracket)?.span;
-                let base_span = expr.span();
-                let add = Expr::Binary {
-                    op: BinaryOp::Add,
-                    lhs: Box::new(expr),
-                    rhs: Box::new(index),
-                    span: base_span.merge(end),
-                };
-                let span = add.span().merge(end);
-                expr = Expr::Unary {
-                    op: UnaryOp::Dereference,
-                    expr: Box::new(add),
+                let span = expr.span().merge(end);
+                expr = Expr::Subscript {
+                    base: Box::new(expr),
+                    index: Box::new(index),
                     span,
                 };
                 continue;
@@ -2077,8 +2181,14 @@ impl<'a> Parser<'a> {
         let specs = self.parse_declaration_specifiers(DeclContext::TypeName)?;
         let (ty, vla_bounds) = if self.at(TokenKind::LParen) {
             let declarator = self.parse_abstract_declarator_tree(DeclContext::TypeName)?;
-            let (_, ty, vla_bounds, _, _, _) =
+            let (_, ty, vla_bounds, static_array_bound, _, _) =
                 self.apply_parsed_declarator(declarator, specs.base_type, true)?;
+            if static_array_bound.is_some() {
+                return Err(Diagnostic::error(
+                    "static array bounds are only allowed in function parameter declarators",
+                    self.prev_span(),
+                ));
+            }
             (ty, vla_bounds)
         } else {
             self.parse_type_suffix(specs.base_type)?
@@ -2264,10 +2374,12 @@ impl<'a> Parser<'a> {
 
     fn push_block_scope(&mut self) {
         self.block_scopes.push(HashMap::new());
+        self.block_tag_scopes.push(HashMap::new());
     }
 
     fn pop_block_scope(&mut self) {
         let _ = self.block_scopes.pop();
+        let _ = self.block_tag_scopes.pop();
     }
 
     fn parse_declarator(
@@ -2281,7 +2393,7 @@ impl<'a> Parser<'a> {
             Vec<Option<Expr>>,
             Option<Expr>,
             Span,
-            Option<(Vec<Parameter>, bool)>,
+            Option<ParsedFunctionInfo>,
         ),
         Diagnostic,
     > {
@@ -2341,13 +2453,14 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.at(TokenKind::LParen) {
-                let (params, is_variadic) = self.parse_parameter_list()?;
+                let (params, is_variadic, parameter_tags) = self.parse_parameter_list()?;
                 let end = self.expect(TokenKind::RParen)?.span;
                 let span = declarator.span().merge(end);
                 declarator = ParsedDeclarator::Function {
                     inner: Box::new(declarator),
                     params,
                     is_variadic,
+                    parameter_tags,
                     span,
                 };
                 self.skip_gnu_attributes()?;
@@ -2402,13 +2515,14 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.at(TokenKind::LParen) {
-                let (params, is_variadic) = self.parse_parameter_list()?;
+                let (params, is_variadic, parameter_tags) = self.parse_parameter_list()?;
                 let end = self.expect(TokenKind::RParen)?.span;
                 let span = declarator.span().merge(end);
                 declarator = ParsedDeclarator::Function {
                     inner: Box::new(declarator),
                     params,
                     is_variadic,
+                    parameter_tags,
                     span,
                 };
                 self.skip_gnu_attributes()?;
@@ -2440,7 +2554,7 @@ impl<'a> Parser<'a> {
             Vec<Option<Expr>>,
             Option<Expr>,
             Span,
-            Option<(Vec<Parameter>, bool)>,
+            Option<ParsedFunctionInfo>,
         ),
         Diagnostic,
     > {
@@ -2472,7 +2586,11 @@ impl<'a> Parser<'a> {
                 ))
             }
             ParsedDeclarator::Array { inner, spec, span } => {
-                let array_ty = match &spec.bound {
+                let ParsedArraySpec {
+                    bound,
+                    static_bound,
+                } = spec;
+                let array_ty = match &bound {
                     ParsedArrayBound::Fixed(len) => CType::array_of(base, *len),
                     ParsedArrayBound::Unspecified | ParsedArrayBound::Variable(_) => {
                         CType::array_of(base, 0)
@@ -2480,16 +2598,18 @@ impl<'a> Parser<'a> {
                 };
                 let (name, ty, mut vla_bounds, static_array_bound, inner_span, function_params) =
                     self.apply_parsed_declarator(*inner, array_ty, false)?;
-                if let ParsedArrayBound::Variable(expr) = spec.bound {
-                    vla_bounds.push(Some(expr));
-                } else if matches!(spec.bound, ParsedArrayBound::Unspecified) {
-                    vla_bounds.push(None);
+                if static_bound.is_none() {
+                    if let ParsedArrayBound::Variable(expr) = bound {
+                        vla_bounds.push(Some(expr));
+                    } else if matches!(bound, ParsedArrayBound::Unspecified) {
+                        vla_bounds.push(None);
+                    }
                 }
                 Ok((
                     name,
                     ty,
                     vla_bounds,
-                    static_array_bound.or(spec.static_bound),
+                    static_array_bound.or(static_bound),
                     span.merge(inner_span),
                     function_params,
                 ))
@@ -2498,6 +2618,7 @@ impl<'a> Parser<'a> {
                 inner,
                 params,
                 is_variadic,
+                parameter_tags,
                 span,
             } => {
                 let function_ty = if is_variadic {
@@ -2518,7 +2639,7 @@ impl<'a> Parser<'a> {
                     static_array_bound,
                     span.merge(inner_span),
                     if surfaces_function {
-                        Some((params, is_variadic))
+                        Some((params, is_variadic, parameter_tags))
                     } else {
                         nested_function_params
                     },
@@ -2631,13 +2752,17 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let is_definition = self.at(TokenKind::LBrace);
+        let declares_tag_in_current_scope = is_definition || self.at(TokenKind::Semicolon);
         let id = match &tag {
             Some(name) => {
-                if let Some(existing) = self.record_tags.get(&(kind, name.clone())) {
-                    *existing
-                } else {
-                    let id = self.alloc_tag_id();
-                    self.record_tags.insert((kind, name.clone()), id);
+                let (id, is_new) = self.resolve_tag(
+                    name,
+                    TagKind::Record(kind),
+                    declares_tag_in_current_scope,
+                    start,
+                )?;
+                if is_new {
                     self.records.insert(
                         id,
                         RecordType {
@@ -2650,8 +2775,8 @@ impl<'a> Parser<'a> {
                             align: 1,
                         },
                     );
-                    id
                 }
+                id
             }
             None => self.alloc_tag_id(),
         };
@@ -3032,13 +3157,13 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let is_definition = self.at(TokenKind::LBrace);
+        let declares_tag_in_current_scope = is_definition || self.at(TokenKind::Semicolon);
         let id = match &tag {
             Some(name) => {
-                if let Some(existing) = self.enum_tags.get(name) {
-                    *existing
-                } else {
-                    let id = self.alloc_tag_id();
-                    self.enum_tags.insert(name.clone(), id);
+                let (id, is_new) =
+                    self.resolve_tag(name, TagKind::Enum, declares_tag_in_current_scope, start)?;
+                if is_new {
                     self.enums.insert(
                         id,
                         EnumType {
@@ -3047,8 +3172,8 @@ impl<'a> Parser<'a> {
                             complete: false,
                         },
                     );
-                    id
                 }
+                id
             }
             None => self.alloc_tag_id(),
         };
@@ -3066,12 +3191,6 @@ impl<'a> Parser<'a> {
                     TokenKind::Identifier(name) => name,
                     _ => return Err(Diagnostic::error("expected enumerator name", token.span)),
                 };
-                if self.enum_constants.contains_key(&name) {
-                    return Err(Diagnostic::error(
-                        format!("redefinition of enumerator {}", name),
-                        token.span,
-                    ));
-                }
                 let value = if self.eat(TokenKind::Equal) {
                     let expr = self.parse_assignment()?;
                     self.eval_integer_constant_expr(&expr)?
@@ -3108,6 +3227,86 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(CType::Enum(id, tag))
+    }
+
+    fn validate_switch_labels(&self, body: &Block) -> Result<(), Diagnostic> {
+        let mut case_values = HashSet::new();
+        let mut has_default = false;
+        self.collect_switch_labels_in_block(body, &mut case_values, &mut has_default)
+    }
+
+    fn collect_switch_labels_in_block(
+        &self,
+        block: &Block,
+        case_values: &mut HashSet<i128>,
+        has_default: &mut bool,
+    ) -> Result<(), Diagnostic> {
+        for item in &block.items {
+            if let BlockItem::Statement(statement) = item {
+                self.collect_switch_labels(statement, case_values, has_default)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_switch_labels(
+        &self,
+        statement: &Statement,
+        case_values: &mut HashSet<i128>,
+        has_default: &mut bool,
+    ) -> Result<(), Diagnostic> {
+        match statement {
+            Statement::Block(block) => {
+                self.collect_switch_labels_in_block(block, case_values, has_default)?
+            }
+            Statement::DoWhile { body, .. }
+            | Statement::For { body, .. }
+            | Statement::While { body, .. } => {
+                self.collect_switch_labels(body, case_values, has_default)?
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_switch_labels(then_branch, case_values, has_default)?;
+                if let Some(else_branch) = else_branch {
+                    self.collect_switch_labels(else_branch, case_values, has_default)?;
+                }
+            }
+            Statement::Labeled {
+                label, statement, ..
+            } => {
+                match label {
+                    SwitchLabel::Case { expr, span } => {
+                        let value = self.eval_integer_constant_expr(expr)?;
+                        if !case_values.insert(value) {
+                            return Err(Diagnostic::error(
+                                format!("duplicate case value {}", value),
+                                *span,
+                            ));
+                        }
+                    }
+                    SwitchLabel::Default { span } => {
+                        if *has_default {
+                            return Err(Diagnostic::error("multiple default labels", *span));
+                        }
+                        *has_default = true;
+                    }
+                }
+                self.collect_switch_labels(statement, case_values, has_default)?;
+            }
+            Statement::Switch { .. } => {}
+            Statement::UserLabeled { statement, .. } => {
+                self.collect_switch_labels(statement, case_values, has_default)?
+            }
+            Statement::Break(_)
+            | Statement::Continue(_)
+            | Statement::Expression(_, _)
+            | Statement::Goto { .. }
+            | Statement::Return(_, _) => {}
+        }
+        Ok(())
     }
 
     fn validate_function_labels(&self, body: &Block) -> Result<(), Diagnostic> {
@@ -3197,24 +3396,53 @@ impl<'a> Parser<'a> {
     }
 
     fn eval_integer_constant_expr(&self, expr: &Expr) -> Result<i128, Diagnostic> {
+        Ok(self.eval_typed_integer_constant_expr(expr)?.value)
+    }
+
+    fn eval_typed_integer_constant_expr(&self, expr: &Expr) -> Result<ConstantInteger, Diagnostic> {
         match expr {
-            Expr::Number(text, span) => self.parse_integer_constant_text(text, *span),
-            Expr::CharLiteral(value, _) => Ok(*value as i128),
-            Expr::Variable(name, span) => self.lookup_enum_constant_value(name).ok_or_else(|| {
-                Diagnostic::error(
-                    format!("identifier {} is not an integer constant expression", name),
-                    *span,
-                )
+            Expr::Number(text, span) => {
+                let (ty, value, _) = parse_integer_literal(text, *span)?;
+                Ok(ConstantInteger { ty, value })
+            }
+            Expr::CharLiteral(value, _) => Ok(ConstantInteger {
+                ty: CType::Int,
+                value: *value as i128,
             }),
+            Expr::Variable(name, span) => self
+                .lookup_enum_constant_value(name)
+                .map(|value| ConstantInteger {
+                    ty: CType::Int,
+                    value,
+                })
+                .ok_or_else(|| {
+                    Diagnostic::error(
+                        format!("identifier {} is not an integer constant expression", name),
+                        *span,
+                    )
+                }),
             Expr::Unary { op, expr, span } => {
-                let value = self.eval_integer_constant_expr(expr)?;
+                let value = self.eval_typed_integer_constant_expr(expr)?;
                 match op {
-                    UnaryOp::Plus => Ok(value),
-                    UnaryOp::Minus => value
-                        .checked_neg()
-                        .ok_or_else(|| Diagnostic::error("constant expression overflow", *span)),
-                    UnaryOp::LogicalNot => Ok((value == 0) as i128),
-                    UnaryOp::BitNot => Ok(!value),
+                    UnaryOp::Plus => self.promote_constant_integer(value),
+                    UnaryOp::Minus => {
+                        let value = self.promote_constant_integer(value)?;
+                        self.constant_integer_negate(value, *span)
+                    }
+                    UnaryOp::LogicalNot => Ok(ConstantInteger {
+                        ty: CType::Int,
+                        value: (value.value == 0) as i128,
+                    }),
+                    UnaryOp::BitNot => {
+                        let value = self.promote_constant_integer(value)?;
+                        Ok(ConstantInteger {
+                            value: value
+                                .ty
+                                .normalize_integer_value(!value.value)
+                                .expect("promoted integer has an integer representation"),
+                            ty: value.ty,
+                        })
+                    }
                     _ => Err(Diagnostic::error(
                         "unsupported operator in integer constant expression",
                         *span,
@@ -3222,57 +3450,21 @@ impl<'a> Parser<'a> {
                 }
             }
             Expr::Binary { op, lhs, rhs, span } => {
-                let lhs = self.eval_integer_constant_expr(lhs)?;
-                let rhs = self.eval_integer_constant_expr(rhs)?;
-                match op {
-                    BinaryOp::Add => lhs
-                        .checked_add(rhs)
-                        .ok_or_else(|| Diagnostic::error("constant expression overflow", *span)),
-                    BinaryOp::Sub => lhs
-                        .checked_sub(rhs)
-                        .ok_or_else(|| Diagnostic::error("constant expression overflow", *span)),
-                    BinaryOp::Mul => lhs
-                        .checked_mul(rhs)
-                        .ok_or_else(|| Diagnostic::error("constant expression overflow", *span)),
-                    BinaryOp::Div => {
-                        if rhs == 0 {
-                            Err(Diagnostic::error(
-                                "division by zero in constant expression",
-                                *span,
-                            ))
-                        } else {
-                            lhs.checked_div(rhs).ok_or_else(|| {
-                                Diagnostic::error("constant expression overflow", *span)
-                            })
-                        }
-                    }
-                    BinaryOp::Rem => {
-                        if rhs == 0 {
-                            Err(Diagnostic::error(
-                                "division by zero in constant expression",
-                                *span,
-                            ))
-                        } else {
-                            lhs.checked_rem(rhs).ok_or_else(|| {
-                                Diagnostic::error("constant expression overflow", *span)
-                            })
-                        }
-                    }
-                    BinaryOp::ShiftLeft => Ok(lhs << rhs),
-                    BinaryOp::ShiftRight => Ok(lhs >> rhs),
-                    BinaryOp::BitAnd => Ok(lhs & rhs),
-                    BinaryOp::BitXor => Ok(lhs ^ rhs),
-                    BinaryOp::BitOr => Ok(lhs | rhs),
-                    BinaryOp::LogicalAnd => Ok(((lhs != 0) && (rhs != 0)) as i128),
-                    BinaryOp::LogicalOr => Ok(((lhs != 0) || (rhs != 0)) as i128),
-                    BinaryOp::Equal => Ok((lhs == rhs) as i128),
-                    BinaryOp::NotEqual => Ok((lhs != rhs) as i128),
-                    BinaryOp::Less => Ok((lhs < rhs) as i128),
-                    BinaryOp::LessEqual => Ok((lhs <= rhs) as i128),
-                    BinaryOp::Greater => Ok((lhs > rhs) as i128),
-                    BinaryOp::GreaterEqual => Ok((lhs >= rhs) as i128),
-                    BinaryOp::Comma => Ok(rhs),
+                let lhs = self.eval_typed_integer_constant_expr(lhs)?;
+                if *op == BinaryOp::LogicalAnd && lhs.value == 0 {
+                    return Ok(ConstantInteger {
+                        ty: CType::Int,
+                        value: 0,
+                    });
                 }
+                if *op == BinaryOp::LogicalOr && lhs.value != 0 {
+                    return Ok(ConstantInteger {
+                        ty: CType::Int,
+                        value: 1,
+                    });
+                }
+                let rhs = self.eval_typed_integer_constant_expr(rhs)?;
+                self.eval_constant_integer_binary(*op, lhs, rhs, *span)
             }
             Expr::Conditional {
                 condition,
@@ -3280,18 +3472,374 @@ impl<'a> Parser<'a> {
                 else_expr,
                 ..
             } => {
-                if self.eval_integer_constant_expr(condition)? != 0 {
-                    self.eval_integer_constant_expr(then_expr)
+                let result_ty = self.usual_constant_integer_type(
+                    &self.integer_constant_expr_type(then_expr)?,
+                    &self.integer_constant_expr_type(else_expr)?,
+                );
+                let selected = if self.eval_typed_integer_constant_expr(condition)?.value != 0 {
+                    self.eval_typed_integer_constant_expr(then_expr)
                 } else {
-                    self.eval_integer_constant_expr(else_expr)
-                }
+                    self.eval_typed_integer_constant_expr(else_expr)
+                }?;
+                Ok(self.convert_constant_integer(selected, &result_ty))
             }
-            Expr::Cast { expr, .. } => self.eval_integer_constant_expr(expr),
+            Expr::Cast { ty, expr, span, .. } => {
+                if !ty.is_integer() {
+                    return Err(Diagnostic::error(
+                        "integer constant expression must have integer type",
+                        *span,
+                    ));
+                }
+                let value = self.eval_typed_integer_constant_expr(expr)?;
+                Ok(self.convert_constant_integer(value, ty))
+            }
+            Expr::SizeofType {
+                ty,
+                vla_bounds,
+                span,
+            } => {
+                if vla_bounds.iter().any(Option::is_some) {
+                    return Err(Diagnostic::error(
+                        "sizeof a variably modified type is not an integer constant expression",
+                        *span,
+                    ));
+                }
+                Ok(ConstantInteger {
+                    ty: CType::UnsignedLong,
+                    value: i128::try_from(self.type_size_of(ty)?)
+                        .map_err(|_| Diagnostic::error("sizeof result is too large", *span))?,
+                })
+            }
             Expr::OffsetOf {
                 ty,
                 designators,
                 span,
-            } => self.eval_offsetof_constant_expr(ty, designators, *span),
+            } => Ok(ConstantInteger {
+                ty: CType::UnsignedLong,
+                value: self.eval_offsetof_constant_expr(ty, designators, *span)?,
+            }),
+            _ => Err(Diagnostic::error(
+                "expression is not a supported integer constant expression",
+                expr.span(),
+            )),
+        }
+    }
+
+    fn promote_constant_integer(
+        &self,
+        value: ConstantInteger,
+    ) -> Result<ConstantInteger, Diagnostic> {
+        let promoted = match value.ty.unqualified() {
+            CType::Bool
+            | CType::Char
+            | CType::SignedChar
+            | CType::UnsignedChar
+            | CType::Short
+            | CType::UnsignedShort
+            | CType::Enum(_, _) => CType::Int,
+            _ if value.ty.is_integer() => value.ty.clone(),
+            _ => {
+                return Err(Diagnostic::error(
+                    "integer constant expression requires integer operands",
+                    Span::new(crate::source::FileId(0), 0, 0),
+                ));
+            }
+        };
+        Ok(self.convert_constant_integer(value, &promoted))
+    }
+
+    fn convert_constant_integer(&self, value: ConstantInteger, target: &CType) -> ConstantInteger {
+        ConstantInteger {
+            value: target
+                .normalize_integer_value(value.value)
+                .expect("integer target has an integer representation"),
+            ty: target.clone(),
+        }
+    }
+
+    fn usual_constant_integer_type(&self, lhs: &CType, rhs: &CType) -> CType {
+        if lhs == rhs {
+            return lhs.clone();
+        }
+        if lhs.is_signed_integer() == rhs.is_signed_integer() {
+            return if lhs.integer_rank() >= rhs.integer_rank() {
+                lhs.clone()
+            } else {
+                rhs.clone()
+            };
+        }
+        let (signed_ty, unsigned_ty) = if lhs.is_signed_integer() {
+            (lhs, rhs)
+        } else {
+            (rhs, lhs)
+        };
+        if signed_ty.integer_rank() > unsigned_ty.integer_rank() {
+            let (_, signed_max) = signed_ty.integer_bounds().unwrap();
+            let (_, unsigned_max) = unsigned_ty.integer_bounds().unwrap();
+            if signed_max >= unsigned_max {
+                signed_ty.clone()
+            } else {
+                signed_ty.unsigned_variant().unwrap()
+            }
+        } else {
+            unsigned_ty.clone()
+        }
+    }
+
+    fn constant_integer_negate(
+        &self,
+        value: ConstantInteger,
+        span: Span,
+    ) -> Result<ConstantInteger, Diagnostic> {
+        if value.ty.is_unsigned_integer() {
+            return Ok(ConstantInteger {
+                value: value
+                    .ty
+                    .normalize_integer_value(-value.value)
+                    .expect("unsigned integer has an integer representation"),
+                ty: value.ty,
+            });
+        }
+        let negated = value
+            .value
+            .checked_neg()
+            .filter(|result| {
+                value
+                    .ty
+                    .integer_bounds()
+                    .is_some_and(|(min, max)| (min..=max).contains(result))
+            })
+            .ok_or_else(|| Diagnostic::error("constant expression overflow", span))?;
+        Ok(ConstantInteger {
+            ty: value.ty,
+            value: negated,
+        })
+    }
+
+    fn eval_constant_integer_binary(
+        &self,
+        op: BinaryOp,
+        lhs: ConstantInteger,
+        rhs: ConstantInteger,
+        span: Span,
+    ) -> Result<ConstantInteger, Diagnostic> {
+        if op == BinaryOp::Comma {
+            return Err(Diagnostic::error(
+                "comma operator is not allowed in an evaluated integer constant expression",
+                span,
+            ));
+        }
+        if matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
+            let value = match op {
+                BinaryOp::LogicalAnd => lhs.value != 0 && rhs.value != 0,
+                BinaryOp::LogicalOr => lhs.value != 0 || rhs.value != 0,
+                _ => unreachable!(),
+            };
+            return Ok(ConstantInteger {
+                ty: CType::Int,
+                value: value as i128,
+            });
+        }
+        if matches!(op, BinaryOp::ShiftLeft | BinaryOp::ShiftRight) {
+            let lhs = self.promote_constant_integer(lhs)?;
+            let rhs = self.promote_constant_integer(rhs)?;
+            let bits = lhs.ty.integer_bits().unwrap() as i128;
+            if !(0..bits).contains(&rhs.value) {
+                return Err(Diagnostic::error(
+                    "shift count is negative or too large in constant expression",
+                    span,
+                ));
+            }
+            let shift = rhs.value as u32;
+            let shifted = match op {
+                BinaryOp::ShiftLeft if lhs.ty.is_unsigned_integer() => lhs
+                    .ty
+                    .normalize_integer_value(lhs.value << shift)
+                    .expect("unsigned integer has an integer representation"),
+                BinaryOp::ShiftLeft => {
+                    if lhs.value < 0 {
+                        return Err(Diagnostic::error(
+                            "left shift of a negative value in constant expression",
+                            span,
+                        ));
+                    }
+                    let result = lhs.value << shift;
+                    if !lhs
+                        .ty
+                        .integer_bounds()
+                        .is_some_and(|(min, max)| (min..=max).contains(&result))
+                    {
+                        return Err(Diagnostic::error("constant expression overflow", span));
+                    }
+                    result
+                }
+                BinaryOp::ShiftRight => lhs.value >> shift,
+                _ => unreachable!(),
+            };
+            return Ok(ConstantInteger {
+                ty: lhs.ty,
+                value: shifted,
+            });
+        }
+
+        let lhs = self.promote_constant_integer(lhs)?;
+        let rhs = self.promote_constant_integer(rhs)?;
+        let common_ty = self.usual_constant_integer_type(&lhs.ty, &rhs.ty);
+        let lhs = self.convert_constant_integer(lhs, &common_ty).value;
+        let rhs = self.convert_constant_integer(rhs, &common_ty).value;
+        let comparison = |value: bool| ConstantInteger {
+            ty: CType::Int,
+            value: value as i128,
+        };
+        if matches!(
+            op,
+            BinaryOp::Equal
+                | BinaryOp::NotEqual
+                | BinaryOp::Less
+                | BinaryOp::LessEqual
+                | BinaryOp::Greater
+                | BinaryOp::GreaterEqual
+        ) {
+            return Ok(comparison(match op {
+                BinaryOp::Equal => lhs == rhs,
+                BinaryOp::NotEqual => lhs != rhs,
+                BinaryOp::Less => lhs < rhs,
+                BinaryOp::LessEqual => lhs <= rhs,
+                BinaryOp::Greater => lhs > rhs,
+                BinaryOp::GreaterEqual => lhs >= rhs,
+                _ => unreachable!(),
+            }));
+        }
+        if matches!(op, BinaryOp::Div | BinaryOp::Rem) && rhs == 0 {
+            return Err(Diagnostic::error(
+                "division by zero in constant expression",
+                span,
+            ));
+        }
+        if common_ty.is_unsigned_integer()
+            && matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
+        {
+            let bits = common_ty.integer_bits().unwrap();
+            let mask = (1u128 << bits) - 1;
+            let lhs = lhs as u128;
+            let rhs = rhs as u128;
+            let value = match op {
+                BinaryOp::Add => lhs.wrapping_add(rhs),
+                BinaryOp::Sub => lhs.wrapping_sub(rhs),
+                BinaryOp::Mul => lhs.wrapping_mul(rhs),
+                _ => unreachable!(),
+            } & mask;
+            return Ok(ConstantInteger {
+                ty: common_ty,
+                value: value as i128,
+            });
+        }
+        let raw = match op {
+            BinaryOp::Add => lhs + rhs,
+            BinaryOp::Sub => lhs - rhs,
+            BinaryOp::Mul => lhs * rhs,
+            BinaryOp::Div => {
+                if common_ty.is_signed_integer()
+                    && common_ty
+                        .integer_bounds()
+                        .is_some_and(|(min, _)| lhs == min && rhs == -1)
+                {
+                    return Err(Diagnostic::error("constant expression overflow", span));
+                }
+                lhs / rhs
+            }
+            BinaryOp::Rem => {
+                if common_ty.is_signed_integer()
+                    && common_ty
+                        .integer_bounds()
+                        .is_some_and(|(min, _)| lhs == min && rhs == -1)
+                {
+                    return Err(Diagnostic::error("constant expression overflow", span));
+                }
+                lhs % rhs
+            }
+            BinaryOp::BitAnd => lhs & rhs,
+            BinaryOp::BitXor => lhs ^ rhs,
+            BinaryOp::BitOr => lhs | rhs,
+            _ => unreachable!(),
+        };
+        if common_ty.is_signed_integer()
+            && !common_ty
+                .integer_bounds()
+                .is_some_and(|(min, max)| (min..=max).contains(&raw))
+        {
+            return Err(Diagnostic::error("constant expression overflow", span));
+        }
+        Ok(ConstantInteger {
+            value: common_ty
+                .normalize_integer_value(raw)
+                .expect("integer result has an integer representation"),
+            ty: common_ty,
+        })
+    }
+
+    fn integer_constant_expr_type(&self, expr: &Expr) -> Result<CType, Diagnostic> {
+        match expr {
+            Expr::Number(text, span) => parse_integer_literal(text, *span).map(|(ty, _, _)| ty),
+            Expr::CharLiteral(_, _) | Expr::Variable(_, _) => Ok(CType::Int),
+            Expr::Unary { op, expr, span } => match op {
+                UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot => Ok(self
+                    .promote_constant_integer(ConstantInteger {
+                        ty: self.integer_constant_expr_type(expr)?,
+                        value: 0,
+                    })?
+                    .ty),
+                UnaryOp::LogicalNot => Ok(CType::Int),
+                _ => Err(Diagnostic::error(
+                    "unsupported operator in integer constant expression",
+                    *span,
+                )),
+            },
+            Expr::Binary { op, lhs, rhs, span } => match op {
+                BinaryOp::LogicalAnd
+                | BinaryOp::LogicalOr
+                | BinaryOp::Equal
+                | BinaryOp::NotEqual
+                | BinaryOp::Less
+                | BinaryOp::LessEqual
+                | BinaryOp::Greater
+                | BinaryOp::GreaterEqual => Ok(CType::Int),
+                BinaryOp::ShiftLeft | BinaryOp::ShiftRight => Ok(self
+                    .promote_constant_integer(ConstantInteger {
+                        ty: self.integer_constant_expr_type(lhs)?,
+                        value: 0,
+                    })?
+                    .ty),
+                BinaryOp::Comma => Err(Diagnostic::error(
+                    "comma operator is not allowed in an evaluated integer constant expression",
+                    *span,
+                )),
+                _ => {
+                    let lhs = self.promote_constant_integer(ConstantInteger {
+                        ty: self.integer_constant_expr_type(lhs)?,
+                        value: 0,
+                    })?;
+                    let rhs = self.promote_constant_integer(ConstantInteger {
+                        ty: self.integer_constant_expr_type(rhs)?,
+                        value: 0,
+                    })?;
+                    Ok(self.usual_constant_integer_type(&lhs.ty, &rhs.ty))
+                }
+            },
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => Ok(self.usual_constant_integer_type(
+                &self.integer_constant_expr_type(then_expr)?,
+                &self.integer_constant_expr_type(else_expr)?,
+            )),
+            Expr::Cast { ty, span, .. } if ty.is_integer() => Ok(ty.clone()),
+            Expr::Cast { span, .. } => Err(Diagnostic::error(
+                "integer constant expression must have integer type",
+                *span,
+            )),
+            Expr::SizeofType { .. } | Expr::OffsetOf { .. } => Ok(CType::UnsignedLong),
             _ => Err(Diagnostic::error(
                 "expression is not a supported integer constant expression",
                 expr.span(),
@@ -3381,24 +3929,6 @@ impl<'a> Parser<'a> {
             }
         }
         None
-    }
-
-    fn parse_integer_constant_text(&self, text: &str, span: Span) -> Result<i128, Diagnostic> {
-        let trimmed = text.trim_end_matches(|ch: char| ch.is_ascii_alphabetic());
-        if let Some(hex) = trimmed
-            .strip_prefix("0x")
-            .or_else(|| trimmed.strip_prefix("0X"))
-        {
-            i128::from_str_radix(hex, 16)
-                .map_err(|_| Diagnostic::error("invalid hexadecimal constant", span))
-        } else if trimmed.starts_with('0') && trimmed.len() > 1 {
-            i128::from_str_radix(&trimmed[1..], 8)
-                .map_err(|_| Diagnostic::error("invalid octal constant", span))
-        } else {
-            trimmed
-                .parse::<i128>()
-                .map_err(|_| Diagnostic::error("invalid integer constant", span))
-        }
     }
 
     fn type_is_complete(&self, ty: &CType) -> bool {
@@ -3697,10 +4227,83 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn current_scope_entry(&self, name: &str) -> Option<&ScopeEntry> {
+        if let Some(scope) = self.block_scopes.last() {
+            scope.get(name)
+        } else {
+            self.file_scope.get(name)
+        }
+    }
+
+    fn current_tag_scope_mut(&mut self) -> &mut HashMap<String, TagBinding> {
+        if let Some(scope) = self.block_tag_scopes.last_mut() {
+            scope
+        } else {
+            &mut self.file_tags
+        }
+    }
+
+    fn current_tag_binding(&self, name: &str) -> Option<TagBinding> {
+        if let Some(scope) = self.block_tag_scopes.last() {
+            scope.get(name).copied()
+        } else {
+            self.file_tags.get(name).copied()
+        }
+    }
+
+    fn visible_tag_binding(&self, name: &str) -> Option<TagBinding> {
+        self.block_tag_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .or_else(|| self.file_tags.get(name))
+            .copied()
+    }
+
+    fn declare_tag(&mut self, name: &str, kind: TagKind, id: usize) {
+        self.current_tag_scope_mut()
+            .insert(name.to_owned(), TagBinding { kind, id });
+    }
+
+    fn resolve_tag(
+        &mut self,
+        name: &str,
+        kind: TagKind,
+        current_scope_only: bool,
+        span: Span,
+    ) -> Result<(usize, bool), Diagnostic> {
+        let existing = if current_scope_only {
+            self.current_tag_binding(name)
+        } else {
+            self.visible_tag_binding(name)
+        };
+        if let Some(existing) = existing {
+            if existing.kind != kind {
+                return Err(Diagnostic::error(
+                    format!("tag {} was previously declared with a different kind", name),
+                    span,
+                ));
+            }
+            return Ok((existing.id, false));
+        }
+        let id = self.alloc_tag_id();
+        self.declare_tag(name, kind, id);
+        Ok((id, true))
+    }
+
     fn visible_scope_entry(&self, name: &str) -> Option<&ScopeEntry> {
         self.block_scopes
             .iter()
             .rev()
+            .find_map(|scope| scope.get(name))
+            .or_else(|| self.file_scope.get(name))
+    }
+
+    fn outer_scope_entry(&self, name: &str) -> Option<&ScopeEntry> {
+        self.block_scopes
+            .iter()
+            .rev()
+            .skip(1)
             .find_map(|scope| scope.get(name))
             .or_else(|| self.file_scope.get(name))
     }
@@ -3720,20 +4323,181 @@ impl<'a> Parser<'a> {
             .and_then(|entry| entry.enum_constant)
     }
 
-    fn declare_ordinary_symbol(&mut self, name: &str, kind: SymbolKind) {
-        let entry = self.current_scope_mut().entry(name.to_owned()).or_default();
-        entry.ordinary = Some(kind);
-        entry.typedef_ty = None;
-        if kind != SymbolKind::EnumConstant {
-            entry.enum_constant = None;
+    fn declare_object_symbol(
+        &mut self,
+        name: &str,
+        ty: &CType,
+        storage_class: Option<ParsedStorageClass>,
+        span: Span,
+        context: DeclContext,
+    ) -> Result<(), Diagnostic> {
+        let existing = self.current_scope_entry(name).cloned();
+        if let Some(existing) = existing {
+            if existing.typedef_ty.is_some() || existing.enum_constant.is_some() {
+                return Err(Diagnostic::error(
+                    format!("{} is already declared as a different kind of symbol", name),
+                    span,
+                ));
+            }
+            if let Some(kind) = existing.ordinary {
+                if kind != SymbolKind::Object {
+                    return Err(Diagnostic::error(
+                        format!("{} is already declared as a different kind of symbol", name),
+                        span,
+                    ));
+                }
+                let repeated_block_extern = context == DeclContext::BlockScope
+                    && existing.ordinary_storage_class == Some(ParsedStorageClass::Extern)
+                    && storage_class == Some(ParsedStorageClass::Extern);
+                if context != DeclContext::FileScope && !repeated_block_extern {
+                    return Err(Diagnostic::error(format!("redefinition of {}", name), span));
+                }
+                if repeated_block_extern
+                    && existing
+                        .ordinary_ty
+                        .as_ref()
+                        .is_some_and(|existing_ty| !declaration_types_compatible(existing_ty, ty))
+                {
+                    return Err(Diagnostic::error(
+                        format!("conflicting types for {}", name),
+                        span,
+                    ));
+                }
+                return Ok(());
+            }
         }
+        if context == DeclContext::BlockScope
+            && storage_class == Some(ParsedStorageClass::Extern)
+            && let Some(outer) = self.outer_scope_entry(name)
+            && outer.ordinary_has_linkage
+        {
+            if outer.ordinary != Some(SymbolKind::Object) {
+                return Err(Diagnostic::error(
+                    format!("{} is already declared as a different kind of symbol", name),
+                    span,
+                ));
+            }
+            if outer
+                .ordinary_ty
+                .as_ref()
+                .is_some_and(|outer_ty| !declaration_types_compatible(outer_ty, ty))
+            {
+                return Err(Diagnostic::error(
+                    format!("conflicting types for {}", name),
+                    span,
+                ));
+            }
+        }
+        let entry = self.current_scope_mut().entry(name.to_owned()).or_default();
+        entry.ordinary = Some(SymbolKind::Object);
+        entry.ordinary_ty = Some(ty.clone());
+        entry.ordinary_storage_class = storage_class;
+        entry.ordinary_has_linkage = context == DeclContext::FileScope
+            || (context == DeclContext::BlockScope
+                && storage_class == Some(ParsedStorageClass::Extern));
+        entry.typedef_ty = None;
+        entry.enum_constant = None;
+        Ok(())
     }
 
-    fn declare_typedef_name(&mut self, name: &str, ty: CType) {
+    fn declare_function_symbol(
+        &mut self,
+        name: &str,
+        ty: &CType,
+        span: Span,
+        context: DeclContext,
+    ) -> Result<(), Diagnostic> {
+        let existing = self.current_scope_entry(name).cloned();
+        if let Some(existing) = existing {
+            if existing.typedef_ty.is_some()
+                || existing.enum_constant.is_some()
+                || existing
+                    .ordinary
+                    .is_some_and(|kind| kind != SymbolKind::Function)
+            {
+                return Err(Diagnostic::error(
+                    format!("{} is already declared as a different kind of symbol", name),
+                    span,
+                ));
+            }
+            if existing.ordinary == Some(SymbolKind::Function) {
+                if context == DeclContext::BlockScope
+                    && existing
+                        .ordinary_ty
+                        .as_ref()
+                        .is_some_and(|existing_ty| !declaration_types_compatible(existing_ty, ty))
+                {
+                    return Err(Diagnostic::error(
+                        format!("conflicting types for {}", name),
+                        span,
+                    ));
+                }
+                return Ok(());
+            }
+        }
+        if context == DeclContext::BlockScope
+            && let Some(outer) = self.outer_scope_entry(name)
+            && outer.ordinary_has_linkage
+        {
+            if outer.ordinary != Some(SymbolKind::Function) {
+                return Err(Diagnostic::error(
+                    format!("{} is already declared as a different kind of symbol", name),
+                    span,
+                ));
+            }
+            if outer
+                .ordinary_ty
+                .as_ref()
+                .is_some_and(|outer_ty| !declaration_types_compatible(outer_ty, ty))
+            {
+                return Err(Diagnostic::error(
+                    format!("conflicting types for {}", name),
+                    span,
+                ));
+            }
+        }
+        let entry = self.current_scope_mut().entry(name.to_owned()).or_default();
+        entry.ordinary = Some(SymbolKind::Function);
+        entry.ordinary_ty = Some(ty.clone());
+        entry.ordinary_storage_class = None;
+        entry.ordinary_has_linkage = true;
+        entry.typedef_ty = None;
+        entry.enum_constant = None;
+        Ok(())
+    }
+
+    fn declare_typedef_name(
+        &mut self,
+        name: &str,
+        ty: CType,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let existing = self.current_scope_entry(name).cloned();
+        if let Some(existing) = existing {
+            if let Some(existing_ty) = existing.typedef_ty {
+                if declaration_types_compatible(&existing_ty, &ty) {
+                    return Ok(());
+                }
+                return Err(Diagnostic::error(
+                    format!("conflicting types for typedef {}", name),
+                    span,
+                ));
+            }
+            if existing.ordinary.is_some() || existing.enum_constant.is_some() {
+                return Err(Diagnostic::error(
+                    format!("{} is already declared as a different kind of symbol", name),
+                    span,
+                ));
+            }
+        }
         let entry = self.current_scope_mut().entry(name.to_owned()).or_default();
         entry.ordinary = None;
+        entry.ordinary_ty = None;
+        entry.ordinary_storage_class = None;
+        entry.ordinary_has_linkage = false;
         entry.enum_constant = None;
         entry.typedef_ty = Some(ty);
+        Ok(())
     }
 
     fn declare_enum_constant(
@@ -3750,6 +4514,9 @@ impl<'a> Parser<'a> {
             ));
         }
         entry.ordinary = Some(SymbolKind::EnumConstant);
+        entry.ordinary_ty = None;
+        entry.ordinary_storage_class = None;
+        entry.ordinary_has_linkage = false;
         entry.enum_constant = Some(value);
         Ok(())
     }
@@ -3806,6 +4573,33 @@ impl<'a> Parser<'a> {
             .get(self.index)
             .map(|token| token.span)
             .unwrap_or_else(|| self.tokens.last().unwrap().span)
+    }
+}
+
+fn declaration_types_compatible(lhs: &CType, rhs: &CType) -> bool {
+    match (lhs, rhs) {
+        (CType::Qualified(lhs, lhs_qualifiers), CType::Qualified(rhs, rhs_qualifiers)) => {
+            lhs_qualifiers == rhs_qualifiers && declaration_types_compatible(lhs, rhs)
+        }
+        (CType::Complex(lhs), CType::Complex(rhs)) | (CType::Pointer(lhs), CType::Pointer(rhs)) => {
+            declaration_types_compatible(lhs, rhs)
+        }
+        (CType::Array(lhs, lhs_len), CType::Array(rhs, rhs_len)) => {
+            (*lhs_len == 0 || *rhs_len == 0 || lhs_len == rhs_len)
+                && declaration_types_compatible(lhs, rhs)
+        }
+        (
+            CType::Function(lhs_return, lhs_params, lhs_variadic),
+            CType::Function(rhs_return, rhs_params, rhs_variadic),
+        ) => {
+            lhs_variadic == rhs_variadic
+                && lhs_params.len() == rhs_params.len()
+                && declaration_types_compatible(lhs_return, rhs_return)
+                && lhs_params.iter().zip(rhs_params).all(|(lhs, rhs)| {
+                    declaration_types_compatible(lhs.unqualified(), rhs.unqualified())
+                })
+        }
+        _ => lhs == rhs,
     }
 }
 
@@ -3868,29 +4662,5 @@ fn align_up(value: usize, align: usize) -> usize {
         value
     } else {
         ((value + align - 1) / align) * align
-    }
-}
-
-trait StatementSpan {
-    fn span(&self) -> Span;
-}
-
-impl StatementSpan for Statement {
-    fn span(&self) -> Span {
-        match self {
-            Statement::Block(block) => block.span,
-            Statement::Break(span)
-            | Statement::Continue(span)
-            | Statement::DoWhile { span, .. }
-            | Statement::Expression(_, span)
-            | Statement::For { span, .. }
-            | Statement::Goto { span, .. }
-            | Statement::Labeled { span, .. }
-            | Statement::Return(_, span)
-            | Statement::Switch { span, .. }
-            | Statement::UserLabeled { span, .. }
-            | Statement::If { span, .. }
-            | Statement::While { span, .. } => *span,
-        }
     }
 }

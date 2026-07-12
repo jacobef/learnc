@@ -64,6 +64,11 @@ function getNavLabelForHref(href) {
         return null;
     return label.replace(/^\d+\.\s*/, "");
 }
+function getPreviousNavHref(href) {
+    const current = normalizeNavHref(href || currentNavHref());
+    const index = DEFAULT_NAV_ITEMS.findIndex((item) => normalizeNavHref(item?.href || "") === current);
+    return index > 1 ? DEFAULT_NAV_ITEMS[index - 1]?.href ?? null : null;
+}
 function currentNavHref() {
     const pathname = window.location?.pathname || "";
     const cleaned = normalizeNavHref(pathname);
@@ -1527,13 +1532,19 @@ function stepperButtons(root, dir) {
     });
     return list;
 }
-function createStepper({ root, prevButtons = null, nextButtons = null, lines = [], nextPage = null, getBoundary, setBoundary, onBeforeChange, onAfterChange, isStepLocked, getStepBadge, getNextLabel, getNextBoundary, getPrevBoundary, isAtEnd, endLabel, allowSameBoundary = false, } = {}) {
+function createStepper({ root, prevButtons = null, nextButtons = null, lines = [], previousPage = getPreviousNavHref(), nextPage = null, getBoundary, setBoundary, onBeforeChange, onAfterChange, isStepLocked, getStepBadge, getNextLabel, getNextBoundary, getPrevBoundary, isAtEnd, startLabel, endLabel, allowSameBoundary = false, } = {}) {
     const boundButtons = new WeakSet();
     const getPrevButtons = () => prevButtons || stepperButtons(root, "prev");
     const getNextButtons = () => nextButtons || stepperButtons(root, "next");
     const total = Array.isArray(lines)
         ? lines.length
         : Math.max(0, Number(lines) || 0);
+    const resolvedStartLabel = (() => {
+        if (startLabel)
+            return startLabel;
+        const label = getNavLabelForHref(previousPage);
+        return label ? `Prev: ${label}` : "Previous Program";
+    })();
     function clearPulse() {
         getNextButtons().forEach((btn) => btn.classList.remove("pulse-success"));
     }
@@ -1558,7 +1569,15 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
         const nextButtons = getNextButtons();
         const current = boundary();
         prevButtons.forEach((btn) => {
-            btn.disabled = current === 0;
+            const atStart = current === 0;
+            const canNavigateBack = atStart && !!previousPage;
+            btn.disabled = atStart && !canNavigateBack;
+            btn.textContent = canNavigateBack
+                ? `${resolvedStartLabel} ◀◀`
+                : atStart
+                    ? "At start"
+                    : "Back ◀";
+            btn.dataset.stepperStart = String(atStart);
         });
         if (nextButtons.length) {
             const atEndNow = atEnd(current);
@@ -1642,8 +1661,14 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
                 return;
             boundButtons.add(btn);
             btn.addEventListener("click", () => {
-                if (boundary() === 0)
+                if (boundary() === 0) {
+                    if (!btn.disabled && previousPage) {
+                        const previousUrl = withSidebarParam(previousPage);
+                        if (previousUrl)
+                            window.location.href = previousUrl;
+                    }
                     return;
+                }
                 clearPulse();
                 const current = boundary();
                 const target = typeof getPrevBoundary === "function"
@@ -1769,6 +1794,7 @@ document.addEventListener("keydown", (e) => {
         : 'button[data-stepper="next"]';
     const btn = [...document.querySelectorAll(selector)].find((node) => node instanceof HTMLButtonElement &&
         !node.disabled &&
+        node.dataset.stepperStart !== "true" &&
         node.dataset.stepperEnd !== "true");
     if (!btn || btn.disabled)
         return;
@@ -2028,4 +2054,4 @@ function flashStatus(el) {
     void node.offsetWidth;
     node.classList.add("status-flash");
 }
-export { clearNode, buildNav, createStepper, disableBoxEditing, ensureBaseLayout, ensurePanelizedMain, flashStatus, getNavLabelForHref, isMobileViewport, bindBtnRefPulse, makeAnswerBox, queryElement, queryRole, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, vbox, applyOtherNames, appendStateObjects, findArrayObjectBoxesForResult, };
+export { clearNode, buildNav, createStepper, disableBoxEditing, ensureBaseLayout, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, isMobileViewport, bindBtnRefPulse, makeAnswerBox, queryElement, queryRole, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, vbox, applyOtherNames, appendStateObjects, findArrayObjectBoxesForResult, };

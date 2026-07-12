@@ -647,8 +647,21 @@ function normalizeTrace(rawTrace) {
             startLine: Math.max(0, Math.floor(Number(event.startLine ?? 0))),
             endLine: Math.max(0, Math.floor(Number(event.endLine ?? event.startLine ?? 0))),
             state: normalizeState(event.state),
+            skippedRange: normalizeProgramSourceRange(event.skippedRange),
         };
     });
+}
+function normalizeProgramSourceRange(rawRange) {
+    if (!rawRange || typeof rawRange !== "object")
+        return null;
+    const range = rawRange;
+    return {
+        file: String(range.file ?? "program.c"),
+        startLine: Math.max(0, Math.floor(Number(range.startLine ?? 0))),
+        startColumn: Math.max(0, Math.floor(Number(range.startColumn ?? 0))),
+        endLine: Math.max(0, Math.floor(Number(range.endLine ?? range.startLine ?? 0))),
+        endColumn: Math.max(0, Math.floor(Number(range.endColumn ?? 0))),
+    };
 }
 function normalizeSourceLocation(rawLocation) {
     if (!rawLocation || typeof rawLocation !== "object")

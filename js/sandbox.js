@@ -320,19 +320,43 @@ function captureStepAnchorForEdit(prevText, nextText) {
     const nextEvent = sandbox.trace[sandbox.stepPosition];
     if (!nextEvent || nextEvent.file !== sandbox.activePath)
         return null;
+    const occurrence = sandbox.trace
+        .slice(0, sandbox.stepPosition)
+        .filter((event) => event.file === nextEvent.file &&
+        event.kind === nextEvent.kind &&
+        event.startLine === nextEvent.startLine).length;
     return {
         file: nextEvent.file,
+        kind: nextEvent.kind,
         mappedStartLine: mapLineThroughEdit(prevText, nextText, nextEvent.startLine),
+        occurrence,
         text: textForTraceEvent(nextEvent),
     };
 }
+function tracePositionForOccurrence(trace, occurrence, matches) {
+    let seen = 0;
+    let lastMatch = null;
+    for (let index = 0; index < trace.length; index += 1) {
+        if (!matches(trace[index]))
+            continue;
+        lastMatch = index;
+        if (seen === occurrence)
+            return index;
+        seen += 1;
+    }
+    return lastMatch;
+}
 function positionForStepAnchor(anchor, trace) {
-    const exactLine = trace.findIndex((event) => event.file === anchor.file && event.startLine === anchor.mappedStartLine);
-    if (exactLine >= 0)
+    const exactLine = tracePositionForOccurrence(trace, anchor.occurrence, (event) => event.file === anchor.file &&
+        event.kind === anchor.kind &&
+        event.startLine === anchor.mappedStartLine);
+    if (exactLine != null)
         return exactLine;
     if (anchor.text) {
-        const textMatch = trace.findIndex((event) => event.file === anchor.file && textForTraceEvent(event) === anchor.text);
-        if (textMatch >= 0)
+        const textMatch = tracePositionForOccurrence(trace, anchor.occurrence, (event) => event.file === anchor.file &&
+            event.kind === anchor.kind &&
+            textForTraceEvent(event) === anchor.text);
+        if (textMatch != null)
             return textMatch;
     }
     const sameFileAfterLine = trace.findIndex((event) => event.file === anchor.file && event.startLine > anchor.mappedStartLine);
@@ -495,7 +519,11 @@ function renderExpression(outcome) {
         renderExpressionError("Expression unavailable", "Fix the program error before evaluating an expression.");
         return;
     }
-    const evaluated = evaluateCExpressionFiles(outcome.files || sandbox.files, outcome.eventIndex ?? 0, expr, undefined, stdinForRun(), outcome.implicitMain ?? implicitMainForRun(), outcome.executionBudget ?? executionBudget());
+    if (outcome.eventIndex == null) {
+        renderExpressionError("Expression unavailable", "Run at least one program step before evaluating an expression.");
+        return;
+    }
+    const evaluated = evaluateCExpressionFiles(outcome.files || sandbox.files, outcome.eventIndex, expr, undefined, stdinForRun(), outcome.implicitMain ?? implicitMainForRun(), outcome.executionBudget ?? executionBudget());
     if (evaluated.kind !== "ok") {
         renderExpressionError(evaluated.kind === "ub"
             ? "Invalid expression: undefined behavior"
@@ -650,6 +678,9 @@ function renderStage() {
         sandbox.traceLength = sandbox.trace.length;
     }
     else {
+        sandbox.trace = [];
+        sandbox.traceLength = 0;
+        sandbox.mainClose = null;
         sandbox.blocked = null;
         sandbox.executionLimit = null;
     }
