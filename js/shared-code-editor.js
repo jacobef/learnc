@@ -1,6 +1,6 @@
-import { applyTextTokenReplacements, appendStateObjects, bindBtnRefPulse, boxValueMatchesSpec, clearNode, createStepper, ensurePanelizedMain, flashStatus, getNavLabelForHref, queryElement, queryRole, renderParts, setPartsContent, syncDocumentTitleFromNav, } from "./shared-core.js";
+import { applyTextTokenReplacements, appendStateObjects, bindBtnRefPulse, clearNode, createStepper, ensurePanelizedMain, flashStatus, getNavLabelForHref, queryElement, queryRole, renderParts, setPartsContent, syncDocumentTitleFromNav, } from "./shared-core.js";
 import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
-import { parseCValueLiteral, runCProgram } from "./shared-c-interpreter.js";
+import { boxValueMatchesSpec, runCProgram } from "./shared-c-interpreter.js";
 import { clearLevelProgress, currentLevelId, maybeRestoreLevelProgress, writeLevelProgress, } from "./shared-progress.js";
 function collectCodeEditorElements(root = document) {
     const role = (name) => queryRole(name, root);
@@ -278,7 +278,7 @@ function createCodeEditorTemplate(config) {
                 return false;
             if ((actual.type || "") !== (expected.type || ""))
                 return false;
-            if (!boxValueMatchesSpec(parseCValueLiteral, actual, expected).ok)
+            if (!boxValueMatchesSpec(actual, expected).ok)
                 return false;
         }
         return true;

@@ -538,10 +538,24 @@ pub struct ProgramStateBox {
     pub name: String,
     pub ty: String,
     pub value: String,
+    pub display_value: String,
+    pub exact_value: String,
     pub address: Option<u64>,
     pub array_root: Option<String>,
     pub array_shape: Vec<usize>,
     pub array_indices: Vec<usize>,
+    pub aliases: Vec<String>,
+    pub type_info: ProgramTypeInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProgramTypeInfo {
+    pub kind: String,
+    pub pointer_depth: usize,
+    pub array_shape: Vec<usize>,
+    pub pointee_array_shape: Vec<usize>,
+    pub size: Option<usize>,
+    pub align: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -584,6 +598,9 @@ pub struct ProgramExpressionResult {
     pub address: Option<u64>,
     pub name: String,
     pub value_literal: Option<ProgramValueLiteral>,
+    pub display_value: String,
+    pub exact_value: String,
+    pub type_info: ProgramTypeInfo,
 }
 
 pub struct Interpreter<'a> {
@@ -6773,6 +6790,8 @@ impl<'a> Interpreter<'a> {
                     } else {
                         self.cboxes_lvalue_value_string(&lvalue, expr.span(), &eval_objects)?
                     };
+                    let (display_value, exact_value) =
+                        self.cboxes_value_display_strings(&value, &ty);
                     Ok(ProgramExpressionResult {
                         kind: "lvalue".to_owned(),
                         ty: cboxes_type_string(&ty),
@@ -6780,11 +6799,16 @@ impl<'a> Interpreter<'a> {
                         address,
                         name,
                         value_literal,
+                        display_value,
+                        exact_value,
+                        type_info: self.cboxes_type_info(&ty),
                     })
                 }
                 ValueCategory::RValue(value) => {
                     let ty = value.ty.clone();
                     let text = self.cboxes_typed_value_string(&value, &ty, expr.span())?;
+                    let (display_value, exact_value) =
+                        self.cboxes_value_display_strings(&text, &ty);
                     Ok(ProgramExpressionResult {
                         kind: "rvalue".to_owned(),
                         ty: cboxes_type_string(&ty),
@@ -6792,6 +6816,9 @@ impl<'a> Interpreter<'a> {
                         address: None,
                         name: String::new(),
                         value_literal,
+                        display_value,
+                        exact_value,
+                        type_info: self.cboxes_type_info(&ty),
                     })
                 }
             }
@@ -6929,6 +6956,7 @@ impl<'a> Interpreter<'a> {
             let base_address = self.object_base_addresses.get(&object_id).copied();
             self.cboxes_push_object_state(&mut state, name, object, base_address, span)?;
         }
+        self.cboxes_add_aliases(&mut state);
         Ok(state)
     }
 
@@ -6946,10 +6974,14 @@ impl<'a> Interpreter<'a> {
                 name: name.to_owned(),
                 ty: cboxes_type_string(&object.ty),
                 value: String::new(),
+                display_value: String::new(),
+                exact_value: String::new(),
                 address: base_address,
                 array_root: None,
                 array_shape: shape.clone(),
                 array_indices: Vec::new(),
+                aliases: Vec::new(),
+                type_info: self.cboxes_type_info(&object.ty),
             });
             if shape
                 .iter()
@@ -6985,14 +7017,20 @@ impl<'a> Interpreter<'a> {
         } else {
             &object.value
         };
+        let value = self.cboxes_stored_value_string(&object.ty, display_value, span)?;
+        let (display_value, exact_value) = self.cboxes_value_display_strings(&value, &object.ty);
         state.push(ProgramStateBox {
             name: name.to_owned(),
             ty: cboxes_type_string(&object.ty),
-            value: self.cboxes_stored_value_string(&object.ty, display_value, span)?,
+            value,
+            display_value,
+            exact_value,
             address: base_address,
             array_root: None,
             array_shape: Vec::new(),
             array_indices: Vec::new(),
+            aliases: Vec::new(),
+            type_info: self.cboxes_type_info(&object.ty),
         });
         Ok(())
     }
@@ -7009,14 +7047,20 @@ impl<'a> Interpreter<'a> {
         span: Span,
     ) -> Result<(), Diagnostic> {
         let CType::Array(inner, _) = ty.unqualified() else {
+            let value = self.cboxes_stored_value_string(ty, value, span)?;
+            let (display_value, exact_value) = self.cboxes_value_display_strings(&value, ty);
             state.push(ProgramStateBox {
                 name: cboxes_array_element_name(root_name, indices),
                 ty: cboxes_type_string(ty),
-                value: self.cboxes_stored_value_string(ty, value, span)?,
+                value,
+                display_value,
+                exact_value,
                 address,
                 array_root: Some(root_name.to_owned()),
                 array_shape: shape.to_vec(),
                 array_indices: indices.clone(),
+                aliases: Vec::new(),
+                type_info: self.cboxes_type_info(ty),
             });
             return Ok(());
         };
@@ -7042,6 +7086,74 @@ impl<'a> Interpreter<'a> {
             indices.pop();
         }
         Ok(())
+    }
+
+    fn cboxes_type_info(&self, ty: &CType) -> ProgramTypeInfo {
+        ProgramTypeInfo {
+            kind: cboxes_type_kind(ty).to_owned(),
+            pointer_depth: cboxes_pointer_depth(ty),
+            array_shape: cboxes_array_shape(ty),
+            pointee_array_shape: cboxes_pointee_array_shape(ty),
+            size: self.type_size_of(ty),
+            align: self.type_align_of(ty),
+        }
+    }
+
+    fn cboxes_value_display_strings(&self, value: &str, ty: &CType) -> (String, String) {
+        if !matches!(
+            ty.unqualified(),
+            CType::Float | CType::Double | CType::LongDouble
+        ) {
+            return (value.to_owned(), value.to_owned());
+        }
+        let Ok(value) = value.parse::<f64>() else {
+            return (value.to_owned(), value.to_owned());
+        };
+        (
+            cboxes_float_default_string(value),
+            cboxes_float_exact_string(value),
+        )
+    }
+
+    fn cboxes_add_aliases(&self, state: &mut [ProgramStateBox]) {
+        let pointers = state
+            .iter()
+            .filter(|item| item.array_root.is_none() && item.type_info.pointer_depth > 0)
+            .map(|item| {
+                (
+                    item.name.clone(),
+                    item.value.clone(),
+                    item.type_info.pointer_depth,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (name, mut address, depth) in pointers {
+            for level in 1..=depth {
+                let Some(index) = state.iter().position(|item| {
+                    item.address
+                        .is_some_and(|candidate| candidate.to_string() == address)
+                }) else {
+                    break;
+                };
+                let alias = format!("{}{}", "*".repeat(level), name);
+                if !state[index].aliases.contains(&alias) {
+                    state[index].aliases.push(alias);
+                }
+                address = state[index].value.clone();
+                if address.is_empty() {
+                    break;
+                }
+            }
+        }
+        for item in state {
+            item.aliases.sort_by(|left, right| {
+                left.chars()
+                    .take_while(|ch| *ch == '*')
+                    .count()
+                    .cmp(&right.chars().take_while(|ch| *ch == '*').count())
+                    .then_with(|| left.cmp(right))
+            });
+        }
     }
 
     fn cboxes_stored_value_string(
@@ -35466,6 +35578,61 @@ fn cboxes_type_string(ty: &CType) -> String {
     rendered
 }
 
+fn cboxes_type_kind(ty: &CType) -> &'static str {
+    match ty.unqualified() {
+        CType::Void => "void",
+        CType::Bool
+        | CType::Char
+        | CType::SignedChar
+        | CType::UnsignedChar
+        | CType::Short
+        | CType::UnsignedShort
+        | CType::Int
+        | CType::UnsignedInt
+        | CType::Long
+        | CType::UnsignedLong
+        | CType::LongLong
+        | CType::UnsignedLongLong
+        | CType::Enum(_, _) => "integer",
+        CType::Float | CType::Double | CType::LongDouble => "floating",
+        CType::Complex(_) => "complex",
+        CType::Pointer(_) => "pointer",
+        CType::Array(_, _) => "array",
+        CType::Struct(_, _) | CType::Union(_, _) => "aggregate",
+        CType::Function(_, _, _) => "function",
+        CType::VaList => "va-list",
+        CType::Qualified(_, _) => unreachable!("unqualified() removes top-level qualifiers"),
+    }
+}
+
+fn cboxes_pointer_depth(ty: &CType) -> usize {
+    let mut depth = 0;
+    let mut current = ty;
+    loop {
+        match current.unqualified() {
+            CType::Pointer(inner) => {
+                depth += 1;
+                current = inner;
+            }
+            _ => return depth,
+        }
+    }
+}
+
+fn cboxes_pointee_array_shape(ty: &CType) -> Vec<usize> {
+    let mut current = ty;
+    let mut saw_pointer = false;
+    while let CType::Pointer(inner) = current.unqualified() {
+        saw_pointer = true;
+        current = inner;
+    }
+    if saw_pointer {
+        cboxes_array_shape(current)
+    } else {
+        Vec::new()
+    }
+}
+
 fn cboxes_float_string(value: f64) -> String {
     if value.is_nan() {
         return if value.is_sign_negative() {
@@ -35485,6 +35652,58 @@ fn cboxes_float_string(value: f64) -> String {
         return format!("{value:.1}");
     }
     value.to_string()
+}
+
+fn cboxes_float_special_string(value: f64) -> Option<String> {
+    if value.is_nan() {
+        return Some(
+            if value.is_sign_negative() {
+                "-nan"
+            } else {
+                "nan"
+            }
+            .to_owned(),
+        );
+    }
+    if value.is_infinite() {
+        return Some(
+            if value.is_sign_negative() {
+                "-inf"
+            } else {
+                "inf"
+            }
+            .to_owned(),
+        );
+    }
+    None
+}
+
+fn cboxes_trim_fixed_float(mut value: String) -> String {
+    if let Some(decimal) = value.find('.') {
+        while value.len() > decimal + 2 && value.ends_with('0') {
+            value.pop();
+        }
+        if value.ends_with('.') {
+            value.push('0');
+        }
+    } else {
+        value.push_str(".0");
+    }
+    value
+}
+
+fn cboxes_float_default_string(value: f64) -> String {
+    if let Some(special) = cboxes_float_special_string(value) {
+        return special;
+    }
+    cboxes_trim_fixed_float(format!("{value:.6}"))
+}
+
+fn cboxes_float_exact_string(value: f64) -> String {
+    if let Some(special) = cboxes_float_special_string(value) {
+        return special;
+    }
+    cboxes_trim_fixed_float(format!("{value:.1074}"))
 }
 
 fn cboxes_array_shape(ty: &CType) -> Vec<usize> {

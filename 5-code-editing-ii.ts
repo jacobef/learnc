@@ -6,13 +6,13 @@ const targetState: BoxState[] = [
   { name: "apple", type: "int", value: "10", address: "<i>(any)</i>" },
   { name: "berry", type: "int", value: "5", address: "<i>(any)</i>" },
 ];
+const targetNames = new Set(targetState.map((box) => box.name));
 
 function missingTarget(boxes: Map<string, BoxState>): BoxState | null {
   return targetState.find((expected) => !boxes.has(expected.name)) ?? null;
 }
 
 function extraNames(boxes: BoxState[]): string[] {
-  const targetNames = new Set(targetState.map((box) => box.name));
   return boxes.map((box) => box.name).filter((name) => name && !targetNames.has(name));
 }
 

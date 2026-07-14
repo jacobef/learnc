@@ -1,6 +1,6 @@
-import { applyTextTokenReplacements, applyOtherNames, appendStateObjects, bindBtnRefPulse, boxValueMatchesSpec, clearNode, cloneBoxes, isMobileViewport, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, makeAnswerBox, normalizeZeroDisplay, queryRole, randAddr, renderCodePane, renderParts, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, typeInfo, } from "./shared-core.js";
+import { applyTextTokenReplacements, applyOtherNames, appendStateObjects, bindBtnRefPulse, clearNode, cloneBoxes, isMobileViewport, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, makeAnswerBox, normalizeZeroDisplay, queryRole, readBoxState, renderCodePane, renderParts, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, } from "./shared-core.js";
 import { clearLevelProgress, currentLevelId, maybeRestoreLevelProgress, writeLevelProgress, } from "./shared-progress.js";
-import { parseCValueLiteral, runCProgram } from "./shared-c-interpreter.js";
+import { allocateCWorkspaceObject, boxValueMatchesSpec, resolveCBoxAliases, runCProgram, } from "./shared-c-interpreter.js";
 function ifKeywordColumnsByLine(lines) {
     const columnsByLine = new Map();
     let inBlockComment = false;
@@ -309,7 +309,7 @@ function stateMatches(actual, expected) {
             return false;
         if ((actualBox.type || "").trim() !== (expectedBox.type || "").trim())
             return false;
-        if (!boxValueMatchesSpec(parseCValueLiteral, actualBox, expectedBox).ok)
+        if (!boxValueMatchesSpec(actualBox, expectedBox).ok)
             return false;
     }
     return true;
@@ -434,14 +434,14 @@ function basicHintForBoxes(actual, expected, baseline, stage) {
                 variable: name,
             };
         }
-        const mismatch = !boxValueMatchesSpec(parseCValueLiteral, actualBox, expectedBox).ok;
+        const mismatch = !boxValueMatchesSpec(actualBox, expectedBox).ok;
         if (!mismatch)
             continue;
         const expectedValue = (expectedBox.value ?? "").trim();
         const label = expectedValue === "" ? "empty" : `$v{${normalizeZeroDisplay(expectedValue)}}`;
         const baselineBox = baselineByName.get(name);
         const shouldRemain = baselineBox
-            ? boxValueMatchesSpec(parseCValueLiteral, baselineBox, expectedBox).ok
+            ? boxValueMatchesSpec(baselineBox, expectedBox).ok
             : false;
         const message = `$n{${name}}'s value should ${shouldRemain ? "remain" : "be"} ${label}.`;
         if (shouldRemain) {
@@ -485,7 +485,7 @@ function basicHintForBoxes(actual, expected, baseline, stage) {
                 variable: name,
             };
         }
-        if (boxValueMatchesSpec(parseCValueLiteral, actualBox, expectedBox).ok) {
+        if (boxValueMatchesSpec(actualBox, expectedBox).ok) {
             continue;
         }
         const expectedValue = (expectedBox.value ?? "").trim();
@@ -494,7 +494,7 @@ function basicHintForBoxes(actual, expected, baseline, stage) {
             : `$v{${normalizeZeroDisplay(expectedValue)}}`;
         const baselineBox = baselineElementsByName.get(name);
         const shouldRemain = baselineBox
-            ? boxValueMatchesSpec(parseCValueLiteral, baselineBox, expectedBox).ok
+            ? boxValueMatchesSpec(baselineBox, expectedBox).ok
             : false;
         const message = `$n{${name}}'s value should ${shouldRemain ? "remain" : "be"} ${label}.`;
         if (shouldRemain) {
@@ -524,21 +524,6 @@ function formatRunLabel(stage, totalLines, endLabel, { withArrow = true, badge =
     return start === end
         ? `${prefix}${verb} line ${start}${suffix}`
         : `${prefix}${verb} lines ${start}-${end}${suffix}`;
-}
-function nextWorkspaceAddress(boxes, type) {
-    const { size, align } = typeInfo(type || "int");
-    let maxAddr = 0;
-    for (const box of boxes) {
-        const addr = Number(box.address);
-        if (Number.isFinite(addr))
-            maxAddr = Math.max(maxAddr, addr);
-    }
-    if (!maxAddr)
-        return String(randAddr(type || "int"));
-    let next = maxAddr + (size || 4);
-    if (align > 1 && next % align !== 0)
-        next = Math.ceil(next / align) * align;
-    return String(next);
 }
 function createProgramTemplate(config) {
     const { steps, initialInstructions = "", next = null, workspace = {}, isLast = false, } = config;
@@ -916,13 +901,56 @@ function createProgramTemplate(config) {
         setPartsContent(instructionsEl, applyButtonTokens(text));
     }
     function refreshOtherNames() {
+        const sourceBoxes = resolveCBoxAliases(readWorkspace());
         applyOtherNames(stageEl, {
             shownAddrs: otherNamesShown,
+            sourceBoxes,
             onToggle: () => {
                 persistProgress();
                 refreshOtherNames();
             },
         });
+    }
+    function refreshDynamicAddresses(wrap, stage) {
+        const nodes = [
+            ...wrap.querySelectorAll(".vbox[data-dynamic-address='true']"),
+        ];
+        if (!nodes.length)
+            return;
+        const oldAddresses = new Set(nodes.map((node) => String(node.querySelector(".address")?.textContent ?? "").trim()));
+        const occupied = (serializeWorkspace(wrap) || []).filter((box) => !oldAddresses.has(String(box.address ?? "").trim()));
+        for (const node of nodes) {
+            const box = readBoxState(node);
+            const type = String(box.type || "").trim() ||
+                node.dataset.defaultAddressType ||
+                "int";
+            const expectedAddress = node.dataset.expectedAddress || "";
+            const expectedType = node.dataset.expectedAddressType || "";
+            const expectedBox = stage.stateAfter.find((candidate) => String(candidate.address ?? "").trim() === expectedAddress &&
+                String(candidate.type || "").trim() === expectedType);
+            const expectedAvailable = type === expectedType &&
+                !!expectedAddress &&
+                !occupied.some((candidate) => String(candidate.address ?? "").trim() === expectedAddress);
+            const allocation = expectedAvailable
+                ? {
+                    address: expectedAddress,
+                    typeInfo: expectedBox?.typeInfo ?? box.typeInfo,
+                    assumedType: expectedType,
+                }
+                : allocateCWorkspaceObject(occupied, type);
+            if (!allocation?.typeInfo)
+                continue;
+            const addressEl = node.querySelector(".address");
+            if (addressEl)
+                addressEl.textContent = allocation.address;
+            node.dataset.typeInfo = JSON.stringify(allocation.typeInfo);
+            occupied.push({
+                ...box,
+                address: allocation.address,
+                type: allocation.assumedType,
+                typeInfo: allocation.typeInfo,
+            });
+        }
     }
     function renderWorkspace(stage) {
         if (!stageEl)
@@ -938,13 +966,24 @@ function createProgramTemplate(config) {
                 allowTypeEdit: null,
             });
             stageEl.appendChild(wrap);
-            wrap.addEventListener("input", () => {
+            refreshDynamicAddresses(wrap, stage);
+            wrap.addEventListener("input", (event) => {
+                const target = event.target;
+                const dynamicBox = target instanceof Element
+                    ? target.closest(".type")?.closest(".vbox")
+                    : null;
+                if (dynamicBox?.dataset.dynamicAddress === "true") {
+                    refreshDynamicAddresses(wrap, stage);
+                }
                 workspaceByStage.set(stage.index, serializeWorkspace(wrap) || []);
                 updateResetVisibility();
                 persistProgress();
+                if (workspace.showOtherNames)
+                    refreshOtherNames();
             });
             wrap.addEventListener("click", () => {
                 window.setTimeout(() => {
+                    refreshDynamicAddresses(wrap, stage);
                     workspaceByStage.set(stage.index, serializeWorkspace(wrap) || []);
                     updateResetVisibility();
                     persistProgress();
@@ -1370,12 +1409,38 @@ function createProgramTemplate(config) {
         const ws = getWorkspaceEl();
         if (!ws)
             return;
+        const currentBoxes = readWorkspace();
+        const usedAddresses = new Set(currentBoxes.map((box) => String(box.address ?? "").trim()));
+        const rustAddress = stage.stateAfter.find((box) => String(box.address ?? "").trim() &&
+            !usedAddresses.has(String(box.address).trim()));
+        const defaultType = String(rustAddress?.type || "int").trim() || "int";
+        const allocation = rustAddress?.address
+            ? {
+                address: String(rustAddress.address),
+                typeInfo: rustAddress.typeInfo,
+                assumedType: defaultType,
+            }
+            : allocateCWorkspaceObject(currentBoxes, defaultType);
+        if (!allocation?.address) {
+            setStatus("Could not allocate an address for the new variable.", "err");
+            flashStatus(statusEl);
+            return;
+        }
         const node = makeAnswerBox({
-            address: nextWorkspaceAddress(readWorkspace(), "int"),
+            // The expected state is produced by the Rust interpreter, whose allocator
+            // knows about retired locals, alignment, and the actual C object layout.
+            address: allocation.address,
             allowNameEdit: true,
             deletable: true,
+            typeInfo: allocation.typeInfo ?? null,
         });
         node.dataset.allowDelete = "true";
+        node.dataset.dynamicAddress = "true";
+        node.dataset.defaultAddressType = defaultType;
+        if (rustAddress?.address) {
+            node.dataset.expectedAddress = String(rustAddress.address);
+            node.dataset.expectedAddressType = defaultType;
+        }
         ws.appendChild(node);
         scrollProgramStateToBottom();
         workspaceByStage.set(stage.index, serializeWorkspace(ws) || []);

@@ -28,7 +28,7 @@ import { clearAllLevelProgress, clearSandboxProgress, hasSandboxProgress, savedL
     mobileNote.className = "mobile-note";
     appendTextLines(mobileNote, ["It's a bit rough on mobile at the moment, sorry!", ""]);
     const updated = document.createElement("i");
-    updated.textContent = "Site last updated June 17, 2026";
+    updated.textContent = "Site last updated July 7, 2026";
     intro.appendChild(mainCopy);
     intro.appendChild(mobileNote);
     intro.appendChild(updated);

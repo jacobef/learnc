@@ -7,12 +7,7 @@ import {
   queryRole,
   vbox,
 } from "./shared-core-dom.js";
-import {
-  formatValueForType,
-  parseType,
-  type BoxState,
-  type ProgramDiagnostic,
-} from "./shared-core-utils.js";
+import type { BoxState, ProgramDiagnostic } from "./shared-core-utils.js";
 import { confettiRain } from "./confetti.js";
 import {
   bindCodeEditorTabKey,
@@ -704,7 +699,7 @@ function renderExpression(outcome: {
     }
   }
   const resultName = String((result as { name?: unknown }).name ?? "").trim();
-  const resultIsArray = !!parseType(result.type || "int").arrayDims?.length;
+  const resultIsArray = result.typeInfo.kind === "array";
   const match =
     result.kind === "lvalue"
       ? (resultName
@@ -712,7 +707,7 @@ function renderExpression(outcome: {
           : null) ||
         (outcome.state || []).find((box) => {
           if (String(box.address) !== String(result.address)) return false;
-          const boxIsArrayRoot = !box.arrayRoot && !!parseType(box.type || "int").arrayDims?.length;
+          const boxIsArrayRoot = !box.arrayRoot && box.typeInfo?.kind === "array";
           return resultIsArray || !boxIsArrayRoot;
         })
       : null;
@@ -721,15 +716,20 @@ function renderExpression(outcome: {
         address: match.address ?? undefined,
         type: match.type,
         value: match.value,
+        displayValue: match.displayValue,
+        exactValue: match.exactValue,
+        typeInfo: match.typeInfo,
+        aliases: match.aliases ?? [],
         name: match.name,
         editable: false,
       })
     : vbox({
         address: result.address ? String(result.address) : "—",
         type: result.type || "int",
-        value: formatValueForType(result.value ?? "", result.type || "int", {
-          nanSign: result.nanSign,
-        }),
+        value: result.value ?? "",
+        displayValue: result.displayValue,
+        exactValue: result.exactValue,
+        typeInfo: result.typeInfo,
         name: "",
         editable: false,
       });

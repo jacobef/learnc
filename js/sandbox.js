@@ -1,5 +1,4 @@
 import { applyOtherNames, appendStateObjects, clearNode, ensureBaseLayout, findArrayObjectBoxesForResult, queryRole, vbox, } from "./shared-core-dom.js";
-import { formatValueForType, parseType, } from "./shared-core-utils.js";
 import { confettiRain } from "./confetti.js";
 import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
 import { evaluateCExpressionFiles, runCFiles, } from "./shared-c-interpreter.js";
@@ -543,7 +542,7 @@ function renderExpression(outcome) {
         }
     }
     const resultName = String(result.name ?? "").trim();
-    const resultIsArray = !!parseType(result.type || "int").arrayDims?.length;
+    const resultIsArray = result.typeInfo.kind === "array";
     const match = result.kind === "lvalue"
         ? (resultName
             ? (outcome.state || []).find((box) => box.name === resultName)
@@ -551,7 +550,7 @@ function renderExpression(outcome) {
             (outcome.state || []).find((box) => {
                 if (String(box.address) !== String(result.address))
                     return false;
-                const boxIsArrayRoot = !box.arrayRoot && !!parseType(box.type || "int").arrayDims?.length;
+                const boxIsArrayRoot = !box.arrayRoot && box.typeInfo?.kind === "array";
                 return resultIsArray || !boxIsArrayRoot;
             })
         : null;
@@ -560,15 +559,20 @@ function renderExpression(outcome) {
             address: match.address ?? undefined,
             type: match.type,
             value: match.value,
+            displayValue: match.displayValue,
+            exactValue: match.exactValue,
+            typeInfo: match.typeInfo,
+            aliases: match.aliases ?? [],
             name: match.name,
             editable: false,
         })
         : vbox({
             address: result.address ? String(result.address) : "—",
             type: result.type || "int",
-            value: formatValueForType(result.value ?? "", result.type || "int", {
-                nanSign: result.nanSign,
-            }),
+            value: result.value ?? "",
+            displayValue: result.displayValue,
+            exactValue: result.exactValue,
+            typeInfo: result.typeInfo,
             name: "",
             editable: false,
         });

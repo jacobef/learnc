@@ -2,27 +2,25 @@ import {
   appendStateObjects,
   applyTextTokenReplacements,
   bindBtnRefPulse,
-  boxValueMatchesSpec,
   clearNode,
   createStepper,
   disableBoxEditing,
   ensurePanelizedMain,
   findArrayObjectBoxesForResult,
   flashStatus,
-  formatValueForType,
   getNavLabelForHref,
-  normalizeBoxValueForContext,
   readBoxState,
   queryRole,
   setPartsContent,
   syncDocumentTitleFromNav,
   vbox,
 } from "./shared-core.js";
-import type { BoxState, Parts, Stepper } from "./shared-core.js";
+import type { BoxState, CTypeInfo, Parts, Stepper } from "./shared-core.js";
 import {
+  boxValueMatchesSpec,
   createSyntheticAddressBase,
   evaluateCExpression,
-  parseCValueLiteral,
+  normalizeBoxValueForContext,
   runCProgram,
 } from "./shared-c-interpreter.js";
 import {
@@ -94,7 +92,7 @@ interface ExpressionHintContext {
   expected:
     | { kind: "error"; message: string }
     | { kind: "lvalue"; address: string }
-    | { kind: "rvalue"; type: string; value: string };
+    | { kind: "rvalue"; type: string; value: string; typeInfo: CTypeInfo };
   ok: boolean;
   hasState: boolean;
 }
@@ -583,6 +581,10 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       address: box.address ?? undefined,
       type: box.type,
       value: box.value,
+      displayValue: box.displayValue,
+      exactValue: box.exactValue,
+      typeInfo: box.typeInfo,
+      aliases: box.aliases ?? [],
       name: box.name,
       editable: false,
     });
@@ -629,6 +631,10 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
         address: box.address ?? undefined,
         type: box.type,
         value: box.value,
+        displayValue: box.displayValue,
+        exactValue: box.exactValue,
+        typeInfo: box.typeInfo,
+        aliases: box.aliases ?? [],
         name: box.name,
         editable: false,
       });
@@ -739,10 +745,12 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       return { kind: "lvalue", address: String(evaluated.result.address || "") };
     }
     const type = evaluated.result.type || "int";
-    const value = formatValueForType(evaluated.result.value ?? "", type, {
-      nanSign: evaluated.result.nanSign,
-    });
-    return { kind: "rvalue", type, value };
+    return {
+      kind: "rvalue",
+      type,
+      value: evaluated.result.value ?? "",
+      typeInfo: evaluated.result.typeInfo,
+    };
   }
 
   function shouldShowExprResultPane(step: ExpressionStep): boolean {
@@ -760,7 +768,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     const selected = selectedBox(step);
     const entered = readEnteredBox();
     const enteredForContext = entered
-      ? normalizeBoxValueForContext(parseCValueLiteral, entered)
+      ? normalizeBoxValueForContext(entered)
       : null;
     let ok = false;
     if (expected.kind === "lvalue") {
@@ -773,12 +781,13 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
         name: "",
         type: expected.type,
         value: expected.value,
+        typeInfo: expected.typeInfo,
       };
       ok =
         activeMode === "entered" &&
         !!entered &&
         String(entered.type || "").trim() === expected.type &&
-        boxValueMatchesSpec(parseCValueLiteral, entered, expectedBox).ok;
+        boxValueMatchesSpec(entered, expectedBox).ok;
     }
     return {
       step,
@@ -831,15 +840,20 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
             address: match.address ?? undefined,
             type: match.type,
             value: match.value,
+            displayValue: match.displayValue,
+            exactValue: match.exactValue,
+            typeInfo: match.typeInfo,
+            aliases: match.aliases ?? [],
             name: match.name,
             editable: false,
           })
         : vbox({
             address: result.address || "—",
             type: result.type,
-            value: formatValueForType(result.value ?? "", result.type, {
-              nanSign: result.nanSign,
-            }),
+            value: result.value ?? "",
+            displayValue: result.displayValue,
+            exactValue: result.exactValue,
+            typeInfo: result.typeInfo,
             name: "",
             editable: false,
           });
@@ -853,9 +867,10 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     const node = vbox({
       address: "—",
       type: result.type || "int",
-      value: formatValueForType(result.value ?? "", result.type || "int", {
-        nanSign: result.nanSign,
-      }),
+      value: result.value ?? "",
+      displayValue: result.displayValue,
+      exactValue: result.exactValue,
+      typeInfo: result.typeInfo,
       name: "",
       editable: false,
     });
@@ -1010,18 +1025,15 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
       return;
     }
     const expectedType = String(evaluation.result.type || "").trim();
-    const expectedValue = formatValueForType(
-      evaluation.result.value ?? "",
-      evaluation.result.type || "int",
-      { nanSign: evaluation.result.nanSign },
-    );
+    const expectedValue = evaluation.result.value ?? "";
     const entryType = String(entry.type || "").trim();
     const expectedBox: BoxState = {
       name: "",
       type: expectedType,
       value: expectedValue,
+      typeInfo: evaluation.result.typeInfo,
     };
-    const match = boxValueMatchesSpec(parseCValueLiteral, entry, expectedBox);
+    const match = boxValueMatchesSpec(entry, expectedBox);
     const ok = entryType === expectedType && match.ok;
     setStatus(ok ? "correct" : "incorrect", ok);
     if (ok) {

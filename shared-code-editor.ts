@@ -2,7 +2,6 @@ import {
   applyTextTokenReplacements,
   appendStateObjects,
   bindBtnRefPulse,
-  boxValueMatchesSpec,
   clearNode,
   createStepper,
   ensurePanelizedMain,
@@ -26,7 +25,7 @@ import {
   updateCodeSurface,
   type CodeDecoration,
 } from "./shared-code-editor-surface.js";
-import { parseCValueLiteral, runCProgram } from "./shared-c-interpreter.js";
+import { boxValueMatchesSpec, runCProgram } from "./shared-c-interpreter.js";
 import {
   clearLevelProgress,
   currentLevelId,
@@ -430,7 +429,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
       const actual = byName.get(expected.name);
       if (!actual) return false;
       if ((actual.type || "") !== (expected.type || "")) return false;
-      if (!boxValueMatchesSpec(parseCValueLiteral, actual, expected).ok) return false;
+      if (!boxValueMatchesSpec(actual, expected).ok) return false;
     }
     return true;
   }

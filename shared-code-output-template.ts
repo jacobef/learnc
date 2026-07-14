@@ -2,14 +2,11 @@ import {
   applyTextTokenReplacements,
   appendStateObjects,
   bindBtnRefPulse,
-  boxValueMatchesSpec,
   clearNode,
   createStepper,
   ensurePanelizedMain,
   flashStatus,
-  formatValueForType,
   getNavLabelForHref,
-  parseType,
   queryElement,
   queryRole,
   renderParts,
@@ -28,7 +25,7 @@ import {
   updateCodeSurface,
   type CodeDecoration,
 } from "./shared-code-editor-surface.js";
-import { parseCValueLiteral, runCProgram } from "./shared-c-interpreter.js";
+import { boxValueMatchesSpec, runCProgram } from "./shared-c-interpreter.js";
 import {
   clearLevelProgress,
   currentLevelId,
@@ -37,8 +34,7 @@ import {
 } from "./shared-progress.js";
 
 type ChallengeParts = Parts;
-type ChallengeScalar = string | number | bigint;
-type ChallengeRuntimeValue = number | bigint;
+type ChallengeRuntimeValue = string;
 type ChallengePartsSpec =
   | ChallengeParts
   | ((ctx: CodeOutputChallengeHintContext) => ChallengeParts | null | undefined)
@@ -149,9 +145,6 @@ interface CodeOutputChallengeProgress {
   showFullShownOutput: boolean;
   hasRunChecks: boolean;
 }
-
-const INT32_MIN = -2147483648n;
-const INT32_MAX = 2147483647n;
 
 function collectCodeOutputChallengeElements(
   root: ParentNode = document,
@@ -448,72 +441,21 @@ function createCodeOutputChallengeTemplate(
       : `${normalized}\n`;
   }
 
-  function normalizeNumberLike(
-    value: ChallengeScalar,
+  function normalizeInputLiteral(
+    value: string,
     type: string,
     label: string,
   ): { runtime: ChallengeRuntimeValue; literal: string } {
-    const parsedType = parseType(type);
-    const base = parsedType.base;
-    if (!base || parsedType.depth !== 0) {
-      failConfig(`${label} type must be int, long, or double.`);
+    const literal = value.trim();
+    const run = runCProgram(`${type} __cboxes_input = ${literal};\n`);
+    if (run.kind !== "ok") {
+      return failConfig(`${label} is not valid C: ${run.diagnostic.message}`);
     }
-    if (base === "double") {
-      let numeric: number;
-      if (typeof value === "number") {
-        numeric = value;
-      } else if (typeof value === "bigint") {
-        numeric = Number(value);
-      } else {
-        const parsed = Number(String(value).trim());
-        if (Number.isNaN(parsed)) {
-          failConfig(`${label} must be numeric for type ${type}.`);
-        }
-        numeric = parsed;
-      }
-      if (!Number.isFinite(numeric)) {
-        failConfig(`${label} must be finite for type ${type}.`);
-      }
-      return {
-        runtime: numeric,
-        literal: formatValueForType(numeric, type),
-      };
-    }
-
-    let asBigInt = 0n;
-    if (typeof value === "bigint") {
-      asBigInt = value;
-    } else if (typeof value === "number") {
-      if (!Number.isFinite(value) || !Number.isInteger(value)) {
-        failConfig(`${label} must be an integer for type ${type}.`);
-      }
-      asBigInt = BigInt(Math.trunc(value));
-    } else {
-      const trimmed = String(value).trim();
-      if (!/^[+-]?\d+$/.test(trimmed)) {
-        failConfig(`${label} must be an integer literal for type ${type}.`);
-      }
-      try {
-        asBigInt = BigInt(trimmed);
-      } catch {
-        failConfig(`${label} is out of range for type ${type}.`);
-      }
-    }
-
-    if (base === "int") {
-      if (asBigInt < INT32_MIN || asBigInt > INT32_MAX) {
-        failConfig(`${label} must be within 32-bit int range.`);
-      }
-      const asNumber = Number(asBigInt);
-      return {
-        runtime: asNumber,
-        literal: String(asNumber),
-      };
-    }
-
+    const stored = run.state.find((box) => box.name === "__cboxes_input");
+    if (!stored) return failConfig(`${label} did not create a scalar C value.`);
     return {
-      runtime: asBigInt,
-      literal: asBigInt.toString(),
+      runtime: stored.value,
+      literal,
     };
   }
 
@@ -589,7 +531,7 @@ function createCodeOutputChallengeTemplate(
     label: string,
   ): ChallengeCase {
     const normalizedInputs = inputSpecs.map((inputSpec, index) =>
-      normalizeNumberLike(
+      normalizeInputLiteral(
         rawInputRow[index]!,
         inputSpec.type,
         `${label} input ${inputSpec.name}`,
@@ -875,7 +817,6 @@ function createCodeOutputChallengeTemplate(
       for (let index = 0; index < outputSpecs.length; index += 1) {
         if (
           !boxValueMatchesSpec(
-            parseCValueLiteral,
             userBehavior.outputBoxes[index]!,
             candidateBehavior.outputBoxes[index]!,
           ).ok
@@ -939,7 +880,7 @@ function createCodeOutputChallengeTemplate(
           failingOutput: outputSpec,
         };
       }
-      if (!boxValueMatchesSpec(parseCValueLiteral, actual, expected).ok) {
+      if (!boxValueMatchesSpec(actual, expected).ok) {
         return {
           ok: false,
           kind: "wrong-output-value",

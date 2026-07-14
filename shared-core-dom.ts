@@ -1,16 +1,6 @@
-import type { BoxState, BoxValue } from "./shared-core-utils.js";
+import type { BoxState, BoxValue, CTypeInfo } from "./shared-core-utils.js";
 import { DEFAULT_NAV_ITEMS as NAV_ITEMS } from "./nav-items.js";
-import {
-  doubleDisplayIsExact,
-  formatDoubleDefault,
-  formatDoubleExact,
-  formatDoubleStorage,
-  getPointerDepth,
-  normalizeZeroDisplay,
-  parseDoubleValueWithSign,
-  parseType,
-  randAddr,
-} from "./shared-core-utils.js";
+import { normalizeZeroDisplay } from "./shared-core-utils.js";
 
 export interface NavItem {
   href: string;
@@ -543,6 +533,10 @@ function vbox({
   allowNameEdit = false,
   allowTypeEdit = false,
   showDoubleExact = false,
+  displayValue = null,
+  exactValue = null,
+  typeInfo = null,
+  aliases = [],
 }: {
   address?: string;
   type?: string;
@@ -552,14 +546,17 @@ function vbox({
   allowNameEdit?: boolean;
   allowTypeEdit?: boolean;
   showDoubleExact?: boolean;
+  displayValue?: string | null;
+  exactValue?: string | null;
+  typeInfo?: CTypeInfo | null;
+  aliases?: string[];
 } = {}): HTMLElement {
-  const parsedType = parseType(type || "int");
-  const isFloatingScalar =
-    (parsedType.base === "float" || parsedType.base === "double") &&
-    parsedType.depth === 0;
+  const isFloatingScalar = typeInfo?.kind === "floating";
   const rawValue = value ?? "";
   const emptyDisplay = rawValue === "";
-  const displayValue = emptyDisplay ? "" : normalizeZeroDisplay(rawValue);
+  const renderedValue = emptyDisplay
+    ? ""
+    : displayValue ?? normalizeZeroDisplay(rawValue);
   const resolvedName = name ?? "";
   const namesList = resolvedName ? [resolvedName] : [""];
   const valueClasses = `value ${editable ? "editable" : ""} ${emptyDisplay ? "placeholder muted" : ""}`;
@@ -584,7 +581,7 @@ function vbox({
         </div>
         <div class="cell">
           <div class="lbl lbl-value">value</div>
-          <div class="${valueClasses}">${displayValue}</div>
+          <div class="${valueClasses}">${renderedValue}</div>
           <button class="double-toggle hidden" type="button" aria-pressed="false">exact</button>
         </div>
         <div class="name-stack">
@@ -602,6 +599,11 @@ function vbox({
   `);
 
   const valueEl = node.querySelector(".value") as HTMLElement | null;
+
+  if (typeInfo) node.dataset.typeInfo = JSON.stringify(typeInfo);
+  if (aliases.length) node.dataset.aliases = JSON.stringify(aliases);
+  if (displayValue != null) node.dataset.displayValue = displayValue;
+  if (exactValue != null) node.dataset.exactValue = exactValue;
 
   if (valueEl) {
     valueEl.dataset.rawValue = rawValue.trim();
@@ -645,15 +647,13 @@ function vbox({
     ".double-toggle",
   ) as HTMLButtonElement | null;
   if (valueEl && isFloatingScalar && !emptyDisplay && !editable) {
-    const parsed = parseDoubleValueWithSign(rawValue);
-    if (parsed != null) {
-      const nanSign = parsed.nanSign;
-      valueEl.dataset.doubleValue = formatDoubleStorage(parsed.value, nanSign);
+    const shortText = displayValue ?? normalizeZeroDisplay(rawValue);
+    const exactText = exactValue ?? shortText;
+    if (shortText) {
+      valueEl.dataset.doubleValue = rawValue;
       node.dataset.doubleDisplay = showDoubleExact ? "exact" : "short";
-      const exactText = formatDoubleExact(parsed.value, nanSign);
-      const defaultText = formatDoubleDefault(parsed.value, nanSign);
-      const approx = !doubleDisplayIsExact(defaultText, exactText);
-      valueEl.textContent = showDoubleExact ? exactText : defaultText;
+      const approx = shortText !== exactText;
+      valueEl.textContent = showDoubleExact ? exactText : shortText;
       if (approx && !showDoubleExact) valueEl.dataset.doubleApprox = "true";
       else delete valueEl.dataset.doubleApprox;
       if (toggleEl) {
@@ -670,31 +670,14 @@ function vbox({
         toggleEl.addEventListener("click", (e) => {
           e.preventDefault();
           e.stopPropagation();
-          const currentValue = parseDoubleValueWithSign(
-            valueEl.dataset.doubleValue ?? valueEl.textContent ?? "",
-          );
-          if (currentValue == null) return;
-          const nextNanSign = currentValue.nanSign;
           const nextExact = node.dataset.doubleDisplay !== "exact";
-          const nextExactText = formatDoubleExact(
-            currentValue.value,
-            nextNanSign,
-          );
-          const nextDefaultText = formatDoubleDefault(
-            currentValue.value,
-            nextNanSign,
-          );
-          const nextApprox = !doubleDisplayIsExact(
-            nextDefaultText,
-            nextExactText,
-          );
           node.dataset.doubleDisplay = nextExact ? "exact" : "short";
-          valueEl.textContent = nextExact ? nextExactText : nextDefaultText;
-          if (nextApprox && !nextExact) valueEl.dataset.doubleApprox = "true";
+          valueEl.textContent = nextExact ? exactText : shortText;
+          if (approx && !nextExact) valueEl.dataset.doubleApprox = "true";
           else delete valueEl.dataset.doubleApprox;
           toggleEl.textContent = nextExact ? "short" : "exact";
           toggleEl.setAttribute("aria-pressed", nextExact ? "true" : "false");
-          if (nextApprox) {
+          if (approx) {
             toggleEl.classList.remove("hidden");
           } else {
             toggleEl.classList.add("hidden");
@@ -734,7 +717,6 @@ function readBoxState(root: Element): BoxState {
   const valEl = root.querySelector(".value");
   const valText = txt(valEl);
   const typeText = txt(root.querySelector(".type"));
-  const parsedType = parseType(typeText || "int");
   const placeholderEmpty =
     valEl?.classList?.contains("placeholder") && valText === "";
   const fallbackRawValue = placeholderEmpty ? "" : valText;
@@ -745,12 +727,7 @@ function readBoxState(root: Element): BoxState {
   let value = normalizeZeroDisplay(rawValue);
   const valueEditable =
     valEl instanceof HTMLElement && valEl.isContentEditable;
-  if (
-    (parsedType.base === "float" || parsedType.base === "double") &&
-    parsedType.depth === 0 &&
-    valEl instanceof HTMLElement &&
-    !valueEditable
-  ) {
+  if (valEl instanceof HTMLElement && !valueEditable) {
     const stored = valEl.dataset.doubleValue;
     if (stored != null && stored !== "") value = stored;
   }
@@ -760,14 +737,42 @@ function readBoxState(root: Element): BoxState {
     address: txt(root.querySelector(".address")),
     type: typeText,
     value,
+    displayValue: el.dataset.displayValue ?? null,
+    exactValue: el.dataset.exactValue ?? null,
     rawValue,
     name: names[0] || "",
     names,
     allowNameEdit: !!root.querySelector(".name-text[contenteditable]"),
     allowTypeEdit: !!root.querySelector(".type[contenteditable]"),
     allowDelete,
+    aliases: parseStoredAliases(el.dataset.aliases),
+    typeInfo: parseStoredTypeInfo(el.dataset.typeInfo),
     showDoubleExact: el.dataset.doubleDisplay === "exact",
+    dynamicAddress: el.dataset.dynamicAddress === "true",
+    defaultAddressType: el.dataset.defaultAddressType ?? null,
+    expectedAddress: el.dataset.expectedAddress ?? null,
+    expectedAddressType: el.dataset.expectedAddressType ?? null,
   };
+}
+
+function parseStoredAliases(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.map((value) => String(value)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseStoredTypeInfo(raw: string | undefined): CTypeInfo | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as CTypeInfo;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function boxAddress(box: BoxState | null | undefined): string {
@@ -782,46 +787,6 @@ function collectStageBoxes(root: Element): BoxState[] {
       box.node = node as HTMLElement;
       return box;
     });
-}
-
-function buildOtherNamesMap(boxes: BoxState[]): Map<string, Set<string>> {
-  const byAddr = new Map<string, BoxState>();
-  boxes.forEach((box) => {
-    const addr = boxAddress(box);
-    if (addr) byAddr.set(addr, box);
-  });
-  const otherNamesByAddr = new Map<string, Set<string>>();
-  boxes.forEach((box) => {
-    const baseName = String(box.name || "").trim();
-    const depth = Math.max(0, Math.floor(getPointerDepth(box.type)));
-    if (!baseName || depth < 1) return;
-    let pointedAddr = String(box.value ?? "").trim();
-    for (let step = 1; step <= depth; step += 1) {
-      if (!pointedAddr) break;
-      const target = byAddr.get(pointedAddr);
-      if (!target) break;
-      const resolvedAddr = boxAddress(target);
-      if (resolvedAddr) {
-        let bucket = otherNamesByAddr.get(resolvedAddr);
-        if (!bucket) {
-          bucket = new Set<string>();
-          otherNamesByAddr.set(resolvedAddr, bucket);
-        }
-        bucket.add(`${"*".repeat(step)}${baseName}`);
-      }
-      pointedAddr = String(target.value ?? "").trim();
-    }
-  });
-  return otherNamesByAddr;
-}
-
-function sortOtherNames(list: Iterable<string>): string[] {
-  return [...list].sort((a, b) => {
-    const aStars = (a.match(/^\*+/) || [""])[0].length;
-    const bStars = (b.match(/^\*+/) || [""])[0].length;
-    if (aStars !== bStars) return aStars - bStars;
-    return a.localeCompare(b);
-  });
 }
 
 function updateOtherNamesList(
@@ -916,7 +881,9 @@ function applyOtherNames(
   const currentAddrs = new Set(boxes.map((box) => boxAddress(box)));
   const aliasSource =
     Array.isArray(sourceBoxes) && sourceBoxes.length ? sourceBoxes : boxes;
-  const otherNamesByAddr = buildOtherNamesMap(aliasSource);
+  const aliasesByAddr = new Map(
+    aliasSource.map((box) => [boxAddress(box), box.aliases ?? []]),
+  );
   const useShownSet = shownAddrs !== null;
   const getShown = (node: HTMLElement, addr: string) =>
     useShownSet ? shownAddrs.has(addr) : node.dataset.otherNames === "on";
@@ -932,8 +899,7 @@ function applyOtherNames(
     if (!node) return;
     const addr = boxAddress(box);
     const baseName = String(box.name || "").trim();
-    const otherNames = otherNamesByAddr.get(addr);
-    const aliases = otherNames ? sortOtherNames(otherNames) : [];
+    const aliases = aliasesByAddr.get(addr) ?? [];
     const filtered = baseName
       ? aliases.filter((alias) => alias !== baseName)
       : aliases;
@@ -972,12 +938,6 @@ function applyOtherNames(
   }
 }
 
-const addrPool: { free: string[] } = { free: [] };
-function nextPooledAddr(type: string = "int") {
-  if (addrPool.free.length) return addrPool.free.pop();
-  return randAddr(type);
-}
-
 function makeAnswerBox({
   name = "",
   type = "",
@@ -988,6 +948,10 @@ function makeAnswerBox({
   allowNameEdit = null,
   allowTypeEdit = null,
   showDoubleExact = null,
+  displayValue = null,
+  exactValue = null,
+  typeInfo = null,
+  aliases = [],
 }: {
   name?: string;
   type?: string;
@@ -998,9 +962,12 @@ function makeAnswerBox({
   allowNameEdit?: boolean | null;
   allowTypeEdit?: boolean | null;
   showDoubleExact?: boolean | null;
+  displayValue?: string | null;
+  exactValue?: string | null;
+  typeInfo?: CTypeInfo | null;
+  aliases?: string[];
 } = {}) {
-  const resolvedAddr =
-    address == null ? String(nextPooledAddr(type || "int")) : String(address);
+  const resolvedAddr = address == null ? "—" : String(address);
   const resolvedNameEdit =
     allowNameEdit !== null && allowNameEdit !== undefined ? allowNameEdit : !name;
   const resolvedTypeEdit =
@@ -1014,15 +981,15 @@ function makeAnswerBox({
     allowNameEdit: resolvedNameEdit,
     allowTypeEdit: resolvedTypeEdit,
     showDoubleExact: showDoubleExact ?? false,
+    displayValue,
+    exactValue,
+    typeInfo,
+    aliases,
   });
   if (deletable) {
     const del = el('<button class="delete" title="delete">×</button>');
     node.appendChild(del);
-    del.onclick = () => {
-      const addrTxt = txt(node.querySelector(".address"));
-      if (addrTxt) addrPool.free.push(addrTxt);
-      node.remove();
-    };
+    del.addEventListener("click", () => node.remove());
   }
   return node;
 }
@@ -1048,6 +1015,7 @@ type GroupedArrayObject = {
   index: number;
   address?: string | null;
   elementType: string;
+  type: string;
   entries: GroupedArrayElement[];
   allowDelete: boolean;
 };
@@ -1059,6 +1027,7 @@ type EvaluatedExpressionResultLike = {
   type?: string;
   value?: BoxValue | bigint | number;
   address?: string;
+  typeInfo?: CTypeInfo | null;
 };
 
 function normalizeArrayDims(value: unknown): number[] {
@@ -1248,6 +1217,7 @@ function groupStateObjects(boxes: BoxState[]): GroupedStateObject[] {
       index: root?.index ?? first.index,
       address: root?.box.address ?? first.box.address ?? null,
       elementType,
+      type: String(root?.box.type ?? "").trim(),
       entries,
       allowDelete:
         root?.box.allowDelete !== null && root?.box.allowDelete !== undefined
@@ -1263,12 +1233,6 @@ function groupStateObjects(boxes: BoxState[]): GroupedStateObject[] {
   }
   out.sort((a, b) => a.index - b.index);
   return out;
-}
-
-function normalizeComparableType(typeText: string): string {
-  return String(typeText || "")
-    .replace(/\s+/g, "")
-    .trim();
 }
 
 function makeSubarrayRootName(baseName: string, prefix: number[]): string {
@@ -1359,20 +1323,16 @@ function findArrayObjectBoxesForResult(
   state: BoxState[] | null | undefined,
 ): BoxState[] | null {
   if (!result || !Array.isArray(state) || !state.length) return null;
-  const parsed = parseType(String(result.type || "int"));
-  const expectedShape = normalizeArrayDims(parsed.arrayDims);
+  const expectedShape = normalizeArrayDims(result.typeInfo?.arrayShape);
   if (!expectedShape.length) return null;
   const baseAddress =
     String(result.value ?? "").trim() || String(result.address ?? "").trim();
   if (!baseAddress) return null;
   const grouped = groupStateObjects(state);
-  const expectedType = normalizeComparableType(String(result.type || ""));
+  const expectedType = String(result.type || "").trim();
   for (const item of grouped) {
     if (item.kind !== "array") continue;
-    const fullType = normalizeComparableType(
-      `${item.elementType}${item.shape.map((d) => `[${d}]`).join("")}`,
-    );
-    const isRootTypeMatch = fullType === expectedType;
+    const isRootTypeMatch = item.type === expectedType;
     if (isRootTypeMatch) {
       const firstAddr = String(item.entries[0]?.box.address ?? "").trim();
       if (firstAddr === baseAddress) {
@@ -1486,10 +1446,6 @@ function makeArrayBox(
     const del = el('<button class="delete" title="delete">×</button>');
     node.appendChild(del);
     del.addEventListener("click", () => {
-      group.entries.forEach((entry) => {
-        const addr = String(entry.box.address ?? "").trim();
-        if (addr) addrPool.free.push(addr);
-      });
       node.remove();
     });
     node.dataset.allowDelete = "true";
@@ -1531,8 +1487,22 @@ function appendStateObjects(
         allowNameEdit: allowNameEdit ?? box.allowNameEdit,
         allowTypeEdit: allowTypeEdit ?? box.allowTypeEdit,
         showDoubleExact: box.showDoubleExact ?? null,
+        displayValue: box.displayValue ?? null,
+        exactValue: box.exactValue ?? null,
+        typeInfo: box.typeInfo ?? null,
+        aliases: box.aliases ?? [],
       });
       if (allowDelete) node.dataset.allowDelete = "true";
+      if (box.dynamicAddress) node.dataset.dynamicAddress = "true";
+      if (box.defaultAddressType) {
+        node.dataset.defaultAddressType = box.defaultAddressType;
+      }
+      if (box.expectedAddress) {
+        node.dataset.expectedAddress = box.expectedAddress;
+      }
+      if (box.expectedAddressType) {
+        node.dataset.expectedAddressType = box.expectedAddressType;
+      }
       if ((box.value ?? "") === "") {
         node.querySelector(".value")?.classList.add("placeholder", "muted");
       }

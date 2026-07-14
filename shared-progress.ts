@@ -7,6 +7,14 @@ type StoredProgress<T> = {
   state: T;
 };
 
+function isStoredProgress<T>(value: object): value is StoredProgress<T> {
+  return (
+    "version" in value &&
+    value.version === 1 &&
+    "state" in value
+  );
+}
+
 function storage(): Storage | null {
   try {
     return window.localStorage;
@@ -35,7 +43,7 @@ export function readLevelProgress<T>(
   try {
     const parsed = JSON.parse(raw) as StoredProgress<T> | T | null;
     if (!parsed || typeof parsed !== "object") return null;
-    if ("state" in parsed) return (parsed as StoredProgress<T>).state ?? null;
+    if (isStoredProgress<T>(parsed)) return parsed.state ?? null;
     return parsed as T;
   } catch {
     return null;

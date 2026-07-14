@@ -22,11 +22,10 @@ createCodeEditorTemplate({
         if (onlyVar.name !== targetName) {
             return `Rename $n{${onlyVar.name}} to $n{${targetName}}.`;
         }
-        const cloud = onlyVar;
-        if (cloud.type !== "int") {
+        if (onlyVar.type !== "int") {
             return `$n{${targetName}} should have type $t{int}.`;
         }
-        if (cloud.value !== "") {
+        if (onlyVar.value !== "") {
             return `$n{${targetName}} should not have a value.`;
         }
         return `Keep the line to a simple $t{int} $n{${targetName}}; declaration.`;

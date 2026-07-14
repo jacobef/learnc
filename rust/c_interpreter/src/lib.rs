@@ -24,7 +24,7 @@ use diag::Diagnostic;
 use interpreter::{
     Interpreter, ProgramBlocked, ProgramExecutionLimit, ProgramExpressionEvalRequest,
     ProgramExpressionResult, ProgramOutput, ProgramSourceLocation, ProgramSourceRange,
-    ProgramStateBox, ProgramTraceEvent, ProgramValueLiteral,
+    ProgramStateBox, ProgramTraceEvent, ProgramTypeInfo, ProgramValueLiteral,
 };
 use lexer::Lexer;
 use parser::Parser;
@@ -995,14 +995,49 @@ fn cboxes_expression_result_json(result: &ProgramExpressionResult) -> String {
         .map(|address| cboxes_json_string(&address.to_string()))
         .unwrap_or_else(|| "null".to_owned());
     format!(
-        "{{\"kind\":{},\"type\":{},\"value\":{},\"address\":{},\"name\":{},\"valueLiteral\":{}}}",
+        "{{\"kind\":{},\"type\":{},\"value\":{},\"displayValue\":{},\"exactValue\":{},\"address\":{},\"name\":{},\"valueLiteral\":{},\"typeInfo\":{}}}",
         cboxes_json_string(&result.kind),
         cboxes_json_string(&result.ty),
         cboxes_json_string(&result.value),
+        cboxes_json_string(&result.display_value),
+        cboxes_json_string(&result.exact_value),
         address,
         cboxes_json_string(&result.name),
         cboxes_value_literal_json(result.value_literal.as_ref()),
+        cboxes_type_info_json(&result.type_info),
     )
+}
+
+fn cboxes_type_info_json(info: &ProgramTypeInfo) -> String {
+    let size = info
+        .size
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_owned());
+    let align = info
+        .align
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_owned());
+    format!(
+        "{{\"kind\":{},\"pointerDepth\":{},\"arrayShape\":{},\"pointeeArrayShape\":{},\"size\":{},\"align\":{}}}",
+        cboxes_json_string(&info.kind),
+        info.pointer_depth,
+        cboxes_usize_array_json(&info.array_shape),
+        cboxes_usize_array_json(&info.pointee_array_shape),
+        size,
+        align,
+    )
+}
+
+fn cboxes_string_array_json(values: &[String]) -> String {
+    let mut out = String::from("[");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&cboxes_json_string(value));
+    }
+    out.push(']');
+    out
 }
 
 fn cboxes_value_literal_json(literal: Option<&ProgramValueLiteral>) -> String {
@@ -1110,6 +1145,10 @@ fn cboxes_state_json(state: &[ProgramStateBox]) -> String {
         out.push_str(&cboxes_json_string(&item.ty));
         out.push_str(",\"value\":");
         out.push_str(&cboxes_json_string(&item.value));
+        out.push_str(",\"displayValue\":");
+        out.push_str(&cboxes_json_string(&item.display_value));
+        out.push_str(",\"exactValue\":");
+        out.push_str(&cboxes_json_string(&item.exact_value));
         out.push_str(",\"address\":");
         if let Some(address) = item.address {
             out.push_str(&cboxes_json_string(&address.to_string()));
@@ -1126,6 +1165,10 @@ fn cboxes_state_json(state: &[ProgramStateBox]) -> String {
         out.push_str(&cboxes_usize_array_json(&item.array_shape));
         out.push_str(",\"arrayIndices\":");
         out.push_str(&cboxes_usize_array_json(&item.array_indices));
+        out.push_str(",\"aliases\":");
+        out.push_str(&cboxes_string_array_json(&item.aliases));
+        out.push_str(",\"typeInfo\":");
+        out.push_str(&cboxes_type_info_json(&item.type_info));
         out.push('}');
     }
     out.push(']');
@@ -3326,6 +3369,41 @@ mod browser_api_tests {
         assert_eq!(result.state[0].value, "42");
         assert!(result.trace.iter().all(|event| event.file == "program.c"));
         assert!(result.trace.iter().any(|event| event.start_line == 3));
+    }
+
+    #[test]
+    fn browser_state_exposes_semantic_metadata_and_aliases() {
+        let result = run_source(
+            "program.c",
+            "int main(void) { double value = 0.1; double *p = &value; double **pp = &p; int items[2] = {1, 2}; }\n",
+        )
+        .unwrap();
+        let value = result
+            .state
+            .iter()
+            .find(|item| item.name == "value")
+            .unwrap();
+        assert_eq!(value.type_info.kind, "floating");
+        assert_eq!(value.type_info.size, Some(8));
+        assert_eq!(value.display_value, "0.1");
+        assert!(value.exact_value.starts_with("0.10000000000000000555"));
+        assert_eq!(value.aliases, ["*p", "**pp"]);
+
+        let items = result
+            .state
+            .iter()
+            .find(|item| item.name == "items")
+            .unwrap();
+        assert_eq!(items.type_info.kind, "array");
+        assert_eq!(items.type_info.array_shape, [2]);
+
+        let json = cboxes_success_json(
+            &result,
+            &HashMap::from([("program.c".to_owned(), (0, usize::MAX))]),
+        );
+        assert!(json.contains("\"typeInfo\""));
+        assert!(json.contains("\"exactValue\""));
+        assert!(json.contains("\"aliases\":[\"*p\",\"**pp\"]"));
     }
 
     #[test]

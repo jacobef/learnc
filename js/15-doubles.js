@@ -5,11 +5,11 @@ createProgramTemplate({
         { code: "double clown = 4.5;\n" },
         {
             code: "int juggler = clown;\n",
-            instructions: "When an $t{int} is assigned to a $t{double}, the decimal part is dropped.",
+            instructions: "When a $t{double} is assigned to an $t{int}, the decimal part is dropped.",
         },
         {
             code: "double circus = juggler;\n",
-            instructions: "When a $t{double} is assigned to an $t{int}, the mathematical value is preserved. In this case, $v{4} is simply converted to $v{4.0}.",
+            instructions: "When an $t{int} is assigned to a $t{double}, the mathematical value is preserved. In this case, $v{4} is simply converted to $v{4.0}.",
         },
         {
             code: "circus = 5.0/2.0;\n",

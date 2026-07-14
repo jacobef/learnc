@@ -1,5 +1,10 @@
 const PROGRESS_PREFIX = "cboxes-progress-v1:";
 const SANDBOX_PROGRESS_KEY = "cboxes:sandbox-state:v1";
+function isStoredProgress(value) {
+    return ("version" in value &&
+        value.version === 1 &&
+        "state" in value);
+}
 function storage() {
     try {
         return window.localStorage;
@@ -27,7 +32,7 @@ export function readLevelProgress(levelId = currentLevelId()) {
         const parsed = JSON.parse(raw);
         if (!parsed || typeof parsed !== "object")
             return null;
-        if ("state" in parsed)
+        if (isStoredProgress(parsed))
             return parsed.state ?? null;
         return parsed;
     }

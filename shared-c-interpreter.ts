@@ -1,9 +1,8 @@
 import { C_INTERPRETER_WASM_BASE64 } from "./shared-c-interpreter-wasm-data.js";
 import type {
   BoxState,
+  CTypeInfo,
   ProgramDiagnostic,
-  ValueLiteralEvaluation,
-  ValueLiteralKind,
 } from "./shared-core-utils.js";
 
 type CInterpreterExports = WebAssembly.Exports & {
@@ -116,12 +115,15 @@ type CExpressionOk = {
     kind: string;
     type: string;
     value: string;
+    displayValue?: string;
+    exactValue?: string;
     address: string | null;
     name?: string;
     valueLiteral?: {
       kind: string;
       hasSuffix: boolean;
     } | null;
+    typeInfo?: Partial<CTypeInfo> | null;
   };
 };
 
@@ -192,13 +194,15 @@ export type CExpressionResult =
         kind: string;
         type: string;
         value: string;
+        displayValue: string;
+        exactValue: string;
         address: string;
         name?: string;
         valueLiteral?: {
-          kind: ValueLiteralKind;
+          kind: "integer" | "floating";
           hasSuffix: boolean;
         } | null;
-        nanSign?: -1 | 1;
+        typeInfo: CTypeInfo;
       };
     }
   | { kind: "compile" | "ub"; diagnostic: ProgramDiagnostic };
@@ -923,6 +927,8 @@ function normalizeState(rawState: unknown): BoxState[] {
       name: String(box.name ?? ""),
       type: String(box.type ?? "int"),
       value: String(box.value ?? ""),
+      displayValue: String(box.displayValue ?? box.value ?? ""),
+      exactValue: String(box.exactValue ?? box.displayValue ?? box.value ?? ""),
       address: box.address == null ? null : String(box.address),
       arrayRoot: box.arrayRoot == null ? null : String(box.arrayRoot),
       arrayShape: Array.isArray(box.arrayShape)
@@ -931,8 +937,39 @@ function normalizeState(rawState: unknown): BoxState[] {
       arrayIndices: Array.isArray(box.arrayIndices)
         ? box.arrayIndices.map((value) => Number(value)).filter(Number.isFinite)
         : null,
+      aliases: Array.isArray(box.aliases)
+        ? box.aliases.map((value) => String(value))
+        : [],
+      typeInfo: normalizeTypeInfo(box.typeInfo),
     };
   });
+}
+
+function normalizeTypeInfo(raw: unknown): CTypeInfo {
+  const info = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const normalizeShape = (value: unknown) =>
+    Array.isArray(value)
+      ? value
+          .map((item) => Math.floor(Number(item)))
+          .filter((item) => Number.isFinite(item) && item >= 0)
+      : [];
+  const nullableNumber = (value: unknown) => {
+    const numeric = Number(value);
+    return value == null || !Number.isFinite(numeric) ? null : numeric;
+  };
+  const kinds = new Set<CTypeInfo["kind"]>([
+    "void", "integer", "floating", "complex", "pointer", "array",
+    "aggregate", "function", "va-list", "unknown",
+  ]);
+  const kind = String(info.kind ?? "unknown") as CTypeInfo["kind"];
+  return {
+    kind: kinds.has(kind) ? kind : "unknown",
+    pointerDepth: Math.max(0, Math.floor(Number(info.pointerDepth ?? 0))),
+    arrayShape: normalizeShape(info.arrayShape),
+    pointeeArrayShape: normalizeShape(info.pointeeArrayShape),
+    size: nullableNumber(info.size),
+    align: nullableNumber(info.align),
+  };
 }
 
 function normalizeTrace(rawTrace: unknown): CProgramTraceEvent[] {
@@ -1011,84 +1048,139 @@ function normalizeExecutionLimit(
   };
 }
 
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+function invokeInterpreter<T>(
+  inputs: Uint8Array[],
+  invoke: (
+    interpreter: CInterpreterExports,
+    pointers: number[],
+  ) => number,
+): T {
+  const interpreter = interpreterExports();
+  const allocations: Array<{ pointer: number; length: number }> = [];
+  let outputPointer: number | null = null;
+  let outputLength = 0;
+  try {
+    const pointers = inputs.map((input) => {
+      const pointer = interpreter.cboxes_alloc(input.length);
+      new Uint8Array(interpreter.memory.buffer).set(input, pointer);
+      allocations.push({ pointer, length: input.length });
+      return pointer;
+    });
+    outputPointer = invoke(interpreter, pointers);
+    outputLength = interpreter.cboxes_last_result_len();
+    const json = textDecoder.decode(
+      new Uint8Array(
+        interpreter.memory.buffer,
+        outputPointer,
+        outputLength,
+      ),
+    );
+    return JSON.parse(json) as T;
+  } finally {
+    try {
+      for (const allocation of allocations) {
+        interpreter.cboxes_free(allocation.pointer, allocation.length);
+      }
+      if (outputPointer != null) {
+        interpreter.cboxes_free(outputPointer, outputLength);
+      }
+    } catch {
+      exportsCache = null;
+    }
+  }
+}
+
+function normalizeProgramResult(
+  parsed: CInterpreterRawResult,
+  diagnosticSource: string,
+): CProgramResult {
+  const implicit = {
+    implicitMainApplied: parsed.implicitMainApplied,
+    implicitMainNotice: parsed.implicitMainNotice,
+  };
+  if (!parsed.ok) {
+    return {
+      kind: parsed.kind,
+      diagnostic: rustDiagnostic(parsed, diagnosticSource),
+      ...implicit,
+    };
+  }
+  return {
+    kind: "ok",
+    state: normalizeState(parsed.state),
+    trace: normalizeTrace(parsed.trace),
+    mainClose: normalizeSourceLocation(parsed.mainClose),
+    blocked: normalizeBlocked(parsed.blocked),
+    executionLimit: normalizeExecutionLimit(parsed.executionLimit),
+    stdout: String(parsed.stdout ?? ""),
+    stderr: String(parsed.stderr ?? ""),
+    exitStatus: Number(parsed.exitStatus ?? 0),
+    ...implicit,
+  };
+}
+
+function normalizeExpressionResult(
+  parsed: CExpressionRawResult,
+  diagnosticSource: string,
+): CExpressionResult {
+  if (!parsed.ok) {
+    return {
+      kind: parsed.kind,
+      diagnostic: rustDiagnostic(parsed, diagnosticSource),
+    };
+  }
+  const result = parsed.result;
+  return {
+    kind: "ok",
+    result: {
+      kind: String(result.kind ?? "rvalue"),
+      type: String(result.type ?? "int"),
+      value: String(result.value ?? ""),
+      displayValue: String(result.displayValue ?? result.value ?? ""),
+      exactValue: String(
+        result.exactValue ?? result.displayValue ?? result.value ?? "",
+      ),
+      address: result.address == null ? "" : String(result.address),
+      name: result.name == null ? undefined : String(result.name),
+      valueLiteral:
+        result.valueLiteral?.kind === "integer" ||
+        result.valueLiteral?.kind === "floating"
+          ? {
+              kind: result.valueLiteral.kind,
+              hasSuffix: result.valueLiteral.hasSuffix === true,
+            }
+          : null,
+      typeInfo: normalizeTypeInfo(result.typeInfo),
+    },
+  };
+}
+
 export function runCProgram(
   source: string,
   addressBase: number = syntheticAddressBase,
   stdin: string = "",
 ): CProgramResult {
-  let interpreter: CInterpreterExports;
-  let inputPtr: number | null = null;
-  let stdinPtr: number | null = null;
-  let outputPtr: number | null = null;
-  let outputLen = 0;
   try {
-    interpreter = interpreterExports();
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
-    const input = encoder.encode(source);
-    const stdinInput = encoder.encode(stdin);
-    inputPtr = interpreter.cboxes_alloc(input.length);
-    new Uint8Array(interpreter.memory.buffer).set(input, inputPtr);
-    stdinPtr = interpreter.cboxes_alloc(stdinInput.length);
-    new Uint8Array(interpreter.memory.buffer).set(stdinInput, stdinPtr);
-    outputPtr = interpreter.cboxes_run_source(
-      inputPtr,
-      input.length,
-      stdinPtr,
-      stdinInput.length,
-      addressBase,
+    const sourceInput = textEncoder.encode(source);
+    const stdinInput = textEncoder.encode(stdin);
+    const parsed = invokeInterpreter<CInterpreterRawResult>(
+      [sourceInput, stdinInput],
+      (interpreter, [sourcePointer, stdinPointer]) =>
+        interpreter.cboxes_run_source(
+          sourcePointer!,
+          sourceInput.length,
+          stdinPointer!,
+          stdinInput.length,
+          addressBase,
+        ),
     );
-    interpreter.cboxes_free(inputPtr, input.length);
-    inputPtr = null;
-    interpreter.cboxes_free(stdinPtr, stdinInput.length);
-    stdinPtr = null;
-    outputLen = interpreter.cboxes_last_result_len();
-    const output = decoder.decode(
-      new Uint8Array(interpreter.memory.buffer, outputPtr, outputLen),
-    );
-    interpreter.cboxes_free(outputPtr, outputLen);
-    outputPtr = null;
-    const parsed = JSON.parse(output) as CInterpreterRawResult;
-    if (!parsed.ok) {
-      return { kind: parsed.kind, diagnostic: rustDiagnostic(parsed, source) };
-    }
-    return {
-      kind: "ok",
-      state: normalizeState(parsed.state),
-      trace: normalizeTrace(parsed.trace),
-      mainClose: normalizeSourceLocation(parsed.mainClose),
-      blocked: normalizeBlocked(parsed.blocked),
-      executionLimit: normalizeExecutionLimit(parsed.executionLimit),
-      stdout: String(parsed.stdout ?? ""),
-      stderr: String(parsed.stderr ?? ""),
-      exitStatus: Number(parsed.exitStatus ?? 0),
-    };
+    return normalizeProgramResult(parsed, source);
   } catch (error) {
     exportsCache = null;
     return crashDiagnostic(error);
-  } finally {
-    const cached = exportsCache;
-    if (cached && inputPtr != null) {
-      try {
-        cached.cboxes_free(inputPtr, new TextEncoder().encode(source).length);
-      } catch {
-        exportsCache = null;
-      }
-    }
-    if (cached && stdinPtr != null) {
-      try {
-        cached.cboxes_free(stdinPtr, new TextEncoder().encode(stdin).length);
-      } catch {
-        exportsCache = null;
-      }
-    }
-    if (cached && outputPtr != null && outputLen > 0) {
-      try {
-        cached.cboxes_free(outputPtr, outputLen);
-      } catch {
-        exportsCache = null;
-      }
-    }
   }
 }
 
@@ -1099,93 +1191,34 @@ export function runCFiles(
   implicitMain: boolean = true,
   executionBudget: CExecutionBudget = DEFAULT_EXECUTION_BUDGET,
 ): CProgramResult {
-  let interpreter: CInterpreterExports;
-  let bundlePtr: number | null = null;
-  let stdinPtr: number | null = null;
-  let outputPtr: number | null = null;
-  let outputLen = 0;
   const bundle = encodeSourceFiles(files);
-  const stdinInput = new TextEncoder().encode(stdin);
+  const stdinInput = textEncoder.encode(stdin);
   const budget = normalizeExecutionBudget(executionBudget);
   try {
-    interpreter = interpreterExports();
-    const decoder = new TextDecoder();
-    bundlePtr = interpreter.cboxes_alloc(bundle.length);
-    new Uint8Array(interpreter.memory.buffer).set(bundle, bundlePtr);
-    stdinPtr = interpreter.cboxes_alloc(stdinInput.length);
-    new Uint8Array(interpreter.memory.buffer).set(stdinInput, stdinPtr);
-    outputPtr = interpreter.cboxes_run_files(
-      bundlePtr,
-      bundle.length,
-      stdinPtr,
-      stdinInput.length,
-      addressBase,
-      implicitMain ? 1 : 0,
-      budget.stepLimit,
-      budget.followingTraceLimit,
+    const parsed = invokeInterpreter<CInterpreterRawResult>(
+      [bundle, stdinInput],
+      (interpreter, [bundlePointer, stdinPointer]) =>
+        interpreter.cboxes_run_files(
+          bundlePointer!,
+          bundle.length,
+          stdinPointer!,
+          stdinInput.length,
+          addressBase,
+          implicitMain ? 1 : 0,
+          budget.stepLimit,
+          budget.followingTraceLimit,
+        ),
     );
-    interpreter.cboxes_free(bundlePtr, bundle.length);
-    bundlePtr = null;
-    interpreter.cboxes_free(stdinPtr, stdinInput.length);
-    stdinPtr = null;
-    outputLen = interpreter.cboxes_last_result_len();
-    const output = decoder.decode(
-      new Uint8Array(interpreter.memory.buffer, outputPtr, outputLen),
-    );
-    interpreter.cboxes_free(outputPtr, outputLen);
-    outputPtr = null;
-    const parsed = JSON.parse(output) as CInterpreterRawResult;
-    if (!parsed.ok) {
-      const diagnosticSource =
-        files.find((file) => file.path === parsed.file)?.source ??
-        files[0]?.source ??
-        "";
-      return {
-        kind: parsed.kind,
-        diagnostic: rustDiagnostic(parsed, diagnosticSource),
-        implicitMainApplied: parsed.implicitMainApplied,
-        implicitMainNotice: parsed.implicitMainNotice,
-      };
-    }
-    return {
-      kind: "ok",
-      state: normalizeState(parsed.state),
-      trace: normalizeTrace(parsed.trace),
-      mainClose: normalizeSourceLocation(parsed.mainClose),
-      blocked: normalizeBlocked(parsed.blocked),
-      executionLimit: normalizeExecutionLimit(parsed.executionLimit),
-      stdout: String(parsed.stdout ?? ""),
-      stderr: String(parsed.stderr ?? ""),
-      exitStatus: Number(parsed.exitStatus ?? 0),
-      implicitMainApplied: parsed.implicitMainApplied,
-      implicitMainNotice: parsed.implicitMainNotice,
-    };
+    const diagnosticSource =
+      !parsed.ok
+        ? files.find((file) => file.path === parsed.file)?.source ??
+          files[0]?.source ??
+          ""
+        : files[0]?.source ?? "";
+    return normalizeProgramResult(parsed, diagnosticSource);
   } catch (error) {
     exportsCache = null;
     return crashDiagnostic(error);
-  } finally {
-    const cached = exportsCache;
-    if (cached && bundlePtr != null) {
-      try {
-        cached.cboxes_free(bundlePtr, bundle.length);
-      } catch {
-        exportsCache = null;
-      }
-    }
-    if (cached && stdinPtr != null) {
-      try {
-        cached.cboxes_free(stdinPtr, stdinInput.length);
-      } catch {
-        exportsCache = null;
-      }
-    }
-    if (cached && outputPtr != null && outputLen > 0) {
-      try {
-        cached.cboxes_free(outputPtr, outputLen);
-      } catch {
-        exportsCache = null;
-      }
-    }
   }
 }
 
@@ -1196,103 +1229,28 @@ export function evaluateCExpression(
   addressBase: number = syntheticAddressBase,
   stdin: string = "",
 ): CExpressionResult {
-  let interpreter: CInterpreterExports;
-  let sourcePtr: number | null = null;
-  let exprPtr: number | null = null;
-  let stdinPtr: number | null = null;
-  let outputPtr: number | null = null;
-  let outputLen = 0;
-  const encoder = new TextEncoder();
-  const sourceInput = encoder.encode(source);
-  const exprInput = encoder.encode(expression);
-  const stdinInput = encoder.encode(stdin);
+  const sourceInput = textEncoder.encode(source);
+  const expressionInput = textEncoder.encode(expression);
+  const stdinInput = textEncoder.encode(stdin);
   try {
-    interpreter = interpreterExports();
-    const decoder = new TextDecoder();
-    sourcePtr = interpreter.cboxes_alloc(sourceInput.length);
-    new Uint8Array(interpreter.memory.buffer).set(sourceInput, sourcePtr);
-    exprPtr = interpreter.cboxes_alloc(exprInput.length);
-    new Uint8Array(interpreter.memory.buffer).set(exprInput, exprPtr);
-    stdinPtr = interpreter.cboxes_alloc(stdinInput.length);
-    new Uint8Array(interpreter.memory.buffer).set(stdinInput, stdinPtr);
-    outputPtr = interpreter.cboxes_eval_expression(
-      sourcePtr,
-      sourceInput.length,
-      exprPtr,
-      exprInput.length,
-      Math.max(0, Math.floor(eventIndex)),
-      stdinPtr,
-      stdinInput.length,
-      addressBase,
+    const parsed = invokeInterpreter<CExpressionRawResult>(
+      [sourceInput, expressionInput, stdinInput],
+      (interpreter, [sourcePointer, expressionPointer, stdinPointer]) =>
+        interpreter.cboxes_eval_expression(
+          sourcePointer!,
+          sourceInput.length,
+          expressionPointer!,
+          expressionInput.length,
+          Math.max(0, Math.floor(eventIndex)),
+          stdinPointer!,
+          stdinInput.length,
+          addressBase,
+        ),
     );
-    interpreter.cboxes_free(sourcePtr, sourceInput.length);
-    sourcePtr = null;
-    interpreter.cboxes_free(exprPtr, exprInput.length);
-    exprPtr = null;
-    interpreter.cboxes_free(stdinPtr, stdinInput.length);
-    stdinPtr = null;
-    outputLen = interpreter.cboxes_last_result_len();
-    const output = decoder.decode(
-      new Uint8Array(interpreter.memory.buffer, outputPtr, outputLen),
-    );
-    interpreter.cboxes_free(outputPtr, outputLen);
-    outputPtr = null;
-    const parsed = JSON.parse(output) as CExpressionRawResult;
-    if (!parsed.ok) {
-      return { kind: parsed.kind, diagnostic: rustDiagnostic(parsed, expression) };
-    }
-    const result = parsed.result || {};
-    return {
-      kind: "ok",
-      result: {
-        kind: String(result.kind ?? "rvalue"),
-        type: String(result.type ?? "int"),
-        value: String(result.value ?? ""),
-        address: result.address == null ? "" : String(result.address),
-        name: result.name == null ? undefined : String(result.name),
-        valueLiteral:
-          result.valueLiteral?.kind === "integer" ||
-          result.valueLiteral?.kind === "floating"
-            ? {
-                kind: result.valueLiteral.kind,
-                hasSuffix: result.valueLiteral.hasSuffix === true,
-              }
-            : null,
-      },
-    };
+    return normalizeExpressionResult(parsed, expression);
   } catch (error) {
     exportsCache = null;
     return crashExpressionDiagnostic(error);
-  } finally {
-    const cached = exportsCache;
-    if (cached && sourcePtr != null) {
-      try {
-        cached.cboxes_free(sourcePtr, sourceInput.length);
-      } catch {
-        exportsCache = null;
-      }
-    }
-    if (cached && exprPtr != null) {
-      try {
-        cached.cboxes_free(exprPtr, exprInput.length);
-      } catch {
-        exportsCache = null;
-      }
-    }
-    if (cached && stdinPtr != null) {
-      try {
-        cached.cboxes_free(stdinPtr, stdinInput.length);
-      } catch {
-        exportsCache = null;
-      }
-    }
-    if (cached && outputPtr != null && outputLen > 0) {
-      try {
-        cached.cboxes_free(outputPtr, outputLen);
-      } catch {
-        exportsCache = null;
-      }
-    }
   }
 }
 
@@ -1305,133 +1263,196 @@ export function evaluateCExpressionFiles(
   implicitMain: boolean = true,
   executionBudget: CExecutionBudget = DEFAULT_EXECUTION_BUDGET,
 ): CExpressionResult {
-  let interpreter: CInterpreterExports;
-  let bundlePtr: number | null = null;
-  let exprPtr: number | null = null;
-  let stdinPtr: number | null = null;
-  let outputPtr: number | null = null;
-  let outputLen = 0;
-  const encoder = new TextEncoder();
   const bundle = encodeSourceFiles(files);
-  const exprInput = encoder.encode(expression);
-  const stdinInput = encoder.encode(stdin);
+  const expressionInput = textEncoder.encode(expression);
+  const stdinInput = textEncoder.encode(stdin);
   const budget = normalizeExecutionBudget(executionBudget);
   try {
-    interpreter = interpreterExports();
-    const decoder = new TextDecoder();
-    bundlePtr = interpreter.cboxes_alloc(bundle.length);
-    new Uint8Array(interpreter.memory.buffer).set(bundle, bundlePtr);
-    exprPtr = interpreter.cboxes_alloc(exprInput.length);
-    new Uint8Array(interpreter.memory.buffer).set(exprInput, exprPtr);
-    stdinPtr = interpreter.cboxes_alloc(stdinInput.length);
-    new Uint8Array(interpreter.memory.buffer).set(stdinInput, stdinPtr);
-    outputPtr = interpreter.cboxes_eval_expression_files(
-      bundlePtr,
-      bundle.length,
-      exprPtr,
-      exprInput.length,
-      Math.max(0, Math.floor(eventIndex)),
-      stdinPtr,
-      stdinInput.length,
-      addressBase,
-      implicitMain ? 1 : 0,
-      budget.stepLimit,
+    const parsed = invokeInterpreter<CExpressionRawResult>(
+      [bundle, expressionInput, stdinInput],
+      (interpreter, [bundlePointer, expressionPointer, stdinPointer]) =>
+        interpreter.cboxes_eval_expression_files(
+          bundlePointer!,
+          bundle.length,
+          expressionPointer!,
+          expressionInput.length,
+          Math.max(0, Math.floor(eventIndex)),
+          stdinPointer!,
+          stdinInput.length,
+          addressBase,
+          implicitMain ? 1 : 0,
+          budget.stepLimit,
+        ),
     );
-    interpreter.cboxes_free(bundlePtr, bundle.length);
-    bundlePtr = null;
-    interpreter.cboxes_free(exprPtr, exprInput.length);
-    exprPtr = null;
-    interpreter.cboxes_free(stdinPtr, stdinInput.length);
-    stdinPtr = null;
-    outputLen = interpreter.cboxes_last_result_len();
-    const output = decoder.decode(
-      new Uint8Array(interpreter.memory.buffer, outputPtr, outputLen),
-    );
-    interpreter.cboxes_free(outputPtr, outputLen);
-    outputPtr = null;
-    const parsed = JSON.parse(output) as CExpressionRawResult;
-    if (!parsed.ok) {
-      const diagnosticSource =
-        parsed.file === "<expression>"
-          ? expression
-          : (files.find((file) => file.path === parsed.file)?.source ??
-            files[0]?.source ??
-            "");
-      return {
-        kind: parsed.kind,
-        diagnostic: rustDiagnostic(parsed, diagnosticSource),
-      };
-    }
-    const result = parsed.result || {};
-    return {
-      kind: "ok",
-      result: {
-        kind: String(result.kind ?? "rvalue"),
-        type: String(result.type ?? "int"),
-        value: String(result.value ?? ""),
-        address: result.address == null ? "" : String(result.address),
-        name: result.name == null ? undefined : String(result.name),
-        valueLiteral:
-          result.valueLiteral?.kind === "integer" ||
-          result.valueLiteral?.kind === "floating"
-            ? {
-                kind: result.valueLiteral.kind,
-                hasSuffix: result.valueLiteral.hasSuffix === true,
-              }
-            : null,
-      },
-    };
+    const diagnosticSource =
+      !parsed.ok && parsed.file !== "<expression>"
+        ? files.find((file) => file.path === parsed.file)?.source ??
+          files[0]?.source ??
+          ""
+        : expression;
+    return normalizeExpressionResult(parsed, diagnosticSource);
   } catch (error) {
     exportsCache = null;
     return crashExpressionDiagnostic(error);
-  } finally {
-    const cached = exportsCache;
-    if (cached && bundlePtr != null) {
-      try {
-        cached.cboxes_free(bundlePtr, bundle.length);
-      } catch {
-        exportsCache = null;
-      }
-    }
-    if (cached && exprPtr != null) {
-      try {
-        cached.cboxes_free(exprPtr, exprInput.length);
-      } catch {
-        exportsCache = null;
-      }
-    }
-    if (cached && stdinPtr != null) {
-      try {
-        cached.cboxes_free(stdinPtr, stdinInput.length);
-      } catch {
-        exportsCache = null;
-      }
-    }
-    if (cached && outputPtr != null && outputLen > 0) {
-      try {
-        cached.cboxes_free(outputPtr, outputLen);
-      } catch {
-        exportsCache = null;
-      }
-    }
   }
 }
 
-export function parseCValueLiteral(literal: string): ValueLiteralEvaluation {
-  const evaluated = evaluateCExpression("0;", 0, literal);
-  if (evaluated.kind !== "ok") {
-    return { error: true, kind: evaluated.kind };
-  }
-  if (!evaluated.result.valueLiteral) {
-    return { error: true, kind: "compile" };
+export function normalizeBoxValueForContext(box: BoxState): BoxState {
+  const raw = String(box.rawValue ?? box.value ?? "").trim();
+  if (!raw) return { ...box, value: raw };
+  const evaluated = evaluateCExpression("0;", 0, raw);
+  if (evaluated.kind !== "ok" || !evaluated.result.valueLiteral) {
+    return { ...box, value: raw };
   }
   return {
-    result: {
-      kind: evaluated.result.kind,
-      type: evaluated.result.type,
-      value: evaluated.result.value,
-      valueLiteral: evaluated.result.valueLiteral,
-      nanSign: evaluated.result.nanSign,
-    },
+    ...box,
+    value: evaluated.result.value,
+    displayValue: evaluated.result.displayValue,
+    exactValue: evaluated.result.exactValue,
+    typeInfo: evaluated.result.typeInfo,
+  };
+}
+
+const typeInfoCache = new Map<string, CTypeInfo>();
+
+function inspectCType(type: string): CTypeInfo | null {
+  const normalized = type.trim();
+  if (!normalized) return null;
+  const cached = typeInfoCache.get(normalized);
+  if (cached) return cached;
+  const evaluated = evaluateCExpression("0;", 0, `(${normalized})0`);
+  if (evaluated.kind !== "ok") return null;
+  typeInfoCache.set(normalized, evaluated.result.typeInfo);
+  return evaluated.result.typeInfo;
+}
+
+export function resolveCBoxAliases(boxes: BoxState[]): BoxState[] {
+  const resolved = boxes.map((box) => ({ ...box, aliases: [] as string[] }));
+  const byAddress = new Map(
+    resolved
+      .filter((box) => String(box.address ?? "").trim())
+      .map((box) => [String(box.address).trim(), box]),
+  );
+  for (const pointer of resolved) {
+    const pointerDepth = inspectCType(pointer.type)?.pointerDepth ?? 0;
+    if (!pointer.name || pointerDepth === 0) continue;
+    let address = String(pointer.value ?? "").trim();
+    for (let level = 1; level <= pointerDepth; level += 1) {
+      const target = byAddress.get(address);
+      if (!target) break;
+      target.aliases!.push(`${"*".repeat(level)}${pointer.name}`);
+      address = String(target.value ?? "").trim();
+    }
+  }
+  return resolved;
+}
+
+const workspaceAddressSlots = new Map<string, BoxState[]>();
+
+function loadWorkspaceAddressSlots(type: string, count: number): BoxState[] {
+  const cached = workspaceAddressSlots.get(type) ?? [];
+  if (cached.length >= count) return cached;
+  const source = Array.from(
+    { length: count },
+    (_, index) => `${type} __cboxes_address_slot_${index};`,
+  ).join("\n");
+  const run = runCProgram(source);
+  const slots =
+    run.kind === "ok"
+      ? run.state.filter((box) => box.name.startsWith("__cboxes_address_slot_"))
+      : [];
+  workspaceAddressSlots.set(type, slots);
+  return slots;
+}
+
+export function allocateCWorkspaceObject(
+  boxes: BoxState[],
+  requestedType: string,
+): { address: string; typeInfo: CTypeInfo; assumedType: string } | null {
+  const enteredType = requestedType.trim();
+  const enteredTypeInfo = enteredType ? inspectCType(enteredType) : null;
+  const assumedType = enteredTypeInfo ? enteredType : "int";
+  const requestedTypeInfo = enteredTypeInfo ?? inspectCType("int");
+  if (!requestedTypeInfo) return null;
+  const occupied = boxes.flatMap((box) => {
+    const start = Number(String(box.address ?? "").trim());
+    if (!Number.isFinite(start)) return [];
+    const size = Math.max(
+      1,
+      inspectCType(String(box.type || ""))?.size ?? box.typeInfo?.size ?? 1,
+    );
+    return [{ start, end: start + size }];
+  });
+  const allocationFrontier = occupied.reduce(
+    (frontier, range) => Math.max(frontier, range.end),
+    Number.NEGATIVE_INFINITY,
+  );
+
+  let slotCount = Math.max(32, boxes.length * 2 + 8);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const slots = loadWorkspaceAddressSlots(assumedType, slotCount);
+    for (const slot of slots) {
+      const address = String(slot.address ?? "").trim();
+      const start = Number(address);
+      if (!address || !Number.isFinite(start)) continue;
+      const typeInfo = slot.typeInfo ?? requestedTypeInfo;
+      const size = Math.max(1, typeInfo.size ?? 1);
+      const end = start + size;
+      if (
+        start >= allocationFrontier &&
+        occupied.every((range) => end <= range.start || start >= range.end)
+      ) {
+        return { address, typeInfo, assumedType };
+      }
+    }
+    slotCount *= 2;
+  }
+  return null;
+}
+
+export function boxValueMatchesSpec(
+  actual: BoxState,
+  expected: BoxState,
+): { ok: boolean; normalized: string } {
+  const actualRaw = String(actual.rawValue ?? actual.value ?? "").trim();
+  const expectedRaw = String(expected.value ?? "").trim();
+  if (!actualRaw || !expectedRaw) {
+    const ok = actualRaw === expectedRaw;
+    return { ok, normalized: ok ? expectedRaw : "" };
+  }
+
+  const targetType = String(expected.type || actual.type || "").trim();
+  const targetKind = expected.typeInfo?.kind ?? "unknown";
+  if (targetKind === "pointer") {
+    // Synthetic addresses are opaque identifiers issued by the interpreter.
+    // Re-evaluating one in an isolated expression would lose the allocation it
+    // refers to, so pointer answers compare those Rust-produced identifiers.
+    const ok = actualRaw === expectedRaw;
+    return { ok, normalized: ok ? expectedRaw : "" };
+  }
+  const entered = evaluateCExpression("0;", 0, actualRaw);
+  if (entered.kind !== "ok" || !entered.result.valueLiteral) {
+    return { ok: false, normalized: "" };
+  }
+  if (
+    (targetKind === "floating" && entered.result.typeInfo.kind !== "floating") ||
+    (targetKind === "integer" && entered.result.typeInfo.kind !== "integer")
+  ) {
+    return { ok: false, normalized: "" };
+  }
+
+  const cast = (raw: string) =>
+    evaluateCExpression("0;", 0, `(${targetType})(${raw})`);
+  const convertedActual = cast(actualRaw);
+  const convertedExpected = cast(expectedRaw);
+  if (convertedActual.kind !== "ok" || convertedExpected.kind !== "ok") {
+    return { ok: false, normalized: "" };
+  }
+  const ok =
+    convertedActual.result.value === convertedExpected.result.value &&
+    convertedActual.result.exactValue === convertedExpected.result.exactValue;
+  return {
+    ok,
+    normalized: ok ? convertedExpected.result.value : "",
   };
 }
