@@ -10,8 +10,21 @@ export type CTypeKind =
   | "va-list"
   | "unknown";
 
+export interface CTypeHelpNode {
+  kind: "pointer" | "array" | "function" | "type";
+  label: string;
+  typeName?: string | null;
+  children: Array<{
+    relation: string;
+    node: CTypeHelpNode;
+  }>;
+}
+
 export interface CTypeInfo {
   kind: CTypeKind;
+  help?: string | null;
+  helpTypeNames?: string[] | null;
+  helpTree?: CTypeHelpNode | null;
   pointerDepth: number;
   arrayShape: number[];
   pointeeArrayShape: number[];
@@ -30,6 +43,9 @@ export interface BoxState {
   arrayRoot?: string | null;
   arrayShape?: number[] | null;
   arrayIndices?: number[] | null;
+  aggregateRoot?: string | null;
+  aggregatePath?: string[] | null;
+  aggregateKind?: "struct" | "union" | null;
   aliases?: string[] | null;
   typeInfo?: CTypeInfo | null;
   names?: string[] | string | null;
@@ -51,12 +67,25 @@ export type ProgramDiagnosticRange = {
   endCol: number;
 };
 
+export type ProgramDiagnosticAnnotation = {
+  id: string;
+  file?: string;
+  range: ProgramDiagnosticRange;
+};
+
+export type ProgramDiagnosticMessagePart = {
+  text: string;
+  annotationId?: string;
+};
+
 export type ProgramDiagnostic = {
   kind: "compile" | "ub";
   message: string;
   file?: string;
   tip?: string;
   range: ProgramDiagnosticRange;
+  annotations?: ProgramDiagnosticAnnotation[];
+  messageParts?: ProgramDiagnosticMessagePart[];
 };
 
 export function normalizeZeroDisplay(value: BoxValue): string {
@@ -99,6 +128,7 @@ export function cloneBoxes(list: BoxState[] | null | undefined): BoxState[] {
       : [box.names || box.name].filter(Boolean),
     arrayShape: box.arrayShape ? [...box.arrayShape] : box.arrayShape,
     arrayIndices: box.arrayIndices ? [...box.arrayIndices] : box.arrayIndices,
+    aggregatePath: box.aggregatePath ? [...box.aggregatePath] : box.aggregatePath,
     aliases: box.aliases ? [...box.aliases] : box.aliases,
     typeInfo: box.typeInfo
       ? {

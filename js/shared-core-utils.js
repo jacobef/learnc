@@ -31,6 +31,7 @@ export function cloneBoxes(list) {
             : [box.names || box.name].filter(Boolean),
         arrayShape: box.arrayShape ? [...box.arrayShape] : box.arrayShape,
         arrayIndices: box.arrayIndices ? [...box.arrayIndices] : box.arrayIndices,
+        aggregatePath: box.aggregatePath ? [...box.aggregatePath] : box.aggregatePath,
         aliases: box.aliases ? [...box.aliases] : box.aliases,
         typeInfo: box.typeInfo
             ? {

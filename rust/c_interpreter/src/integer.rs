@@ -39,39 +39,20 @@ pub fn parse_integer_literal(text: &str, span: Span) -> Result<(CType, i128, boo
 
     let has_suffix = !suffix.is_empty();
     let suffix = suffix.to_ascii_lowercase();
-    let mut unsigned = false;
-    let mut long_count = 0usize;
-    let mut idx = 0usize;
-    let bytes = suffix.as_bytes();
-    while idx < bytes.len() {
-        match bytes[idx] {
-            b'u' if !unsigned => {
-                unsigned = true;
-                idx += 1;
-            }
-            b'l' => {
-                if idx + 1 < bytes.len() && bytes[idx + 1] == b'l' {
-                    long_count += 2;
-                    idx += 2;
-                } else {
-                    long_count += 1;
-                    idx += 1;
-                }
-            }
-            _ => {
-                return Err(Diagnostic::error(
-                    "unsupported integer literal suffix",
-                    span,
-                ));
-            }
+    let (unsigned, long_count) = match suffix.as_str() {
+        "" => (false, 0),
+        "u" => (true, 0),
+        "l" => (false, 1),
+        "ul" | "lu" => (true, 1),
+        "ll" => (false, 2),
+        "ull" | "llu" => (true, 2),
+        _ => {
+            return Err(Diagnostic::error(
+                "unsupported integer literal suffix",
+                span,
+            ));
         }
-    }
-    if long_count > 2 {
-        return Err(Diagnostic::error(
-            "unsupported integer literal suffix",
-            span,
-        ));
-    }
+    };
 
     let candidates = match (decimal_constant, unsigned, long_count) {
         (true, false, 0) => vec![CType::Int, CType::Long, CType::LongLong],

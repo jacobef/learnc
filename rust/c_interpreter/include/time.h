@@ -6,7 +6,13 @@
 typedef unsigned long clock_t;
 typedef long time_t;
 
+struct timespec {
+    time_t tv_sec;
+    long tv_nsec;
+};
+
 #define CLOCKS_PER_SEC ((clock_t)1000000)
+#define TIME_UTC 1
 
 struct tm {
     int tm_sec;
@@ -31,5 +37,6 @@ char *ctime(const time_t *timer);
 struct tm *gmtime(const time_t *timer);
 struct tm *localtime(const time_t *timer);
 size_t strftime(char *restrict s, size_t maxsize, const char *restrict format, const struct tm *restrict timeptr);
+int timespec_get(struct timespec *ts, int base);
 
 #endif

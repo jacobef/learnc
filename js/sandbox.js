@@ -1,6 +1,7 @@
 import { applyOtherNames, appendStateObjects, clearNode, ensureBaseLayout, findArrayObjectBoxesForResult, queryRole, vbox, } from "./shared-core-dom.js";
 import { confettiRain } from "./confetti.js";
 import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
+import { diagnosticDecorations, diagnosticMessageText, renderDiagnosticMessage, } from "./shared-diagnostics.js";
 import { evaluateCExpressionFiles, runCFiles, } from "./shared-c-interpreter.js";
 const { main } = ensureBaseLayout();
 main.classList.add("main-panelized");
@@ -377,18 +378,6 @@ function updateInstructions() {
         instructions.textContent = message;
     }
 }
-function diagnosticDecoration(diagnostic) {
-    if (!diagnostic || (diagnostic.file && diagnostic.file !== sandbox.activePath))
-        return [];
-    return [
-        {
-            line: diagnostic.range.startLine,
-            startCol: diagnostic.range.startCol,
-            endCol: diagnostic.range.endCol,
-            className: "code-highlight-error",
-        },
-    ];
-}
 function renderDiagnostic(diagnostic) {
     if (!diagnostic) {
         diagnosticEl.classList.add("hidden");
@@ -406,7 +395,7 @@ function renderDiagnostic(diagnostic) {
     heading.textContent = `${diagnostic.kind === "ub" ? "Undefined behavior" : "Error"} at ${location}`;
     const message = document.createElement("div");
     message.className = "code-diagnostic-message";
-    message.textContent = diagnostic.message;
+    renderDiagnosticMessage(message, diagnostic);
     diagnosticEl.append(heading, message);
     if (!diagnostic.file || diagnostic.file === sandbox.activePath) {
         editor.setAttribute("aria-invalid", "true");
@@ -526,7 +515,7 @@ function renderExpression(outcome) {
     if (evaluated.kind !== "ok") {
         renderExpressionError(evaluated.kind === "ub"
             ? "Invalid expression: undefined behavior"
-            : "Invalid expression", evaluated.diagnostic.message);
+            : "Invalid expression", diagnosticMessageText(evaluated.diagnostic));
         return;
     }
     const { result } = evaluated;
@@ -794,7 +783,7 @@ function updateLineGutters(linesOverride) {
         lines,
         lineClasses,
         lineNumberClasses,
-        decorations: diagnosticDecoration(diagnostic),
+        decorations: diagnosticDecorations(diagnostic, lines, sandbox.activePath),
     });
     renderDiagnostic(diagnostic);
     const style = window.getComputedStyle(editor);

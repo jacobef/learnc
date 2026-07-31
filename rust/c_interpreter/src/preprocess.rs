@@ -5,6 +5,7 @@ use std::mem;
 use std::path::{Component, Path, PathBuf};
 
 use crate::diag::Diagnostic;
+use crate::integer::parse_integer_literal as parse_c_integer_literal;
 use crate::source::{FileId, LineOrigin, SourceManager, Span};
 
 const HIDDEN_STDIO_H: &str = include_str!("../include/stdio.h");
@@ -31,6 +32,9 @@ const HIDDEN_SIGNAL_H: &str = include_str!("../include/signal.h");
 const HIDDEN_INTTYPES_H: &str = include_str!("../include/inttypes.h");
 const HIDDEN_TIME_H: &str = include_str!("../include/time.h");
 const HIDDEN_FENV_H: &str = include_str!("../include/fenv.h");
+const HIDDEN_STDALIGN_H: &str = include_str!("../include/stdalign.h");
+const HIDDEN_STDNORETURN_H: &str = include_str!("../include/stdnoreturn.h");
+const HIDDEN_UCHAR_H: &str = include_str!("../include/uchar.h");
 
 pub struct Preprocessed {
     pub file_id: FileId,
@@ -77,6 +81,7 @@ struct ConditionalFrame {
     branch_taken: bool,
     currently_active: bool,
     saw_else: bool,
+    opening_span: Span,
 }
 
 struct PresumedLocation {
@@ -92,7 +97,7 @@ enum ExpansionMode {
 
 #[derive(Clone, Debug)]
 enum IfToken {
-    Number(i128),
+    Number(PpInt),
     LParen,
     RParen,
     Question,
@@ -120,6 +125,39 @@ enum IfToken {
     End,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PpInt {
+    bits: u64,
+    unsigned: bool,
+}
+
+impl PpInt {
+    fn signed(value: i64) -> Self {
+        Self {
+            bits: value as u64,
+            unsigned: false,
+        }
+    }
+
+    fn unsigned(value: u64) -> Self {
+        Self {
+            bits: value,
+            unsigned: true,
+        }
+    }
+
+    fn truthy(self) -> bool {
+        self.bits != 0
+    }
+
+    fn with_common_type(self, other: Self) -> Self {
+        Self {
+            bits: self.bits,
+            unsigned: self.unsigned || other.unsigned,
+        }
+    }
+}
+
 impl Preprocessor {
     #[cfg(not(test))]
     pub fn new() -> Self {
@@ -140,7 +178,7 @@ impl Preprocessor {
         root_file: FileId,
     ) -> Result<Preprocessed, Diagnostic> {
         let root_path = sources.file(root_file).path().clone();
-        let mut macros = HashMap::new();
+        let mut macros = predefined_macros();
         let expanded = self.expand_file(sources, root_file, &root_path, &mut macros)?;
         let file_id = sources.add_generated_file(root_path, expanded.text, expanded.line_origins);
         Ok(Preprocessed { file_id })
@@ -162,11 +200,22 @@ impl Preprocessor {
         };
 
         let lines = text.lines().collect::<Vec<_>>();
+        let mut line_starts = vec![0usize];
+        line_starts.extend(
+            text.match_indices('\n')
+                .map(|(newline, _)| newline.saturating_add(1)),
+        );
         let mut line_idx = 0usize;
         while line_idx < lines.len() {
             let line_number = line_idx + 1;
             let line = lines[line_idx];
             let trimmed = line.trim_start();
+            let first_token = line.len().saturating_sub(trimmed.len());
+            let line_span = Span::new(
+                file_id,
+                line_starts[line_idx].saturating_add(first_token),
+                line_starts[line_idx].saturating_add(line.len()),
+            );
             if let Some(rest) = trimmed.strip_prefix('#') {
                 self.handle_directive(
                     rest.trim_start(),
@@ -178,7 +227,9 @@ impl Preprocessor {
                     &mut conditionals,
                     &mut presumed,
                     &mut out,
-                )?;
+                    line_span,
+                )
+                .map_err(|diag| diag.replace_placeholder_span(line_span))?;
                 out.push_line("", file_id, line_number);
                 line_idx += 1;
                 continue;
@@ -189,15 +240,18 @@ impl Preprocessor {
                 let mut expanded_source = line.to_owned();
                 let mut end_line_idx = line_idx;
                 loop {
-                    match self.expand_macros_in_line(
-                        &expanded_source,
-                        macros,
-                        &mut HashSet::new(),
-                        ExpansionMode::Normal,
-                        file_id,
-                        presumed_line,
-                        &presumed.file_name,
-                    ) {
+                    match self
+                        .expand_macros_in_line(
+                            &expanded_source,
+                            macros,
+                            &mut HashSet::new(),
+                            ExpansionMode::Normal,
+                            file_id,
+                            presumed_line,
+                            &presumed.file_name,
+                        )
+                        .map_err(|diag| diag.replace_placeholder_span(line_span))
+                    {
                         Ok(expanded) => {
                             for (offset, expanded_line) in expanded.split('\n').enumerate() {
                                 out.push_line(expanded_line, file_id, line_number + offset);
@@ -223,9 +277,13 @@ impl Preprocessor {
         }
 
         if !conditionals.is_empty() {
+            let opening_span = conditionals
+                .last()
+                .map(|frame| frame.opening_span)
+                .unwrap_or_else(|| Self::span(file_id));
             return Err(Diagnostic::error(
                 format!("unterminated conditional directive in {}", path.display()),
-                Self::span(file_id),
+                opening_span,
             ));
         }
 
@@ -250,14 +308,17 @@ impl Preprocessor {
         if !text.is_empty() && !text.ends_with('\n') {
             return Err(Diagnostic::error(
                 "nonempty source file must end in a newline character",
-                Self::span(file_id),
+                Span::new(file_id, text.len(), text.len()),
             ));
         }
 
-        let bytes = text.as_bytes();
+        let trigraphs = replace_trigraphs(text);
+        let translated = canonicalize_universal_characters(&trigraphs, file_id)?;
+        let bytes = translated.as_bytes();
         let mut idx = 0usize;
         let mut out = String::with_capacity(text.len());
         let mut mode = Mode::Normal;
+        let mut construct_start = None;
 
         while idx < bytes.len() {
             if let Some(consumed) = line_splice_length(bytes, idx) {
@@ -267,6 +328,11 @@ impl Preprocessor {
 
             match mode {
                 Mode::Normal => {
+                    if let Some((replacement, consumed)) = digraph_at(bytes, idx) {
+                        out.push_str(replacement);
+                        idx += consumed;
+                        continue;
+                    }
                     let ch = bytes[idx] as char;
                     if ch == '/' && idx + 1 < bytes.len() {
                         match bytes[idx + 1] as char {
@@ -278,6 +344,7 @@ impl Preprocessor {
                             }
                             '*' => {
                                 out.push(' ');
+                                construct_start = Some(idx);
                                 idx += 2;
                                 mode = Mode::BlockComment;
                                 continue;
@@ -288,13 +355,22 @@ impl Preprocessor {
                     out.push(ch);
                     idx += 1;
                     if ch == '"' {
+                        construct_start = Some(idx - 1);
                         mode = Mode::String;
                     } else if ch == '\'' {
+                        construct_start = Some(idx - 1);
                         mode = Mode::Char;
                     }
                 }
                 Mode::String | Mode::Char => {
                     let ch = bytes[idx] as char;
+                    if ch == '\n' || ch == '\r' {
+                        let start = construct_start.unwrap_or(idx);
+                        return Err(Diagnostic::error(
+                            "unterminated quoted literal during preprocessing",
+                            Span::new(file_id, start, idx),
+                        ));
+                    }
                     out.push(ch);
                     idx += 1;
                     if ch == '\\' && idx < bytes.len() {
@@ -304,6 +380,7 @@ impl Preprocessor {
                     }
                     if (mode == Mode::String && ch == '"') || (mode == Mode::Char && ch == '\'') {
                         mode = Mode::Normal;
+                        construct_start = None;
                     }
                 }
                 Mode::LineComment => {
@@ -328,6 +405,7 @@ impl Preprocessor {
                     {
                         idx += 2;
                         mode = Mode::Normal;
+                        construct_start = None;
                         continue;
                     }
                     let ch = bytes[idx] as char;
@@ -346,9 +424,10 @@ impl Preprocessor {
         }
 
         if mode == Mode::BlockComment {
+            let start = construct_start.unwrap_or(text.len());
             return Err(Diagnostic::error(
                 "unterminated block comment during preprocessing",
-                Self::span(file_id),
+                Span::new(file_id, start, start.saturating_add(2)),
             ));
         }
 
@@ -366,6 +445,7 @@ impl Preprocessor {
         conditionals: &mut Vec<ConditionalFrame>,
         presumed: &mut PresumedLocation,
         out: &mut ExpandedFile,
+        directive_span: Span,
     ) -> Result<(), Diagnostic> {
         let (keyword, rest) = split_directive(directive);
         let active = self.is_active(conditionals);
@@ -384,6 +464,7 @@ impl Preprocessor {
                     branch_taken: condition,
                     currently_active: condition,
                     saw_else: false,
+                    opening_span: directive_span,
                 });
                 Ok(())
             }
@@ -400,6 +481,7 @@ impl Preprocessor {
                     branch_taken: condition,
                     currently_active: condition,
                     saw_else: false,
+                    opening_span: directive_span,
                 });
                 Ok(())
             }
@@ -414,6 +496,7 @@ impl Preprocessor {
                     branch_taken: condition,
                     currently_active: active && condition,
                     saw_else: false,
+                    opening_span: directive_span,
                 });
                 Ok(())
             }
@@ -677,6 +760,9 @@ impl Preprocessor {
             "<inttypes.h>" => Some((manifest.join("inttypes.h"), HIDDEN_INTTYPES_H)),
             "<time.h>" => Some((manifest.join("time.h"), HIDDEN_TIME_H)),
             "<fenv.h>" => Some((manifest.join("fenv.h"), HIDDEN_FENV_H)),
+            "<stdalign.h>" => Some((manifest.join("stdalign.h"), HIDDEN_STDALIGN_H)),
+            "<stdnoreturn.h>" => Some((manifest.join("stdnoreturn.h"), HIDDEN_STDNORETURN_H)),
+            "<uchar.h>" => Some((manifest.join("uchar.h"), HIDDEN_UCHAR_H)),
             _ => None,
         }
     }
@@ -693,6 +779,12 @@ impl Preprocessor {
                 Self::span(file_id),
             ));
         };
+        if is_predefined_macro(name) {
+            return Err(Diagnostic::error(
+                format!("predefined macro {name} cannot be redefined"),
+                Self::span(file_id),
+            ));
+        }
         let tail = &rest[name_end..];
         if tail.starts_with('(') {
             let close = tail.find(')').ok_or_else(|| {
@@ -704,18 +796,45 @@ impl Preprocessor {
             let params_text = &tail[1..close];
             let (params, variadic) = self.parse_macro_parameters(params_text, file_id)?;
             let replacement = tail[close + 1..].trim_start().to_owned();
-            macros.insert(
-                name.to_owned(),
+            self.validate_macro_stringification_operators(
+                &replacement,
+                &params,
+                variadic,
+                file_id,
+            )?;
+            return self.install_macro_definition(
+                name,
                 MacroDefinition::Function {
                     params,
                     variadic,
                     replacement,
                 },
+                macros,
+                file_id,
             );
-            return Ok(());
         }
         let replacement = tail.trim_start().to_owned();
-        macros.insert(name.to_owned(), MacroDefinition::Object(replacement));
+        self.install_macro_definition(name, MacroDefinition::Object(replacement), macros, file_id)?;
+        Ok(())
+    }
+
+    fn install_macro_definition(
+        &self,
+        name: &str,
+        definition: MacroDefinition,
+        macros: &mut HashMap<String, MacroDefinition>,
+        file_id: FileId,
+    ) -> Result<(), Diagnostic> {
+        if let Some(existing) = macros.get(name) {
+            if macro_definitions_equivalent(existing, &definition) {
+                return Ok(());
+            }
+            return Err(Diagnostic::error(
+                format!("incompatible redefinition of macro {name}"),
+                Self::span(file_id),
+            ));
+        }
+        macros.insert(name.to_owned(), definition);
         Ok(())
     }
 
@@ -759,6 +878,47 @@ impl Preprocessor {
         Ok((params, variadic))
     }
 
+    fn validate_macro_stringification_operators(
+        &self,
+        replacement: &str,
+        params: &[String],
+        variadic: bool,
+        file_id: FileId,
+    ) -> Result<(), Diagnostic> {
+        let bytes = replacement.as_bytes();
+        let mut idx = 0usize;
+        while idx < bytes.len() {
+            let ch = bytes[idx] as char;
+            if ch == '"' || ch == '\'' {
+                idx = skip_quoted_literal(replacement, idx, file_id)?;
+                continue;
+            }
+            if ch != '#' {
+                idx += 1;
+                continue;
+            }
+            if idx + 1 < bytes.len() && bytes[idx + 1] as char == '#' {
+                idx += 2;
+                continue;
+            }
+            let ident_start = skip_whitespace(replacement, idx + 1);
+            let Some((name, end)) = parse_identifier_with_end(&replacement[ident_start..]) else {
+                return Err(Diagnostic::error(
+                    "# in macro replacement must be followed by a parameter name",
+                    Self::span(file_id),
+                ));
+            };
+            if !params.iter().any(|param| param == name) && !(variadic && name == "__VA_ARGS__") {
+                return Err(Diagnostic::error(
+                    "# in macro replacement must be followed by a parameter name",
+                    Self::span(file_id),
+                ));
+            }
+            idx = ident_start + end;
+        }
+        Ok(())
+    }
+
     fn handle_undef(
         &self,
         rest: &str,
@@ -771,6 +931,12 @@ impl Preprocessor {
                 Self::span(file_id),
             ));
         };
+        if is_predefined_macro(name) {
+            return Err(Diagnostic::error(
+                format!("predefined macro {name} cannot be undefined"),
+                Self::span(file_id),
+            ));
+        }
         macros.remove(name);
         Ok(())
     }
@@ -830,7 +996,7 @@ impl Preprocessor {
                 match definition {
                     MacroDefinition::Object(replacement) => {
                         if active.insert(name.to_owned()) {
-                            out.push_str(&self.expand_macros_in_line(
+                            let expanded = self.expand_macros_in_line(
                                 &replacement,
                                 macros,
                                 active,
@@ -838,8 +1004,30 @@ impl Preprocessor {
                                 file_id,
                                 presumed_line,
                                 presumed_file,
-                            )?);
+                            )?;
+                            let boundary = boundary_function_macro_start(
+                                &expanded,
+                                &line[idx..],
+                                macros,
+                                active,
+                            );
                             active.remove(name);
+                            if let Some(start) = boundary {
+                                out.push_str(&expanded[..start]);
+                                let joint = format!("{}{}", &expanded[start..], &line[idx..]);
+                                out.push_str(&self.expand_macros_in_line(
+                                    &joint,
+                                    macros,
+                                    active,
+                                    mode,
+                                    file_id,
+                                    presumed_line,
+                                    presumed_file,
+                                )?);
+                                idx = bytes.len();
+                            } else {
+                                out.push_str(&expanded);
+                            }
                         } else {
                             out.push_str(name);
                         }
@@ -858,10 +1046,13 @@ impl Preprocessor {
                             out.push_str(name);
                             continue;
                         }
-                        let (raw_args, end_idx) =
+                        let (mut raw_args, end_idx) =
                             self.parse_macro_invocation(line, call_start, file_id)?;
+                        if raw_args.is_empty() && (!params.is_empty() || variadic) {
+                            raw_args.push(String::new());
+                        }
                         if (!variadic && raw_args.len() != params.len())
-                            || (variadic && raw_args.len() < params.len())
+                            || (variadic && raw_args.len() <= params.len())
                         {
                             return Err(Diagnostic::error(
                                 format!(
@@ -926,7 +1117,7 @@ impl Preprocessor {
                             &expanded_variadic_args,
                             file_id,
                         )?;
-                        out.push_str(&self.expand_macros_in_line(
+                        let expanded = self.expand_macros_in_line(
                             &substituted,
                             macros,
                             active,
@@ -934,9 +1125,31 @@ impl Preprocessor {
                             file_id,
                             presumed_line,
                             presumed_file,
-                        )?);
+                        )?;
+                        let boundary = boundary_function_macro_start(
+                            &expanded,
+                            &line[end_idx..],
+                            macros,
+                            active,
+                        );
                         active.remove(name);
-                        idx = end_idx;
+                        if let Some(start) = boundary {
+                            out.push_str(&expanded[..start]);
+                            let joint = format!("{}{}", &expanded[start..], &line[end_idx..]);
+                            out.push_str(&self.expand_macros_in_line(
+                                &joint,
+                                macros,
+                                active,
+                                mode,
+                                file_id,
+                                presumed_line,
+                                presumed_file,
+                            )?);
+                            idx = bytes.len();
+                        } else {
+                            out.push_str(&expanded);
+                            idx = end_idx;
+                        }
                     }
                 }
                 continue;
@@ -1181,8 +1394,16 @@ impl Preprocessor {
                     idx += 1;
                 }
                 let name = &replacement[start..idx];
+                let next = skip_whitespace(replacement, idx);
+                let is_left_paste_operand = replacement[next..].starts_with("##");
                 if variadic && name == "__VA_ARGS__" {
-                    out.push_str(expanded_variadic_args);
+                    out.push_str(if is_left_paste_operand {
+                        raw_variadic_args
+                    } else {
+                        expanded_variadic_args
+                    });
+                } else if is_left_paste_operand {
+                    out.push_str(raw_substitutions.get(name).copied().unwrap_or(name));
                 } else if let Some(arg) = expanded_substitutions.get(name) {
                     out.push_str(arg);
                 } else {
@@ -1216,7 +1437,7 @@ impl Preprocessor {
             IfExprLexer::new(&expanded, file_id).tokenize()?,
             Self::span(file_id),
         );
-        Ok(parser.parse_expression()? != 0)
+        Ok(parser.parse_expression()?.truthy())
     }
 
     fn handle_line(
@@ -1323,7 +1544,7 @@ impl<'a> IfExprLexer<'a> {
                 while self.idx < bytes.len() && is_ident_continue(bytes[self.idx] as char) {
                     self.idx += 1;
                 }
-                tokens.push(IfToken::Number(0));
+                tokens.push(IfToken::Number(PpInt::signed(0)));
                 continue;
             }
             if ch.is_ascii_digit() {
@@ -1358,6 +1579,12 @@ impl<'a> IfExprLexer<'a> {
                 None
             };
             let token = match two_char {
+                Some("++" | "--") => {
+                    return Err(Diagnostic::error(
+                        "increment and decrement are not valid in #if expressions",
+                        Span::new(self.file_id, 0, 0),
+                    ));
+                }
                 Some("||") => {
                     self.idx += 2;
                     IfToken::OrOr
@@ -1443,7 +1670,7 @@ impl IfExprParser {
         }
     }
 
-    fn parse_expression(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_expression(&mut self) -> Result<PpInt, Diagnostic> {
         let value = self.parse_conditional()?;
         if !matches!(self.peek(), IfToken::End) {
             return Err(Diagnostic::error(
@@ -1454,133 +1681,140 @@ impl IfExprParser {
         Ok(value)
     }
 
-    fn parse_conditional(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_conditional(&mut self) -> Result<PpInt, Diagnostic> {
         let condition = self.parse_logical_or()?;
         if self.consume_simple(IfToken::Question) {
             let outer_evaluating = self.evaluating;
-            self.evaluating = outer_evaluating && condition != 0;
+            self.evaluating = outer_evaluating && condition.truthy();
             let if_true = self.parse_conditional()?;
             self.expect_simple(IfToken::Colon, "expected : in conditional expression")?;
-            self.evaluating = outer_evaluating && condition == 0;
+            self.evaluating = outer_evaluating && !condition.truthy();
             let if_false = self.parse_conditional()?;
             self.evaluating = outer_evaluating;
-            return Ok(if !outer_evaluating {
-                0
-            } else if condition != 0 {
+            let selected = if outer_evaluating && condition.truthy() {
                 if_true
             } else {
                 if_false
-            });
+            };
+            return Ok(selected.with_common_type(if_true.with_common_type(if_false)));
         }
         Ok(condition)
     }
 
-    fn parse_logical_or(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_logical_or(&mut self) -> Result<PpInt, Diagnostic> {
         let mut value = self.parse_logical_and()?;
         while self.consume_simple(IfToken::OrOr) {
             let outer_evaluating = self.evaluating;
-            self.evaluating = outer_evaluating && value == 0;
+            self.evaluating = outer_evaluating && !value.truthy();
             let rhs = self.parse_logical_and()?;
             self.evaluating = outer_evaluating;
-            value = if outer_evaluating {
-                bool_to_int(value != 0 || rhs != 0)
-            } else {
-                0
-            };
+            value = pp_bool(outer_evaluating && (value.truthy() || rhs.truthy()));
         }
         Ok(value)
     }
 
-    fn parse_logical_and(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_logical_and(&mut self) -> Result<PpInt, Diagnostic> {
         let mut value = self.parse_bitwise_or()?;
         while self.consume_simple(IfToken::AndAnd) {
             let outer_evaluating = self.evaluating;
-            self.evaluating = outer_evaluating && value != 0;
+            self.evaluating = outer_evaluating && value.truthy();
             let rhs = self.parse_bitwise_or()?;
             self.evaluating = outer_evaluating;
-            value = if outer_evaluating {
-                bool_to_int(value != 0 && rhs != 0)
-            } else {
-                0
+            value = pp_bool(outer_evaluating && value.truthy() && rhs.truthy());
+        }
+        Ok(value)
+    }
+
+    fn parse_bitwise_or(&mut self) -> Result<PpInt, Diagnostic> {
+        let mut value = self.parse_bitwise_xor()?;
+        while self.consume_simple(IfToken::Pipe) {
+            let rhs = self.parse_bitwise_xor()?;
+            value = PpInt {
+                bits: value.bits | rhs.bits,
+                unsigned: value.unsigned || rhs.unsigned,
             };
         }
         Ok(value)
     }
 
-    fn parse_bitwise_or(&mut self) -> Result<i128, Diagnostic> {
-        let mut value = self.parse_bitwise_xor()?;
-        while self.consume_simple(IfToken::Pipe) {
-            value |= self.parse_bitwise_xor()?;
-        }
-        Ok(value)
-    }
-
-    fn parse_bitwise_xor(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_bitwise_xor(&mut self) -> Result<PpInt, Diagnostic> {
         let mut value = self.parse_bitwise_and()?;
         while self.consume_simple(IfToken::Caret) {
-            value ^= self.parse_bitwise_and()?;
+            let rhs = self.parse_bitwise_and()?;
+            value = PpInt {
+                bits: value.bits ^ rhs.bits,
+                unsigned: value.unsigned || rhs.unsigned,
+            };
         }
         Ok(value)
     }
 
-    fn parse_bitwise_and(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_bitwise_and(&mut self) -> Result<PpInt, Diagnostic> {
         let mut value = self.parse_equality()?;
         while self.consume_simple(IfToken::Amp) {
-            value &= self.parse_equality()?;
+            let rhs = self.parse_equality()?;
+            value = PpInt {
+                bits: value.bits & rhs.bits,
+                unsigned: value.unsigned || rhs.unsigned,
+            };
         }
         Ok(value)
     }
 
-    fn parse_equality(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_equality(&mut self) -> Result<PpInt, Diagnostic> {
         let mut value = self.parse_relational()?;
         loop {
             if self.consume_simple(IfToken::EqEq) {
                 let rhs = self.parse_relational()?;
-                value = bool_to_int(value == rhs);
+                value = pp_bool(value.bits == rhs.bits);
             } else if self.consume_simple(IfToken::NotEq) {
                 let rhs = self.parse_relational()?;
-                value = bool_to_int(value != rhs);
+                value = pp_bool(value.bits != rhs.bits);
             } else {
                 return Ok(value);
             }
         }
     }
 
-    fn parse_relational(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_relational(&mut self) -> Result<PpInt, Diagnostic> {
         let mut value = self.parse_shift()?;
         loop {
             if self.consume_simple(IfToken::Less) {
                 let rhs = self.parse_shift()?;
-                value = bool_to_int(value < rhs);
+                value = pp_bool(pp_compare(value, rhs).is_lt());
             } else if self.consume_simple(IfToken::LessEq) {
                 let rhs = self.parse_shift()?;
-                value = bool_to_int(value <= rhs);
+                value = pp_bool(pp_compare(value, rhs).is_le());
             } else if self.consume_simple(IfToken::Greater) {
                 let rhs = self.parse_shift()?;
-                value = bool_to_int(value > rhs);
+                value = pp_bool(pp_compare(value, rhs).is_gt());
             } else if self.consume_simple(IfToken::GreaterEq) {
                 let rhs = self.parse_shift()?;
-                value = bool_to_int(value >= rhs);
+                value = pp_bool(pp_compare(value, rhs).is_ge());
             } else {
                 return Ok(value);
             }
         }
     }
 
-    fn parse_shift(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_shift(&mut self) -> Result<PpInt, Diagnostic> {
         let mut value = self.parse_additive()?;
         loop {
             if self.consume_simple(IfToken::Shl) {
                 let rhs = self.parse_additive()?;
                 if self.evaluating {
                     let shift = to_shift_count(rhs, self.span)?;
-                    value = value.wrapping_shl(shift);
+                    value.bits = value.bits.wrapping_shl(shift);
                 }
             } else if self.consume_simple(IfToken::Shr) {
                 let rhs = self.parse_additive()?;
                 if self.evaluating {
                     let shift = to_shift_count(rhs, self.span)?;
-                    value >>= shift;
+                    value.bits = if value.unsigned {
+                        value.bits >> shift
+                    } else {
+                        ((value.bits as i64) >> shift) as u64
+                    };
                 }
             } else {
                 return Ok(value);
@@ -1588,55 +1822,55 @@ impl IfExprParser {
         }
     }
 
-    fn parse_additive(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_additive(&mut self) -> Result<PpInt, Diagnostic> {
         let mut value = self.parse_multiplicative()?;
         loop {
             if self.consume_simple(IfToken::Plus) {
-                value = value.wrapping_add(self.parse_multiplicative()?);
+                let rhs = self.parse_multiplicative()?;
+                value = PpInt {
+                    bits: value.bits.wrapping_add(rhs.bits),
+                    unsigned: value.unsigned || rhs.unsigned,
+                };
             } else if self.consume_simple(IfToken::Minus) {
-                value = value.wrapping_sub(self.parse_multiplicative()?);
+                let rhs = self.parse_multiplicative()?;
+                value = PpInt {
+                    bits: value.bits.wrapping_sub(rhs.bits),
+                    unsigned: value.unsigned || rhs.unsigned,
+                };
             } else {
                 return Ok(value);
             }
         }
     }
 
-    fn parse_multiplicative(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_multiplicative(&mut self) -> Result<PpInt, Diagnostic> {
         let mut value = self.parse_unary()?;
         loop {
             if self.consume_simple(IfToken::Star) {
-                value = value.wrapping_mul(self.parse_unary()?);
+                let rhs = self.parse_unary()?;
+                value = PpInt {
+                    bits: value.bits.wrapping_mul(rhs.bits),
+                    unsigned: value.unsigned || rhs.unsigned,
+                };
             } else if self.consume_simple(IfToken::Slash) {
                 let rhs = self.parse_unary()?;
                 if self.evaluating {
-                    value = value.checked_div(rhs).ok_or_else(|| {
-                        Diagnostic::error(
-                            if rhs == 0 {
-                                "division by zero in #if expression"
-                            } else {
-                                "integer overflow in #if expression"
-                            },
-                            self.span,
-                        )
-                    })?;
+                    value = pp_div_rem(value, rhs, false, self.span)?;
                 } else {
-                    value = 0;
+                    value = PpInt {
+                        bits: 0,
+                        unsigned: value.unsigned || rhs.unsigned,
+                    };
                 }
             } else if self.consume_simple(IfToken::Percent) {
                 let rhs = self.parse_unary()?;
                 if self.evaluating {
-                    value = value.checked_rem(rhs).ok_or_else(|| {
-                        Diagnostic::error(
-                            if rhs == 0 {
-                                "division by zero in #if expression"
-                            } else {
-                                "integer overflow in #if expression"
-                            },
-                            self.span,
-                        )
-                    })?;
+                    value = pp_div_rem(value, rhs, true, self.span)?;
                 } else {
-                    value = 0;
+                    value = PpInt {
+                        bits: 0,
+                        unsigned: value.unsigned || rhs.unsigned,
+                    };
                 }
             } else {
                 return Ok(value);
@@ -1644,23 +1878,27 @@ impl IfExprParser {
         }
     }
 
-    fn parse_unary(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_unary(&mut self) -> Result<PpInt, Diagnostic> {
         if self.consume_simple(IfToken::Bang) {
-            return Ok(bool_to_int(self.parse_unary()? == 0));
+            return Ok(pp_bool(!self.parse_unary()?.truthy()));
         }
         if self.consume_simple(IfToken::Tilde) {
-            return Ok(!self.parse_unary()?);
+            let mut value = self.parse_unary()?;
+            value.bits = !value.bits;
+            return Ok(value);
         }
         if self.consume_simple(IfToken::Plus) {
             return self.parse_unary();
         }
         if self.consume_simple(IfToken::Minus) {
-            return Ok(self.parse_unary()?.wrapping_neg());
+            let mut value = self.parse_unary()?;
+            value.bits = value.bits.wrapping_neg();
+            return Ok(value);
         }
         self.parse_primary()
     }
 
-    fn parse_primary(&mut self) -> Result<i128, Diagnostic> {
+    fn parse_primary(&mut self) -> Result<PpInt, Diagnostic> {
         match self.next() {
             IfToken::Number(value) => Ok(value),
             IfToken::LParen => {
@@ -1707,59 +1945,77 @@ impl IfExprParser {
     }
 }
 
-fn bool_to_int(value: bool) -> i128 {
-    if value { 1 } else { 0 }
+fn pp_bool(value: bool) -> PpInt {
+    PpInt::signed(i64::from(value))
 }
 
-fn to_shift_count(value: i128, span: Span) -> Result<u32, Diagnostic> {
-    if !(0..128).contains(&value) {
+fn pp_compare(left: PpInt, right: PpInt) -> std::cmp::Ordering {
+    if left.unsigned || right.unsigned {
+        left.bits.cmp(&right.bits)
+    } else {
+        (left.bits as i64).cmp(&(right.bits as i64))
+    }
+}
+
+fn pp_div_rem(left: PpInt, right: PpInt, remainder: bool, span: Span) -> Result<PpInt, Diagnostic> {
+    let unsigned = left.unsigned || right.unsigned;
+    if right.bits == 0 {
+        return Err(Diagnostic::error(
+            "division by zero in #if expression",
+            span,
+        ));
+    }
+    let bits = if unsigned {
+        if remainder {
+            left.bits % right.bits
+        } else {
+            left.bits / right.bits
+        }
+    } else {
+        let left = left.bits as i64;
+        let right = right.bits as i64;
+        let result = if remainder {
+            left.checked_rem(right)
+        } else {
+            left.checked_div(right)
+        }
+        .ok_or_else(|| Diagnostic::error("integer overflow in #if expression", span))?;
+        result as u64
+    };
+    Ok(PpInt { bits, unsigned })
+}
+
+fn to_shift_count(value: PpInt, span: Span) -> Result<u32, Diagnostic> {
+    if value.unsigned {
+        if value.bits < 64 {
+            return Ok(value.bits as u32);
+        }
+    } else if (value.bits as i64) >= 0 && value.bits < 64 {
+        return Ok(value.bits as u32);
+    }
+    {
         return Err(Diagnostic::error(
             "invalid shift count in #if expression",
             span,
         ));
     }
-    Ok(value as u32)
 }
 
 fn same_token_kind(left: &IfToken, right: &IfToken) -> bool {
     mem::discriminant(left) == mem::discriminant(right)
 }
 
-fn parse_pp_integer_literal(text: &str, file_id: FileId) -> Result<i128, Diagnostic> {
-    let digits_end = text
-        .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .unwrap_or(text.len());
-    let token = &text[..digits_end];
-    let suffix_start = token
-        .find(|ch: char| !(ch.is_ascii_hexdigit() || ch == 'x' || ch == 'X'))
-        .unwrap_or(token.len());
-    let (digits, suffix) = token.split_at(suffix_start);
-    if !suffix.chars().all(|ch| matches!(ch, 'u' | 'U' | 'l' | 'L')) {
-        return Err(Diagnostic::error(
-            "invalid integer literal in #if expression",
-            Span::new(file_id, 0, 0),
-        ));
-    }
-    let (radix, digits) = if let Some(rest) = digits
-        .strip_prefix("0x")
-        .or_else(|| digits.strip_prefix("0X"))
-    {
-        (16, rest)
-    } else if digits.starts_with('0') && digits.len() > 1 {
-        (8, digits)
+fn parse_pp_integer_literal(text: &str, file_id: FileId) -> Result<PpInt, Diagnostic> {
+    let span = Span::new(file_id, 0, 0);
+    let (ty, value, _) = parse_c_integer_literal(text, span)?;
+    Ok(if ty.is_unsigned_integer() {
+        PpInt::unsigned(value as u64)
     } else {
-        (10, digits)
-    };
-    let parsed = i128::from_str_radix(digits, radix).map_err(|_| {
-        Diagnostic::error(
-            "invalid integer literal in #if expression",
-            Span::new(file_id, 0, 0),
-        )
-    })?;
-    Ok(parsed)
+        PpInt::signed(value as i64)
+    })
 }
 
-fn parse_char_constant(text: &str, idx: &mut usize, file_id: FileId) -> Result<i128, Diagnostic> {
+fn parse_char_constant(text: &str, idx: &mut usize, file_id: FileId) -> Result<PpInt, Diagnostic> {
     let bytes = text.as_bytes();
     *idx += 1;
     let mut saw_any = false;
@@ -1775,7 +2031,7 @@ fn parse_char_constant(text: &str, idx: &mut usize, file_id: FileId) -> Result<i
                     Span::new(file_id, 0, 0),
                 ));
             }
-            return Ok(value);
+            return Ok(PpInt::signed(value as i64));
         }
         let unit = if ch == '\\' {
             *idx += 1;
@@ -1827,15 +2083,23 @@ fn parse_escape_sequence(text: &str, idx: &mut usize, file_id: FileId) -> Result
                     Span::new(file_id, 0, 0),
                 ));
             }
-            i128::from_str_radix(&text[start..*idx], 16).map_err(|_| {
+            let value = i128::from_str_radix(&text[start..*idx], 16).map_err(|_| {
                 Diagnostic::error(
                     "invalid hexadecimal escape sequence in #if expression",
                     Span::new(file_id, 0, 0),
                 )
-            })?
+            })?;
+            require_if_character_escape_range(value, file_id)?;
+            value
         }
-        'u' => parse_fixed_hex_escape(text, idx, 4, file_id, "\\u")?,
-        'U' => parse_fixed_hex_escape(text, idx, 8, file_id, "\\U")?,
+        'u' => validate_if_universal_character_name(
+            parse_fixed_hex_escape(text, idx, 4, file_id, "\\u")?,
+            file_id,
+        )?,
+        'U' => validate_if_universal_character_name(
+            parse_fixed_hex_escape(text, idx, 8, file_id, "\\U")?,
+            file_id,
+        )?,
         '0'..='7' => {
             let start = *idx - 1;
             while *idx < bytes.len()
@@ -1844,12 +2108,14 @@ fn parse_escape_sequence(text: &str, idx: &mut usize, file_id: FileId) -> Result
             {
                 *idx += 1;
             }
-            i128::from_str_radix(&text[start..*idx], 8).map_err(|_| {
+            let value = i128::from_str_radix(&text[start..*idx], 8).map_err(|_| {
                 Diagnostic::error(
                     "invalid octal escape sequence in #if expression",
                     Span::new(file_id, 0, 0),
                 )
-            })?
+            })?;
+            require_if_character_escape_range(value, file_id)?;
+            value
         }
         _ => {
             return Err(Diagnostic::error(
@@ -1858,6 +2124,29 @@ fn parse_escape_sequence(text: &str, idx: &mut usize, file_id: FileId) -> Result
             ));
         }
     };
+    Ok(value)
+}
+
+fn require_if_character_escape_range(value: i128, file_id: FileId) -> Result<(), Diagnostic> {
+    if value > u8::MAX as i128 {
+        return Err(Diagnostic::error(
+            "numeric escape sequence is outside the range of an ordinary character constant",
+            Span::new(file_id, 0, 0),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_if_universal_character_name(value: i128, file_id: FileId) -> Result<i128, Diagnostic> {
+    if (value < 0xa0 && !matches!(value, 0x24 | 0x40 | 0x60))
+        || (0xd800..=0xdfff).contains(&value)
+        || value > 0x10ffff
+    {
+        return Err(Diagnostic::error(
+            "invalid universal character name in #if expression",
+            Span::new(file_id, 0, 0),
+        ));
+    }
     Ok(value)
 }
 
@@ -1884,6 +2173,306 @@ fn parse_fixed_hex_escape(
             Span::new(file_id, 0, 0),
         )
     })
+}
+
+fn predefined_macros() -> HashMap<String, MacroDefinition> {
+    [
+        ("__DATE__", "\"Jan  1 1970\""),
+        ("__TIME__", "\"00:00:00\""),
+        ("__STDC__", "1"),
+        ("__STDC_HOSTED__", "1"),
+        ("__STDC_VERSION__", "201112L"),
+        ("__STDC_NO_ATOMICS__", "1"),
+        ("__STDC_NO_THREADS__", "1"),
+        ("__FILE__", ""),
+        ("__LINE__", ""),
+    ]
+    .into_iter()
+    .map(|(name, replacement)| {
+        (
+            name.to_owned(),
+            MacroDefinition::Object(replacement.to_owned()),
+        )
+    })
+    .collect()
+}
+
+fn is_predefined_macro(name: &str) -> bool {
+    matches!(
+        name,
+        "__DATE__"
+            | "__TIME__"
+            | "__STDC__"
+            | "__STDC_HOSTED__"
+            | "__STDC_VERSION__"
+            | "__STDC_NO_ATOMICS__"
+            | "__STDC_NO_THREADS__"
+            | "__FILE__"
+            | "__LINE__"
+    )
+}
+
+fn canonicalize_universal_characters(text: &str, file_id: FileId) -> Result<String, Diagnostic> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mode {
+        Normal,
+        String,
+        Char,
+        LineComment,
+        BlockComment,
+    }
+
+    let chars = text.char_indices().collect::<Vec<_>>();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0usize;
+    let mut mode = Mode::Normal;
+    let mut in_identifier = false;
+    while index < chars.len() {
+        let (byte_offset, ch) = chars[index];
+        if ch == '\\'
+            && index + 1 < chars.len()
+            && matches!(chars[index + 1].1, '\n' | '\r')
+            && matches!(mode, Mode::LineComment | Mode::BlockComment)
+        {
+            out.push(ch);
+            out.push(chars[index + 1].1);
+            if chars[index + 1].1 == '\r' && index + 2 < chars.len() && chars[index + 2].1 == '\n' {
+                out.push('\n');
+                index += 3;
+            } else {
+                index += 2;
+            }
+            continue;
+        }
+        if matches!(mode, Mode::String | Mode::Char) && ch == '\\' {
+            out.push(ch);
+            index += 1;
+            if index < chars.len() {
+                out.push(chars[index].1);
+                index += 1;
+            }
+            continue;
+        }
+        if mode == Mode::Normal && ch == '/' && index + 1 < chars.len() {
+            match chars[index + 1].1 {
+                '/' => {
+                    out.push_str("//");
+                    index += 2;
+                    mode = Mode::LineComment;
+                    in_identifier = false;
+                    continue;
+                }
+                '*' => {
+                    out.push_str("/*");
+                    index += 2;
+                    mode = Mode::BlockComment;
+                    in_identifier = false;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if mode == Mode::BlockComment
+            && ch == '*'
+            && index + 1 < chars.len()
+            && chars[index + 1].1 == '/'
+        {
+            out.push_str("*/");
+            index += 2;
+            mode = Mode::Normal;
+            in_identifier = false;
+            continue;
+        }
+        if mode == Mode::Normal && ch == '\\' && index + 1 < chars.len() {
+            let marker = chars[index + 1].1;
+            let digits = match marker {
+                'u' => 4,
+                'U' => 8,
+                _ => 0,
+            };
+            if digits != 0 {
+                if index + 2 + digits > chars.len() {
+                    return Err(Diagnostic::error(
+                        "incomplete universal character name in identifier",
+                        Span::new(file_id, byte_offset, byte_offset + 1),
+                    ));
+                }
+                let mut value = 0u32;
+                for (_, digit) in &chars[index + 2..index + 2 + digits] {
+                    value = value
+                        .checked_mul(16)
+                        .and_then(|value| digit.to_digit(16).map(|digit| value + digit))
+                        .ok_or_else(|| {
+                            Diagnostic::error(
+                                "invalid universal character name in identifier",
+                                Span::new(file_id, byte_offset, byte_offset + 1),
+                            )
+                        })?;
+                }
+                let decoded = char::from_u32(value).ok_or_else(|| {
+                    Diagnostic::error(
+                        "universal character name does not name a valid character",
+                        Span::new(file_id, byte_offset, byte_offset + 1),
+                    )
+                })?;
+                if !unicode_identifier_character(decoded)
+                    || (!in_identifier
+                        && unicode_identifier_character_disallowed_initially(decoded))
+                {
+                    return Err(Diagnostic::error(
+                        "universal character name is not permitted in an identifier",
+                        Span::new(file_id, byte_offset, byte_offset + 1),
+                    ));
+                }
+                out.push_str(&format!("__cboxes_uc_{value:08x}_"));
+                in_identifier = true;
+                index += 2 + digits;
+                continue;
+            }
+        }
+        if !ch.is_ascii() {
+            if mode == Mode::String || mode == Mode::Char {
+                out.push_str(&format!("\\U{:08x}", ch as u32));
+            } else if matches!(mode, Mode::LineComment | Mode::BlockComment) {
+                out.push('?');
+            } else if unicode_identifier_character(ch)
+                && (in_identifier || !unicode_identifier_character_disallowed_initially(ch))
+            {
+                out.push_str(&format!("__cboxes_uc_{:08x}_", ch as u32));
+                in_identifier = true;
+            } else {
+                return Err(Diagnostic::error(
+                    "character is not permitted in a C identifier",
+                    Span::new(file_id, byte_offset, byte_offset + ch.len_utf8()),
+                ));
+            }
+            index += 1;
+            continue;
+        }
+        out.push(ch);
+        let was_normal = mode == Mode::Normal;
+        if mode == Mode::LineComment && matches!(ch, '\n' | '\r') {
+            mode = Mode::Normal;
+            in_identifier = false;
+        } else if ch == '"'
+            && mode != Mode::Char
+            && mode != Mode::LineComment
+            && mode != Mode::BlockComment
+        {
+            mode = if mode == Mode::String {
+                Mode::Normal
+            } else {
+                Mode::String
+            };
+        } else if ch == '\''
+            && mode != Mode::String
+            && mode != Mode::LineComment
+            && mode != Mode::BlockComment
+        {
+            mode = if mode == Mode::Char {
+                Mode::Normal
+            } else {
+                Mode::Char
+            };
+        }
+        if was_normal {
+            in_identifier = ch == '_' || ch.is_ascii_alphanumeric();
+        }
+        index += 1;
+    }
+    Ok(out)
+}
+
+fn unicode_identifier_character(ch: char) -> bool {
+    let value = ch as u32;
+    matches!(
+        value,
+        0x00a8
+            | 0x00aa
+            | 0x00ad
+            | 0x00af
+            | 0x00b2..=0x00b5
+            | 0x00b7..=0x00ba
+            | 0x00bc..=0x00be
+            | 0x00c0..=0x00d6
+            | 0x00d8..=0x00f6
+            | 0x00f8..=0x00ff
+            | 0x0100..=0x167f
+            | 0x1681..=0x180d
+            | 0x180f..=0x1fff
+            | 0x200b..=0x200d
+            | 0x202a..=0x202e
+            | 0x203f..=0x2040
+            | 0x2054
+            | 0x2060..=0x206f
+            | 0x2070..=0x218f
+            | 0x2460..=0x24ff
+            | 0x2776..=0x2793
+            | 0x2c00..=0x2dff
+            | 0x2e80..=0x2fff
+            | 0x3004..=0x3007
+            | 0x3021..=0x302f
+            | 0x3031..=0x303f
+            | 0x3040..=0xd7ff
+            | 0xf900..=0xfd3d
+            | 0xfd40..=0xfdcf
+            | 0xfdf0..=0xfe44
+            | 0xfe47..=0xfffd
+    ) || ((0x10000..=0xefffd).contains(&value) && value & 0xffff <= 0xfffd)
+}
+
+fn unicode_identifier_character_disallowed_initially(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x0300..=0x036f | 0x1dc0..=0x1dff | 0x20d0..=0x20ff | 0xfe20..=0xfe2f
+    )
+}
+
+fn replace_trigraphs(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if idx + 2 < bytes.len() && bytes[idx] == b'?' && bytes[idx + 1] == b'?' {
+            let replacement = match bytes[idx + 2] {
+                b'=' => Some('#'),
+                b'/' => Some('\\'),
+                b'\'' => Some('^'),
+                b'(' => Some('['),
+                b')' => Some(']'),
+                b'!' => Some('|'),
+                b'<' => Some('{'),
+                b'>' => Some('}'),
+                b'-' => Some('~'),
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                out.push(replacement);
+                idx += 3;
+                continue;
+            }
+        }
+        let ch = text[idx..].chars().next().expect("idx is in bounds");
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
+    out
+}
+
+fn digraph_at(bytes: &[u8], idx: usize) -> Option<(&'static str, usize)> {
+    let rest = bytes.get(idx..)?;
+    if rest.starts_with(b"%:%:") {
+        return Some(("##", 4));
+    }
+    [
+        (b"<:".as_slice(), "["),
+        (b":>".as_slice(), "]"),
+        (b"<%".as_slice(), "{"),
+        (b"%>".as_slice(), "}"),
+        (b"%:".as_slice(), "#"),
+    ]
+    .into_iter()
+    .find_map(|(digraph, replacement)| rest.starts_with(digraph).then_some((replacement, 2)))
 }
 
 fn line_splice_length(bytes: &[u8], idx: usize) -> Option<usize> {
@@ -2002,6 +2591,93 @@ fn string_literal_token(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+fn macro_definitions_equivalent(lhs: &MacroDefinition, rhs: &MacroDefinition) -> bool {
+    match (lhs, rhs) {
+        (MacroDefinition::Object(lhs), MacroDefinition::Object(rhs)) => {
+            normalize_macro_replacement(lhs) == normalize_macro_replacement(rhs)
+        }
+        (
+            MacroDefinition::Function {
+                params: lhs_params,
+                variadic: lhs_variadic,
+                replacement: lhs_replacement,
+            },
+            MacroDefinition::Function {
+                params: rhs_params,
+                variadic: rhs_variadic,
+                replacement: rhs_replacement,
+            },
+        ) => {
+            lhs_params == rhs_params
+                && lhs_variadic == rhs_variadic
+                && normalize_macro_replacement(lhs_replacement)
+                    == normalize_macro_replacement(rhs_replacement)
+        }
+        _ => false,
+    }
+}
+
+fn boundary_function_macro_start(
+    expanded: &str,
+    following: &str,
+    macros: &HashMap<String, MacroDefinition>,
+    unavailable: &HashSet<String>,
+) -> Option<usize> {
+    if !following.trim_start().starts_with('(') {
+        return None;
+    }
+    let trimmed = expanded.trim_end();
+    let end = trimmed.len();
+    let start = trimmed
+        .char_indices()
+        .rev()
+        .find_map(|(idx, ch)| (!is_ident_continue(ch)).then_some(idx + ch.len_utf8()))
+        .unwrap_or(0);
+    let name = &trimmed[start..end];
+    if !is_identifier(name)
+        || unavailable.contains(name)
+        || !matches!(macros.get(name), Some(MacroDefinition::Function { .. }))
+    {
+        return None;
+    }
+    Some(start)
+}
+
+fn normalize_macro_replacement(replacement: &str) -> String {
+    let bytes = replacement.as_bytes();
+    let mut normalized = String::new();
+    let mut idx = 0usize;
+    let mut pending_space = false;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if ch.is_ascii_whitespace() {
+            pending_space = !normalized.is_empty();
+            idx += 1;
+            continue;
+        }
+        if pending_space {
+            normalized.push(' ');
+            pending_space = false;
+        }
+        if ch == '"' || ch == '\'' {
+            match skip_quoted_literal(replacement, idx, FileId(0)) {
+                Ok(end) => {
+                    normalized.push_str(&replacement[idx..end]);
+                    idx = end;
+                }
+                Err(_) => {
+                    normalized.push_str(&replacement[idx..]);
+                    break;
+                }
+            }
+        } else {
+            normalized.push(ch);
+            idx += 1;
+        }
+    }
+    normalized
 }
 
 fn parse_line_file_name(text: &str) -> Option<String> {

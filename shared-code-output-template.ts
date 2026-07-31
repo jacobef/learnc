@@ -23,8 +23,13 @@ import {
   bindCodeEditorTabKey,
   ensureCodeSurfaceElements,
   updateCodeSurface,
-  type CodeDecoration,
 } from "./shared-code-editor-surface.js";
+import {
+  diagnosticDecorations,
+  diagnosticMessageText,
+  offsetDiagnosticLines,
+  renderDiagnosticMessage,
+} from "./shared-diagnostics.js";
 import { boxValueMatchesSpec, runCProgram } from "./shared-c-interpreter.js";
 import {
   clearLevelProgress,
@@ -449,7 +454,7 @@ function createCodeOutputChallengeTemplate(
     const literal = value.trim();
     const run = runCProgram(`${type} __cboxes_input = ${literal};\n`);
     if (run.kind !== "ok") {
-      return failConfig(`${label} is not valid C: ${run.diagnostic.message}`);
+      return failConfig(`${label} is not valid C: ${diagnosticMessageText(run.diagnostic)}`);
     }
     const stored = run.state.find((box) => box.name === "__cboxes_input");
     if (!stored) return failConfig(`${label} did not create a scalar C value.`);
@@ -670,29 +675,7 @@ function createCodeOutputChallengeTemplate(
     if (result.kind === "ok") return null;
     const diagnostic = result.diagnostic;
     if (diagnostic.range.startLine < preludeLineCount) return null;
-    return {
-      ...diagnostic,
-      range: {
-        startLine: diagnostic.range.startLine - preludeLineCount,
-        startCol: diagnostic.range.startCol,
-        endLine: diagnostic.range.endLine - preludeLineCount,
-        endCol: diagnostic.range.endCol,
-      },
-    };
-  }
-
-  function diagnosticDecoration(
-    diagnostic: ProgramDiagnostic | null,
-  ): CodeDecoration[] {
-    if (!diagnostic) return [];
-    return [
-      {
-        line: diagnostic.range.startLine,
-        startCol: diagnostic.range.startCol,
-        endCol: diagnostic.range.endCol,
-        className: "code-highlight-error",
-      },
-    ];
+    return offsetDiagnosticLines(diagnostic, -preludeLineCount);
   }
 
   function renderDiagnostic(diagnostic: ProgramDiagnostic | null) {
@@ -714,7 +697,7 @@ function createCodeOutputChallengeTemplate(
     }`;
     const message = document.createElement("div");
     message.className = "code-diagnostic-message";
-    message.textContent = diagnostic.message;
+    renderDiagnosticMessage(message, diagnostic);
     diagnosticEl.append(heading, message);
     if (diagnostic.tip) {
       const tip = document.createElement("div");
@@ -738,7 +721,7 @@ function createCodeOutputChallengeTemplate(
       measureEl,
       lines,
       lineNumberStart: preludeLineCount + 1,
-      decorations: diagnosticDecoration(diagnostic),
+      decorations: diagnosticDecorations(diagnostic, lines),
       lineNumberClasses,
     });
     syncEditorLinkedScroll();
@@ -1153,7 +1136,10 @@ function createCodeOutputChallengeTemplate(
 
   function defaultHint(current: ChallengeCaseResult, report: ChallengeRunReport): string {
     if (current.kind === "compile") {
-      return getProgramDiagnostic()?.message || "The shown case does not compile yet. Fix syntax errors first.";
+      const diagnostic = getProgramDiagnostic();
+      return diagnostic
+        ? diagnosticMessageText(diagnostic)
+        : "The shown case does not compile yet. Fix syntax errors first.";
     }
     if (current.kind === "ub") {
       return "The shown case has undefined behavior. Avoid invalid pointer/math operations.";

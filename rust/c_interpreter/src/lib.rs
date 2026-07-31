@@ -17,14 +17,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ast::{
     Block, BlockItem, Declaration, Designator, Expr, ExternalDeclaration, ForInit, FunctionDecl,
-    FunctionDef, Initializer, InitializerItem, Parameter, Statement, StorageClass, SwitchLabel,
-    TranslationUnit,
+    FunctionDef, Initializer, InitializerItem, Linkage, Parameter, Statement, StorageClass,
+    SwitchLabel, TranslationUnit,
 };
 use diag::Diagnostic;
 use interpreter::{
     Interpreter, ProgramBlocked, ProgramExecutionLimit, ProgramExpressionEvalRequest,
     ProgramExpressionResult, ProgramOutput, ProgramSourceLocation, ProgramSourceRange,
-    ProgramStateBox, ProgramTraceEvent, ProgramTypeInfo, ProgramValueLiteral,
+    ProgramStateBox, ProgramTraceEvent, ProgramTypeHelpNode, ProgramTypeInfo, ProgramValueLiteral,
 };
 use lexer::Lexer;
 use parser::Parser;
@@ -74,7 +74,27 @@ struct RunOptions {
 }
 
 type VirtualSource = (PathBuf, String);
-type SourceDisplayMap = HashMap<String, (usize, usize)>;
+
+#[derive(Clone, Copy, Debug)]
+struct SourceDisplay {
+    line_offset: usize,
+    line_count: usize,
+    eof_column: usize,
+    normalized_final_newline: bool,
+}
+
+impl SourceDisplay {
+    fn unbounded() -> Self {
+        Self {
+            line_offset: 0,
+            line_count: usize::MAX,
+            eof_column: 0,
+            normalized_final_newline: false,
+        }
+    }
+}
+
+type SourceDisplayMap = HashMap<String, SourceDisplay>;
 
 #[derive(Clone, Debug)]
 struct CboxesImplicitMain {
@@ -90,7 +110,16 @@ struct CboxesVirtualRun {
 }
 
 fn cboxes_source_line_count(source: &str) -> usize {
-    source.lines().count().max(1)
+    source.split('\n').count().max(1)
+}
+
+fn cboxes_source_display(source: &str, line_offset: usize) -> SourceDisplay {
+    SourceDisplay {
+        line_offset,
+        line_count: cboxes_source_line_count(source),
+        eof_column: source.rsplit('\n').next().unwrap_or("").len(),
+        normalized_final_newline: !source.is_empty() && !source.ends_with('\n'),
+    }
 }
 
 impl Default for RunOptions {
@@ -190,7 +219,8 @@ fn parse_virtual_sources_with_options(
         let cwd = path.parent().unwrap_or_else(|| Path::new(""));
         units.push(parse_translation_unit(&mut sources, file_id, cwd, options)?);
     }
-    let translation_unit = merge_translation_units(units)?;
+    let translation_unit =
+        merge_translation_units(units).map_err(|diag| diag.with_sources(&sources))?;
     Ok((sources, translation_unit))
 }
 
@@ -224,7 +254,8 @@ where
         let file_id = sources.add_file(path.clone(), text);
         units.push(parse_translation_unit(&mut sources, file_id, cwd, options)?);
     }
-    let translation_unit = merge_translation_units(units)?;
+    let translation_unit =
+        merge_translation_units(units).map_err(|diag| diag.with_sources(&sources))?;
     let ProgramOutput {
         stdout,
         stderr,
@@ -351,16 +382,10 @@ fn cboxes_prepare_virtual_sources(
 
     let mut source_display = files
         .iter()
-        .map(|(path, source)| {
-            (
-                path.display().to_string(),
-                (0, cboxes_source_line_count(source)),
-            )
-        })
+        .map(|(path, source)| (path.display().to_string(), cboxes_source_display(source, 0)))
         .collect::<HashMap<_, _>>();
 
-    for index in &c_files {
-        let source = &mut files[*index].1;
+    for (_, source) in &mut files {
         if !source.is_empty() && !source.ends_with('\n') {
             source.push('\n');
         }
@@ -380,7 +405,7 @@ fn cboxes_prepare_virtual_sources(
     let entry_path = files[entry_index].0.display().to_string();
     files[entry_index].1 = cboxes_wrap_entire_program_in_main(&files[entry_index].1);
     if let Some(display) = source_display.get_mut(&entry_path) {
-        display.0 = 1;
+        display.line_offset = 1;
     }
     Ok((
         files,
@@ -559,7 +584,7 @@ pub unsafe extern "C" fn cboxes_run_source(
     });
     let source_display = HashMap::from([(
         "program.c".to_owned(),
-        (line_offset, cboxes_source_line_count(input)),
+        cboxes_source_display(input, line_offset),
     )]);
     let json = match result {
         Ok(Ok(result)) => cboxes_success_json(&result, &source_display),
@@ -753,7 +778,7 @@ pub unsafe extern "C" fn cboxes_eval_expression(
     });
     let source_display = HashMap::from([(
         "program.c".to_owned(),
-        (line_offset, cboxes_source_line_count(input)),
+        cboxes_source_display(input, line_offset),
     )]);
     let json = match result {
         Ok(Ok(result)) => match result.expression {
@@ -885,23 +910,63 @@ pub unsafe extern "C" fn cboxes_eval_expression_files(
 }
 
 fn cboxes_has_explicit_main(source: &str) -> bool {
-    let bytes = source.as_bytes();
-    let needle = b"main";
-    let mut i = 0usize;
-    while i + needle.len() <= bytes.len() {
-        if &bytes[i..i + needle.len()] == needle {
-            let before = if i == 0 { b' ' } else { bytes[i - 1] };
-            let after = bytes.get(i + needle.len()).copied().unwrap_or(b' ');
-            let before_ident = before == b'_' || before.is_ascii_alphanumeric();
-            let after_ident = after == b'_' || after.is_ascii_alphanumeric();
-            if !before_ident && !after_ident {
-                let tail = &source[i + needle.len()..];
-                if tail.trim_start().starts_with('(') {
-                    return true;
-                }
+    fn skip_quoted(bytes: &[u8], mut index: usize, quote: u8) -> usize {
+        index += 1;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' => index = (index + 2).min(bytes.len()),
+                byte if byte == quote => return index + 1,
+                _ => index += 1,
             }
         }
-        i += 1;
+        index
+    }
+
+    fn skip_trivia(bytes: &[u8], mut index: usize) -> usize {
+        loop {
+            while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+                index += 1;
+            }
+            if bytes.get(index..index + 2) == Some(b"//") {
+                index += 2;
+                while bytes.get(index).is_some_and(|byte| *byte != b'\n') {
+                    index += 1;
+                }
+            } else if bytes.get(index..index + 2) == Some(b"/*") {
+                index += 2;
+                while index < bytes.len() && bytes.get(index..index + 2) != Some(b"*/") {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            } else {
+                return index;
+            }
+        }
+    }
+
+    let spliced = source.replace("\\\r\n", "").replace("\\\n", "");
+    let bytes = spliced.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes.get(i..i + 2) == Some(b"//") || bytes.get(i..i + 2) == Some(b"/*") {
+            i = skip_trivia(bytes, i);
+        } else if matches!(bytes[i], b'\'' | b'"') {
+            i = skip_quoted(bytes, i, bytes[i]);
+        } else if bytes[i] == b'_' || bytes[i].is_ascii_alphabetic() {
+            let start = i;
+            i += 1;
+            while bytes
+                .get(i)
+                .is_some_and(|byte| *byte == b'_' || byte.is_ascii_alphanumeric())
+            {
+                i += 1;
+            }
+            if &bytes[start..i] == b"main" && bytes.get(skip_trivia(bytes, i)) == Some(&b'(') {
+                return true;
+            }
+        } else {
+            i += 1;
+        }
     }
     false
 }
@@ -1017,14 +1082,54 @@ fn cboxes_type_info_json(info: &ProgramTypeInfo) -> String {
         .align
         .map(|value| value.to_string())
         .unwrap_or_else(|| "null".to_owned());
+    let help = info
+        .help
+        .as_deref()
+        .map(cboxes_json_string)
+        .unwrap_or_else(|| "null".to_owned());
+    let help_tree = info
+        .help_tree
+        .as_ref()
+        .map(cboxes_type_help_node_json)
+        .unwrap_or_else(|| "null".to_owned());
     format!(
-        "{{\"kind\":{},\"pointerDepth\":{},\"arrayShape\":{},\"pointeeArrayShape\":{},\"size\":{},\"align\":{}}}",
+        "{{\"kind\":{},\"help\":{},\"helpTypeNames\":{},\"helpTree\":{},\"pointerDepth\":{},\"arrayShape\":{},\"pointeeArrayShape\":{},\"size\":{},\"align\":{}}}",
         cboxes_json_string(&info.kind),
+        help,
+        cboxes_string_array_json(&info.help_type_names),
+        help_tree,
         info.pointer_depth,
         cboxes_usize_array_json(&info.array_shape),
         cboxes_usize_array_json(&info.pointee_array_shape),
         size,
         align,
+    )
+}
+
+fn cboxes_type_help_node_json(node: &ProgramTypeHelpNode) -> String {
+    let type_name = node
+        .type_name
+        .as_deref()
+        .map(cboxes_json_string)
+        .unwrap_or_else(|| "null".to_owned());
+    let mut children = String::from("[");
+    for (index, child) in node.children.iter().enumerate() {
+        if index > 0 {
+            children.push(',');
+        }
+        children.push_str(&format!(
+            "{{\"relation\":{},\"node\":{}}}",
+            cboxes_json_string(&child.relation),
+            cboxes_type_help_node_json(&child.node),
+        ));
+    }
+    children.push(']');
+    format!(
+        "{{\"kind\":{},\"label\":{},\"typeName\":{},\"children\":{}}}",
+        cboxes_json_string(&node.kind),
+        cboxes_json_string(&node.label),
+        type_name,
+        children,
     )
 }
 
@@ -1090,31 +1195,134 @@ fn cboxes_diagnostic_json(diag: &Diagnostic, source_display: &SourceDisplayMap) 
     } else {
         "compile"
     };
-    let location = cboxes_rendered_location(&rendered).map(|(file, line, col)| {
-        let line_offset = source_display
-            .get(&file)
-            .map(|display| display.0)
-            .unwrap_or(0);
-        (file, line.saturating_sub(line_offset), col)
-    });
-    cboxes_error_json(kind, &rendered, location)
+    let range = diag
+        .display_range()
+        .and_then(|range| {
+            let file = range.path.to_string_lossy().into_owned();
+            cboxes_display_range(
+                source_display,
+                file,
+                range.start_line,
+                range.start_column,
+                range.end_line,
+                range.end_column,
+            )
+        })
+        .or_else(|| {
+            cboxes_rendered_location(&rendered).and_then(|(file, line, col)| {
+                cboxes_display_range(source_display, file, line, col, line, col + 1)
+            })
+        });
+    let annotations = diag
+        .display_annotations()
+        .iter()
+        .filter_map(|annotation| {
+            let annotation_range = &annotation.range;
+            let file = annotation_range.path.to_string_lossy().into_owned();
+            cboxes_display_range(
+                source_display,
+                file,
+                annotation_range.start_line,
+                annotation_range.start_column,
+                annotation_range.end_line,
+                annotation_range.end_column,
+            )
+            .map(|range| (annotation.id.clone(), range))
+        })
+        .collect::<Vec<_>>();
+    cboxes_error_json_with_annotations(kind, &rendered, range, &annotations)
 }
 
-fn cboxes_error_json(
+type CboxesDiagnosticRange = (String, usize, usize, usize, usize);
+
+fn cboxes_display_range(
+    source_display: &SourceDisplayMap,
+    file: String,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+) -> Option<CboxesDiagnosticRange> {
+    let display = source_display
+        .get(&file)
+        .copied()
+        .unwrap_or_else(SourceDisplay::unbounded);
+    let start_line = start_line.saturating_sub(display.line_offset);
+    if start_line == display.line_count && display.normalized_final_newline {
+        let eof_line = display.line_count.saturating_sub(1);
+        return Some((
+            file,
+            eof_line,
+            display.eof_column,
+            eof_line,
+            display.eof_column,
+        ));
+    }
+    if start_line >= display.line_count {
+        return None;
+    }
+    let end_line = end_line
+        .saturating_sub(display.line_offset)
+        .max(start_line)
+        .min(display.line_count.saturating_sub(1));
+    Some((file, start_line, start_col, end_line, end_col))
+}
+
+fn cboxes_error_json(kind: &str, message: &str, range: Option<CboxesDiagnosticRange>) -> String {
+    cboxes_error_json_with_annotations(kind, message, range, &[])
+}
+
+fn cboxes_error_json_with_annotations(
     kind: &str,
     message: &str,
-    location: Option<(String, usize, usize)>,
+    range: Option<CboxesDiagnosticRange>,
+    annotations: &[(String, CboxesDiagnosticRange)],
 ) -> String {
-    let (file, line, col) = location
-        .map(|(file, line, col)| (cboxes_json_string(&file), line.to_string(), col.to_string()))
-        .unwrap_or_else(|| ("null".to_owned(), "null".to_owned(), "null".to_owned()));
+    let (file, line, col, end_line, end_col) = range
+        .map(|(file, line, col, end_line, end_col)| {
+            (
+                cboxes_json_string(&file),
+                line.to_string(),
+                col.to_string(),
+                end_line.to_string(),
+                end_col.to_string(),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                "null".to_owned(),
+                "null".to_owned(),
+                "null".to_owned(),
+                "null".to_owned(),
+                "null".to_owned(),
+            )
+        });
+    let mut annotations_json = String::from("[");
+    for (index, (id, (file, line, col, end_line, end_col))) in annotations.iter().enumerate() {
+        if index > 0 {
+            annotations_json.push(',');
+        }
+        annotations_json.push_str(&format!(
+            "{{\"id\":{},\"file\":{},\"line\":{},\"column\":{},\"endLine\":{},\"endColumn\":{}}}",
+            cboxes_json_string(id),
+            cboxes_json_string(file),
+            line,
+            col,
+            end_line,
+            end_col,
+        ));
+    }
+    annotations_json.push(']');
     format!(
-        "{{\"ok\":false,\"kind\":{},\"message\":{},\"file\":{},\"line\":{},\"column\":{}}}",
+        "{{\"ok\":false,\"kind\":{},\"message\":{},\"file\":{},\"line\":{},\"column\":{},\"endLine\":{},\"endColumn\":{},\"annotations\":{}}}",
         cboxes_json_string(kind),
         cboxes_json_string(message),
         file,
         line,
-        col
+        col,
+        end_line,
+        end_col,
+        annotations_json,
     )
 }
 
@@ -1165,6 +1373,20 @@ fn cboxes_state_json(state: &[ProgramStateBox]) -> String {
         out.push_str(&cboxes_usize_array_json(&item.array_shape));
         out.push_str(",\"arrayIndices\":");
         out.push_str(&cboxes_usize_array_json(&item.array_indices));
+        out.push_str(",\"aggregateRoot\":");
+        if let Some(root) = &item.aggregate_root {
+            out.push_str(&cboxes_json_string(root));
+        } else {
+            out.push_str("null");
+        }
+        out.push_str(",\"aggregatePath\":");
+        out.push_str(&cboxes_string_array_json(&item.aggregate_path));
+        out.push_str(",\"aggregateKind\":");
+        if let Some(kind) = &item.aggregate_kind {
+            out.push_str(&cboxes_json_string(kind));
+        } else {
+            out.push_str("null");
+        }
         out.push_str(",\"aliases\":");
         out.push_str(&cboxes_string_array_json(&item.aliases));
         out.push_str(",\"typeInfo\":");
@@ -1179,13 +1401,13 @@ fn cboxes_trace_json(trace: &[ProgramTraceEvent], source_display: &SourceDisplay
     let mut out = String::from("[");
     let mut wrote_event = false;
     for event in trace {
-        let (line_offset, line_count) = source_display
+        let display = source_display
             .get(&event.file)
             .copied()
-            .unwrap_or((0, usize::MAX));
-        let start_line = event.start_line.saturating_sub(line_offset);
-        let end_line = event.end_line.saturating_sub(line_offset);
-        if start_line >= line_count {
+            .unwrap_or_else(SourceDisplay::unbounded);
+        let start_line = event.start_line.saturating_sub(display.line_offset);
+        let end_line = event.end_line.saturating_sub(display.line_offset);
+        if start_line >= display.line_count {
             continue;
         }
         if wrote_event {
@@ -1200,7 +1422,11 @@ fn cboxes_trace_json(trace: &[ProgramTraceEvent], source_display: &SourceDisplay
         out.push_str(",\"startLine\":");
         out.push_str(&start_line.to_string());
         out.push_str(",\"endLine\":");
-        out.push_str(&end_line.min(line_count.saturating_sub(1)).to_string());
+        out.push_str(
+            &end_line
+                .min(display.line_count.saturating_sub(1))
+                .to_string(),
+        );
         out.push_str(",\"state\":");
         out.push_str(&cboxes_state_json(&event.state));
         out.push_str(",\"skippedRange\":");
@@ -1221,18 +1447,18 @@ fn cboxes_source_range_json(
     let Some(range) = range else {
         return "null".to_owned();
     };
-    let (line_offset, line_count) = source_display
+    let display = source_display
         .get(&range.file)
         .copied()
-        .unwrap_or((0, usize::MAX));
-    let start_line = range.start_line.saturating_sub(line_offset);
-    if start_line >= line_count {
+        .unwrap_or_else(SourceDisplay::unbounded);
+    let start_line = range.start_line.saturating_sub(display.line_offset);
+    if start_line >= display.line_count {
         return "null".to_owned();
     }
     let end_line = range
         .end_line
-        .saturating_sub(line_offset)
-        .min(line_count.saturating_sub(1));
+        .saturating_sub(display.line_offset)
+        .min(display.line_count.saturating_sub(1));
     format!(
         "{{\"file\":{},\"startLine\":{},\"startColumn\":{},\"endLine\":{},\"endColumn\":{}}}",
         cboxes_json_string(&range.file),
@@ -1247,12 +1473,12 @@ fn cboxes_source_location_json(
     location: &ProgramSourceLocation,
     source_display: &SourceDisplayMap,
 ) -> String {
-    let (line_offset, line_count) = source_display
+    let display = source_display
         .get(&location.file)
         .copied()
-        .unwrap_or((0, usize::MAX));
-    let line = location.line.saturating_sub(line_offset);
-    if line >= line_count {
+        .unwrap_or_else(SourceDisplay::unbounded);
+    let line = location.line.saturating_sub(display.line_offset);
+    if line >= display.line_count {
         return "null".to_owned();
     }
     format!(
@@ -1269,18 +1495,18 @@ fn cboxes_blocked_json(
     let Some(blocked) = blocked else {
         return "null".to_owned();
     };
-    let (line_offset, line_count) = source_display
+    let display = source_display
         .get(&blocked.file)
         .copied()
-        .unwrap_or((0, usize::MAX));
-    let start_line = blocked.start_line.saturating_sub(line_offset);
-    if start_line >= line_count {
+        .unwrap_or_else(SourceDisplay::unbounded);
+    let start_line = blocked.start_line.saturating_sub(display.line_offset);
+    if start_line >= display.line_count {
         return "null".to_owned();
     }
     let end_line = blocked
         .end_line
-        .saturating_sub(line_offset)
-        .min(line_count.saturating_sub(1));
+        .saturating_sub(display.line_offset)
+        .min(display.line_count.saturating_sub(1));
     format!(
         "{{\"file\":{},\"startLine\":{},\"endLine\":{},\"function\":{},\"state\":{}}}",
         cboxes_json_string(&blocked.file),
@@ -1298,18 +1524,20 @@ fn cboxes_execution_limit_json(
     let Some(execution_limit) = execution_limit else {
         return "null".to_owned();
     };
-    let (line_offset, line_count) = source_display
+    let display = source_display
         .get(&execution_limit.file)
         .copied()
-        .unwrap_or((0, usize::MAX));
-    let start_line = execution_limit.start_line.saturating_sub(line_offset);
-    if start_line >= line_count {
+        .unwrap_or_else(SourceDisplay::unbounded);
+    let start_line = execution_limit
+        .start_line
+        .saturating_sub(display.line_offset);
+    if start_line >= display.line_count {
         return "null".to_owned();
     }
     let end_line = execution_limit
         .end_line
-        .saturating_sub(line_offset)
-        .min(line_count.saturating_sub(1));
+        .saturating_sub(display.line_offset)
+        .min(display.line_count.saturating_sub(1));
     format!(
         "{{\"file\":{},\"startLine\":{},\"endLine\":{},\"tracePosition\":{}}}",
         cboxes_json_string(&execution_limit.file),
@@ -1362,7 +1590,8 @@ fn run_with_sources(
 ) -> Result<RunResult, Diagnostic> {
     let translation_unit = normalize_single_translation_unit(parse_translation_unit(
         sources, root_file, cwd, options,
-    )?)?;
+    )?)
+    .map_err(|diag| diag.with_sources(sources))?;
     run_translation_unit(sources, translation_unit, options)
 }
 
@@ -1449,15 +1678,18 @@ fn parse_translation_unit(
 fn normalize_single_translation_unit(
     mut unit: TranslationUnit,
 ) -> Result<TranslationUnit, Diagnostic> {
+    let original_externals = unit.externals.clone();
     let normalized = normalize_translation_unit(
         std::mem::take(&mut unit.externals),
         &unit.records,
         &unit.enums,
     )?;
+    unit.externals = original_externals;
     unit.function_declarations = normalized.function_declarations;
     unit.functions = normalized.function_definitions;
     unit.globals = normalized.global_declarations;
     unit.global_definitions = normalized.global_definitions;
+    unit.inline_function_definitions = normalized.inline_function_definitions;
     Ok(unit)
 }
 
@@ -1468,6 +1700,7 @@ fn merge_translation_units(units: Vec<TranslationUnit>) -> Result<TranslationUni
         function_declarations: Vec::new(),
         globals: Vec::new(),
         global_definitions: Vec::new(),
+        inline_function_definitions: Vec::new(),
         records: Default::default(),
         enums: Default::default(),
         enum_constants: Default::default(),
@@ -1536,8 +1769,12 @@ fn merge_translation_units(units: Vec<TranslationUnit>) -> Result<TranslationUni
         for external in unit.externals {
             remapped_externals.push(remap_external_declaration(external, &record_map, &enum_map));
         }
+        merged.externals.extend(remapped_externals.iter().cloned());
         let normalized =
             normalize_translation_unit(remapped_externals, &merged.records, &merged.enums)?;
+        merged
+            .inline_function_definitions
+            .extend(normalized.inline_function_definitions.iter().cloned());
         for function_decl in normalized.function_declarations {
             if function_decl.storage_class == Some(StorageClass::Static) {
                 merged.function_declarations.push(function_decl);
@@ -1655,6 +1892,17 @@ fn merge_translation_units(units: Vec<TranslationUnit>) -> Result<TranslationUni
         }
     }
 
+    for (name, definition) in &mut external_function_defs {
+        if let Some(declaration) = external_function_decls.get(name) {
+            definition.is_noreturn = declaration.is_noreturn;
+        }
+    }
+    for (name, definition) in &mut external_object_defs {
+        if let Some(declaration) = external_object_decls.get(name) {
+            definition.alignment = declaration.alignment;
+        }
+    }
+
     merged
         .function_declarations
         .extend(external_function_decls.into_values());
@@ -1687,12 +1935,6 @@ fn fallback_span(unit: &TranslationUnit) -> Span {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Linkage {
-    Internal,
-    External,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExternalSymbolKind {
     Function,
     Object,
@@ -1704,6 +1946,7 @@ struct NormalizedTranslationUnit {
     function_definitions: Vec<FunctionDef>,
     global_declarations: Vec<Declaration>,
     global_definitions: Vec<Declaration>,
+    inline_function_definitions: Vec<FunctionDef>,
 }
 
 #[derive(Debug, Clone)]
@@ -1757,9 +2000,9 @@ fn normalize_translation_unit(
         match external {
             ExternalDeclaration::Function(function) => {
                 let decl = function_decl_from_definition(&function);
-                let linkage = resolve_linkage(
+                let linkage = validate_linkage(
                     &function.name,
-                    function.storage_class,
+                    function.linkage,
                     ExternalSymbolKind::Function,
                     function.span,
                     &mut prior_symbols,
@@ -1806,9 +2049,9 @@ fn normalize_translation_unit(
                 }
             }
             ExternalDeclaration::FunctionDeclaration(function_decl) => {
-                let linkage = resolve_linkage(
+                let linkage = validate_linkage(
                     &function_decl.name,
-                    function_decl.storage_class,
+                    function_decl.linkage,
                     ExternalSymbolKind::Function,
                     function_decl.span,
                     &mut prior_symbols,
@@ -1848,9 +2091,10 @@ fn normalize_translation_unit(
             }
             ExternalDeclaration::ObjectDeclaration(decl) => {
                 let role = classify_object_role(&decl);
-                let linkage = resolve_linkage(
+                let linkage = validate_linkage(
                     &decl.name,
-                    decl.storage_class,
+                    decl.linkage
+                        .expect("translation-unit object declaration must have linkage"),
                     ExternalSymbolKind::Object,
                     decl.span,
                     &mut prior_symbols,
@@ -1900,10 +2144,30 @@ fn normalize_translation_unit(
         function_definitions: Vec::new(),
         global_declarations: Vec::new(),
         global_definitions: Vec::new(),
+        inline_function_definitions: Vec::new(),
     };
 
     let internal_linkage_names = collect_internal_linkage_names(&function_entries, &object_entries);
     for entry in function_entries.into_values() {
+        if let Some(definition) = entry.definition.as_ref()
+            && !definition.has_prototype
+            && entry.declaration.has_prototype
+            && composite_type(
+                &function_decl_type(&entry.declaration),
+                &old_style_promoted_definition_type(definition),
+                records,
+                enums,
+            )
+            .is_none()
+        {
+            return Err(Diagnostic::error(
+                format!(
+                    "old-style definition of {} is incompatible with its prototype",
+                    definition.name
+                ),
+                definition.span,
+            ));
+        }
         if entry.declaration.name == "main" && entry.saw_inline {
             return Err(Diagnostic::error(
                 "main shall not be declared inline",
@@ -1927,13 +2191,15 @@ fn normalize_translation_unit(
         normalized
             .function_declarations
             .push(entry.declaration.clone());
-        if let Some(definition) = entry.definition {
+        if let Some(mut definition) = entry.definition {
+            definition.is_noreturn = entry.declaration.is_noreturn;
             if is_inline_definition {
                 validate_inline_definition_constraints(
                     &definition,
                     &internal_linkage_names,
                     records,
                 )?;
+                normalized.inline_function_definitions.push(definition);
             } else {
                 normalized.function_definitions.push(definition);
             }
@@ -1943,9 +2209,21 @@ fn normalize_translation_unit(
         normalized
             .global_declarations
             .push(entry.declaration.clone());
-        if let Some(definition) = entry.real_definition.take() {
+        if let Some(mut definition) = entry.real_definition.take() {
+            definition.alignment = entry.declaration.alignment;
             normalized.global_definitions.push(definition);
         } else if entry.has_tentative_definition {
+            if entry.declaration.linkage == Some(Linkage::Internal)
+                && !type_is_complete_for_linkage(&entry.declaration.ty, records)
+            {
+                return Err(Diagnostic::error(
+                    format!(
+                        "tentative definition of internal-linkage object {} must have complete type",
+                        entry.declaration.name
+                    ),
+                    entry.declaration.span,
+                ));
+            }
             normalized
                 .global_definitions
                 .push(finalize_tentative_definition(entry.declaration));
@@ -1955,9 +2233,20 @@ fn normalize_translation_unit(
     Ok(normalized)
 }
 
-fn resolve_linkage(
+fn type_is_complete_for_linkage(ty: &CType, records: &HashMap<usize, RecordType>) -> bool {
+    match ty.unqualified() {
+        CType::Void | CType::Function(..) | CType::Array(_, 0) => false,
+        CType::Array(inner, _) => type_is_complete_for_linkage(inner, records),
+        CType::Struct(id, _) | CType::Union(id, _) => {
+            records.get(id).is_some_and(|record| record.complete)
+        }
+        _ => true,
+    }
+}
+
+fn validate_linkage(
     name: &str,
-    storage_class: Option<StorageClass>,
+    linkage: Linkage,
     kind: ExternalSymbolKind,
     span: Span,
     prior_symbols: &mut HashMap<String, PriorSymbol>,
@@ -1975,7 +2264,7 @@ fn resolve_linkage(
                 span,
             ));
         }
-        if storage_class == Some(StorageClass::Static) && prior.linkage == Linkage::External {
+        if prior.linkage != linkage {
             return Err(Diagnostic::ub(
                 format!(
                     "identifier {} is declared with both internal and external linkage",
@@ -1990,12 +2279,6 @@ fn resolve_linkage(
             )));
         }
     }
-    let linkage = match storage_class {
-        Some(StorageClass::Static) => Linkage::Internal,
-        _ => prior
-            .map(|prior| prior.linkage)
-            .unwrap_or(Linkage::External),
-    };
     prior_symbols.insert(
         name.to_owned(),
         PriorSymbol {
@@ -2279,8 +2562,11 @@ fn validate_inline_expr(
         Expr::Number(_, _)
         | Expr::CharLiteral(_, _)
         | Expr::WideCharLiteral(_, _)
+        | Expr::Utf16CharLiteral(_, _)
+        | Expr::Utf32CharLiteral(_, _)
         | Expr::StringLiteral(_, _)
         | Expr::WideStringLiteral(_, _) => Ok(()),
+        Expr::Utf16StringLiteral(_, _) | Expr::Utf32StringLiteral(_, _) => Ok(()),
         Expr::Variable(name, span) => {
             if !local_scopes.iter().rev().any(|scope| scope.contains(name))
                 && internal_linkage_names.contains(name)
@@ -2459,7 +2745,10 @@ fn merge_function_declaration(
     let new_ty = function_decl_type(new_decl);
     let composite = composite_type(&existing_ty, &new_ty, records, enums).ok_or_else(|| {
         Diagnostic::error(
-            format!("conflicting declarations of function {}", new_decl.name),
+            format!(
+                "conflicting declarations of function {}: the earlier declaration has type {}, but this one has type {}",
+                new_decl.name, existing_ty, new_ty
+            ),
             new_decl.span,
         )
     })?;
@@ -2467,7 +2756,10 @@ fn merge_function_declaration(
         new_decl.name.clone(),
         composite,
         combine_function_storage(existing.storage_class, new_decl.storage_class),
+        existing.linkage,
         existing.is_inline || new_decl.is_inline,
+        existing.is_noreturn || new_decl.is_noreturn,
+        existing.has_prototype || new_decl.has_prototype,
         combine_spans(existing.span, new_decl.span),
     )?;
     Ok(())
@@ -2482,12 +2774,28 @@ fn merge_object_declaration(
     let composite =
         composite_type(&existing.ty, &new_decl.ty, records, enums).ok_or_else(|| {
             Diagnostic::error(
-                format!("conflicting declarations of object {}", new_decl.name),
-                new_decl.span,
+                format!(
+                    "conflicting declarations of object {}: the earlier declaration has type {}, but this one has type {}",
+                    new_decl.name, existing.ty, new_decl.ty
+                ),
+                new_decl.declarator_span,
             )
         })?;
     existing.ty = composite;
     existing.storage_class = combine_object_storage(existing.storage_class, new_decl.storage_class);
+    match (existing.alignment, new_decl.alignment) {
+        (Some(lhs), Some(rhs)) if lhs != rhs => {
+            return Err(Diagnostic::error(
+                format!(
+                    "conflicting alignment specifiers for object {}",
+                    new_decl.name
+                ),
+                new_decl.span,
+            ));
+        }
+        (None, Some(alignment)) => existing.alignment = Some(alignment),
+        _ => {}
+    }
     existing.span = combine_spans(existing.span, new_decl.span);
     Ok(())
 }
@@ -2503,8 +2811,10 @@ fn remap_record_member(
         ty: remap_type(member.ty, record_map, enum_map),
         offset: member.offset,
         bit_width: member.bit_width,
+        bit_width_span: member.bit_width_span,
         bit_offset: member.bit_offset,
         bit_storage_size: member.bit_storage_size,
+        declaration_span: member.declaration_span,
     }
 }
 
@@ -2534,6 +2844,7 @@ fn remap_function(
     FunctionDef {
         name: function.name,
         return_type: remap_type(function.return_type, record_map, enum_map),
+        return_type_span: function.return_type_span,
         params: function
             .params
             .into_iter()
@@ -2541,7 +2852,10 @@ fn remap_function(
             .collect(),
         is_variadic: function.is_variadic,
         storage_class: function.storage_class,
+        linkage: function.linkage,
         is_inline: function.is_inline,
+        is_noreturn: function.is_noreturn,
+        has_prototype: function.has_prototype,
         body: remap_block(function.body, record_map, enum_map),
         span: function.span,
     }
@@ -2562,7 +2876,10 @@ fn remap_function_decl(
             .collect(),
         is_variadic: function.is_variadic,
         storage_class: function.storage_class,
+        linkage: function.linkage,
         is_inline: function.is_inline,
+        is_noreturn: function.is_noreturn,
+        has_prototype: function.has_prototype,
         span: function.span,
     }
 }
@@ -2613,7 +2930,10 @@ fn remap_block(
                             .collect(),
                         is_variadic: decl.is_variadic,
                         storage_class: decl.storage_class,
+                        linkage: decl.linkage,
                         is_inline: decl.is_inline,
+                        is_noreturn: decl.is_noreturn,
+                        has_prototype: decl.has_prototype,
                         span: decl.span,
                     })
                 }
@@ -2761,9 +3081,12 @@ fn remap_declaration(
             .map(|expr| expr.map(|expr| remap_expr(expr, record_map, enum_map)))
             .collect(),
         storage_class: decl.storage_class,
+        linkage: decl.linkage,
+        alignment: decl.alignment,
         init: decl
             .init
             .map(|init| remap_initializer(init, record_map, enum_map)),
+        declarator_span: decl.declarator_span,
         span: decl.span,
     }
 }
@@ -2813,8 +3136,12 @@ fn remap_expr(
         Expr::Number(text, span) => Expr::Number(text, span),
         Expr::CharLiteral(value, span) => Expr::CharLiteral(value, span),
         Expr::WideCharLiteral(value, span) => Expr::WideCharLiteral(value, span),
+        Expr::Utf16CharLiteral(value, span) => Expr::Utf16CharLiteral(value, span),
+        Expr::Utf32CharLiteral(value, span) => Expr::Utf32CharLiteral(value, span),
         Expr::StringLiteral(text, span) => Expr::StringLiteral(text, span),
         Expr::WideStringLiteral(text, span) => Expr::WideStringLiteral(text, span),
+        Expr::Utf16StringLiteral(text, span) => Expr::Utf16StringLiteral(text, span),
+        Expr::Utf32StringLiteral(text, span) => Expr::Utf32StringLiteral(text, span),
         Expr::Variable(name, span) => Expr::Variable(name, span),
         Expr::Unary { op, expr, span } => Expr::Unary {
             op,
@@ -2935,12 +3262,19 @@ fn remap_expr(
             else_expr: Box::new(remap_expr(*else_expr, record_map, enum_map)),
             span,
         },
-        Expr::Call { callee, args, span } => Expr::Call {
+        Expr::Call {
+            callee,
+            args,
+            declared_callee_type,
+            span,
+        } => Expr::Call {
             callee: Box::new(remap_expr(*callee, record_map, enum_map)),
             args: args
                 .into_iter()
                 .map(|arg| remap_expr(arg, record_map, enum_map))
                 .collect(),
+            declared_callee_type: declared_callee_type
+                .map(|ty| remap_type(ty, record_map, enum_map)),
             span,
         },
         Expr::Member { base, member, span } => Expr::Member {
@@ -2987,12 +3321,18 @@ fn function_decl_from_definition(function: &FunctionDef) -> FunctionDecl {
         params: function.params.clone(),
         is_variadic: function.is_variadic,
         storage_class: function.storage_class,
+        linkage: function.linkage,
         is_inline: function.is_inline,
+        is_noreturn: function.is_noreturn,
+        has_prototype: function.has_prototype,
         span: function.span,
     }
 }
 
 fn function_decl_type(decl: &FunctionDecl) -> CType {
+    if !decl.has_prototype {
+        return CType::function(decl.return_type.clone(), Vec::new());
+    }
     if decl.is_variadic {
         CType::variadic_function(
             decl.return_type.clone(),
@@ -3006,11 +3346,33 @@ fn function_decl_type(decl: &FunctionDecl) -> CType {
     }
 }
 
+fn old_style_promoted_definition_type(function: &FunctionDef) -> CType {
+    let params = function
+        .params
+        .iter()
+        .map(|param| match param.ty.unqualified() {
+            CType::Float => CType::Double,
+            CType::Bool
+            | CType::Char
+            | CType::SignedChar
+            | CType::UnsignedChar
+            | CType::Short
+            | CType::UnsignedShort
+            | CType::Enum(..) => CType::Int,
+            _ => param.ty.clone(),
+        })
+        .collect();
+    CType::function(function.return_type.clone(), params)
+}
+
 fn function_decl_from_type(
     name: String,
     ty: CType,
     storage_class: Option<StorageClass>,
+    linkage: Linkage,
     is_inline: bool,
+    is_noreturn: bool,
+    has_prototype: bool,
     span: Span,
 ) -> Result<FunctionDecl, Diagnostic> {
     let CType::Function(return_type, params, is_variadic) = ty.unqualified() else {
@@ -3034,7 +3396,10 @@ fn function_decl_from_type(
             .collect(),
         is_variadic: *is_variadic,
         storage_class,
+        linkage,
         is_inline,
+        is_noreturn,
+        has_prototype,
         span,
     })
 }
@@ -3072,7 +3437,7 @@ fn combine_object_storage(
     }
 }
 
-fn composite_type(
+pub(crate) fn composite_type(
     lhs: &CType,
     rhs: &CType,
     records: &HashMap<usize, RecordType>,
@@ -3139,9 +3504,28 @@ fn composite_type_inner(
         (
             CType::Function(lhs_ret, lhs_params, lhs_variadic),
             CType::Function(rhs_ret, rhs_params, rhs_variadic),
-        ) if lhs_variadic == rhs_variadic && lhs_params.len() == rhs_params.len() => {
+        ) => {
             let return_type =
                 composite_type_inner(lhs_ret, rhs_ret, records, enums, seen_records, seen_enums)?;
+            if lhs_params.is_empty() && !lhs_variadic {
+                if *rhs_variadic
+                    || !function_prototype_compatible_with_unspecified_parameters(rhs_params)
+                {
+                    return None;
+                }
+                return Some(CType::function(return_type, rhs_params.clone()));
+            }
+            if rhs_params.is_empty() && !rhs_variadic {
+                if *lhs_variadic
+                    || !function_prototype_compatible_with_unspecified_parameters(lhs_params)
+                {
+                    return None;
+                }
+                return Some(CType::function(return_type, lhs_params.clone()));
+            }
+            if lhs_variadic != rhs_variadic || lhs_params.len() != rhs_params.len() {
+                return None;
+            }
             let mut params = Vec::new();
             for (lhs_param, rhs_param) in lhs_params.iter().zip(rhs_params) {
                 params.push(composite_type_inner(
@@ -3197,6 +3581,27 @@ fn composite_type_inner(
         _ if lhs == rhs => Some(lhs.clone()),
         _ => None,
     }
+}
+
+fn function_prototype_compatible_with_unspecified_parameters(params: &[CType]) -> bool {
+    params == [CType::Void]
+        || params
+            .iter()
+            .all(|param| type_unchanged_by_default_argument_promotions(param))
+}
+
+fn type_unchanged_by_default_argument_promotions(ty: &CType) -> bool {
+    !matches!(
+        ty.unqualified(),
+        CType::Bool
+            | CType::Char
+            | CType::SignedChar
+            | CType::UnsignedChar
+            | CType::Short
+            | CType::UnsignedShort
+            | CType::Enum(..)
+            | CType::Float
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3346,6 +3751,455 @@ mod browser_api_tests {
     use super::*;
 
     #[test]
+    fn browser_diagnostics_preserve_the_full_source_range() {
+        let source = "int main(void) {\n  char a = \"hi\";\n}\n";
+        let diagnostic = run_source("program.c", source).unwrap_err();
+        let range = diagnostic.display_range().unwrap();
+
+        assert_eq!(range.path, PathBuf::from("program.c"));
+        assert_eq!(
+            (
+                range.start_line,
+                range.start_column,
+                range.end_line,
+                range.end_column,
+            ),
+            (1, 11, 1, 15)
+        );
+
+        let json = cboxes_diagnostic_json(
+            &diagnostic,
+            &HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]),
+        );
+        assert!(json.contains("\"line\":1,\"column\":11"));
+        assert!(json.contains("\"endLine\":1,\"endColumn\":15"));
+    }
+
+    #[test]
+    fn browser_eof_diagnostics_stay_at_the_original_source_end() {
+        let source = "int f(int x) {\n}\n\nint a";
+        let run = cboxes_run_virtual_sources(
+            vec![(PathBuf::from("program.c"), source.to_owned())],
+            &RunOptions::default(),
+            false,
+        )
+        .unwrap();
+        let diagnostic = run.result.unwrap_err();
+        let json = cboxes_diagnostic_json(&diagnostic, &run.source_display);
+
+        assert!(json.contains("\"file\":\"program.c\""), "{json}");
+        assert!(json.contains("\"line\":3,\"column\":5"), "{json}");
+    }
+
+    #[test]
+    fn missing_semicolon_at_an_include_boundary_points_into_the_header() {
+        let files = vec![
+            (
+                PathBuf::from("main.c"),
+                "#include \"bad.h\"\nint main(void) {}".to_owned(),
+            ),
+            (PathBuf::from("bad.h"), "extern int object".to_owned()),
+        ];
+        let run = cboxes_run_virtual_sources(files, &RunOptions::default(), false).unwrap();
+        let diagnostic = run.result.unwrap_err();
+        let range = diagnostic.display_range().unwrap();
+
+        assert_eq!(range.path, PathBuf::from("bad.h"));
+        assert_eq!((range.start_line, range.start_column), (0, 11));
+    }
+
+    #[test]
+    fn member_and_initializer_diagnostics_do_not_blame_following_punctuation() {
+        let cases = [
+            ("struct S { int x; char x; }; int main(void) {}\n", "x"),
+            ("struct S { void x; }; int main(void) {}\n", "x"),
+            ("struct S { int x : 0; }; int main(void) {}\n", "0"),
+            ("struct S { int a[]; int x; }; int main(void) {}\n", "a[]"),
+            ("int main(void) { int x = {1, 2}; }\n", "2"),
+            ("int main(void) { int a[2] = {[3] = 1}; }\n", "[3]"),
+        ];
+
+        for (source, expected) in cases {
+            let diagnostic = run_source("program.c", source).unwrap_err();
+            let range = diagnostic.display_range().unwrap();
+            let start = source.rfind(expected).unwrap();
+            assert_eq!(
+                (range.start_column, range.end_column),
+                (start, start + expected.len()),
+                "{expected}: {}",
+                diagnostic.render()
+            );
+        }
+    }
+
+    #[test]
+    fn conversions_link_call_parameters_and_function_return_types() {
+        let cases = [
+            (
+                "void f(int count) {} int main(void) { f(\"wrong\"); }\n",
+                "int count",
+            ),
+            ("int *f(void) { return 1; } int main(void) {}\n", "int"),
+        ];
+
+        for (source, destination) in cases {
+            let diagnostic = run_source("program.c", source).unwrap_err();
+            let annotation = diagnostic.display_annotations().first().unwrap();
+            let start = source.find(destination).unwrap();
+            assert_eq!(annotation.id, "destination");
+            assert_eq!(
+                (annotation.range.start_column, annotation.range.end_column),
+                (start, start + destination.len())
+            );
+        }
+    }
+
+    #[test]
+    fn c11_type_context_diagnostics_highlight_the_type_or_compound_literal() {
+        let cases = [
+            (
+                "struct S; int main(void) { return _Alignof(struct S); }\n",
+                "_Alignof(struct S)",
+            ),
+            (
+                "struct S; int main(void) { return _Generic(1, struct S: 1, default: 2); }\n",
+                "struct S",
+            ),
+            (
+                "int main(void) { return _Generic(1, int: 1, signed int: 2); }\n",
+                "signed int",
+            ),
+            (
+                "struct S; int main(void) { (struct S){0}; }\n",
+                "(struct S){0}",
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let diagnostic = run_source("program.c", source).unwrap_err();
+            let range = diagnostic.display_range().unwrap();
+            let start = source.rfind(expected).unwrap();
+            assert_eq!(
+                (range.start_column, range.end_column),
+                (start, start + expected.len()),
+                "{expected}: {}",
+                diagnostic.render()
+            );
+        }
+    }
+
+    #[test]
+    fn hexadecimal_integer_constants_with_e_digits_remain_integer_constants() {
+        let source = "enum E { VALUE = 0xdead }; int main(void) { return VALUE != 0xdead; }\n";
+        let result = run_source("program.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn c11_rejects_undeclared_old_style_parameters() {
+        let source = "int function(value) { return value; }\nint main(void) { return 0; }\n";
+        let diagnostic = run_source("program.c", source).unwrap_err();
+
+        assert!(
+            diagnostic
+                .render()
+                .contains("old-style parameter value is missing its declaration"),
+            "{}",
+            diagnostic.render()
+        );
+        let range = diagnostic.display_range().unwrap();
+        let start = source.find("value").unwrap();
+        assert_eq!(
+            (
+                range.start_line,
+                range.start_column,
+                range.end_line,
+                range.end_column,
+            ),
+            (0, start, 0, start + "value".len())
+        );
+    }
+
+    #[test]
+    fn c11_still_accepts_declared_old_style_parameters() {
+        let source = "int identity(value) int value; { return value; }\nint main(void) { return identity(7) != 7; }\n";
+        let result = run_source("program.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn main_must_use_a_standard_parameter_list() {
+        for source in [
+            "int main(int value) { return value; }\n",
+            "int main(value) int value; { return value; }\n",
+        ] {
+            let diagnostic = run_source("program.c", source).unwrap_err();
+            assert!(
+                diagnostic
+                    .render()
+                    .contains("this definition gives main 1 parameter"),
+                "{}",
+                diagnostic.render()
+            );
+            if source.starts_with("int main(int value)") {
+                let start = source.find("int value").unwrap();
+                let range = diagnostic.display_range().unwrap();
+                assert_eq!(
+                    (
+                        range.start_line,
+                        range.start_column,
+                        range.end_line,
+                        range.end_column,
+                    ),
+                    (0, start, 0, start + "int value".len())
+                );
+            }
+        }
+
+        for source in [
+            "int main(void) { return 0; }\n",
+            "int main() { return 0; }\n",
+            "int main(int argc, char **argv) { return argc < 1 || argv[argc] != 0; }\n",
+        ] {
+            let result = run_source("program.c", source).unwrap();
+            assert_eq!(result.exit_status, 0, "{source}");
+        }
+    }
+
+    #[test]
+    fn incomplete_function_header_is_not_misdiagnosed_as_an_unknown_type() {
+        for source in ["int main()\n", "int function(value) int value;\n"] {
+            let diagnostic = run_source("program.c", source).unwrap_err();
+            assert!(
+                diagnostic
+                    .render()
+                    .contains("is missing a body or semicolon"),
+                "{}",
+                diagnostic.render()
+            );
+            let range = diagnostic.display_range().unwrap();
+            assert_eq!(range.start_line, 0);
+            assert!(range.start_column > 0, "{}", diagnostic.render());
+        }
+    }
+
+    #[test]
+    fn missing_main_points_to_the_end_instead_of_blaming_another_function() {
+        let source = "int f(int value) { return value; }\n";
+        let diagnostic = run_source("program.c", source).unwrap_err();
+
+        assert!(
+            diagnostic.render().contains("program does not define main"),
+            "{}",
+            diagnostic.render()
+        );
+        let range = diagnostic.display_range().unwrap();
+        assert_eq!(
+            (
+                range.start_line,
+                range.start_column,
+                range.end_line,
+                range.end_column,
+            ),
+            (0, source.trim_end().len(), 0, source.trim_end().len())
+        );
+    }
+
+    #[test]
+    fn prefix_unary_diagnostics_include_the_operator_in_their_range() {
+        let cases = [
+            ("int *b = 0; int *c = *b;", "*b"),
+            ("int *b = 0; int *c = *(b);", "*(b)"),
+            ("int ***b = 0; int **c = **b;", "**b"),
+            ("int b; int c = &b;", "&b"),
+            ("struct S { int x; } s; int x = +s;", "+s"),
+            ("struct S { int x; } s; int x = -s;", "-s"),
+            ("struct S { int x; } s; int x = !s;", "!s"),
+            ("double d = 1; int x = ~d;", "~d"),
+            ("int x = ++3;", "++3"),
+            ("int x = --3;", "--3"),
+        ];
+
+        for (body, expression) in cases {
+            let source = format!("int main(void) {{ {body} }}\n");
+            let diagnostic = run_source("program.c", &source).unwrap_err();
+            let range = diagnostic.display_range().unwrap();
+            let start = source.rfind(expression).unwrap();
+            assert_eq!(
+                (
+                    range.start_line,
+                    range.start_column,
+                    range.end_line,
+                    range.end_column,
+                ),
+                (0, start, 0, start + expression.len()),
+                "{expression}: {}",
+                diagnostic.render()
+            );
+        }
+    }
+
+    #[test]
+    fn conversion_diagnostics_highlight_the_converted_expression_in_every_context() {
+        let cases = [
+            ("int main(void) { int **p; int *q = **p; }\n", "**p"),
+            ("int main(void) { int **p; int *q; q = **p; }\n", "**p"),
+            (
+                "void f(int **value) {} int main(void) { int **p; f(*p); }\n",
+                "*p",
+            ),
+            (
+                "int **f(void) { int **p; return *p; } int main(void) { return 0; }\n",
+                "*p",
+            ),
+        ];
+
+        for (source, expression) in cases {
+            let diagnostic = run_source("program.c", source).unwrap_err();
+            let range = diagnostic.display_range().unwrap();
+            let start = source.rfind(expression).unwrap();
+            assert_eq!(
+                (
+                    range.start_line,
+                    range.start_column,
+                    range.end_line,
+                    range.end_column,
+                ),
+                (0, start, 0, start + expression.len()),
+                "{expression}: {}",
+                diagnostic.render()
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_initializer_diagnostics_identify_and_annotate_the_failing_member() {
+        let cases = [
+            (
+                "struct S { int a; int b; }; int main(void) { struct S s = {0, \"x\"}; }\n",
+                "b",
+                "int b",
+            ),
+            (
+                "struct S { int a; int b; }; int main(void) { struct S s = {.b = \"x\"}; }\n",
+                "b",
+                "int b",
+            ),
+            (
+                "union U { int a; double d; }; int main(void) { union U u = {.a = \"x\"}; }\n",
+                "a",
+                "int a",
+            ),
+            (
+                "struct I { int x; }; struct O { int lead; struct I inner; }; int main(void) { struct O o = {0, {\"x\"}}; }\n",
+                "x",
+                "int x",
+            ),
+        ];
+
+        for (source, member_name, member_declaration) in cases {
+            let diagnostic = run_source("program.c", source).unwrap_err();
+            assert!(
+                diagnostic
+                    .render()
+                    .contains(&format!("initializing member {member_name}")),
+                "{}",
+                diagnostic.render()
+            );
+            let annotation = diagnostic.display_annotations().first().unwrap();
+            let member_start = source.find(member_declaration).unwrap() + "int ".len();
+            assert_eq!(annotation.id, "destination");
+            assert_eq!(
+                (
+                    annotation.range.start_line,
+                    annotation.range.start_column,
+                    annotation.range.end_line,
+                    annotation.range.end_column,
+                ),
+                (0, member_start, 0, member_start + member_name.len()),
+            );
+
+            let json = cboxes_diagnostic_json(
+                &diagnostic,
+                &HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]),
+            );
+            assert!(json.contains("\"annotations\":[{\"id\":\"destination\""));
+        }
+    }
+
+    #[test]
+    fn unterminated_literals_highlight_from_the_quote_to_the_line_end() {
+        let source = "int main(void) {\n  char a[] = \"hi\n}\n";
+        let diagnostic = run_source("program.c", source).unwrap_err();
+        let range = diagnostic.display_range().unwrap();
+
+        assert_eq!(
+            (
+                range.start_line,
+                range.start_column,
+                range.end_line,
+                range.end_column,
+            ),
+            (1, 13, 1, 16)
+        );
+    }
+
+    #[test]
+    fn preprocessor_fallback_ranges_cover_the_relevant_line() {
+        let source = "  #define\nint main(void) { return 0; }\n";
+        let diagnostic = run_source("program.c", source).unwrap_err();
+        let range = diagnostic.display_range().unwrap();
+
+        assert_eq!(
+            (
+                range.start_line,
+                range.start_column,
+                range.end_line,
+                range.end_column,
+            ),
+            (0, 2, 0, 9)
+        );
+    }
+
+    #[test]
+    fn diagnostic_columns_are_mapped_back_across_macro_expansion() {
+        let source = "#include <limits.h>\nint main(void){int x=INT_MIN; int y=-1; return x/y;}\n";
+        let diagnostic = run_source("program.c", source).unwrap_err();
+        let range = diagnostic.display_range().unwrap();
+        let expression_start = source.lines().nth(1).unwrap().find("x/y").unwrap();
+
+        assert_eq!(
+            (
+                range.start_line,
+                range.start_column,
+                range.end_line,
+                range.end_column,
+            ),
+            (1, expression_start, 1, expression_start + 3)
+        );
+    }
+
+    #[test]
+    fn translation_unit_validation_errors_keep_their_source_range() {
+        let source = "int f(void){return 1;} int f(void){return 2;} int main(void){return f();}\n";
+        let diagnostic = run_source("program.c", source).unwrap_err();
+        let range = diagnostic.display_range().unwrap();
+        let definition_start = source.match_indices("int f").nth(1).unwrap().0;
+        let start = definition_start + source[definition_start..].find('f').unwrap();
+        let end = start + source[start..].find('}').unwrap() + 1;
+
+        assert_eq!(
+            (
+                range.start_line,
+                range.start_column,
+                range.end_line,
+                range.end_column,
+            ),
+            (0, start, 0, end)
+        );
+    }
+
+    #[test]
     fn virtual_project_links_sources_and_resolves_headers() {
         let files = vec![
             (
@@ -3372,12 +4226,29 @@ mod browser_api_tests {
     }
 
     #[test]
+    fn virtual_project_normalizes_a_missing_final_newline_in_headers() {
+        let files = vec![
+            (
+                PathBuf::from("program.c"),
+                "#include \"answer.h\"\nint main(void) { return answer() != 42; }".to_owned(),
+            ),
+            (
+                PathBuf::from("answer.c"),
+                "#include \"answer.h\"\nint answer(void) { return 42; }".to_owned(),
+            ),
+            (PathBuf::from("answer.h"), "int answer(void);".to_owned()),
+        ];
+
+        let (files, _, _) = cboxes_prepare_virtual_sources(files, false).unwrap();
+        assert!(files.iter().all(|(_, source)| source.ends_with('\n')));
+        let result = run_virtual_sources_with_options(&files, &RunOptions::default()).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
     fn browser_state_exposes_semantic_metadata_and_aliases() {
-        let result = run_source(
-            "program.c",
-            "int main(void) { double value = 0.1; double *p = &value; double **pp = &p; int items[2] = {1, 2}; }\n",
-        )
-        .unwrap();
+        let source = "int main(void) { double value = 0.1; double *p = &value; double **pp = &p; int items[2] = {1, 2}; }\n";
+        let result = run_source("program.c", source).unwrap();
         let value = result
             .state
             .iter()
@@ -3399,11 +4270,288 @@ mod browser_api_tests {
 
         let json = cboxes_success_json(
             &result,
-            &HashMap::from([("program.c".to_owned(), (0, usize::MAX))]),
+            &HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]),
         );
         assert!(json.contains("\"typeInfo\""));
         assert!(json.contains("\"exactValue\""));
         assert!(json.contains("\"aliases\":[\"*p\",\"**pp\"]"));
+    }
+
+    #[test]
+    fn browser_state_uses_c_syntax_for_type_names() {
+        let source = concat!(
+            "int global;\n",
+            "int *returns_pointer(void) { return &global; }\n",
+            "int main(void) {\n",
+            "  int (*function_pointer)(void) = main;\n",
+            "  int *(*pointer_to_pointer_returning_function)(void) = returns_pointer;\n",
+            "  int values[3] = {0};\n",
+            "  int (*pointer_to_array)[3] = &values;\n",
+            "  int *array_of_pointers[3] = {0};\n",
+            "  int (*pointer_to_incomplete_array)[];\n",
+            "  const int *pointer_to_const = 0;\n",
+            "  int * const const_pointer = 0;\n",
+            "  _Bool flag = 0;\n",
+            "}\n",
+        );
+        let result = run_source("program.c", source).unwrap();
+        let type_of = |name: &str| {
+            result
+                .state
+                .iter()
+                .find(|item| item.name == name)
+                .map(|item| item.ty.as_str())
+        };
+        let help_for = |name: &str| {
+            result
+                .state
+                .iter()
+                .find(|item| item.name == name)
+                .and_then(|item| item.type_info.help.as_deref())
+        };
+        let info_for = |name: &str| {
+            &result
+                .state
+                .iter()
+                .find(|item| item.name == name)
+                .unwrap()
+                .type_info
+        };
+
+        assert_eq!(type_of("function_pointer"), Some("int (*)(void)"));
+        assert_eq!(
+            help_for("function_pointer"),
+            Some("pointer to function taking no arguments and returning int")
+        );
+        let function_pointer_tree = info_for("function_pointer").help_tree.as_ref().unwrap();
+        assert_eq!(function_pointer_tree.kind, "pointer");
+        assert_eq!(function_pointer_tree.children[0].relation, "to");
+        assert_eq!(function_pointer_tree.children[0].node.kind, "function");
+        assert_eq!(info_for("function_pointer").help_type_names, ["int"]);
+        assert_eq!(
+            type_of("pointer_to_pointer_returning_function"),
+            Some("int*(*)(void)")
+        );
+        assert_eq!(
+            help_for("pointer_to_pointer_returning_function"),
+            Some("pointer to function taking no arguments and returning pointer to int")
+        );
+        assert_eq!(type_of("pointer_to_array"), Some("int (*)[3]"));
+        assert_eq!(
+            help_for("pointer_to_array"),
+            Some("pointer to array of 3 ints")
+        );
+        assert_eq!(type_of("array_of_pointers"), Some("int*[3]"));
+        assert_eq!(
+            help_for("array_of_pointers"),
+            Some("array of 3 pointers to int")
+        );
+        assert_eq!(type_of("pointer_to_incomplete_array"), Some("int (*)[]"));
+        assert_eq!(
+            help_for("pointer_to_incomplete_array"),
+            Some("pointer to array of unknown length containing ints")
+        );
+        let incomplete_array_tree = info_for("pointer_to_incomplete_array")
+            .help_tree
+            .as_ref()
+            .unwrap();
+        assert_eq!(incomplete_array_tree.kind, "pointer");
+        assert_eq!(incomplete_array_tree.children[0].node.kind, "array");
+        assert_eq!(
+            incomplete_array_tree.children[0].node.label,
+            "array of unknown length"
+        );
+        assert_eq!(info_for("pointer_to_incomplete_array").size, Some(8));
+        assert_eq!(type_of("pointer_to_const"), Some("const int*"));
+        assert_eq!(help_for("pointer_to_const"), None);
+        assert!(info_for("pointer_to_const").help_tree.is_none());
+        assert!(info_for("pointer_to_const").help_type_names.is_empty());
+        assert_eq!(type_of("const_pointer"), Some("int* const"));
+        assert_eq!(help_for("const_pointer"), None);
+        assert!(info_for("const_pointer").help_tree.is_none());
+        assert_eq!(type_of("flag"), Some("_Bool"));
+        assert_eq!(help_for("flag"), None);
+    }
+
+    #[test]
+    fn browser_state_displays_struct_and_union_values() {
+        let source = format!(
+            "{}\n",
+            r#"
+            struct Point { int x; double y; };
+            struct Shape { struct Point point; int sides[2]; };
+            union Number { int integer; double decimal; };
+
+            int main(void) {
+                struct Shape shape = {{3, 2.5}, {4, 5}};
+                union Number number = {.decimal = 1.25};
+            }
+        "#
+            .trim()
+        );
+        let result = run_source("program.c", source).unwrap();
+
+        let shape = result
+            .state
+            .iter()
+            .find(|item| item.name == "shape")
+            .unwrap();
+        assert_eq!(shape.value, "");
+        assert_eq!(shape.type_info.kind, "aggregate");
+        assert_eq!(shape.aggregate_kind.as_deref(), Some("struct"));
+        let state_value = |name: &str| {
+            result
+                .state
+                .iter()
+                .find(|item| item.name == name)
+                .map(|item| item.value.as_str())
+        };
+        assert_eq!(state_value("shape.point.x"), Some("3"));
+        assert_eq!(state_value("shape.point.y"), Some("2.5"));
+        assert_eq!(state_value("shape.sides[0]"), Some("4"));
+        assert_eq!(state_value("shape.sides[1]"), Some("5"));
+        let point = result
+            .state
+            .iter()
+            .find(|item| item.name == "shape.point")
+            .unwrap();
+        assert_eq!(point.aggregate_root.as_deref(), Some("shape"));
+        assert_eq!(point.aggregate_path, ["point"]);
+        let point_x = result
+            .state
+            .iter()
+            .find(|item| item.name == "shape.point.x")
+            .unwrap();
+        let point_y = result
+            .state
+            .iter()
+            .find(|item| item.name == "shape.point.y")
+            .unwrap();
+        assert_eq!(point_x.address, shape.address);
+        assert_eq!(point_y.address, shape.address.map(|address| address + 8));
+
+        let number = result
+            .state
+            .iter()
+            .find(|item| item.name == "number")
+            .unwrap();
+        assert_eq!(number.value, "");
+        assert_eq!(number.type_info.kind, "aggregate");
+        assert_eq!(number.aggregate_kind.as_deref(), Some("union"));
+        assert_eq!(state_value("number.decimal"), Some("1.25"));
+        assert!(
+            result
+                .state
+                .iter()
+                .all(|item| item.name != "number.integer")
+        );
+    }
+
+    #[test]
+    fn browser_state_does_not_invent_a_union_member_after_byte_copying() {
+        let source = concat!(
+            "#include <string.h>\n",
+            "union Number { int integer; double decimal; };\n",
+            "int main(void) {\n",
+            "  union Number source = {.integer = 7};\n",
+            "  union Number copied;\n",
+            "  memcpy(&copied, &source, sizeof copied);\n",
+            "}\n",
+        );
+        let result = run_source("program.c", source).unwrap();
+        let copied = result
+            .state
+            .iter()
+            .find(|item| item.name == "copied")
+            .unwrap();
+
+        assert_eq!(copied.value, "active member unknown");
+        assert!(
+            result
+                .state
+                .iter()
+                .all(|item| !item.name.starts_with("copied."))
+        );
+    }
+
+    #[test]
+    fn browser_state_includes_visible_program_globals() {
+        let source = format!(
+            "{}\n",
+            r#"
+            #include <stdio.h>
+            struct Counter { int current; int limit; };
+            int total = 3;
+            static int zeroed;
+            struct Counter counter = {1, 10};
+
+            int main(void) {
+                int local = 4;
+                total = 8;
+            }
+        "#
+            .trim()
+        );
+        let result = run_source("program.c", source).unwrap();
+
+        let state_value = |name: &str| {
+            result
+                .state
+                .iter()
+                .find(|item| item.name == name)
+                .map(|item| item.value.as_str())
+        };
+        assert_eq!(state_value("total"), Some("8"));
+        assert_eq!(state_value("zeroed"), Some("0"));
+        assert_eq!(state_value("counter"), Some(""));
+        assert_eq!(state_value("counter.current"), Some("1"));
+        assert_eq!(state_value("counter.limit"), Some("10"));
+        assert_eq!(state_value("local"), Some("4"));
+        assert!(
+            result
+                .state
+                .iter()
+                .all(|item| !matches!(item.name.as_str(), "stdin" | "stdout" | "stderr"))
+        );
+    }
+
+    #[test]
+    fn browser_state_uses_locals_instead_of_shadowed_globals() {
+        let source = "int value = 1; int main(void) { int value = 2; }\n";
+        let result = run_source("program.c", source).unwrap();
+        let values = result
+            .state
+            .iter()
+            .filter(|item| item.name == "value")
+            .collect::<Vec<_>>();
+
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].value, "2");
+    }
+
+    #[test]
+    fn browser_state_includes_cross_file_globals_visible_to_main() {
+        let files = vec![
+            (
+                PathBuf::from("program.c"),
+                "extern int answer; int main(void) { answer = 42; }\n".to_owned(),
+            ),
+            (
+                PathBuf::from("answer.c"),
+                "int answer = 7; static int hidden = 9;\n".to_owned(),
+            ),
+        ];
+        let result = run_virtual_sources_with_options(&files, &RunOptions::default()).unwrap();
+
+        assert_eq!(
+            result
+                .state
+                .iter()
+                .find(|item| item.name == "answer")
+                .map(|item| item.value.as_str()),
+            Some("42")
+        );
+        assert!(result.state.iter().all(|item| item.name != "hidden"));
     }
 
     #[test]
@@ -3449,10 +4597,8 @@ mod browser_api_tests {
     fn explicit_main_reports_its_closing_brace_as_the_program_end() {
         let source = "int main(void) {\n  int a = 1;\n}\n";
         let result = run_source("program.c", source).unwrap();
-        let source_display = HashMap::from([(
-            "program.c".to_owned(),
-            (0, cboxes_source_line_count(source)),
-        )]);
+        let source_display =
+            HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]);
         let json = cboxes_success_json(&result, &source_display);
 
         assert_eq!(result.trace.len(), 1);
@@ -3475,10 +4621,8 @@ mod browser_api_tests {
             },
         )
         .unwrap();
-        let source_display = HashMap::from([(
-            "program.c".to_owned(),
-            (0, cboxes_source_line_count(source)),
-        )]);
+        let source_display =
+            HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]);
         let json = cboxes_success_json(&result, &source_display);
 
         let execution_limit = result.execution_limit.as_ref().unwrap();
@@ -3568,10 +4712,8 @@ mod browser_api_tests {
         let source =
             "#include <stdio.h>\nint main(void) {\n  int before = 1;\n  int ch = getchar();\n}\n";
         let result = run_source("program.c", source).unwrap();
-        let source_display = HashMap::from([(
-            "program.c".to_owned(),
-            (0, cboxes_source_line_count(source)),
-        )]);
+        let source_display =
+            HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]);
         let json = cboxes_success_json(&result, &source_display);
 
         assert!(result.blocked.is_some());
@@ -3613,6 +4755,25 @@ mod browser_api_tests {
                 .1
                 .starts_with("int main(void) {\n#include <stdio.h>")
         );
+    }
+
+    #[test]
+    fn legacy_implicit_main_detection_ignores_comments_and_literals() {
+        let source = r#"#include <stdio.h>
+            // main() is introduced later in the course.
+            printf("main() is where programs start\n");
+        "#;
+        assert!(!cboxes_has_explicit_main(source));
+        let result = run_source("program.c", cboxes_wrap_implicit_main(source)).unwrap();
+        assert_eq!(result.stdout, "main() is where programs start\n");
+
+        assert!(!cboxes_has_explicit_main("/* int main(void) {} */\n"));
+        assert!(!cboxes_has_explicit_main(
+            "char text[] = \"main (void)\";\n"
+        ));
+        assert!(cboxes_has_explicit_main(
+            "int ma\\\nin /* comment */ (void) { return 0; }\n"
+        ));
     }
 
     #[test]

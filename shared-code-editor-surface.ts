@@ -3,6 +3,9 @@ export type CodeDecoration = {
   startCol: number;
   endCol: number;
   className: string;
+  priority?: number;
+  diagnosticAnnotationId?: string;
+  diagnosticGroupId?: string;
 };
 
 export interface CodeSurfaceElements {
@@ -54,20 +57,31 @@ function normalizedDecorationsForLine(
         endCol,
       };
     })
-    .sort((left, right) => left.startCol - right.startCol || left.endCol - right.endCol);
-
+    .filter((decoration) => decoration.endCol > decoration.startCol);
+  const boundaries = Array.from(
+    new Set(normalized.flatMap((decoration) => [decoration.startCol, decoration.endCol])),
+  ).sort((left, right) => left - right);
   const out: CodeDecoration[] = [];
-  for (const decoration of normalized) {
-    const prev = out[out.length - 1];
-    if (!prev || decoration.startCol >= prev.endCol) {
-      out.push(decoration);
-      continue;
+  for (let index = 0; index + 1 < boundaries.length; index += 1) {
+    const startCol = boundaries[index];
+    const endCol = boundaries[index + 1];
+    const winner = normalized
+      .filter(
+        (decoration) => decoration.startCol <= startCol && decoration.endCol >= endCol,
+      )
+      .sort((left, right) => (right.priority || 0) - (left.priority || 0))[0];
+    if (!winner) continue;
+    const previous = out[out.length - 1];
+    if (
+      previous
+      && previous.endCol === startCol
+      && previous.className === winner.className
+      && previous.priority === winner.priority
+    ) {
+      previous.endCol = endCol;
+    } else {
+      out.push({ ...winner, startCol, endCol });
     }
-    if (decoration.endCol <= prev.endCol) continue;
-    out.push({
-      ...decoration,
-      startCol: prev.endCol,
-    });
   }
   return out;
 }
@@ -94,6 +108,12 @@ function appendLineContent(
     }
     const marked = document.createElement("span");
     marked.className = decoration.className;
+    if (decoration.diagnosticAnnotationId) {
+      marked.dataset.diagnosticAnnotation = decoration.diagnosticAnnotationId;
+    }
+    if (decoration.diagnosticGroupId) {
+      marked.dataset.diagnosticGroup = decoration.diagnosticGroupId;
+    }
     marked.textContent = textValueForLine(line.slice(start, end));
     lineEl.appendChild(marked);
     cursor = Math.max(cursor, end);

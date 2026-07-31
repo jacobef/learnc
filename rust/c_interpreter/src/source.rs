@@ -181,8 +181,9 @@ impl SourceManager {
 
     pub fn span_display_range(&self, span: Span) -> (PathBuf, usize, usize, usize, usize) {
         let generated = self.file(span.file);
-        let (generated_start_line, start_column) = generated.line_col(span.start);
-        let (generated_end_line, end_column) = generated.line_col(span.end.max(span.start));
+        let (generated_start_line, generated_start_column) = generated.line_col(span.start);
+        let (generated_end_line, generated_end_column) =
+            generated.line_col(span.end.max(span.start));
         let start_origin = generated.line_origin(generated_start_line);
         let end_origin = generated.line_origin(generated_end_line);
         let display_file = start_origin
@@ -195,12 +196,85 @@ impl SourceManager {
             .filter(|origin| self.file(origin.file).path() == display_file.path())
             .map(|origin| origin.line_number)
             .unwrap_or(generated_end_line);
+        let start_column = start_origin
+            .map(|origin| {
+                remap_generated_column(
+                    generated.line_text(generated_start_line),
+                    self.file(origin.file).line_text(origin.line_number),
+                    generated_start_column.saturating_sub(1),
+                    RangeEdge::Start,
+                )
+            })
+            .unwrap_or_else(|| generated_start_column.saturating_sub(1));
+        let end_column = end_origin
+            .filter(|origin| self.file(origin.file).path() == display_file.path())
+            .map(|origin| {
+                remap_generated_column(
+                    generated.line_text(generated_end_line),
+                    self.file(origin.file).line_text(origin.line_number),
+                    generated_end_column.saturating_sub(1),
+                    RangeEdge::End,
+                )
+            })
+            .unwrap_or_else(|| generated_end_column.saturating_sub(1));
         (
             display_file.path().clone(),
             start_line.saturating_sub(1),
-            start_column.saturating_sub(1),
+            start_column,
             end_line.saturating_sub(1),
-            end_column.saturating_sub(1),
+            end_column,
         )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RangeEdge {
+    Start,
+    End,
+}
+
+fn remap_generated_column(
+    generated: &str,
+    original: &str,
+    column: usize,
+    edge: RangeEdge,
+) -> usize {
+    if generated == original {
+        return column.min(original.len());
+    }
+
+    let generated_bytes = generated.as_bytes();
+    let original_bytes = original.as_bytes();
+    let common_prefix = generated_bytes
+        .iter()
+        .zip(original_bytes)
+        .take_while(|(generated, original)| generated == original)
+        .count();
+    let max_suffix = generated_bytes
+        .len()
+        .saturating_sub(common_prefix)
+        .min(original_bytes.len().saturating_sub(common_prefix));
+    let common_suffix = generated_bytes
+        .iter()
+        .rev()
+        .zip(original_bytes.iter().rev())
+        .take(max_suffix)
+        .take_while(|(generated, original)| generated == original)
+        .count();
+
+    if column <= common_prefix {
+        return column.min(original.len());
+    }
+    let generated_suffix_start = generated.len().saturating_sub(common_suffix);
+    if column >= generated_suffix_start {
+        return original
+            .len()
+            .saturating_sub(generated.len().saturating_sub(column))
+            .min(original.len());
+    }
+
+    match edge {
+        RangeEdge::Start => common_prefix,
+        RangeEdge::End => original.len().saturating_sub(common_suffix),
     }
 }

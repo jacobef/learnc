@@ -21,7 +21,7 @@
 #define pow(x, y) _Generic(((x) + (y)), float: powf, long double: powl, float _Complex: cpowf, double _Complex: cpow, long double _Complex: cpowl, default: pow)(x, y)
 #define sqrt(x) _Generic((x), float: sqrtf, long double: sqrtl, float _Complex: csqrtf, double _Complex: csqrt, long double _Complex: csqrtl, default: sqrt)(x)
 
-#define fabs(x) _Generic((x), float: fabsf, long double: fabsl, default: fabs)(x)
+#define fabs(x) _Generic((x), float: fabsf, long double: fabsl, float _Complex: cabsf, double _Complex: cabs, long double _Complex: cabsl, default: fabs)(x)
 #define atan2(x, y) _Generic(((x) + (y)), float: atan2f, long double: atan2l, default: atan2)(x, y)
 #define cbrt(x) _Generic((x), float: cbrtf, long double: cbrtl, default: cbrt)(x)
 #define ceil(x) _Generic((x), float: ceilf, long double: ceill, default: ceil)(x)
@@ -61,7 +61,6 @@
 #define tgamma(x) _Generic((x), float: tgammaf, long double: tgammal, default: tgamma)(x)
 #define trunc(x) _Generic((x), float: truncf, long double: truncl, default: trunc)(x)
 
-#define cabs(x) _Generic((x), float: cabsf, long double: cabsl, float _Complex: cabsf, double _Complex: cabs, long double _Complex: cabsl, default: cabs)(x)
 #define carg(x) _Generic((x), float: cargf, long double: cargl, float _Complex: cargf, double _Complex: carg, long double _Complex: cargl, default: carg)(x)
 #define cimag(x) _Generic((x), float: cimagf, long double: cimagl, float _Complex: cimagf, double _Complex: cimag, long double _Complex: cimagl, default: cimag)(x)
 #define conj(x) _Generic((x), float: conjf, long double: conjl, float _Complex: conjf, double _Complex: conj, long double _Complex: conjl, default: conj)(x)

@@ -13,8 +13,12 @@ import {
   bindCodeEditorTabKey,
   ensureCodeSurfaceElements,
   updateCodeSurface,
-  type CodeDecoration,
 } from "./shared-code-editor-surface.js";
+import {
+  diagnosticDecorations,
+  diagnosticMessageText,
+  renderDiagnosticMessage,
+} from "./shared-diagnostics.js";
 import {
   evaluateCExpressionFiles,
   runCFiles,
@@ -497,18 +501,6 @@ function updateInstructions() {
   }
 }
 
-function diagnosticDecoration(diagnostic: ProgramDiagnostic | null): CodeDecoration[] {
-  if (!diagnostic || (diagnostic.file && diagnostic.file !== sandbox.activePath)) return [];
-  return [
-    {
-      line: diagnostic.range.startLine,
-      startCol: diagnostic.range.startCol,
-      endCol: diagnostic.range.endCol,
-      className: "code-highlight-error",
-    },
-  ];
-}
-
 function renderDiagnostic(diagnostic: ProgramDiagnostic | null) {
   if (!diagnostic) {
     diagnosticEl.classList.add("hidden");
@@ -526,7 +518,7 @@ function renderDiagnostic(diagnostic: ProgramDiagnostic | null) {
   heading.textContent = `${diagnostic.kind === "ub" ? "Undefined behavior" : "Error"} at ${location}`;
   const message = document.createElement("div");
   message.className = "code-diagnostic-message";
-  message.textContent = diagnostic.message;
+  renderDiagnosticMessage(message, diagnostic);
   diagnosticEl.append(heading, message);
   if (!diagnostic.file || diagnostic.file === sandbox.activePath) {
     editor.setAttribute("aria-invalid", "true");
@@ -682,7 +674,7 @@ function renderExpression(outcome: {
       evaluated.kind === "ub"
         ? "Invalid expression: undefined behavior"
         : "Invalid expression",
-      evaluated.diagnostic.message,
+      diagnosticMessageText(evaluated.diagnostic),
     );
     return;
   }
@@ -995,7 +987,7 @@ function updateLineGutters(linesOverride?: string[]) {
     lines,
     lineClasses,
     lineNumberClasses,
-    decorations: diagnosticDecoration(diagnostic),
+    decorations: diagnosticDecorations(diagnostic, lines, sandbox.activePath),
   });
   renderDiagnostic(diagnostic);
   const style = window.getComputedStyle(editor);

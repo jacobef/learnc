@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::source::Span;
+use crate::token::StringLiteralValue;
 use crate::types::{CType, EnumType, RecordType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +12,12 @@ pub enum StorageClass {
     Extern,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Linkage {
+    Internal,
+    External,
+}
+
 #[derive(Debug, Clone)]
 pub struct TranslationUnit {
     pub externals: Vec<ExternalDeclaration>,
@@ -18,6 +25,7 @@ pub struct TranslationUnit {
     pub function_declarations: Vec<FunctionDecl>,
     pub globals: Vec<Declaration>,
     pub global_definitions: Vec<Declaration>,
+    pub inline_function_definitions: Vec<FunctionDef>,
     pub records: HashMap<usize, RecordType>,
     pub enums: HashMap<usize, EnumType>,
     pub enum_constants: HashMap<String, i128>,
@@ -34,10 +42,14 @@ pub enum ExternalDeclaration {
 pub struct FunctionDef {
     pub name: String,
     pub return_type: CType,
+    pub return_type_span: Span,
     pub params: Vec<Parameter>,
     pub is_variadic: bool,
     pub storage_class: Option<StorageClass>,
+    pub linkage: Linkage,
     pub is_inline: bool,
+    pub is_noreturn: bool,
+    pub has_prototype: bool,
     pub body: Block,
     pub span: Span,
 }
@@ -49,7 +61,10 @@ pub struct FunctionDecl {
     pub params: Vec<Parameter>,
     pub is_variadic: bool,
     pub storage_class: Option<StorageClass>,
+    pub linkage: Linkage,
     pub is_inline: bool,
+    pub is_noreturn: bool,
+    pub has_prototype: bool,
     pub span: Span,
 }
 
@@ -83,7 +98,10 @@ pub struct Declaration {
     pub ty: CType,
     pub vla_bounds: Vec<Option<Expr>>,
     pub storage_class: Option<StorageClass>,
+    pub linkage: Option<Linkage>,
+    pub alignment: Option<usize>,
     pub init: Option<Initializer>,
+    pub declarator_span: Span,
     pub span: Span,
 }
 
@@ -208,8 +226,12 @@ pub enum Expr {
     Number(String, Span),
     CharLiteral(i64, Span),
     WideCharLiteral(i64, Span),
-    StringLiteral(String, Span),
-    WideStringLiteral(String, Span),
+    Utf16CharLiteral(u16, Span),
+    Utf32CharLiteral(u32, Span),
+    StringLiteral(StringLiteralValue, Span),
+    WideStringLiteral(StringLiteralValue, Span),
+    Utf16StringLiteral(StringLiteralValue, Span),
+    Utf32StringLiteral(StringLiteralValue, Span),
     Variable(String, Span),
     Unary {
         op: UnaryOp,
@@ -289,6 +311,7 @@ pub enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        declared_callee_type: Option<CType>,
         span: Span,
     },
     Member {
@@ -311,8 +334,12 @@ impl Expr {
             Expr::Number(_, span)
             | Expr::CharLiteral(_, span)
             | Expr::WideCharLiteral(_, span)
+            | Expr::Utf16CharLiteral(_, span)
+            | Expr::Utf32CharLiteral(_, span)
             | Expr::StringLiteral(_, span)
             | Expr::WideStringLiteral(_, span)
+            | Expr::Utf16StringLiteral(_, span)
+            | Expr::Utf32StringLiteral(_, span)
             | Expr::Variable(_, span)
             | Expr::Unary { span, .. }
             | Expr::Postfix { span, .. }
@@ -330,6 +357,37 @@ impl Expr {
             | Expr::Conditional { span, .. }
             | Expr::Call { span, .. }
             | Expr::Member { span, .. } => *span,
+        }
+    }
+
+    pub fn set_span(&mut self, new_span: Span) {
+        match self {
+            Expr::Number(_, span)
+            | Expr::CharLiteral(_, span)
+            | Expr::WideCharLiteral(_, span)
+            | Expr::Utf16CharLiteral(_, span)
+            | Expr::Utf32CharLiteral(_, span)
+            | Expr::StringLiteral(_, span)
+            | Expr::WideStringLiteral(_, span)
+            | Expr::Utf16StringLiteral(_, span)
+            | Expr::Utf32StringLiteral(_, span)
+            | Expr::Variable(_, span)
+            | Expr::Unary { span, .. }
+            | Expr::Postfix { span, .. }
+            | Expr::Binary { span, .. }
+            | Expr::Subscript { span, .. }
+            | Expr::Assign { span, .. }
+            | Expr::CompoundAssign { span, .. }
+            | Expr::SizeofType { span, .. }
+            | Expr::SizeofExpr { span, .. }
+            | Expr::OffsetOf { span, .. }
+            | Expr::Cast { span, .. }
+            | Expr::CompoundLiteral { span, .. }
+            | Expr::GenericSelection { span, .. }
+            | Expr::VaArg { span, .. }
+            | Expr::Conditional { span, .. }
+            | Expr::Call { span, .. }
+            | Expr::Member { span, .. } => *span = new_span,
         }
     }
 }

@@ -23,8 +23,11 @@ import {
   bindCodeEditorTabKey,
   ensureCodeSurfaceElements,
   updateCodeSurface,
-  type CodeDecoration,
 } from "./shared-code-editor-surface.js";
+import {
+  diagnosticDecorations,
+  renderDiagnosticMessage,
+} from "./shared-diagnostics.js";
 import { boxValueMatchesSpec, runCProgram } from "./shared-c-interpreter.js";
 import {
   clearLevelProgress,
@@ -359,20 +362,6 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     return result.kind === "ok" ? null : result.diagnostic;
   }
 
-  function diagnosticDecoration(
-    diagnostic: ProgramDiagnostic | null,
-  ): CodeDecoration[] {
-    if (!diagnostic) return [];
-    return [
-      {
-        line: diagnostic.range.startLine,
-        startCol: diagnostic.range.startCol,
-        endCol: diagnostic.range.endCol,
-        className: "code-highlight-error",
-      },
-    ];
-  }
-
   function renderDiagnostic(diagnostic: ProgramDiagnostic | null) {
     if (!diagnosticEl) return;
     if (!diagnostic) {
@@ -392,7 +381,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
     }`;
     const message = document.createElement("div");
     message.className = "code-diagnostic-message";
-    message.textContent = diagnostic.message;
+    renderDiagnosticMessage(message, diagnostic);
     diagnosticEl.append(heading, message);
     if (diagnostic.tip) {
       const tip = document.createElement("div");
@@ -415,7 +404,7 @@ function createCodeEditorTemplate(config: CodeEditorConfig): void {
       highlightEl,
       measureEl,
       lines,
-      decorations: diagnosticDecoration(diagnostic),
+      decorations: diagnosticDecorations(diagnostic, lines),
       lineNumberClasses,
     });
     renderDiagnostic(diagnostic);

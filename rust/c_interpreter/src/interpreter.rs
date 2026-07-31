@@ -8,15 +8,16 @@ use std::panic::{AssertUnwindSafe, catch_unwind, panic_any, resume_unwind};
 use std::rc::Rc;
 
 use crate::ast::{
-    BinaryOp, Block, BlockItem, Declaration, Designator, Expr, ForInit, FunctionDecl, FunctionDef,
-    GenericAssociation, Initializer, Parameter, PostfixOp, Statement, StorageClass, SwitchLabel,
-    TranslationUnit, UnaryOp,
+    BinaryOp, Block, BlockItem, Declaration, Designator, Expr, ExternalDeclaration, ForInit,
+    FunctionDecl, FunctionDef, GenericAssociation, Initializer, Linkage, Parameter, PostfixOp,
+    Statement, StorageClass, SwitchLabel, TranslationUnit, UnaryOp,
 };
 use crate::diag::Diagnostic;
 use crate::integer::parse_integer_literal;
 use crate::source::{FileId, SourceManager, Span};
-use crate::types::{CType, HOST_LONG_DOUBLE_ALIGN, RecordMember, RecordType};
-use crate::{RunOptions, UbDetectionMode};
+use crate::token::StringLiteralValue;
+use crate::types::{CType, HOST_LONG_DOUBLE_ALIGN, RecordMember, RecordType, TypeQualifiers};
+use crate::{RunOptions, UbDetectionMode, composite_type};
 
 const INT_MIN: i128 = i32::MIN as i128;
 const INT_MAX: i128 = i32::MAX as i128;
@@ -32,6 +33,9 @@ const HOST_BUFSIZ: usize = 1024;
 const MAX_DYNAMIC_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
 const MAX_NON_DYNAMIC_OBJECT_BYTES: usize = 64 * 1024 * 1024;
 const COMPACT_OBJECT_REPRESENTATION_THRESHOLD: usize = 1024 * 1024;
+// Debug builds need a lower ceiling because the unoptimized evaluator uses substantially more
+// native stack per interpreted call. Release/Wasm builds can safely support deeper beginner code.
+const MAX_FUNCTION_CALL_DEPTH: usize = if cfg!(debug_assertions) { 12 } else { 64 };
 
 // The runtime currently backs all real floating types with f64, so host long double calls
 // are marshalled through f64 even when the nominal C type is long double.
@@ -257,7 +261,6 @@ unsafe extern "C" {
     fn clock() -> c_ulong;
     fn difftime(time1: c_long, time0: c_long) -> c_double;
     fn mktime(timeptr: *mut HostTm) -> c_long;
-    fn time(timer: *mut c_long) -> c_long;
     fn asctime(timeptr: *const HostTm) -> *mut c_char;
     fn ctime(timer: *const c_long) -> *mut c_char;
     fn gmtime(timer: *const c_long) -> *mut HostTm;
@@ -544,6 +547,9 @@ pub struct ProgramStateBox {
     pub array_root: Option<String>,
     pub array_shape: Vec<usize>,
     pub array_indices: Vec<usize>,
+    pub aggregate_root: Option<String>,
+    pub aggregate_path: Vec<String>,
+    pub aggregate_kind: Option<String>,
     pub aliases: Vec<String>,
     pub type_info: ProgramTypeInfo,
 }
@@ -551,11 +557,28 @@ pub struct ProgramStateBox {
 #[derive(Debug, Clone)]
 pub struct ProgramTypeInfo {
     pub kind: String,
+    pub help: Option<String>,
+    pub help_type_names: Vec<String>,
+    pub help_tree: Option<ProgramTypeHelpNode>,
     pub pointer_depth: usize,
     pub array_shape: Vec<usize>,
     pub pointee_array_shape: Vec<usize>,
     pub size: Option<usize>,
     pub align: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProgramTypeHelpNode {
+    pub kind: String,
+    pub label: String,
+    pub type_name: Option<String>,
+    pub children: Vec<ProgramTypeHelpChild>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProgramTypeHelpChild {
+    pub relation: String,
+    pub node: Box<ProgramTypeHelpNode>,
 }
 
 #[derive(Debug, Clone)]
@@ -615,6 +638,7 @@ pub struct Interpreter<'a> {
     function_may_setjmp: HashMap<String, bool>,
     declared_globals: HashMap<String, Declaration>,
     internal_declared_globals: FileScopedMap<Declaration>,
+    function_visible_global_declarations: HashMap<String, HashMap<String, Declaration>>,
     global_bindings: HashMap<String, ObjectId>,
     internal_global_bindings: FileScopedMap<ObjectId>,
     local_static_bindings: HashMap<Span, ObjectId>,
@@ -640,18 +664,24 @@ pub struct Interpreter<'a> {
     signgam_binding: Option<ObjectId>,
     tmpnam_binding: Option<ObjectId>,
     strerror_binding: Option<ObjectId>,
+    time_text_binding: Option<ObjectId>,
     getenv_binding: Option<ObjectId>,
     setlocale_binding: Option<ObjectId>,
     localeconv_bindings: Vec<ObjectId>,
     locale_generation: u64,
     signal_handlers: HashMap<i32, SignalHandlerState>,
-    time_text_bindings: Vec<ObjectId>,
-    time_tm_bindings: Vec<ObjectId>,
     fe_dfl_env_binding: Option<ObjectId>,
     wctrans_descriptors: HashMap<i128, u64>,
     wctype_descriptors: HashMap<i128, u64>,
     atexit_handlers: Vec<String>,
     running_atexit: bool,
+    quick_exit_handlers: Vec<String>,
+    running_quick_exit: bool,
+    func_name_bindings: HashMap<String, ObjectId>,
+    mbrtoc16_pending: HashMap<PointerValue, u16>,
+    mbrtoc16_null_pending: Option<u16>,
+    c16rtomb_pending: HashMap<PointerValue, u16>,
+    c16rtomb_null_pending: Option<u16>,
     encoded_object_pointers: HashMap<PointerValue, u64>,
     encoded_function_pointers: HashMap<String, u64>,
     decoded_pointers: HashMap<u64, EncodedPointer>,
@@ -685,6 +715,7 @@ struct ObjectId(usize);
 struct Frame {
     id: usize,
     bindings: HashMap<String, ObjectId>,
+    object_decls: HashMap<String, Declaration>,
     function_decls: HashMap<String, FunctionDecl>,
 }
 
@@ -694,6 +725,26 @@ struct CurrentFunctionContext {
     body_span: Span,
     is_variadic: bool,
     last_named_parameter: Option<Parameter>,
+}
+
+#[derive(Clone, Copy)]
+struct ConstraintContext<'a> {
+    return_type: &'a CType,
+    return_type_span: Span,
+    loop_depth: usize,
+    switch_depth: usize,
+}
+
+#[derive(Default)]
+struct JumpScopeValidation {
+    labels: HashMap<String, (HashSet<Span>, Span)>,
+    gotos: Vec<(String, HashSet<Span>, Span)>,
+    switches: Vec<SwitchScopeValidation>,
+}
+
+struct SwitchScopeValidation {
+    source_scope: HashSet<Span>,
+    label_scopes: Vec<(HashSet<Span>, Span)>,
 }
 
 struct CallFrameCleanup<'a> {
@@ -858,6 +909,9 @@ impl VirtualFileSystem {
             return Err(libc::EISDIR);
         }
         let existing = self.paths.get(path).copied();
+        if mode.exclusive && existing.is_some() {
+            return Err(libc::EEXIST);
+        }
         let file_id = match mode.opening {
             FopenOpening::Read => existing.ok_or(libc::ENOENT)?,
             FopenOpening::Write => {
@@ -1036,6 +1090,7 @@ struct ParsedFopenMode {
     kind: HostStreamModeKind,
     binary: bool,
     opening: FopenOpening,
+    exclusive: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1354,6 +1409,7 @@ struct ActiveBlockScope {
     frame_id: usize,
     block_span: Span,
     saved_bindings: Option<HashMap<String, ObjectId>>,
+    saved_object_decls: Option<HashMap<String, Declaration>>,
     saved_function_decls: Option<HashMap<String, FunctionDecl>>,
     existing_objects: Option<Vec<ObjectId>>,
 }
@@ -1369,6 +1425,7 @@ struct SetjmpEnvironment {
     frame_id: usize,
     site: SetjmpSite,
     bindings: HashMap<String, ObjectId>,
+    object_decls: HashMap<String, Declaration>,
     function_decls: HashMap<String, FunctionDecl>,
     object_snapshots: HashMap<ObjectId, ObjectState>,
     object_versions: HashMap<ObjectId, u64>,
@@ -1386,6 +1443,7 @@ struct PendingLongjmpReturn {
 struct TerminationSignal {
     status: c_int,
     run_atexit: bool,
+    run_quick_exit: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1622,6 +1680,53 @@ enum ComplexFunctionKind {
 }
 
 impl<'a> Interpreter<'a> {
+    fn collect_function_visible_global_declarations(
+        program: &TranslationUnit,
+    ) -> HashMap<String, HashMap<String, Declaration>> {
+        let mut external = HashMap::<String, Declaration>::default();
+        let mut internal = FileScopedMap::<Declaration>::default();
+        let mut visible_by_function = HashMap::default();
+
+        let merge_declaration = |declarations: &mut HashMap<String, Declaration>,
+                                 declaration: &Declaration| {
+            if let Some(existing) = declarations.get_mut(&declaration.name) {
+                existing.ty = composite_type(
+                    &existing.ty,
+                    &declaration.ty,
+                    &program.records,
+                    &program.enums,
+                )
+                .expect("translation-unit normalization already checked compatible declarations");
+            } else {
+                declarations.insert(declaration.name.clone(), declaration.clone());
+            }
+        };
+
+        for external_declaration in &program.externals {
+            match external_declaration {
+                ExternalDeclaration::ObjectDeclaration(declaration) => {
+                    if declaration.linkage == Some(Linkage::Internal) {
+                        merge_declaration(
+                            internal.entry(declaration.span.file).or_default(),
+                            declaration,
+                        );
+                    } else {
+                        merge_declaration(&mut external, declaration);
+                    }
+                }
+                ExternalDeclaration::Function(function) => {
+                    let mut visible = external.clone();
+                    if let Some(file_declarations) = internal.get(&function.span.file) {
+                        visible.extend(file_declarations.clone());
+                    }
+                    visible_by_function.insert(function_symbol(function), visible);
+                }
+                ExternalDeclaration::FunctionDeclaration(_) => {}
+            }
+        }
+        visible_by_function
+    }
+
     fn null_pointer() -> PointerValue {
         PointerValue {
             object: None,
@@ -2018,6 +2123,10 @@ impl<'a> Interpreter<'a> {
                 | "mbrtowc"
                 | "mbtowc"
                 | "wcrtomb"
+                | "mbrtoc16"
+                | "c16rtomb"
+                | "mbrtoc32"
+                | "c32rtomb"
                 | "wctomb"
                 | "mbstowcs"
                 | "mbsrtowcs"
@@ -2091,12 +2200,15 @@ impl<'a> Interpreter<'a> {
                 | "strtoimax"
                 | "strtoumax"
                 | "malloc"
+                | "aligned_alloc"
                 | "calloc"
                 | "realloc"
                 | "free"
                 | "abort"
                 | "atexit"
+                | "at_quick_exit"
                 | "exit"
+                | "quick_exit"
                 | "_Exit"
                 | "bsearch"
                 | "qsort"
@@ -2118,6 +2230,7 @@ impl<'a> Interpreter<'a> {
                 | "gmtime"
                 | "localtime"
                 | "strftime"
+                | "timespec_get"
                 | "feclearexcept"
                 | "fegetexceptflag"
                 | "feraiseexcept"
@@ -2172,6 +2285,8 @@ impl<'a> Interpreter<'a> {
         let mut function_may_setjmp = HashMap::default();
         let mut declared_globals = HashMap::default();
         let mut internal_declared_globals: FileScopedMap<Declaration> = HashMap::default();
+        let function_visible_global_declarations =
+            Self::collect_function_visible_global_declarations(&program);
         for function in &program.function_declarations {
             if function.storage_class == Some(StorageClass::Static) {
                 internal_declared_functions
@@ -2209,6 +2324,32 @@ impl<'a> Interpreter<'a> {
                 declared_globals.insert(global.name.clone(), global.clone());
             }
         }
+        let mut next_encoded_pointer = run_options.synthetic_address_base.max(1);
+        let mut encoded_function_pointers = HashMap::default();
+        let mut decoded_pointers = HashMap::default();
+        let mut addressable_functions = function_symbols.keys().cloned().collect::<Vec<_>>();
+        addressable_functions.extend(
+            declared_functions
+                .keys()
+                .filter(|name| Self::is_host_library_function(name))
+                .cloned(),
+        );
+        for declarations in internal_declared_functions.values() {
+            addressable_functions.extend(
+                declarations
+                    .keys()
+                    .filter(|name| Self::is_host_library_function(name))
+                    .cloned(),
+            );
+        }
+        addressable_functions.sort_unstable();
+        addressable_functions.dedup();
+        for name in addressable_functions {
+            let address = next_encoded_pointer;
+            next_encoded_pointer = next_encoded_pointer.saturating_add(0x1000);
+            encoded_function_pointers.insert(name.clone(), address);
+            decoded_pointers.insert(address, EncodedPointer::Function(name));
+        }
         Self {
             sources,
             program,
@@ -2221,6 +2362,7 @@ impl<'a> Interpreter<'a> {
             function_may_setjmp,
             declared_globals,
             internal_declared_globals,
+            function_visible_global_declarations,
             global_bindings: HashMap::default(),
             internal_global_bindings: HashMap::default(),
             local_static_bindings: HashMap::default(),
@@ -2234,7 +2376,7 @@ impl<'a> Interpreter<'a> {
             restrict_trackers: Vec::new(),
             formatted_io_accesses: None,
             pending_stream_buffer_lifetime_ub: None,
-            next_encoded_pointer: run_options.synthetic_address_base.max(1),
+            next_encoded_pointer,
             object_type_registry: HashMap::default(),
             object_base_addresses: HashMap::default(),
             host_allocations: HashMap::default(),
@@ -2246,21 +2388,27 @@ impl<'a> Interpreter<'a> {
             signgam_binding: None,
             tmpnam_binding: None,
             strerror_binding: None,
+            time_text_binding: None,
             getenv_binding: None,
             setlocale_binding: None,
             localeconv_bindings: Vec::new(),
             locale_generation: 0,
             signal_handlers: HashMap::default(),
-            time_text_bindings: Vec::new(),
-            time_tm_bindings: Vec::new(),
             fe_dfl_env_binding: None,
             wctrans_descriptors: HashMap::default(),
             wctype_descriptors: HashMap::default(),
             atexit_handlers: Vec::new(),
             running_atexit: false,
+            quick_exit_handlers: Vec::new(),
+            running_quick_exit: false,
+            func_name_bindings: HashMap::default(),
+            mbrtoc16_pending: HashMap::default(),
+            mbrtoc16_null_pending: None,
+            c16rtomb_pending: HashMap::default(),
+            c16rtomb_null_pending: None,
             encoded_object_pointers: HashMap::default(),
-            encoded_function_pointers: HashMap::default(),
-            decoded_pointers: HashMap::default(),
+            encoded_function_pointers,
+            decoded_pointers,
             current_variadic_args: Vec::new(),
             va_lists: HashMap::default(),
             next_va_list_handle: 1,
@@ -2290,13 +2438,28 @@ impl<'a> Interpreter<'a> {
             .lookup_function("main", FileId(0))
             .cloned()
             .ok_or_else(|| {
+                let representative_span = self
+                    .program
+                    .functions
+                    .first()
+                    .map(|function| function.span)
+                    .or_else(|| {
+                        self.program
+                            .function_declarations
+                            .first()
+                            .map(|function| function.span)
+                    })
+                    .or_else(|| self.program.globals.first().map(|global| global.span));
+                let entry_file = representative_span
+                    .and_then(|span| {
+                        let (path, ..) = self.sources.span_display_range(span);
+                        self.sources.find_file(&path)
+                    })
+                    .unwrap_or(FileId(0));
+                let end = self.sources.file(entry_file).text().trim_end().len();
                 Diagnostic::error(
-                    "translation unit does not define main",
-                    self.program
-                        .functions
-                        .first()
-                        .map(|f| f.span)
-                        .unwrap_or(crate::source::Span::new(crate::source::FileId(0), 0, 0)),
+                    "program does not define main",
+                    Span::new(entry_file, end, end),
                 )
             })?;
         let mut objects = vec![HashMap::default()];
@@ -2304,6 +2467,7 @@ impl<'a> Interpreter<'a> {
         self.initialize_host_stdio(&mut objects)?;
         self.initialize_host_math(&mut objects)?;
         self.initialize_host_errno(&mut objects)?;
+        self.validate_program_constraints(&objects)?;
         let main_args = self.build_main_arguments(&main, &mut objects)?;
         let main_symbol = function_symbol(main.as_ref());
         let entry = catch_unwind(AssertUnwindSafe(|| {
@@ -2360,6 +2524,23 @@ impl<'a> Interpreter<'a> {
                                     blocked = Some(self.cboxes_blocked_result(function_name, span));
                                 }
                             }
+                            Err(payload) => {
+                                if let Some(signal) =
+                                    payload.downcast_ref::<TerminationSignal>().copied()
+                                {
+                                    exit_status = signal.status;
+                                } else {
+                                    resume_unwind(payload);
+                                }
+                            }
+                        }
+                    } else if signal.run_quick_exit {
+                        let handlers = catch_unwind(AssertUnwindSafe(|| {
+                            self.run_quick_exit_handlers(&mut objects, main.span)
+                        }));
+                        match handlers {
+                            Ok(Ok(())) => {}
+                            Ok(Err(diag)) => return Err(diag),
                             Err(payload) => {
                                 if let Some(signal) =
                                     payload.downcast_ref::<TerminationSignal>().copied()
@@ -2533,6 +2714,1487 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    fn validate_program_constraints(&self, objects: &ObjectFrames) -> Result<(), Diagnostic> {
+        for function in self
+            .program
+            .functions
+            .iter()
+            .chain(self.program.inline_function_definitions.iter())
+        {
+            self.validate_jump_scopes(function)?;
+            let mut frame = Frame {
+                id: usize::MAX,
+                bindings: HashMap::default(),
+                object_decls: HashMap::default(),
+                function_decls: HashMap::default(),
+            };
+            if let Some(visible_globals) = self
+                .function_visible_global_declarations
+                .get(&function_symbol(function))
+            {
+                frame.object_decls.extend(visible_globals.clone());
+            }
+            frame.object_decls.insert(
+                "__func__".to_owned(),
+                Declaration {
+                    name: "__func__".to_owned(),
+                    ty: CType::array_of(
+                        CType::qualified(
+                            CType::Char,
+                            crate::types::TypeQualifiers {
+                                is_const: true,
+                                ..crate::types::TypeQualifiers::default()
+                            },
+                        ),
+                        function.name.len() + 1,
+                    ),
+                    vla_bounds: Vec::new(),
+                    storage_class: Some(StorageClass::Static),
+                    linkage: None,
+                    alignment: None,
+                    init: None,
+                    declarator_span: function.span,
+                    span: function.span,
+                },
+            );
+            for param in &function.params {
+                if param.ty == CType::Void {
+                    continue;
+                }
+                if let Some(name) = &param.name {
+                    let parameter_ty =
+                        Self::resolve_vla_type_for_constraints(&param.ty, &param.vla_bounds).0;
+                    frame.object_decls.insert(
+                        name.clone(),
+                        Declaration {
+                            name: name.clone(),
+                            ty: parameter_ty,
+                            vla_bounds: param.vla_bounds.clone(),
+                            storage_class: param.storage_class,
+                            linkage: None,
+                            alignment: None,
+                            init: None,
+                            declarator_span: param.span,
+                            span: param.span,
+                        },
+                    );
+                }
+            }
+            for param in &function.params {
+                for bound in param.vla_bounds.iter().flatten() {
+                    self.validate_expr_constraints(bound, &frame, objects)?;
+                    let bound_ty = self.value_expr_type(bound, &frame, objects)?;
+                    if !bound_ty.is_integer() {
+                        return Err(Diagnostic::error(
+                            "array bound must have integer type",
+                            bound.span(),
+                        ));
+                    }
+                }
+                if let Some(bound) = &param.static_array_bound {
+                    self.validate_expr_constraints(bound, &frame, objects)?;
+                }
+            }
+            let mut context = ConstraintContext {
+                return_type: &function.return_type,
+                return_type_span: function.return_type_span,
+                loop_depth: 0,
+                switch_depth: 0,
+            };
+            self.validate_block_constraints(&function.body, &mut frame, objects, &mut context)?;
+        }
+        Ok(())
+    }
+
+    fn validate_jump_scopes(&self, function: &FunctionDef) -> Result<(), Diagnostic> {
+        let mut validation = JumpScopeValidation::default();
+        Self::collect_jump_scopes_in_block(
+            &function.body,
+            &HashSet::default(),
+            &mut Vec::new(),
+            &mut validation,
+        );
+        for (label, source_scope, _) in &validation.gotos {
+            let Some((target_scope, _)) = validation.labels.get(label) else {
+                continue;
+            };
+            if let Some(declaration_span) = target_scope.difference(source_scope).next() {
+                return Err(Diagnostic::error(
+                    "goto enters the scope of an object with variably modified type",
+                    *declaration_span,
+                )
+                .with_note("the jump originates outside this variably modified object's scope"));
+            }
+        }
+        for switch in &validation.switches {
+            for (target_scope, _) in &switch.label_scopes {
+                if let Some(declaration_span) = target_scope.difference(&switch.source_scope).next()
+                {
+                    return Err(Diagnostic::error(
+                        "switch dispatch enters the scope of an object with variably modified type",
+                        *declaration_span,
+                    )
+                    .with_note(
+                        "the switch statement is outside this variably modified object's scope",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_jump_scopes_in_block(
+        block: &Block,
+        inherited_scope: &HashSet<Span>,
+        switch_stack: &mut Vec<usize>,
+        validation: &mut JumpScopeValidation,
+    ) {
+        let mut scope = inherited_scope.clone();
+        for item in &block.items {
+            match item {
+                BlockItem::Declaration(decl) => {
+                    if decl.vla_bounds.iter().any(Option::is_some) {
+                        scope.insert(decl.span);
+                    }
+                }
+                BlockItem::FunctionDeclaration(_) => {}
+                BlockItem::Statement(statement) => Self::collect_jump_scopes_in_statement(
+                    statement,
+                    &scope,
+                    switch_stack,
+                    validation,
+                ),
+            }
+        }
+    }
+
+    fn collect_jump_scopes_in_statement(
+        statement: &Statement,
+        scope: &HashSet<Span>,
+        switch_stack: &mut Vec<usize>,
+        validation: &mut JumpScopeValidation,
+    ) {
+        match statement {
+            Statement::Block(block) => {
+                Self::collect_jump_scopes_in_block(block, scope, switch_stack, validation)
+            }
+            Statement::DoWhile { body, .. } | Statement::While { body, .. } => {
+                Self::collect_jump_scopes_in_statement(body, scope, switch_stack, validation)
+            }
+            Statement::For { init, body, .. } => {
+                let mut for_scope = scope.clone();
+                if let Some(ForInit::Declarations(decls)) = init {
+                    for decl in decls {
+                        if decl.vla_bounds.iter().any(Option::is_some) {
+                            for_scope.insert(decl.span);
+                        }
+                    }
+                }
+                Self::collect_jump_scopes_in_statement(body, &for_scope, switch_stack, validation);
+            }
+            Statement::Goto { label, span } => {
+                validation.gotos.push((label.clone(), scope.clone(), *span));
+            }
+            Statement::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_jump_scopes_in_statement(
+                    then_branch,
+                    scope,
+                    switch_stack,
+                    validation,
+                );
+                if let Some(else_branch) = else_branch {
+                    Self::collect_jump_scopes_in_statement(
+                        else_branch,
+                        scope,
+                        switch_stack,
+                        validation,
+                    );
+                }
+            }
+            Statement::Labeled {
+                statement, span, ..
+            } => {
+                if let Some(switch_index) = switch_stack.last().copied() {
+                    validation.switches[switch_index]
+                        .label_scopes
+                        .push((scope.clone(), *span));
+                }
+                Self::collect_jump_scopes_in_statement(statement, scope, switch_stack, validation);
+            }
+            Statement::Switch { body, .. } => {
+                let switch_index = validation.switches.len();
+                validation.switches.push(SwitchScopeValidation {
+                    source_scope: scope.clone(),
+                    label_scopes: Vec::new(),
+                });
+                switch_stack.push(switch_index);
+                Self::collect_jump_scopes_in_block(body, scope, switch_stack, validation);
+                switch_stack.pop();
+            }
+            Statement::UserLabeled {
+                label,
+                statement,
+                span,
+            } => {
+                validation
+                    .labels
+                    .insert(label.clone(), (scope.clone(), *span));
+                Self::collect_jump_scopes_in_statement(statement, scope, switch_stack, validation);
+            }
+            Statement::Break(..)
+            | Statement::Continue(..)
+            | Statement::Expression(..)
+            | Statement::Return(..) => {}
+        }
+    }
+
+    fn validate_block_constraints(
+        &self,
+        block: &Block,
+        frame: &mut Frame,
+        objects: &ObjectFrames,
+        context: &mut ConstraintContext<'_>,
+    ) -> Result<(), Diagnostic> {
+        let saved_object_decls = frame.object_decls.clone();
+        let saved_function_decls = frame.function_decls.clone();
+        let result = (|| {
+            for item in &block.items {
+                match item {
+                    BlockItem::Declaration(decl) => {
+                        if self.array_element_type_is_incomplete(&decl.ty, &decl.vla_bounds) {
+                            let CType::Array(inner, _) = decl.ty.unqualified() else {
+                                unreachable!();
+                            };
+                            return Err(Diagnostic::error(
+                                format!("array element has incomplete type {inner}"),
+                                decl.span,
+                            ));
+                        }
+                        for bound in decl.vla_bounds.iter().flatten() {
+                            self.validate_expr_constraints(bound, frame, objects)?;
+                            if !self.value_expr_type(bound, frame, objects)?.is_integer() {
+                                return Err(Diagnostic::error(
+                                    "array bound must have integer type",
+                                    bound.span(),
+                                ));
+                            }
+                        }
+                        let mut visible_decl = decl.clone();
+                        visible_decl.ty = Self::resolve_vla_type_for_constraints(
+                            &visible_decl.ty,
+                            &visible_decl.vla_bounds,
+                        )
+                        .0;
+                        if let Some(initializer) = &decl.init {
+                            visible_decl.ty = self.complete_array_initializer_type(
+                                &visible_decl.ty,
+                                initializer,
+                                frame,
+                                objects,
+                                false,
+                            )?;
+                        }
+                        self.validate_declared_object_type(&visible_decl)?;
+                        frame
+                            .object_decls
+                            .insert(decl.name.clone(), visible_decl.clone());
+                        frame.bindings.remove(&decl.name);
+                        frame.function_decls.remove(&decl.name);
+                        if let Some(initializer) = &decl.init {
+                            self.validate_initializer_constraints(
+                                &visible_decl.ty,
+                                initializer,
+                                frame,
+                                objects,
+                            )?;
+                        }
+                    }
+                    BlockItem::FunctionDeclaration(decl) => {
+                        frame.object_decls.remove(&decl.name);
+                        frame.bindings.remove(&decl.name);
+                        frame.function_decls.insert(decl.name.clone(), decl.clone());
+                    }
+                    BlockItem::Statement(statement) => {
+                        self.validate_statement_constraints(statement, frame, objects, context)?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        frame.object_decls = saved_object_decls;
+        frame.function_decls = saved_function_decls;
+        result
+    }
+
+    fn validate_statement_constraints(
+        &self,
+        statement: &Statement,
+        frame: &mut Frame,
+        objects: &ObjectFrames,
+        context: &mut ConstraintContext<'_>,
+    ) -> Result<(), Diagnostic> {
+        match statement {
+            Statement::Block(block) => {
+                self.validate_block_constraints(block, frame, objects, context)
+            }
+            Statement::Break(span) => {
+                if context.loop_depth == 0 && context.switch_depth == 0 {
+                    Err(Diagnostic::error(
+                        "break statement is not within a loop or switch",
+                        *span,
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            Statement::Continue(span) => {
+                if context.loop_depth == 0 {
+                    Err(Diagnostic::error(
+                        "continue statement is not within a loop",
+                        *span,
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            Statement::DoWhile {
+                body, condition, ..
+            }
+            | Statement::While {
+                condition, body, ..
+            } => {
+                self.validate_expr_constraints(condition, frame, objects)?;
+                self.require_scalar_expr(condition, condition.span(), frame, objects)?;
+                context.loop_depth += 1;
+                let result = self.validate_statement_constraints(body, frame, objects, context);
+                context.loop_depth -= 1;
+                result
+            }
+            Statement::Expression(expr, _) => {
+                if let Some(expr) = expr {
+                    self.validate_expr_constraints(expr, frame, objects)?;
+                }
+                Ok(())
+            }
+            Statement::For {
+                init,
+                condition,
+                step,
+                body,
+                ..
+            } => {
+                let saved_object_decls = frame.object_decls.clone();
+                let saved_function_decls = frame.function_decls.clone();
+                let result = (|| {
+                    if let Some(init) = init {
+                        match init {
+                            ForInit::Declarations(decls) => {
+                                for decl in decls {
+                                    if self.array_element_type_is_incomplete(
+                                        &decl.ty,
+                                        &decl.vla_bounds,
+                                    ) {
+                                        let CType::Array(inner, _) = decl.ty.unqualified() else {
+                                            unreachable!();
+                                        };
+                                        return Err(Diagnostic::error(
+                                            format!("array element has incomplete type {inner}"),
+                                            decl.span,
+                                        ));
+                                    }
+                                    for bound in decl.vla_bounds.iter().flatten() {
+                                        self.validate_expr_constraints(bound, frame, objects)?;
+                                    }
+                                    let mut visible_decl = decl.clone();
+                                    visible_decl.ty = Self::resolve_vla_type_for_constraints(
+                                        &visible_decl.ty,
+                                        &visible_decl.vla_bounds,
+                                    )
+                                    .0;
+                                    if let Some(initializer) = &decl.init {
+                                        visible_decl.ty = self.complete_array_initializer_type(
+                                            &visible_decl.ty,
+                                            initializer,
+                                            frame,
+                                            objects,
+                                            false,
+                                        )?;
+                                    }
+                                    self.validate_declared_object_type(&visible_decl)?;
+                                    frame
+                                        .object_decls
+                                        .insert(decl.name.clone(), visible_decl.clone());
+                                    frame.function_decls.remove(&decl.name);
+                                    if let Some(initializer) = &decl.init {
+                                        self.validate_initializer_constraints(
+                                            &visible_decl.ty,
+                                            initializer,
+                                            frame,
+                                            objects,
+                                        )?;
+                                    }
+                                }
+                            }
+                            ForInit::Expression(expr) => {
+                                self.validate_expr_constraints(expr, frame, objects)?;
+                            }
+                        }
+                    }
+                    if let Some(condition) = condition {
+                        self.validate_expr_constraints(condition, frame, objects)?;
+                        self.require_scalar_expr(condition, condition.span(), frame, objects)?;
+                    }
+                    if let Some(step) = step {
+                        self.validate_expr_constraints(step, frame, objects)?;
+                    }
+                    context.loop_depth += 1;
+                    let body_result =
+                        self.validate_statement_constraints(body, frame, objects, context);
+                    context.loop_depth -= 1;
+                    body_result
+                })();
+                frame.object_decls = saved_object_decls;
+                frame.function_decls = saved_function_decls;
+                result
+            }
+            Statement::Goto { .. } => Ok(()),
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.validate_expr_constraints(condition, frame, objects)?;
+                self.require_scalar_expr(condition, condition.span(), frame, objects)?;
+                self.validate_statement_constraints(then_branch, frame, objects, context)?;
+                if let Some(else_branch) = else_branch {
+                    self.validate_statement_constraints(else_branch, frame, objects, context)?;
+                }
+                Ok(())
+            }
+            Statement::Labeled {
+                statement, span, ..
+            } => {
+                if context.switch_depth == 0 {
+                    return Err(Diagnostic::error(
+                        "case/default label is not within a switch statement",
+                        *span,
+                    ));
+                }
+                self.validate_statement_constraints(statement, frame, objects, context)
+            }
+            Statement::Return(expr, span) => match (context.return_type.unqualified(), expr) {
+                (CType::Void, None) => Ok(()),
+                (CType::Void, Some(_)) => Err(Diagnostic::error(
+                    "a void function cannot return a value",
+                    *span,
+                )),
+                (_, None) => Err(Diagnostic::error(
+                    "a non-void function must return a value in a return statement",
+                    *span,
+                )),
+                (_, Some(expr)) => {
+                    self.validate_expr_constraints(expr, frame, objects)?;
+                    self.validate_implicit_conversion(
+                        expr,
+                        context.return_type,
+                        frame,
+                        objects,
+                        expr.span(),
+                    )
+                    .map_err(|diagnostic| {
+                        diagnostic.with_related_span(
+                            "destination",
+                            "the function's return type is declared here",
+                            context.return_type_span,
+                        )
+                    })
+                }
+            },
+            Statement::Switch { expr, body, .. } => {
+                self.validate_expr_constraints(expr, frame, objects)?;
+                if !self.value_expr_type(expr, frame, objects)?.is_integer() {
+                    return Err(Diagnostic::error(
+                        "switch expression must have integer type",
+                        expr.span(),
+                    ));
+                }
+                context.switch_depth += 1;
+                let result = self.validate_block_constraints(body, frame, objects, context);
+                context.switch_depth -= 1;
+                result
+            }
+            Statement::UserLabeled { statement, .. } => {
+                self.validate_statement_constraints(statement, frame, objects, context)
+            }
+        }
+    }
+
+    fn validate_initializer_constraints(
+        &self,
+        target: &CType,
+        initializer: &Initializer,
+        frame: &Frame,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        match initializer {
+            Initializer::Expr(expr) => {
+                self.validate_expr_constraints(expr, frame, objects)?;
+                if let (CType::Array(inner, len), Expr::StringLiteral(text, span)) =
+                    (target.unqualified(), expr)
+                    && inner.is_character()
+                {
+                    self.string_literal_array_initializer(inner, *len, text, *span)?;
+                    return Ok(());
+                }
+                if let (CType::Array(inner, len), Expr::WideStringLiteral(text, span)) =
+                    (target.unqualified(), expr)
+                    && *inner.unqualified() == self.wchar_type()
+                {
+                    self.wide_string_literal_array_initializer(*len, text, *span)?;
+                    return Ok(());
+                }
+                if let CType::Array(inner, len) = target.unqualified() {
+                    let unicode = match expr {
+                        Expr::Utf16StringLiteral(text, span)
+                            if *inner.unqualified() == CType::UnsignedShort =>
+                        {
+                            Some((text, true, *span))
+                        }
+                        Expr::Utf32StringLiteral(text, span)
+                            if *inner.unqualified() == CType::UnsignedInt =>
+                        {
+                            Some((text, false, *span))
+                        }
+                        _ => None,
+                    };
+                    if let Some((text, utf16, span)) = unicode {
+                        self.unicode_string_literal_array_initializer(*len, text, utf16, span)?;
+                        return Ok(());
+                    }
+                }
+                if let CType::Array(inner, _) = target.unqualified() {
+                    let required_form = if inner.is_character() {
+                        "a string literal or a brace-enclosed list"
+                    } else {
+                        "a brace-enclosed list"
+                    };
+                    let literal_kind = match expr {
+                        Expr::StringLiteral(..) => Some(("an ordinary string literal", "char")),
+                        Expr::WideStringLiteral(..) => Some(("a wide string literal", "wchar_t")),
+                        Expr::Utf16StringLiteral(..) => {
+                            Some(("a UTF-16 string literal", "char16_t"))
+                        }
+                        Expr::Utf32StringLiteral(..) => {
+                            Some(("a UTF-32 string literal", "char32_t"))
+                        }
+                        _ => None,
+                    };
+                    if let Some((literal_kind, element_type)) = literal_kind {
+                        return Err(Diagnostic::error(
+                            format!(
+                                "cannot initialize {} with {}; use a brace-enclosed list or change the array element type to {}",
+                                target, literal_kind, element_type
+                            ),
+                            expr.span(),
+                        ));
+                    }
+                    if matches!(
+                        self.expr_type(expr, frame, objects)?.unqualified(),
+                        CType::Array(..)
+                    ) {
+                        return Err(Diagnostic::error(
+                            "an array cannot be initialized by copying another array; use a brace-enclosed list instead",
+                            expr.span(),
+                        ));
+                    }
+                    let source = self.value_expr_type(expr, frame, objects)?;
+                    return Err(Diagnostic::error(
+                        format!(
+                            "cannot convert {} to {}; an array of this type must use {}",
+                            source, target, required_form
+                        ),
+                        expr.span(),
+                    ));
+                }
+                self.validate_implicit_conversion(expr, target, frame, objects, expr.span())
+            }
+            Initializer::List { items, .. } => {
+                if !matches!(
+                    target.unqualified(),
+                    CType::Array(..) | CType::Struct(..) | CType::Union(..)
+                ) {
+                    if items.len() != 1 || !items[0].designators.is_empty() {
+                        let error_span = if items.len() > 1 {
+                            items[1].span
+                        } else {
+                            items[0].span
+                        };
+                        return Err(Diagnostic::error(
+                            "scalar initializer list must contain a single un-designated initializer",
+                            error_span,
+                        ));
+                    }
+                    return self.validate_initializer_constraints(
+                        target,
+                        &items[0].initializer,
+                        frame,
+                        objects,
+                    );
+                }
+                let used = self.validate_initializer_sequence(target, items, frame, objects)?;
+                if used != items.len() {
+                    return Err(Diagnostic::error(
+                        "too many initializer elements",
+                        items[used].span,
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn validate_initializer_items_into_type(
+        &self,
+        target: &CType,
+        items: &[crate::ast::InitializerItem],
+        frame: &Frame,
+        objects: &ObjectFrames,
+    ) -> Result<usize, Diagnostic> {
+        let Some(first) = items.first() else {
+            return Ok(0);
+        };
+        if first.designators.is_empty() {
+            if let Initializer::Expr(expr) = &first.initializer {
+                let expr_ty = self.expr_type(expr, frame, objects)?;
+                if matches!(target.unqualified(), CType::Struct(..) | CType::Union(..))
+                    && self.cross_unit_tagged_type_compatible(
+                        target.unqualified(),
+                        expr_ty.unqualified(),
+                    )
+                {
+                    self.validate_initializer_constraints(
+                        target,
+                        &first.initializer,
+                        frame,
+                        objects,
+                    )?;
+                    return Ok(1);
+                }
+                if let CType::Array(inner, _) = target.unqualified()
+                    && ((matches!(expr, Expr::StringLiteral(..)) && inner.is_character())
+                        || (matches!(expr, Expr::WideStringLiteral(..))
+                            && *inner.unqualified() == self.wchar_type())
+                        || (matches!(expr, Expr::Utf16StringLiteral(..))
+                            && *inner.unqualified() == CType::UnsignedShort)
+                        || (matches!(expr, Expr::Utf32StringLiteral(..))
+                            && *inner.unqualified() == CType::UnsignedInt))
+                {
+                    self.validate_initializer_constraints(
+                        target,
+                        &first.initializer,
+                        frame,
+                        objects,
+                    )?;
+                    return Ok(1);
+                }
+            }
+            if matches!(first.initializer, Initializer::List { .. }) {
+                self.validate_initializer_constraints(target, &first.initializer, frame, objects)?;
+                return Ok(1);
+            }
+        }
+        match target.unqualified() {
+            CType::Array(..) | CType::Struct(..) | CType::Union(..) => {
+                self.validate_initializer_sequence(target, items, frame, objects)
+            }
+            _ => {
+                if !first.designators.is_empty() {
+                    return Err(Diagnostic::error(
+                        "designators require an aggregate or union initializer",
+                        first.span,
+                    ));
+                }
+                self.validate_initializer_constraints(target, &first.initializer, frame, objects)?;
+                Ok(1)
+            }
+        }
+    }
+
+    fn validate_initializer_sequence(
+        &self,
+        target: &CType,
+        items: &[crate::ast::InitializerItem],
+        frame: &Frame,
+        objects: &ObjectFrames,
+    ) -> Result<usize, Diagnostic> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+        match target.unqualified() {
+            CType::Array(inner, len) => {
+                let mut item_index = 0;
+                let mut current = 0;
+                while item_index < items.len() {
+                    let item = &items[item_index];
+                    if !item.designators.is_empty() {
+                        let selectors =
+                            self.initializer_selectors(target, &item.designators, item.span)?;
+                        let Some((InitSelector::Index(index), _)) = selectors.split_first() else {
+                            return Err(Diagnostic::error(
+                                "array initializer designator must begin with [index]",
+                                item.span,
+                            ));
+                        };
+                        if *len != 0 && *index >= *len {
+                            let designator_span = match &item.designators[0] {
+                                Designator::Member(_, span) | Designator::Index(_, span) => *span,
+                            };
+                            return Err(Diagnostic::error(
+                                "array designator is outside the bounds of the array",
+                                designator_span,
+                            ));
+                        }
+                        let selected =
+                            self.initializer_selector_type(target, &selectors, item.span)?;
+                        self.validate_initializer_constraints(
+                            &selected,
+                            &item.initializer,
+                            frame,
+                            objects,
+                        )
+                        .map_err(|diagnostic| {
+                            match self.initializer_selected_record_member(target, &selectors) {
+                                Some(member) => {
+                                    Self::annotate_member_initializer_error(diagnostic, &member)
+                                }
+                                None => diagnostic,
+                            }
+                        })?;
+                        current = index.saturating_add(1);
+                        item_index += 1;
+                    } else {
+                        if *len != 0 && current >= *len {
+                            break;
+                        }
+                        let used = self.validate_initializer_items_into_type(
+                            inner,
+                            &items[item_index..],
+                            frame,
+                            objects,
+                        )?;
+                        item_index += used;
+                        current += 1;
+                    }
+                }
+                Ok(item_index)
+            }
+            CType::Struct(..) => {
+                let positions = self.initializable_record_member_positions(target);
+                let mut item_index = 0;
+                let mut current = 0;
+                while item_index < items.len() {
+                    let item = &items[item_index];
+                    if !item.designators.is_empty() {
+                        let selectors =
+                            self.initializer_selectors(target, &item.designators, item.span)?;
+                        let Some((InitSelector::Member(name), _)) = selectors.split_first() else {
+                            return Err(Diagnostic::error(
+                                "structure initializer designator must begin with .member",
+                                item.span,
+                            ));
+                        };
+                        let top_pos = positions
+                            .iter()
+                            .position(|member| member.storage_name == *name)
+                            .ok_or_else(|| {
+                                Diagnostic::error(
+                                    "invalid structure initializer designator",
+                                    item.span,
+                                )
+                            })?;
+                        let selected =
+                            self.initializer_selector_type(target, &selectors, item.span)?;
+                        self.validate_initializer_constraints(
+                            &selected,
+                            &item.initializer,
+                            frame,
+                            objects,
+                        )
+                        .map_err(|diagnostic| {
+                            match self.initializer_selected_record_member(target, &selectors) {
+                                Some(member) => {
+                                    Self::annotate_member_initializer_error(diagnostic, &member)
+                                }
+                                None => diagnostic,
+                            }
+                        })?;
+                        current = top_pos + 1;
+                        item_index += 1;
+                    } else {
+                        if current >= positions.len() {
+                            break;
+                        }
+                        let member = &positions[current];
+                        let used = self
+                            .validate_initializer_items_into_type(
+                                &member.ty,
+                                &items[item_index..],
+                                frame,
+                                objects,
+                            )
+                            .map_err(|diagnostic| {
+                                Self::annotate_member_initializer_error(diagnostic, member)
+                            })?;
+                        item_index += used;
+                        current += 1;
+                    }
+                }
+                Ok(item_index)
+            }
+            CType::Union(..) => {
+                let item = &items[0];
+                if item.designators.is_empty() {
+                    let member =
+                        self.first_initializable_union_member(target)
+                            .ok_or_else(|| {
+                                Diagnostic::error("union has no initializable members", item.span)
+                            })?;
+                    self.validate_initializer_items_into_type(&member.ty, items, frame, objects)
+                        .map_err(|diagnostic| {
+                            Self::annotate_member_initializer_error(diagnostic, &member)
+                        })
+                } else {
+                    let selectors =
+                        self.initializer_selectors(target, &item.designators, item.span)?;
+                    if !matches!(selectors.first(), Some(InitSelector::Member(_))) {
+                        return Err(Diagnostic::error(
+                            "union initializer designator must begin with .member",
+                            item.span,
+                        ));
+                    }
+                    let selected = self.initializer_selector_type(target, &selectors, item.span)?;
+                    self.validate_initializer_constraints(
+                        &selected,
+                        &item.initializer,
+                        frame,
+                        objects,
+                    )
+                    .map_err(|diagnostic| {
+                        match self.initializer_selected_record_member(target, &selectors) {
+                            Some(member) => {
+                                Self::annotate_member_initializer_error(diagnostic, &member)
+                            }
+                            None => diagnostic,
+                        }
+                    })?;
+                    Ok(1)
+                }
+            }
+            _ => Err(Diagnostic::error(
+                "initializer sequence requires an aggregate or union type",
+                items[0].span,
+            )),
+        }
+    }
+
+    fn initializer_selector_type(
+        &self,
+        target: &CType,
+        selectors: &[InitSelector],
+        span: Span,
+    ) -> Result<CType, Diagnostic> {
+        let Some((first, rest)) = selectors.split_first() else {
+            return Ok(target.clone());
+        };
+        let selected = match first {
+            InitSelector::Index(index) => match target.unqualified() {
+                CType::Array(inner, len) if *len == 0 || *index < *len => (**inner).clone(),
+                CType::Array(..) => {
+                    return Err(Diagnostic::error(
+                        "array designator is outside the bounds of the array",
+                        span,
+                    ));
+                }
+                _ => {
+                    return Err(Diagnostic::error(
+                        "array designator requires an array type",
+                        span,
+                    ));
+                }
+            },
+            InitSelector::Member(name) => self
+                .direct_member_by_storage_name(target, name)
+                .map(|member| member.ty.clone())
+                .ok_or_else(|| Diagnostic::error("invalid member initializer designator", span))?,
+        };
+        self.initializer_selector_type(&selected, rest, span)
+    }
+
+    fn require_scalar_expr(
+        &self,
+        expr: &Expr,
+        diagnostic_span: Span,
+        frame: &Frame,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        let ty = self.value_expr_type(expr, frame, objects)?;
+        if ty.is_arithmetic() || ty.is_pointer() {
+            Ok(())
+        } else {
+            Err(Diagnostic::error(
+                format!("expression of type {} is not scalar", ty),
+                diagnostic_span,
+            ))
+        }
+    }
+
+    fn validate_declared_object_type(&self, decl: &Declaration) -> Result<(), Diagnostic> {
+        if matches!(decl.ty.unqualified(), CType::Void | CType::Function(..)) {
+            return Err(Diagnostic::error(
+                format!("an object cannot have type {}", decl.ty),
+                decl.declarator_span,
+            ));
+        }
+        if decl.storage_class != Some(StorageClass::Extern) && !self.type_is_complete(&decl.ty) {
+            return Err(Diagnostic::error(
+                format!("object definition has incomplete type {}", decl.ty),
+                decl.declarator_span,
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_implicit_conversion(
+        &self,
+        expr: &Expr,
+        target: &CType,
+        frame: &Frame,
+        objects: &ObjectFrames,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let source = self.value_expr_type(expr, frame, objects)?;
+        let compatible = if target == &source {
+            true
+        } else if matches!(target.unqualified(), CType::Bool) {
+            source.is_arithmetic() || source.is_pointer()
+        } else if target.is_arithmetic() && source.is_arithmetic() {
+            true
+        } else if target.is_pointer() && source.is_pointer() {
+            self.pointer_assignment_compatible(target, &source)
+        } else if target.is_pointer() && source.is_integer() {
+            self.is_null_pointer_constant(expr, frame, objects)?
+        } else if matches!(target.unqualified(), CType::Struct(..) | CType::Union(..)) {
+            self.cross_unit_tagged_type_compatible(target.unqualified(), source.unqualified())
+        } else {
+            false
+        };
+        if compatible {
+            Ok(())
+        } else {
+            let message = if target.is_pointer() && source.is_integer() {
+                if matches!(
+                    expr,
+                    Expr::CharLiteral(..)
+                        | Expr::WideCharLiteral(..)
+                        | Expr::Utf16CharLiteral(..)
+                        | Expr::Utf32CharLiteral(..)
+                ) {
+                    format!("cannot convert a character constant to pointer type {target}")
+                } else {
+                    format!(
+                        "cannot implicitly convert integer expression of type {source} to pointer type {target}; the expression is not a null pointer constant"
+                    )
+                }
+            } else {
+                format!("cannot convert {} to {}", source, target)
+            };
+            Err(Diagnostic::error(message, span))
+        }
+    }
+
+    fn expr_is_lvalue(&self, expr: &Expr, frame: &Frame) -> bool {
+        match expr {
+            Expr::Variable(name, span) => {
+                frame.object_decls.contains_key(name)
+                    || self.lookup_global_declaration(name, span.file).is_some()
+            }
+            Expr::StringLiteral(..)
+            | Expr::WideStringLiteral(..)
+            | Expr::CompoundLiteral { .. }
+            | Expr::Subscript { .. }
+            | Expr::Unary {
+                op: UnaryOp::Dereference,
+                ..
+            } => true,
+            Expr::Member { base, .. } => self.expr_is_lvalue(base, frame),
+            _ => false,
+        }
+    }
+
+    fn expr_is_function_designator(&self, expr: &Expr, frame: &Frame) -> bool {
+        let Expr::Variable(name, span) = expr else {
+            return false;
+        };
+        frame.function_decls.contains_key(name)
+            || self.lookup_function_declaration(name, span.file).is_some()
+            || self.lookup_function(name, span.file).is_some()
+            || self.builtin_function_type(name).is_some()
+    }
+
+    fn expr_refers_to_vla(&self, expr: &Expr, frame: &Frame) -> bool {
+        match expr {
+            Expr::Variable(name, _) => frame
+                .object_decls
+                .get(name)
+                .is_some_and(|decl| decl.vla_bounds.iter().any(|bound| bound.is_some())),
+            Expr::Unary { expr, .. }
+            | Expr::Postfix { expr, .. }
+            | Expr::SizeofExpr { expr, .. }
+            | Expr::Cast { expr, .. } => self.expr_refers_to_vla(expr, frame),
+            Expr::Subscript { base, .. } | Expr::Member { base, .. } => {
+                self.expr_refers_to_vla(base, frame)
+            }
+            _ => false,
+        }
+    }
+
+    fn array_element_type_is_incomplete(&self, ty: &CType, vla_bounds: &[Option<Expr>]) -> bool {
+        let CType::Array(inner, outer_len) = ty.unqualified() else {
+            return false;
+        };
+        let bounds = if *outer_len == 0 && !vla_bounds.is_empty() {
+            &vla_bounds[1..]
+        } else {
+            vla_bounds
+        };
+        Self::type_has_unresolved_incomplete_array(inner, bounds).0
+    }
+
+    fn type_has_unresolved_incomplete_array(
+        ty: &CType,
+        vla_bounds: &[Option<Expr>],
+    ) -> (bool, usize) {
+        match ty.unqualified() {
+            CType::Array(inner, len) => {
+                let (incomplete_here, used_here) = if *len == 0 {
+                    (
+                        !matches!(vla_bounds.first(), Some(Some(_))),
+                        usize::from(!vla_bounds.is_empty()),
+                    )
+                } else {
+                    (false, 0)
+                };
+                let (incomplete_inner, used_inner) =
+                    Self::type_has_unresolved_incomplete_array(inner, &vla_bounds[used_here..]);
+                (incomplete_here || incomplete_inner, used_here + used_inner)
+            }
+            _ => (false, 0),
+        }
+    }
+
+    fn resolve_vla_type_for_constraints(ty: &CType, vla_bounds: &[Option<Expr>]) -> (CType, usize) {
+        match ty {
+            CType::Array(inner, len) => {
+                let (resolved_len, used_here) = if *len == 0 && !vla_bounds.is_empty() {
+                    (if vla_bounds[0].is_some() { 1 } else { 0 }, 1)
+                } else {
+                    (*len, 0)
+                };
+                let (inner, used_inner) =
+                    Self::resolve_vla_type_for_constraints(inner, &vla_bounds[used_here..]);
+                (CType::array_of(inner, resolved_len), used_here + used_inner)
+            }
+            CType::Pointer(inner) => {
+                let (inner, used) = Self::resolve_vla_type_for_constraints(inner, vla_bounds);
+                (CType::pointer_to(inner), used)
+            }
+            CType::Qualified(inner, qualifiers) => {
+                let (inner, used) = Self::resolve_vla_type_for_constraints(inner, vla_bounds);
+                (CType::qualified(inner, *qualifiers), used)
+            }
+            _ => (ty.clone(), 0),
+        }
+    }
+
+    fn validate_expr_constraints(
+        &self,
+        expr: &Expr,
+        frame: &Frame,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        match expr {
+            Expr::Number(..)
+            | Expr::CharLiteral(..)
+            | Expr::WideCharLiteral(..)
+            | Expr::Utf16CharLiteral(..)
+            | Expr::Utf32CharLiteral(..)
+            | Expr::StringLiteral(..)
+            | Expr::WideStringLiteral(..)
+            | Expr::Utf16StringLiteral(..)
+            | Expr::Utf32StringLiteral(..)
+            | Expr::Variable(..)
+            | Expr::OffsetOf { .. } => {}
+            Expr::Unary { op, expr, span } => {
+                self.validate_expr_constraints(expr, frame, objects)?;
+                let ty = self.expr_type(expr, frame, objects)?;
+                match op {
+                    UnaryOp::AddressOf => {
+                        if !self.expr_is_lvalue(expr, frame)
+                            && !self.expr_is_function_designator(expr, frame)
+                        {
+                            return Err(Diagnostic::error(
+                                "the & operator requires an object or function; a temporary value does not have an address",
+                                *span,
+                            ));
+                        }
+                        if self.expr_designates_bit_field(expr, frame, objects)? {
+                            return Err(Diagnostic::error(
+                                "cannot take the address of a bit-field",
+                                *span,
+                            ));
+                        }
+                        if let Expr::Variable(name, _) = expr.as_ref()
+                            && frame.object_decls.get(name).is_some_and(|decl| {
+                                decl.storage_class == Some(StorageClass::Register)
+                            })
+                        {
+                            return Err(Diagnostic::error(
+                                "cannot take the address of a register object",
+                                *span,
+                            ));
+                        }
+                    }
+                    UnaryOp::LogicalNot => self.require_scalar_expr(expr, *span, frame, objects)?,
+                    UnaryOp::PreIncrement | UnaryOp::PreDecrement => {
+                        if !self.expr_is_lvalue(expr, frame)
+                            || self.type_has_const_subobject(&ty)
+                            || !(ty.is_integer() || ty.is_floating() || ty.is_pointer())
+                        {
+                            return Err(Diagnostic::error(
+                                "++ and -- require a changeable arithmetic variable or pointer",
+                                *span,
+                            ));
+                        }
+                        if ty.is_pointer() {
+                            self.require_complete_pointer_arithmetic_type(&ty, *span)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Expr::Postfix { expr, span, .. } => {
+                self.validate_expr_constraints(expr, frame, objects)?;
+                let ty = self.expr_type(expr, frame, objects)?;
+                if !self.expr_is_lvalue(expr, frame)
+                    || self.type_has_const_subobject(&ty)
+                    || !(ty.is_integer() || ty.is_floating() || ty.is_pointer())
+                {
+                    return Err(Diagnostic::error(
+                        "++ and -- require a changeable arithmetic variable or pointer",
+                        *span,
+                    ));
+                }
+                if ty.is_pointer() {
+                    self.require_complete_pointer_arithmetic_type(&ty, *span)?;
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.validate_expr_constraints(lhs, frame, objects)?;
+                self.validate_expr_constraints(rhs, frame, objects)?;
+            }
+            Expr::Subscript { base, index, .. } => {
+                self.validate_expr_constraints(base, frame, objects)?;
+                self.validate_expr_constraints(index, frame, objects)?;
+            }
+            Expr::Assign { lhs, rhs, span } => {
+                self.validate_expr_constraints(lhs, frame, objects)?;
+                self.validate_expr_constraints(rhs, frame, objects)?;
+                let lhs_ty = self.expr_type(lhs, frame, objects)?;
+                if !self.expr_is_lvalue(lhs, frame) {
+                    return Err(Diagnostic::error(
+                        "the left side of = is not a stored object that can be changed",
+                        *span,
+                    ));
+                }
+                if matches!(lhs_ty.unqualified(), CType::Array(..)) {
+                    return Err(Diagnostic::error(
+                        "arrays cannot be assigned; assign their elements individually",
+                        *span,
+                    ));
+                }
+                if self.type_has_const_subobject(&lhs_ty) {
+                    return Err(Diagnostic::error(
+                        "the left side of = is const and cannot be changed",
+                        *span,
+                    ));
+                }
+                if matches!(lhs_ty.unqualified(), CType::Void) {
+                    return Err(Diagnostic::error(
+                        "the left side of = has type void and cannot store a value",
+                        *span,
+                    ));
+                }
+                self.validate_implicit_conversion(rhs, &lhs_ty, frame, objects, rhs.span())?;
+            }
+            Expr::CompoundAssign { op, lhs, rhs, span } => {
+                self.validate_expr_constraints(lhs, frame, objects)?;
+                self.validate_expr_constraints(rhs, frame, objects)?;
+                let lhs_ty = self.expr_type(lhs, frame, objects)?;
+                if !self.expr_is_lvalue(lhs, frame) {
+                    return Err(Diagnostic::error(
+                        "the left side of this assignment is not a stored object that can be changed",
+                        *span,
+                    ));
+                }
+                if matches!(lhs_ty.unqualified(), CType::Array(..)) {
+                    return Err(Diagnostic::error(
+                        "arrays cannot be assigned; assign their elements individually",
+                        *span,
+                    ));
+                }
+                if self.type_has_const_subobject(&lhs_ty) {
+                    return Err(Diagnostic::error(
+                        "the left side of this assignment is const and cannot be changed",
+                        *span,
+                    ));
+                }
+                if matches!(lhs_ty.unqualified(), CType::Void) {
+                    return Err(Diagnostic::error(
+                        "the left side of this assignment has type void and cannot store a value",
+                        *span,
+                    ));
+                }
+                let binary = Expr::Binary {
+                    op: *op,
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                    span: *span,
+                };
+                let _ = self.expr_type(&binary, frame, objects)?;
+            }
+            Expr::SizeofType {
+                ty,
+                vla_bounds,
+                span,
+            } => {
+                for bound in vla_bounds.iter().flatten() {
+                    self.validate_expr_constraints(bound, frame, objects)?;
+                }
+                if vla_bounds.iter().all(Option::is_none) {
+                    let _ = self.eval_sizeof_type(ty, *span)?;
+                }
+            }
+            Expr::SizeofExpr { expr, span } => {
+                self.validate_expr_constraints(expr, frame, objects)?;
+                if self.expr_designates_bit_field(expr, frame, objects)? {
+                    return Err(Diagnostic::error(
+                        "sizeof cannot be applied to a bit-field",
+                        *span,
+                    ));
+                }
+                let ty = self.expr_type(expr, frame, objects)?;
+                if !self.expr_refers_to_vla(expr, frame) {
+                    let _ = self.eval_sizeof_type(&ty, *span)?;
+                }
+            }
+            Expr::Cast {
+                ty,
+                vla_bounds,
+                expr,
+                span,
+            } => {
+                for bound in vla_bounds.iter().flatten() {
+                    self.validate_expr_constraints(bound, frame, objects)?;
+                }
+                self.validate_expr_constraints(expr, frame, objects)?;
+                let source = self.value_expr_type(expr, frame, objects)?;
+                if !matches!(ty.unqualified(), CType::Void)
+                    && (!(ty.is_arithmetic() || ty.is_pointer())
+                        || !(source.is_arithmetic() || source.is_pointer()))
+                {
+                    return Err(Diagnostic::error(
+                        format!("invalid cast from {} to {}", source, ty),
+                        *span,
+                    ));
+                }
+            }
+            Expr::CompoundLiteral {
+                ty,
+                vla_bounds,
+                initializer,
+                ..
+            } => {
+                if matches!(ty.unqualified(), CType::Struct(..) | CType::Union(..))
+                    && !self.type_is_complete(ty)
+                {
+                    return Err(Diagnostic::error(
+                        format!("compound literal has incomplete type {ty}"),
+                        expr.span(),
+                    ));
+                }
+                if matches!(ty.unqualified(), CType::Array(..))
+                    && vla_bounds.iter().any(Option::is_some)
+                {
+                    return Err(Diagnostic::error(
+                        "compound literal cannot have variable length array type",
+                        expr.span(),
+                    ));
+                }
+                if let CType::Array(inner, _) = ty.unqualified()
+                    && Self::has_incomplete_array_dimension(inner)
+                {
+                    return Err(Diagnostic::error(
+                        format!("array element has incomplete type {inner}"),
+                        expr.span(),
+                    ));
+                }
+                for bound in vla_bounds.iter().flatten() {
+                    self.validate_expr_constraints(bound, frame, objects)?;
+                }
+                let completed =
+                    self.complete_compound_literal_type(ty, initializer, frame, objects)?;
+                self.validate_initializer_constraints(&completed, initializer, frame, objects)?;
+            }
+            Expr::GenericSelection {
+                control,
+                associations,
+                default,
+                ..
+            } => {
+                self.validate_expr_constraints(control, frame, objects)?;
+                for association in associations {
+                    self.validate_expr_constraints(&association.expr, frame, objects)?;
+                }
+                if let Some(default) = default {
+                    self.validate_expr_constraints(default, frame, objects)?;
+                }
+            }
+            Expr::VaArg { ap, ty, span } => {
+                self.validate_expr_constraints(ap, frame, objects)?;
+                if !self.expr_is_lvalue(ap, frame)
+                    || self.expr_type(ap, frame, objects)? != CType::VaList
+                {
+                    return Err(Diagnostic::error(
+                        "va_arg requires a va_list lvalue",
+                        ap.span(),
+                    ));
+                }
+                if matches!(
+                    ty.unqualified(),
+                    CType::Void | CType::Function(..) | CType::VaList
+                ) || !self.type_is_complete(ty)
+                {
+                    return Err(Diagnostic::error(
+                        "va_arg requires a complete object type",
+                        *span,
+                    ));
+                }
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.validate_expr_constraints(condition, frame, objects)?;
+                self.require_scalar_expr(condition, condition.span(), frame, objects)?;
+                self.validate_expr_constraints(then_expr, frame, objects)?;
+                self.validate_expr_constraints(else_expr, frame, objects)?;
+            }
+            Expr::Call {
+                callee,
+                args,
+                declared_callee_type,
+                span,
+            } => {
+                self.validate_expr_constraints(callee, frame, objects)?;
+                for arg in args {
+                    self.validate_expr_constraints(arg, frame, objects)?;
+                }
+                if matches!(callee.as_ref(), Expr::Variable(name, _) if matches!(name.as_str(), "va_start" | "va_end" | "va_copy"))
+                {
+                    let _ = self.expr_type(expr, frame, objects)?;
+                    return Ok(());
+                }
+                let callee_ty = declared_callee_type
+                    .clone()
+                    .unwrap_or(self.value_expr_type(callee, frame, objects)?);
+                let function_ty = match callee_ty.unqualified() {
+                    CType::Function(..) => callee_ty,
+                    CType::Pointer(inner) if matches!(inner.unqualified(), CType::Function(..)) => {
+                        (**inner).clone()
+                    }
+                    _ => {
+                        return Err(Diagnostic::error("call target is not a function", *span));
+                    }
+                };
+                let CType::Function(_, params, variadic) = function_ty.unqualified() else {
+                    unreachable!();
+                };
+                if !params.is_empty() {
+                    let fixed = if params.as_slice() == [CType::Void] {
+                        0
+                    } else {
+                        params.len()
+                    };
+                    if (!variadic && args.len() != fixed) || (*variadic && args.len() < fixed) {
+                        return Err(Diagnostic::error(
+                            format!(
+                                "function call expected {}{} argument(s), got {}",
+                                fixed,
+                                if *variadic { "+" } else { "" },
+                                args.len()
+                            ),
+                            *span,
+                        ));
+                    }
+                    let parameter_spans = self.call_parameter_spans(callee, frame);
+                    for (index, (arg, param)) in
+                        args.iter().zip(params.iter()).take(fixed).enumerate()
+                    {
+                        self.validate_implicit_conversion(arg, param, frame, objects, arg.span())
+                            .map_err(|diagnostic| {
+                                if let Some(span) = parameter_spans.get(index).copied() {
+                                    diagnostic.with_related_span(
+                                        "destination",
+                                        "the parameter is declared here",
+                                        span,
+                                    )
+                                } else {
+                                    diagnostic
+                                }
+                            })?;
+                    }
+                }
+            }
+            Expr::Member { base, .. } => {
+                self.validate_expr_constraints(base, frame, objects)?;
+            }
+        }
+        let _ = self.expr_type(expr, frame, objects)?;
+        Ok(())
+    }
+
+    fn call_parameter_spans(&self, callee: &Expr, frame: &Frame) -> Vec<Span> {
+        let Expr::Variable(name, span) = callee else {
+            return Vec::new();
+        };
+        if let Some(declaration) = frame.function_decls.get(name) {
+            return declaration.params.iter().map(|param| param.span).collect();
+        }
+        if let Some(function) = self.lookup_function(name, span.file) {
+            return function.params.iter().map(|param| param.span).collect();
+        }
+        self.lookup_function_declaration(name, span.file)
+            .map(|declaration| declaration.params.iter().map(|param| param.span).collect())
+            .unwrap_or_default()
+    }
+
     fn initialize_globals(&mut self, objects: &mut ObjectFrames) -> Result<(), Diagnostic> {
         let globals = self.program.global_definitions.clone();
         let mut allocated = Vec::with_capacity(globals.len());
@@ -2548,14 +4210,17 @@ impl<'a> Interpreter<'a> {
             }
             if matches!(decl.ty.unqualified(), CType::Void | CType::Function(..)) {
                 return Err(Diagnostic::error(
-                    "object type cannot be void or function",
+                    format!("an object cannot have type {}", decl.ty),
                     decl.span,
                 ));
             }
             if !self.type_is_complete(&decl.ty)
                 && !matches!(decl.ty.unqualified(), CType::Array(_, 0) if decl.init.is_some())
             {
-                return Err(Diagnostic::error("object type must be complete", decl.span));
+                return Err(Diagnostic::error(
+                    format!("object definition has incomplete type {}", decl.ty),
+                    decl.span,
+                ));
             }
             let object = self.allocate_object(
                 objects,
@@ -2565,6 +4230,7 @@ impl<'a> Interpreter<'a> {
                 false,
                 false,
             )?;
+            self.ensure_object_alignment(object, &decl.ty, decl.alignment);
             if decl.storage_class == Some(StorageClass::Static) {
                 self.internal_global_bindings
                     .entry(decl.span.file)
@@ -2579,9 +4245,11 @@ impl<'a> Interpreter<'a> {
             let mut frame = Frame {
                 id: 0,
                 bindings: HashMap::default(),
+                object_decls: HashMap::default(),
                 function_decls: HashMap::default(),
             };
             if let Some(initializer) = decl.init.as_ref() {
+                self.validate_initializer_constraints(&decl.ty, initializer, &frame, objects)?;
                 self.validate_static_initializer(initializer)?;
             }
             self.initialize_declared_object(
@@ -2848,25 +4516,62 @@ impl<'a> Interpreter<'a> {
 
     fn parse_standard_fopen_mode(&self, bytes: &[u8]) -> Option<ParsedFopenMode> {
         let text = std::str::from_utf8(bytes).ok()?;
-        let (kind, binary, opening) = match text {
-            "r" => (HostStreamModeKind::Input, false, FopenOpening::Read),
-            "rb" => (HostStreamModeKind::Input, true, FopenOpening::Read),
-            "w" => (HostStreamModeKind::Output, false, FopenOpening::Write),
-            "wb" => (HostStreamModeKind::Output, true, FopenOpening::Write),
-            "a" => (HostStreamModeKind::Output, false, FopenOpening::Append),
-            "ab" => (HostStreamModeKind::Output, true, FopenOpening::Append),
-            "r+" => (HostStreamModeKind::Update, false, FopenOpening::Read),
-            "rb+" | "r+b" => (HostStreamModeKind::Update, true, FopenOpening::Read),
-            "w+" => (HostStreamModeKind::Update, false, FopenOpening::Write),
-            "wb+" | "w+b" => (HostStreamModeKind::Update, true, FopenOpening::Write),
-            "a+" => (HostStreamModeKind::Update, false, FopenOpening::Append),
-            "ab+" | "a+b" => (HostStreamModeKind::Update, true, FopenOpening::Append),
+        let (kind, binary, opening, exclusive) = match text {
+            "r" => (HostStreamModeKind::Input, false, FopenOpening::Read, false),
+            "rb" => (HostStreamModeKind::Input, true, FopenOpening::Read, false),
+            "w" => (
+                HostStreamModeKind::Output,
+                false,
+                FopenOpening::Write,
+                false,
+            ),
+            "wb" => (HostStreamModeKind::Output, true, FopenOpening::Write, false),
+            "wx" => (HostStreamModeKind::Output, false, FopenOpening::Write, true),
+            "wbx" | "wxb" => (HostStreamModeKind::Output, true, FopenOpening::Write, true),
+            "a" => (
+                HostStreamModeKind::Output,
+                false,
+                FopenOpening::Append,
+                false,
+            ),
+            "ab" => (
+                HostStreamModeKind::Output,
+                true,
+                FopenOpening::Append,
+                false,
+            ),
+            "r+" => (HostStreamModeKind::Update, false, FopenOpening::Read, false),
+            "rb+" | "r+b" => (HostStreamModeKind::Update, true, FopenOpening::Read, false),
+            "w+" => (
+                HostStreamModeKind::Update,
+                false,
+                FopenOpening::Write,
+                false,
+            ),
+            "wb+" | "w+b" => (HostStreamModeKind::Update, true, FopenOpening::Write, false),
+            "w+x" | "wx+" => (HostStreamModeKind::Update, false, FopenOpening::Write, true),
+            "w+bx" | "w+xb" | "wb+x" | "wbx+" | "wx+b" | "wxb+" => {
+                (HostStreamModeKind::Update, true, FopenOpening::Write, true)
+            }
+            "a+" => (
+                HostStreamModeKind::Update,
+                false,
+                FopenOpening::Append,
+                false,
+            ),
+            "ab+" | "a+b" => (
+                HostStreamModeKind::Update,
+                true,
+                FopenOpening::Append,
+                false,
+            ),
             _ => return None,
         };
         Some(ParsedFopenMode {
             kind,
             binary,
             opening,
+            exclusive,
         })
     }
 
@@ -3361,8 +5066,12 @@ impl<'a> Interpreter<'a> {
             Expr::Number(..)
             | Expr::CharLiteral(..)
             | Expr::WideCharLiteral(..)
+            | Expr::Utf16CharLiteral(..)
+            | Expr::Utf32CharLiteral(..)
             | Expr::StringLiteral(..)
             | Expr::WideStringLiteral(..)
+            | Expr::Utf16StringLiteral(..)
+            | Expr::Utf32StringLiteral(..)
             | Expr::OffsetOf { .. } => Ok(()),
             Expr::Variable(name, span) => {
                 if self.program.enum_constants.contains_key(name)
@@ -3568,7 +5277,7 @@ impl<'a> Interpreter<'a> {
             && Self::has_incomplete_array_dimension(inner)
         {
             return Err(Diagnostic::error(
-                "array element type must be complete",
+                format!("array element has incomplete type {inner}"),
                 initializer.span(),
             ));
         }
@@ -3582,6 +5291,17 @@ impl<'a> Interpreter<'a> {
                 && *inner.unqualified() == self.wchar_type()
             {
                 return self.wide_string_literal_array_initializer(*len, text, *init_span);
+            }
+            if let Initializer::Expr(Expr::Utf16StringLiteral(text, init_span)) = initializer
+                && *inner.unqualified() == CType::UnsignedShort
+            {
+                return self.unicode_string_literal_array_initializer(*len, text, true, *init_span);
+            }
+            if let Initializer::Expr(Expr::Utf32StringLiteral(text, init_span)) = initializer
+                && *inner.unqualified() == CType::UnsignedInt
+            {
+                return self
+                    .unicode_string_literal_array_initializer(*len, text, false, *init_span);
             }
         }
 
@@ -3777,12 +5497,22 @@ impl<'a> Interpreter<'a> {
     ) -> Result<usize, Diagnostic> {
         match initializer {
             Initializer::Expr(Expr::StringLiteral(text, _)) if inner.is_character() => {
-                Ok(text.len() + 1)
+                Ok(text.narrow_len() + 1)
             }
             Initializer::Expr(Expr::WideStringLiteral(text, _))
                 if *inner.unqualified() == self.wchar_type() =>
             {
-                Ok(text.chars().count() + 1)
+                Ok(text.utf32_units().len() + 1)
+            }
+            Initializer::Expr(Expr::Utf16StringLiteral(text, _))
+                if *inner.unqualified() == CType::UnsignedShort =>
+            {
+                Ok(text.utf16_units().len() + 1)
+            }
+            Initializer::Expr(Expr::Utf32StringLiteral(text, _))
+                if *inner.unqualified() == CType::UnsignedInt =>
+            {
+                Ok(text.utf32_units().len() + 1)
             }
             Initializer::List { items, .. } => {
                 let mut next_index = 0usize;
@@ -3812,17 +5542,17 @@ impl<'a> Interpreter<'a> {
         &self,
         inner: &CType,
         declared_len: usize,
-        text: &str,
+        text: &StringLiteralValue,
         span: Span,
     ) -> Result<(CType, StoredValue), Diagnostic> {
-        let mut bytes = text.as_bytes().to_vec();
+        let mut bytes = text.narrow_bytes();
         bytes.push(0);
         let actual_len = if declared_len == 0 {
             bytes.len()
         } else {
             declared_len
         };
-        if bytes.len() > actual_len {
+        if bytes.len().saturating_sub(1) > actual_len {
             return Err(Diagnostic::error(
                 "string literal is too long for the destination array",
                 span,
@@ -3843,10 +5573,14 @@ impl<'a> Interpreter<'a> {
         ))
     }
 
-    fn wide_literal_units(&self, text: &str) -> Result<Vec<libc::wchar_t>, Diagnostic> {
-        text.chars()
-            .map(|ch| {
-                libc::wchar_t::try_from(ch as u32).map_err(|_| {
+    fn wide_literal_units(
+        &self,
+        text: &StringLiteralValue,
+    ) -> Result<Vec<libc::wchar_t>, Diagnostic> {
+        text.utf32_units()
+            .into_iter()
+            .map(|unit| {
+                libc::wchar_t::try_from(unit).map_err(|_| {
                     Diagnostic::error(
                         "wide literal contains a character outside the supported wchar_t range",
                         Span::new(FileId(0), 0, 0),
@@ -3859,7 +5593,7 @@ impl<'a> Interpreter<'a> {
     fn wide_string_literal_array_initializer(
         &self,
         declared_len: usize,
-        text: &str,
+        text: &StringLiteralValue,
         span: Span,
     ) -> Result<(CType, StoredValue), Diagnostic> {
         let mut units = self
@@ -3871,7 +5605,7 @@ impl<'a> Interpreter<'a> {
         } else {
             declared_len
         };
-        if units.len() > actual_len {
+        if units.len().saturating_sub(1) > actual_len {
             return Err(Diagnostic::error(
                 "wide string literal is too long for the destination array",
                 span,
@@ -3885,6 +5619,49 @@ impl<'a> Interpreter<'a> {
             .collect::<Vec<_>>();
         Ok((
             CType::array_of(self.wchar_type(), actual_len),
+            StoredValue::Array(values),
+        ))
+    }
+
+    fn unicode_string_literal_array_initializer(
+        &self,
+        declared_len: usize,
+        text: &StringLiteralValue,
+        utf16: bool,
+        span: Span,
+    ) -> Result<(CType, StoredValue), Diagnostic> {
+        let element_ty = if utf16 {
+            CType::UnsignedShort
+        } else {
+            CType::UnsignedInt
+        };
+        let mut units: Vec<u32> = if utf16 {
+            text.utf16_units().into_iter().map(u32::from).collect()
+        } else {
+            text.utf32_units()
+        };
+        units.push(0);
+        let actual_len = if declared_len == 0 {
+            units.len()
+        } else {
+            declared_len
+        };
+        if units.len().saturating_sub(1) > actual_len {
+            return Err(Diagnostic::error(
+                "Unicode string literal is too long for the destination array",
+                span,
+            ));
+        }
+        let values = (0..actual_len)
+            .map(|idx| {
+                StoredValue::Scalar(TypedValue::integer(
+                    element_ty.clone(),
+                    units.get(idx).copied().unwrap_or(0) as i128,
+                ))
+            })
+            .collect();
+        Ok((
+            CType::array_of(element_ty, actual_len),
             StoredValue::Array(values),
         ))
     }
@@ -3920,6 +5697,27 @@ impl<'a> Interpreter<'a> {
                         return Ok(());
                     }
                 }
+                if let CType::Array(inner, len) = ty.unqualified() {
+                    let unicode = match expr {
+                        Expr::Utf16StringLiteral(text, span)
+                            if *inner.unqualified() == CType::UnsignedShort =>
+                        {
+                            Some((text, true, *span))
+                        }
+                        Expr::Utf32StringLiteral(text, span)
+                            if *inner.unqualified() == CType::UnsignedInt =>
+                        {
+                            Some((text, false, *span))
+                        }
+                        _ => None,
+                    };
+                    if let Some((text, utf16, span)) = unicode {
+                        let (_, value) =
+                            self.unicode_string_literal_array_initializer(*len, text, utf16, span)?;
+                        *stored = value;
+                        return Ok(());
+                    }
+                }
                 let sequencing = self
                     .initializer_sequencing
                     .is_some()
@@ -3934,7 +5732,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(())
             }
-            Initializer::List { items, span } => {
+            Initializer::List { items, .. } => {
                 let owns_sequence = self.initializer_sequencing.is_none();
                 if owns_sequence {
                     self.initializer_sequencing = Some(InitializerSequencing::default());
@@ -3953,16 +5751,21 @@ impl<'a> Interpreter<'a> {
                             if used != items.len() {
                                 return Err(Diagnostic::error(
                                     "too many initializer elements",
-                                    *span,
+                                    items[used].span,
                                 ));
                             }
                             Ok(())
                         }
                         _ => {
                             if items.len() != 1 || !items[0].designators.is_empty() {
+                                let error_span = if items.len() > 1 {
+                                    items[1].span
+                                } else {
+                                    items[0].span
+                                };
                                 return Err(Diagnostic::error(
                                     "scalar initializer list must contain a single un-designated initializer",
-                                    *span,
+                                    error_span,
                                 ));
                             }
                             self.apply_initializer(
@@ -4026,6 +5829,26 @@ impl<'a> Interpreter<'a> {
                     Initializer::Expr(Expr::StringLiteral(..))
                 )
                 && inner.is_character()
+            {
+                self.apply_initializer(
+                    stored,
+                    ty,
+                    &first.initializer,
+                    frame,
+                    objects,
+                    allow_array_growth,
+                )?;
+                return Ok(1);
+            }
+            if first.designators.is_empty()
+                && ((matches!(
+                    first.initializer,
+                    Initializer::Expr(Expr::Utf16StringLiteral(..))
+                ) && *inner.unqualified() == CType::UnsignedShort)
+                    || (matches!(
+                        first.initializer,
+                        Initializer::Expr(Expr::Utf32StringLiteral(..))
+                    ) && *inner.unqualified() == CType::UnsignedInt))
             {
                 self.apply_initializer(
                     stored,
@@ -4427,6 +6250,12 @@ impl<'a> Interpreter<'a> {
             Designator::Member(name, designator_span) => {
                 let (path, member_ty, _) =
                     self.resolve_member_access(ty, name, *designator_span)?;
+                if matches!(member_ty.unqualified(), CType::Array(_, 0)) {
+                    return Err(Diagnostic::error(
+                        "flexible array members cannot be initialized",
+                        *designator_span,
+                    ));
+                }
                 let mut result = path
                     .into_iter()
                     .map(InitSelector::Member)
@@ -4444,17 +6273,68 @@ impl<'a> Interpreter<'a> {
                     .members
                     .iter()
                     .filter(|member| {
-                        member.name.is_some()
-                            || (member.bit_width.is_none()
-                                && matches!(
-                                    member.ty.unqualified(),
-                                    CType::Struct(_, _) | CType::Union(_, _)
-                                ))
+                        !matches!(member.ty.unqualified(), CType::Array(_, 0))
+                            && (member.name.is_some()
+                                || (member.bit_width.is_none()
+                                    && matches!(
+                                        member.ty.unqualified(),
+                                        CType::Struct(_, _) | CType::Union(_, _)
+                                    )))
                     })
                     .cloned()
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn initializer_selected_record_member(
+        &self,
+        target: &CType,
+        selectors: &[InitSelector],
+    ) -> Option<RecordMember> {
+        let mut current = target.clone();
+        let mut selected = None;
+        for selector in selectors {
+            match selector {
+                InitSelector::Index(_) => {
+                    let CType::Array(inner, _) = current.unqualified() else {
+                        return selected;
+                    };
+                    current = (**inner).clone();
+                }
+                InitSelector::Member(name) => {
+                    let member = self
+                        .record_type(&current)?
+                        .members
+                        .iter()
+                        .find(|member| member.storage_name == *name)?
+                        .clone();
+                    current = member.ty.clone();
+                    selected = Some(member);
+                }
+            }
+        }
+        selected
+    }
+
+    fn annotate_member_initializer_error(
+        diagnostic: Diagnostic,
+        member: &RecordMember,
+    ) -> Diagnostic {
+        let Some(name) = member.name.as_deref() else {
+            return diagnostic;
+        };
+        let diagnostic =
+            diagnostic.with_message_prefix(format!("while initializing member {name}"));
+        if let Some(span) = member.declaration_span {
+            diagnostic.with_related_span(
+                "destination",
+                format!("member {name} is declared here"),
+                span,
+            )
+        } else {
+            diagnostic
+        }
     }
 
     fn first_initializable_union_member(&self, ty: &CType) -> Option<RecordMember> {
@@ -5612,19 +7492,40 @@ impl<'a> Interpreter<'a> {
         call_span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
+        if self.current_frame_ids.len() >= MAX_FUNCTION_CALL_DEPTH {
+            return Err(Diagnostic::error(
+                format!(
+                    "function call depth exceeded the interpreter limit of {MAX_FUNCTION_CALL_DEPTH}; check for recursion that does not reach its base case"
+                ),
+                call_span,
+            ));
+        }
         let fixed_param_count =
             if function.params.len() == 1 && function.params[0].ty == CType::Void {
                 0
             } else {
                 function.params.len()
             };
-        if fixed_param_count == 0 && !function.is_variadic {
+        if function.params.len() == 1
+            && function.params[0].ty == CType::Void
+            && !function.is_variadic
+        {
             if !args.is_empty() {
                 return Err(Diagnostic::error(
                     format!("function {} takes no arguments", function.name),
                     call_span,
                 ));
             }
+        } else if function.params.is_empty() && !args.is_empty() {
+            return Err(Diagnostic::ub(
+                format!(
+                    "call supplies {} argument(s), but the definition of {} has no parameters",
+                    args.len(),
+                    function.name
+                ),
+                call_span,
+                Some("6.5.2.2p6"),
+            ));
         } else if (!function.is_variadic && fixed_param_count != args.len())
             || (function.is_variadic && args.len() < fixed_param_count)
         {
@@ -5650,6 +7551,7 @@ impl<'a> Interpreter<'a> {
         let mut frame = Frame {
             id: frame_id,
             bindings: HashMap::default(),
+            object_decls: HashMap::default(),
             function_decls: HashMap::default(),
         };
         objects.push(HashMap::default());
@@ -5663,6 +7565,32 @@ impl<'a> Interpreter<'a> {
         });
 
         self.current_frame_ids.push(frame_id);
+
+        let func_key = function_symbol(function);
+        let func_object = if let Some(object) = self.func_name_bindings.get(&func_key).copied() {
+            object
+        } else {
+            let pointer = self.intern_readonly_c_bytes(function.name.as_bytes());
+            let object = pointer.object.expect("__func__ has static storage");
+            let func_ty = CType::array_of(
+                CType::qualified(
+                    CType::Char,
+                    crate::types::TypeQualifiers {
+                        is_const: true,
+                        ..crate::types::TypeQualifiers::default()
+                    },
+                ),
+                function.name.len() + 1,
+            );
+            if let Some(state) = self.retired_objects.get_mut(&object) {
+                state.ty = func_ty.clone();
+                state.const_object = true;
+            }
+            self.object_type_registry.insert(object, func_ty);
+            self.func_name_bindings.insert(func_key, object);
+            object
+        };
+        frame.bindings.insert("__func__".to_owned(), func_object);
 
         let result = {
             let _cleanup = CallFrameCleanup::new(self, objects, frame_id);
@@ -5731,6 +7659,16 @@ impl<'a> Interpreter<'a> {
                         self.exec_block(&function.body, &mut frame, objects)?
                     };
 
+                    if function.is_noreturn && matches!(flow, Flow::Continue | Flow::Return(_)) {
+                        break Err(Diagnostic::ub(
+                            format!(
+                                "_Noreturn function {} returned to its caller",
+                                function.name
+                            ),
+                            function.span,
+                            Some("6.7.4p8"),
+                        ));
+                    }
                     break match flow {
                         Flow::Continue if function.name == "main" => {
                             let value = self.convert_value(
@@ -6007,6 +7945,9 @@ impl<'a> Interpreter<'a> {
     }
 
     fn function_type(&self, function: &FunctionDef) -> CType {
+        if !function.has_prototype {
+            return CType::function(function.return_type.clone(), Vec::new());
+        }
         let params = function
             .params
             .iter()
@@ -6020,6 +7961,9 @@ impl<'a> Interpreter<'a> {
     }
 
     fn function_declaration_type(&self, function: &FunctionDecl) -> CType {
+        if !function.has_prototype {
+            return CType::function(function.return_type.clone(), Vec::new());
+        }
         let params = function
             .params
             .iter()
@@ -6105,6 +8049,13 @@ impl<'a> Interpreter<'a> {
         let else_ty = self.value_expr_type(else_expr, frame, objects)?;
         if then_ty == else_ty {
             Ok(then_ty)
+        } else if matches!(
+            (then_ty.unqualified(), else_ty.unqualified()),
+            (CType::Struct(..), CType::Struct(..)) | (CType::Union(..), CType::Union(..))
+        ) && self
+            .cross_unit_tagged_type_compatible(then_ty.unqualified(), else_ty.unqualified())
+        {
+            Ok(then_ty.unqualified().clone())
         } else if then_ty.is_arithmetic() && else_ty.is_arithmetic() {
             self.usual_arithmetic_type(&then_ty, &else_ty, span)
         } else if then_ty.is_pointer()
@@ -6165,14 +8116,37 @@ impl<'a> Interpreter<'a> {
         frame: &Frame,
         objects: &ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
+        if target.is_integer()
+            && !matches!(target.unqualified(), CType::Bool)
+            && value.ty.is_pointer()
+        {
+            return Err(Diagnostic::error(
+                format!(
+                    "cannot implicitly convert pointer type {} to integer type {}",
+                    value.ty, target
+                ),
+                span,
+            ));
+        }
         if target.is_pointer()
             && value.ty.is_integer()
             && !self.is_null_pointer_constant(expr, frame, objects)?
         {
-            return Err(Diagnostic::error(
-                "integer expression is not a null pointer constant",
-                span,
-            ));
+            let message = if matches!(
+                expr,
+                Expr::CharLiteral(..)
+                    | Expr::WideCharLiteral(..)
+                    | Expr::Utf16CharLiteral(..)
+                    | Expr::Utf32CharLiteral(..)
+            ) {
+                format!("cannot convert a character constant to pointer type {target}")
+            } else {
+                format!(
+                    "cannot implicitly convert integer expression of type {} to pointer type {target}; the expression is not a null pointer constant",
+                    value.ty
+                )
+            };
+            return Err(Diagnostic::error(message, span));
         }
         if target.is_pointer()
             && value.ty.is_pointer()
@@ -6251,17 +8225,41 @@ impl<'a> Interpreter<'a> {
     }
 
     fn function_parameter_types_compatible(&self, lhs: &[CType], rhs: &[CType]) -> bool {
+        if lhs.is_empty() {
+            return self.function_prototype_compatible_with_unspecified_parameters(rhs);
+        }
+        if rhs.is_empty() {
+            return self.function_prototype_compatible_with_unspecified_parameters(lhs);
+        }
         lhs.len() == rhs.len()
             && lhs.iter().zip(rhs).all(|(lhs, rhs)| {
                 self.cross_unit_tagged_type_compatible(lhs.unqualified(), rhs.unqualified())
             })
     }
 
-    fn composite_function_parameter_types(&self, params: &[CType]) -> Vec<CType> {
+    fn composite_function_parameter_types(&self, lhs: &[CType], rhs: &[CType]) -> Vec<CType> {
+        let params = if lhs.is_empty() { rhs } else { lhs };
         params
             .iter()
             .map(|param| param.unqualified().clone())
             .collect()
+    }
+
+    fn function_prototype_compatible_with_unspecified_parameters(&self, params: &[CType]) -> bool {
+        params == [CType::Void]
+            || params.iter().all(|param| {
+                !matches!(
+                    param.unqualified(),
+                    CType::Bool
+                        | CType::Char
+                        | CType::SignedChar
+                        | CType::UnsignedChar
+                        | CType::Short
+                        | CType::UnsignedShort
+                        | CType::Enum(..)
+                        | CType::Float
+                )
+            })
     }
 
     fn cross_unit_tagged_type_compatible(&self, lhs: &CType, rhs: &CType) -> bool {
@@ -6304,22 +8302,28 @@ impl<'a> Interpreter<'a> {
                 CType::Function(rhs_return, rhs_params, rhs_variadic),
             ) => {
                 lhs_variadic == rhs_variadic
-                    && lhs_params.len() == rhs_params.len()
                     && self.cross_unit_tagged_type_compatible_inner(
                         lhs_return,
                         rhs_return,
                         seen_records,
                     )
-                    && lhs_params
-                        .iter()
-                        .zip(rhs_params)
-                        .all(|(lhs_param, rhs_param)| {
-                            self.cross_unit_tagged_type_compatible_inner(
-                                lhs_param.unqualified(),
-                                rhs_param.unqualified(),
-                                seen_records,
-                            )
-                        })
+                    && if lhs_params.is_empty() {
+                        self.function_prototype_compatible_with_unspecified_parameters(rhs_params)
+                    } else if rhs_params.is_empty() {
+                        self.function_prototype_compatible_with_unspecified_parameters(lhs_params)
+                    } else {
+                        lhs_params.len() == rhs_params.len()
+                            && lhs_params
+                                .iter()
+                                .zip(rhs_params)
+                                .all(|(lhs_param, rhs_param)| {
+                                    self.cross_unit_tagged_type_compatible_inner(
+                                        lhs_param.unqualified(),
+                                        rhs_param.unqualified(),
+                                        seen_records,
+                                    )
+                                })
+                    }
             }
             (CType::Struct(lhs_id, lhs_tag), CType::Struct(rhs_id, rhs_tag)) => self
                 .cross_unit_record_compatible(
@@ -6399,6 +8403,21 @@ impl<'a> Interpreter<'a> {
         self.pointer_target_compatible_inner(target, source, false)
     }
 
+    fn pointer_targets_are_compatible_object_types(
+        &self,
+        lhs: &CType,
+        rhs: &CType,
+        require_complete: bool,
+    ) -> bool {
+        if matches!(lhs.unqualified(), CType::Void | CType::Function(..))
+            || matches!(rhs.unqualified(), CType::Void | CType::Function(..))
+            || !self.cross_unit_tagged_type_compatible(lhs.unqualified(), rhs.unqualified())
+        {
+            return false;
+        }
+        !require_complete || (self.type_is_complete(lhs) && self.type_is_complete(rhs))
+    }
+
     fn pointer_target_compatible_inner(
         &self,
         target: &CType,
@@ -6451,7 +8470,7 @@ impl<'a> Interpreter<'a> {
                 self.cross_unit_tagged_type_compatible(target_inner, source_inner)
             }
             (CType::Array(target_inner, target_len), CType::Array(source_inner, source_len))
-                if target_len == source_len =>
+                if target_len == source_len || *target_len == 0 || *source_len == 0 =>
             {
                 self.pointer_target_compatible_inner(target_inner, source_inner, false)
             }
@@ -6538,7 +8557,7 @@ impl<'a> Interpreter<'a> {
                 && self.function_parameter_types_compatible(lhs_params, rhs_params)
                 && lhs_variadic == rhs_variadic =>
             {
-                let params = self.composite_function_parameter_types(lhs_params);
+                let params = self.composite_function_parameter_types(lhs_params, rhs_params);
                 if *lhs_variadic {
                     CType::variadic_function((**lhs_return).clone(), params)
                 } else {
@@ -6549,7 +8568,7 @@ impl<'a> Interpreter<'a> {
                 .composite_pointer_target_type_inner(lhs_inner, rhs_inner, false)
                 .map(CType::pointer_to)?,
             (CType::Array(lhs_inner, lhs_len), CType::Array(rhs_inner, rhs_len))
-                if lhs_len == rhs_len
+                if (lhs_len == rhs_len || *lhs_len == 0 || *rhs_len == 0)
                     && self
                         .composite_pointer_target_type_inner(lhs_inner, rhs_inner, false)
                         .is_some() =>
@@ -6557,7 +8576,7 @@ impl<'a> Interpreter<'a> {
                 CType::array_of(
                     self.composite_pointer_target_type_inner(lhs_inner, rhs_inner, false)
                         .expect("guard verified compatible array element types"),
-                    *lhs_len,
+                    if *lhs_len == 0 { *rhs_len } else { *lhs_len },
                 )
             }
             _ => {
@@ -6643,6 +8662,8 @@ impl<'a> Interpreter<'a> {
     }
 
     fn exec_function_declaration(&mut self, decl: &FunctionDecl, frame: &mut Frame) {
+        frame.bindings.remove(&decl.name);
+        frame.object_decls.remove(&decl.name);
         frame.function_decls.insert(decl.name.clone(), decl.clone());
     }
 
@@ -6937,12 +8958,16 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
         span: Span,
     ) -> Result<Vec<ProgramStateBox>, Diagnostic> {
-        let mut bindings = frame
-            .bindings
-            .iter()
-            .filter(|(name, _)| !name.is_empty() && !name.starts_with("__codex_"))
-            .map(|(name, object)| (*object, name.as_str()))
-            .collect::<Vec<_>>();
+        let mut bindings = self.cboxes_visible_global_bindings(frame);
+        bindings.extend(
+            frame
+                .bindings
+                .iter()
+                .filter(|(name, _)| {
+                    !name.is_empty() && name.as_str() != "__func__" && !name.starts_with("__codex_")
+                })
+                .map(|(name, object)| (*object, name.as_str())),
+        );
         bindings.sort_by_key(|(object, _)| object.0);
 
         let mut state = Vec::new();
@@ -6960,6 +8985,47 @@ impl<'a> Interpreter<'a> {
         Ok(state)
     }
 
+    fn cboxes_visible_global_bindings<'b>(&'b self, frame: &Frame) -> Vec<(ObjectId, &'b str)> {
+        let Some(function) = self.current_functions.last() else {
+            return Vec::new();
+        };
+        let Some(visible) = self
+            .function_visible_global_declarations
+            .get(&function.name)
+        else {
+            return Vec::new();
+        };
+
+        self.program
+            .global_definitions
+            .iter()
+            .filter(|definition| {
+                !definition.name.is_empty()
+                    && !definition.name.starts_with("__codex_")
+                    && !frame.bindings.contains_key(&definition.name)
+                    && visible.get(&definition.name).is_some_and(|declaration| {
+                        if definition.linkage == Some(Linkage::Internal) {
+                            declaration.linkage == Some(Linkage::Internal)
+                                && declaration.span.file == definition.span.file
+                        } else {
+                            declaration.linkage != Some(Linkage::Internal)
+                        }
+                    })
+            })
+            .filter_map(|definition| {
+                let object = if definition.linkage == Some(Linkage::Internal) {
+                    self.internal_global_bindings
+                        .get(&definition.span.file)
+                        .and_then(|bindings| bindings.get(&definition.name))
+                        .copied()
+                } else {
+                    self.global_bindings.get(&definition.name).copied()
+                }?;
+                Some((object, definition.name.as_str()))
+            })
+            .collect()
+    }
+
     fn cboxes_push_object_state(
         &self,
         state: &mut Vec<ProgramStateBox>,
@@ -6968,20 +9034,67 @@ impl<'a> Interpreter<'a> {
         base_address: Option<u64>,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        if let CType::Array(_, _) = object.ty.unqualified() {
-            let shape = cboxes_array_shape(&object.ty);
+        let decoded_value;
+        let value = if let StoredValue::ObjectRepresentation(bytes) = &object.value {
+            decoded_value = self.deserialize_stored_value(&object.ty, bytes, span)?;
+            &decoded_value
+        } else {
+            &object.value
+        };
+        self.cboxes_push_subobject_state(
+            state,
+            name,
+            &object.ty,
+            value,
+            base_address,
+            None,
+            &[],
+            span,
+        )
+    }
+
+    fn cboxes_push_subobject_state(
+        &self,
+        state: &mut Vec<ProgramStateBox>,
+        name: &str,
+        ty: &CType,
+        value: &StoredValue,
+        address: Option<u64>,
+        aggregate_root: Option<&str>,
+        aggregate_path: &[String],
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if let StoredValue::ObjectRepresentation(bytes) = value {
+            let decoded = self.deserialize_stored_value(ty, bytes, span)?;
+            return self.cboxes_push_subobject_state(
+                state,
+                name,
+                ty,
+                &decoded,
+                address,
+                aggregate_root,
+                aggregate_path,
+                span,
+            );
+        }
+
+        if matches!(ty.unqualified(), CType::Array(_, _)) {
+            let shape = cboxes_array_shape(ty);
             state.push(ProgramStateBox {
                 name: name.to_owned(),
-                ty: cboxes_type_string(&object.ty),
+                ty: cboxes_type_string(ty),
                 value: String::new(),
                 display_value: String::new(),
                 exact_value: String::new(),
-                address: base_address,
+                address,
                 array_root: None,
                 array_shape: shape.clone(),
                 array_indices: Vec::new(),
+                aggregate_root: aggregate_root.map(str::to_owned),
+                aggregate_path: aggregate_path.to_vec(),
+                aggregate_kind: None,
                 aliases: Vec::new(),
-                type_info: self.cboxes_type_info(&object.ty),
+                type_info: self.cboxes_type_info(ty),
             });
             if shape
                 .iter()
@@ -6990,49 +9103,228 @@ impl<'a> Interpreter<'a> {
             {
                 return Ok(());
             }
-            let decoded_value;
-            let display_value = if let StoredValue::ObjectRepresentation(bytes) = &object.value {
-                decoded_value = self.deserialize_stored_value(&object.ty, bytes, span)?;
-                &decoded_value
-            } else {
-                &object.value
-            };
             self.cboxes_push_array_elements(
                 state,
                 name,
-                &object.ty,
-                display_value,
-                base_address,
+                ty,
+                value,
+                address,
                 &shape,
                 &mut Vec::new(),
+                aggregate_root,
+                aggregate_path,
                 span,
             )?;
             return Ok(());
         }
 
-        let decoded_value;
-        let display_value = if let StoredValue::ObjectRepresentation(bytes) = &object.value {
-            decoded_value = self.deserialize_stored_value(&object.ty, bytes, span)?;
-            &decoded_value
-        } else {
-            &object.value
-        };
-        let value = self.cboxes_stored_value_string(&object.ty, display_value, span)?;
-        let (display_value, exact_value) = self.cboxes_value_display_strings(&value, &object.ty);
+        if matches!(ty.unqualified(), CType::Struct(_, _) | CType::Union(_, _)) {
+            return self.cboxes_push_aggregate_state(
+                state,
+                name,
+                ty,
+                value,
+                address,
+                aggregate_root,
+                aggregate_path,
+                span,
+            );
+        }
+
+        let value = self.cboxes_stored_value_string(ty, value, span)?;
+        let (display_value, exact_value) = self.cboxes_value_display_strings(&value, ty);
         state.push(ProgramStateBox {
             name: name.to_owned(),
-            ty: cboxes_type_string(&object.ty),
+            ty: cboxes_type_string(ty),
             value,
             display_value,
             exact_value,
-            address: base_address,
+            address,
             array_root: None,
             array_shape: Vec::new(),
             array_indices: Vec::new(),
+            aggregate_root: aggregate_root.map(str::to_owned),
+            aggregate_path: aggregate_path.to_vec(),
+            aggregate_kind: None,
             aliases: Vec::new(),
-            type_info: self.cboxes_type_info(&object.ty),
+            type_info: self.cboxes_type_info(ty),
         });
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cboxes_push_aggregate_state(
+        &self,
+        state: &mut Vec<ProgramStateBox>,
+        name: &str,
+        ty: &CType,
+        value: &StoredValue,
+        address: Option<u64>,
+        aggregate_root: Option<&str>,
+        aggregate_path: &[String],
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let kind = match ty.unqualified() {
+            CType::Struct(_, _) => "struct",
+            CType::Union(_, _) => "union",
+            _ => return Ok(()),
+        };
+        let unknown_union_member = matches!(
+            value,
+            StoredValue::Union {
+                active_member: None,
+                ..
+            }
+        );
+        let status = if unknown_union_member {
+            "active member unknown"
+        } else {
+            ""
+        };
+        state.push(ProgramStateBox {
+            name: name.to_owned(),
+            ty: cboxes_type_string(ty),
+            value: status.to_owned(),
+            display_value: status.to_owned(),
+            exact_value: status.to_owned(),
+            address,
+            array_root: None,
+            array_shape: Vec::new(),
+            array_indices: Vec::new(),
+            aggregate_root: aggregate_root.map(str::to_owned),
+            aggregate_path: aggregate_path.to_vec(),
+            aggregate_kind: Some(kind.to_owned()),
+            aliases: Vec::new(),
+            type_info: self.cboxes_type_info(ty),
+        });
+
+        let root_name = aggregate_root.unwrap_or(name);
+        self.cboxes_push_aggregate_members(
+            state,
+            root_name,
+            name,
+            ty,
+            value,
+            address,
+            aggregate_path,
+            span,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cboxes_push_aggregate_members(
+        &self,
+        state: &mut Vec<ProgramStateBox>,
+        root_name: &str,
+        parent_name: &str,
+        ty: &CType,
+        value: &StoredValue,
+        address: Option<u64>,
+        aggregate_path: &[String],
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        match (ty.unqualified(), value) {
+            (CType::Struct(_, _), StoredValue::Record(values)) => {
+                let Some(record) = self.record_type(ty) else {
+                    return Ok(());
+                };
+                for member in &record.members {
+                    let Some((_, member_value)) = values
+                        .iter()
+                        .find(|(name, _)| name.as_ref() == member.storage_name)
+                    else {
+                        continue;
+                    };
+                    self.cboxes_push_aggregate_member(
+                        state,
+                        root_name,
+                        parent_name,
+                        ty,
+                        member,
+                        member_value,
+                        address,
+                        aggregate_path,
+                        span,
+                    )?;
+                }
+            }
+            (
+                CType::Union(_, _),
+                StoredValue::Union {
+                    active_member: Some(active),
+                    ..
+                },
+            ) => {
+                let Some(member) = self.direct_member_by_storage_name(ty, active) else {
+                    return Ok(());
+                };
+                let member_value = self.extract_union_member(value, ty, member, span)?;
+                self.cboxes_push_aggregate_member(
+                    state,
+                    root_name,
+                    parent_name,
+                    ty,
+                    member,
+                    &member_value,
+                    address,
+                    aggregate_path,
+                    span,
+                )?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cboxes_push_aggregate_member(
+        &self,
+        state: &mut Vec<ProgramStateBox>,
+        root_name: &str,
+        parent_name: &str,
+        parent_ty: &CType,
+        member: &RecordMember,
+        member_value: &StoredValue,
+        address: Option<u64>,
+        aggregate_path: &[String],
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if member.bit_width == Some(0) || (member.name.is_none() && member.bit_width.is_some()) {
+            return Ok(());
+        }
+        let member_ty = self.qualified_member_type(parent_ty, member);
+        let member_address = address.and_then(|base| base.checked_add(member.offset as u64));
+        let Some(member_name) = &member.name else {
+            if matches!(
+                member_ty.unqualified(),
+                CType::Struct(_, _) | CType::Union(_, _)
+            ) {
+                self.cboxes_push_aggregate_members(
+                    state,
+                    root_name,
+                    parent_name,
+                    &member_ty,
+                    member_value,
+                    member_address,
+                    aggregate_path,
+                    span,
+                )?;
+            }
+            return Ok(());
+        };
+        let name = format!("{parent_name}.{member_name}");
+        let mut path = aggregate_path.to_vec();
+        path.push(member_name.clone());
+        self.cboxes_push_subobject_state(
+            state,
+            &name,
+            &member_ty,
+            member_value,
+            member_address,
+            Some(root_name),
+            &path,
+            span,
+        )
     }
 
     fn cboxes_push_array_elements(
@@ -7044,6 +9336,8 @@ impl<'a> Interpreter<'a> {
         address: Option<u64>,
         shape: &[usize],
         indices: &mut Vec<usize>,
+        aggregate_root: Option<&str>,
+        aggregate_path: &[String],
         span: Span,
     ) -> Result<(), Diagnostic> {
         let CType::Array(inner, _) = ty.unqualified() else {
@@ -7059,6 +9353,9 @@ impl<'a> Interpreter<'a> {
                 array_root: Some(root_name.to_owned()),
                 array_shape: shape.to_vec(),
                 array_indices: indices.clone(),
+                aggregate_root: aggregate_root.map(str::to_owned),
+                aggregate_path: aggregate_path.to_vec(),
+                aggregate_kind: None,
                 aliases: Vec::new(),
                 type_info: self.cboxes_type_info(ty),
             });
@@ -7081,6 +9378,8 @@ impl<'a> Interpreter<'a> {
                 element_address,
                 shape,
                 indices,
+                aggregate_root,
+                aggregate_path,
                 span,
             )?;
             indices.pop();
@@ -7091,6 +9390,9 @@ impl<'a> Interpreter<'a> {
     fn cboxes_type_info(&self, ty: &CType) -> ProgramTypeInfo {
         ProgramTypeInfo {
             kind: cboxes_type_kind(ty).to_owned(),
+            help: cboxes_type_help(ty),
+            help_type_names: cboxes_type_help_type_names(ty),
+            help_tree: cboxes_type_help_tree(ty),
             pointer_depth: cboxes_pointer_depth(ty),
             array_shape: cboxes_array_shape(ty),
             pointee_array_shape: cboxes_pointee_array_shape(ty),
@@ -7166,10 +9468,85 @@ impl<'a> Interpreter<'a> {
             StoredValue::Scalar(value) if value.indeterminate => Ok(String::new()),
             StoredValue::Scalar(value) => self.cboxes_typed_value_string(value, ty, span),
             StoredValue::Indeterminate => Ok(String::new()),
-            StoredValue::Array(_)
-            | StoredValue::ObjectRepresentation(_)
-            | StoredValue::Record(_)
-            | StoredValue::Union { .. } => Ok(String::new()),
+            StoredValue::ObjectRepresentation(bytes) => {
+                let decoded = self.deserialize_stored_value(ty, bytes, span)?;
+                if matches!(
+                    decoded,
+                    StoredValue::Scalar(TypedValue {
+                        data: ValueData::ObjectRepresentation(_),
+                        ..
+                    })
+                ) {
+                    return Ok(String::new());
+                }
+                self.cboxes_stored_value_string(ty, &decoded, span)
+            }
+            StoredValue::Array(elements) => {
+                let CType::Array(element_ty, _) = ty.unqualified() else {
+                    return Ok(String::new());
+                };
+                let values = elements
+                    .iter()
+                    .map(|element| {
+                        self.cboxes_aggregate_component_string(element_ty, element, span)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(format!("{{ {} }}", values.join(", ")))
+            }
+            StoredValue::Record(values) => {
+                let Some(record) = self.record_type(ty) else {
+                    return Ok(String::new());
+                };
+                let mut members = Vec::new();
+                for member in &record.members {
+                    if member.bit_width == Some(0)
+                        || (member.name.is_none() && member.bit_width.is_some())
+                    {
+                        continue;
+                    }
+                    let Some((_, value)) = values
+                        .iter()
+                        .find(|(name, _)| name.as_ref() == member.storage_name)
+                    else {
+                        continue;
+                    };
+                    let value = self.cboxes_aggregate_component_string(&member.ty, value, span)?;
+                    if let Some(name) = &member.name {
+                        members.push(format!(".{name} = {value}"));
+                    } else {
+                        members.push(value);
+                    }
+                }
+                Ok(format!("{{ {} }}", members.join(", ")))
+            }
+            StoredValue::Union { active_member, .. } => {
+                let Some(active_member) = active_member else {
+                    return Ok("{ active member unknown }".to_owned());
+                };
+                let Some(member) = self.direct_member_by_storage_name(ty, active_member) else {
+                    return Ok("{ active member unknown }".to_owned());
+                };
+                let value = self.extract_union_member(value, ty, member, span)?;
+                let value = self.cboxes_aggregate_component_string(&member.ty, &value, span)?;
+                Ok(match &member.name {
+                    Some(name) => format!("{{ .{name} = {value} }}"),
+                    None => format!("{{ {value} }}"),
+                })
+            }
+        }
+    }
+
+    fn cboxes_aggregate_component_string(
+        &self,
+        ty: &CType,
+        value: &StoredValue,
+        span: Span,
+    ) -> Result<String, Diagnostic> {
+        let value = self.cboxes_stored_value_string(ty, value, span)?;
+        if value.is_empty() {
+            Ok("?".to_owned())
+        } else {
+            Ok(self.cboxes_value_display_strings(&value, ty).0)
         }
     }
 
@@ -7183,9 +9560,9 @@ impl<'a> Interpreter<'a> {
             ValueData::Void => Ok(String::new()),
             ValueData::Int(value) => Ok(value.to_string()),
             ValueData::Float(value) => Ok(cboxes_float_string(*value)),
-            ValueData::Complex(_)
-            | ValueData::Aggregate(_)
-            | ValueData::ObjectRepresentation(_) => Ok(String::new()),
+            ValueData::Aggregate(value) => self.cboxes_stored_value_string(ty, value, span),
+            ValueData::ObjectRepresentation(_) => Ok(String::new()),
+            ValueData::Complex(_) => Ok(String::new()),
             ValueData::Function(_) => Ok(String::new()),
             ValueData::Pointer(pointer) => {
                 if pointer.is_null() {
@@ -7211,13 +9588,16 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<(), Diagnostic> {
         if decl.storage_class == Some(StorageClass::Extern) {
+            frame.bindings.remove(&decl.name);
+            frame.function_decls.remove(&decl.name);
+            frame.object_decls.insert(decl.name.clone(), decl.clone());
             return Ok(());
         }
         let resolved_ty =
             self.resolve_decl_type(&decl.ty, &decl.vla_bounds, frame, objects, decl.span)?;
         if matches!(resolved_ty.unqualified(), CType::Void | CType::Function(..)) {
             return Err(Diagnostic::error(
-                "object type cannot be void or function",
+                format!("an object cannot have type {resolved_ty}"),
                 decl.span,
             ));
         }
@@ -7233,7 +9613,10 @@ impl<'a> Interpreter<'a> {
         if !self.type_is_complete(&resolved_ty)
             && !matches!(resolved_ty.unqualified(), CType::Array(_, 0) if decl.init.is_some())
         {
-            return Err(Diagnostic::error("object type must be complete", decl.span));
+            return Err(Diagnostic::error(
+                format!("object definition has incomplete type {resolved_ty}"),
+                decl.span,
+            ));
         }
         let (object, static_zero, reused_automatic) =
             if decl.storage_class == Some(StorageClass::Static) {
@@ -7289,6 +9672,9 @@ impl<'a> Interpreter<'a> {
                     false,
                 )
             };
+        self.ensure_object_alignment(object, &resolved_ty, decl.alignment);
+        frame.object_decls.remove(&decl.name);
+        frame.function_decls.remove(&decl.name);
         frame.bindings.insert(decl.name.clone(), object);
         if (!reused_automatic || decl.init.is_some())
             && (decl.storage_class != Some(StorageClass::Static)
@@ -7490,6 +9876,7 @@ impl<'a> Interpreter<'a> {
         };
 
         let saved_bindings = frame.bindings.clone();
+        let saved_object_decls = frame.object_decls.clone();
         let saved_function_decls = frame.function_decls.clone();
         let existing_objects = objects
             .last()
@@ -7502,6 +9889,7 @@ impl<'a> Interpreter<'a> {
             if index >= block.items.len() {
                 self.retire_block_objects(objects, &existing_objects);
                 frame.bindings = saved_bindings;
+                frame.object_decls = saved_object_decls;
                 frame.function_decls = saved_function_decls;
                 return Ok(Some(Flow::Continue));
             }
@@ -7540,6 +9928,7 @@ impl<'a> Interpreter<'a> {
                     } else {
                         self.retire_block_objects(objects, &existing_objects);
                         frame.bindings = saved_bindings;
+                        frame.object_decls = saved_object_decls;
                         frame.function_decls = saved_function_decls;
                         return Ok(Some(Flow::Goto(target, span)));
                     }
@@ -7547,6 +9936,7 @@ impl<'a> Interpreter<'a> {
                 flow => {
                     self.retire_block_objects(objects, &existing_objects);
                     frame.bindings = saved_bindings;
+                    frame.object_decls = saved_object_decls;
                     frame.function_decls = saved_function_decls;
                     return Ok(Some(flow));
                 }
@@ -8412,6 +10802,7 @@ impl<'a> Interpreter<'a> {
             return Ok(None);
         };
         let saved_bindings = frame.bindings.clone();
+        let saved_object_decls = frame.object_decls.clone();
         let saved_function_decls = frame.function_decls.clone();
         let existing_objects = objects
             .last()
@@ -8423,6 +10814,7 @@ impl<'a> Interpreter<'a> {
             if index >= block.items.len() {
                 self.retire_block_objects(objects, &existing_objects);
                 frame.bindings = saved_bindings;
+                frame.object_decls = saved_object_decls;
                 frame.function_decls = saved_function_decls;
                 return Ok(Some(Flow::Continue));
             }
@@ -8449,6 +10841,7 @@ impl<'a> Interpreter<'a> {
                 flow => {
                     self.retire_block_objects(objects, &existing_objects);
                     frame.bindings = saved_bindings;
+                    frame.object_decls = saved_object_decls;
                     frame.function_decls = saved_function_decls;
                     return Ok(Some(flow));
                 }
@@ -8593,6 +10986,7 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<Flow, Diagnostic> {
         let saved_bindings = frame.bindings.clone();
+        let saved_object_decls = frame.object_decls.clone();
         let saved_function_decls = frame.function_decls.clone();
         if let Some(init) = init {
             match init {
@@ -8619,6 +11013,7 @@ impl<'a> Interpreter<'a> {
                 )?;
                 if !self.scalar_truthy(&cond, condition.span())? {
                     frame.bindings = saved_bindings;
+                    frame.object_decls = saved_object_decls;
                     frame.function_decls = saved_function_decls;
                     return Ok(Flow::Continue);
                 }
@@ -8627,11 +11022,13 @@ impl<'a> Interpreter<'a> {
                 Flow::Continue | Flow::LoopContinue => {}
                 Flow::LoopBreak => {
                     frame.bindings = saved_bindings;
+                    frame.object_decls = saved_object_decls;
                     frame.function_decls = saved_function_decls;
                     return Ok(Flow::Continue);
                 }
                 flow => {
                     frame.bindings = saved_bindings;
+                    frame.object_decls = saved_object_decls;
                     frame.function_decls = saved_function_decls;
                     return Ok(flow);
                 }
@@ -8728,6 +11125,14 @@ impl<'a> Interpreter<'a> {
                 self.wchar_type(),
                 *value as i128,
             ))),
+            Expr::Utf16CharLiteral(value, _) => Ok(ValueCategory::RValue(TypedValue::integer(
+                CType::UnsignedShort,
+                *value as i128,
+            ))),
+            Expr::Utf32CharLiteral(value, _) => Ok(ValueCategory::RValue(TypedValue::integer(
+                CType::UnsignedInt,
+                *value as i128,
+            ))),
             Expr::StringLiteral(text, _) => {
                 let pointer = self.intern_string_literal(text);
                 let object = pointer.object.expect("string literal has an object");
@@ -8760,13 +11165,62 @@ impl<'a> Interpreter<'a> {
                     restrict_source: None,
                 }))
             }
+            Expr::Utf16StringLiteral(text, span) => {
+                self.eval_unicode_string_literal(text, true, *span, objects)
+            }
+            Expr::Utf32StringLiteral(text, span) => {
+                self.eval_unicode_string_literal(text, false, *span, objects)
+            }
             Expr::Variable(name, span) => {
-                if let Some(object) = frame
-                    .bindings
-                    .get(name)
-                    .copied()
-                    .or_else(|| self.lookup_global_binding(name, span.file))
-                {
+                if let Some(object) = frame.bindings.get(name).copied() {
+                    let ty = self.lookup_object(objects, object).unwrap().ty.clone();
+                    Ok(ValueCategory::LValue(LValue {
+                        object,
+                        ty,
+                        base_offset: 0,
+                        offset: 0,
+                        member_path: Vec::new(),
+                        designated_root_ty: None,
+                        byte_offset_override: None,
+                        bit_field_width: None,
+                        restrict_source: None,
+                    }))
+                } else if let Some(decl) = frame.object_decls.get(name) {
+                    let Some(object) = self.lookup_global_binding(name, span.file) else {
+                        return Err(self.missing_definition_use_diag(name, *span));
+                    };
+                    Ok(ValueCategory::LValue(LValue {
+                        object,
+                        ty: decl.ty.clone(),
+                        base_offset: 0,
+                        offset: 0,
+                        member_path: Vec::new(),
+                        designated_root_ty: None,
+                        byte_offset_override: None,
+                        bit_field_width: None,
+                        restrict_source: None,
+                    }))
+                } else if let Some(function_decl) = frame.function_decls.get(name) {
+                    if let Some(function) = self.lookup_function(name, span.file) {
+                        Ok(ValueCategory::RValue(TypedValue {
+                            ty: self.function_declaration_type(function_decl),
+                            data: ValueData::Function(function_symbol(function)),
+                            restrict_source: None,
+                            indeterminate: false,
+                            missing_return: false,
+                        }))
+                    } else if Self::is_host_library_function(name) {
+                        Ok(ValueCategory::RValue(TypedValue {
+                            ty: self.function_declaration_type(function_decl),
+                            data: ValueData::Function(name.clone()),
+                            restrict_source: None,
+                            indeterminate: false,
+                            missing_return: false,
+                        }))
+                    } else {
+                        Err(self.missing_definition_use_diag(name, *span))
+                    }
+                } else if let Some(object) = self.lookup_global_binding(name, span.file) {
                     let ty = self.lookup_object(objects, object).unwrap().ty.clone();
                     Ok(ValueCategory::LValue(LValue {
                         object,
@@ -8783,18 +11237,6 @@ impl<'a> Interpreter<'a> {
                     Ok(ValueCategory::RValue(
                         self.function_designator_value(function),
                     ))
-                } else if let Some(function_decl) = frame.function_decls.get(name) {
-                    if Self::is_host_library_function(name) {
-                        Ok(ValueCategory::RValue(TypedValue {
-                            ty: self.function_declaration_type(function_decl),
-                            data: ValueData::Function(name.clone()),
-                            restrict_source: None,
-                            indeterminate: false,
-                            missing_return: false,
-                        }))
-                    } else {
-                        Err(self.missing_definition_use_diag(name, *span))
-                    }
                 } else if let Some(function_decl) =
                     self.lookup_function_declaration(name, span.file)
                 {
@@ -8843,16 +11285,26 @@ impl<'a> Interpreter<'a> {
                     ValueCategory::LValue(lvalue) => lvalue,
                     ValueCategory::RValue(_) => {
                         return Err(Diagnostic::error(
-                            "left operand of assignment is not assignable",
+                            "the left side of = is not a stored object that can be changed",
                             *span,
                         ));
                     }
                 };
-                if self.type_has_const_subobject(&lvalue.ty)
-                    || matches!(lvalue.ty.unqualified(), CType::Array(_, _) | CType::Void)
-                {
+                if matches!(lvalue.ty.unqualified(), CType::Array(..)) {
                     return Err(Diagnostic::error(
-                        "left operand of assignment is not a modifiable lvalue",
+                        "arrays cannot be assigned; assign their elements individually",
+                        *span,
+                    ));
+                }
+                if self.type_has_const_subobject(&lvalue.ty) {
+                    return Err(Diagnostic::error(
+                        "the left side of = is const and cannot be changed",
+                        *span,
+                    ));
+                }
+                if matches!(lvalue.ty.unqualified(), CType::Void) {
+                    return Err(Diagnostic::error(
+                        "the left side of = has type void and cannot store a value",
                         *span,
                     ));
                 }
@@ -8860,8 +11312,14 @@ impl<'a> Interpreter<'a> {
                 self.push_assignment_target(assignment_target, AssignmentTargetKind::Simple);
                 let rhs_value = self.eval_rvalue(rhs, frame, objects)?;
                 self.pop_assignment_target();
-                let converted = self
-                    .convert_value_in_context(rhs, rhs_value, &lvalue.ty, *span, frame, objects)?;
+                let converted = self.convert_value_in_context(
+                    rhs,
+                    rhs_value,
+                    &lvalue.ty,
+                    rhs.span(),
+                    frame,
+                    objects,
+                )?;
                 self.store_lvalue(objects, &lvalue, converted.clone(), *span)?;
                 Ok(ValueCategory::RValue(converted))
             }
@@ -8870,20 +11328,26 @@ impl<'a> Interpreter<'a> {
                     ValueCategory::LValue(lvalue) => lvalue,
                     ValueCategory::RValue(_) => {
                         return Err(Diagnostic::error(
-                            "left operand of assignment is not assignable",
+                            "the left side of this assignment is not a stored object that can be changed",
                             *span,
                         ));
                     }
                 };
-                if matches!(lvalue.ty.unqualified(), CType::Array(_, _) | CType::Void) {
+                if matches!(lvalue.ty.unqualified(), CType::Array(..)) {
                     return Err(Diagnostic::error(
-                        "left operand of compound assignment is not a modifiable scalar",
+                        "arrays cannot be assigned; assign their elements individually",
                         *span,
                     ));
                 }
                 if lvalue.ty.is_const_qualified() {
                     return Err(Diagnostic::error(
-                        "left operand of compound assignment is not a modifiable scalar",
+                        "the left side of this assignment is const and cannot be changed",
+                        *span,
+                    ));
+                }
+                if matches!(lvalue.ty.unqualified(), CType::Void) {
+                    return Err(Diagnostic::error(
+                        "the left side of this assignment has type void and cannot store a value",
                         *span,
                     ));
                 }
@@ -8932,6 +11396,11 @@ impl<'a> Interpreter<'a> {
             } => {
                 let resolved_ty = self.resolve_decl_type(ty, vla_bounds, frame, objects, *span)?;
                 let value = self.eval_rvalue(expr, frame, objects)?;
+                if matches!(resolved_ty.unqualified(), CType::Void) {
+                    self.reject_missing_return_value(&value, *span)?;
+                    self.reject_indeterminate_pointer_use(&value, *span)?;
+                    return Ok(ValueCategory::RValue(TypedValue::void()));
+                }
                 self.check_pointer_cast_ub(&value, &resolved_ty, *span, objects)?;
                 let converted = self.convert_value(value, &resolved_ty, *span)?;
                 Ok(ValueCategory::RValue(
@@ -8999,9 +11468,19 @@ impl<'a> Interpreter<'a> {
                 self.merge_sequenced_footprint(condition_footprint);
                 Ok(result)
             }
-            Expr::Call { callee, args, span } => {
-                self.eval_call(callee, args, *span, frame, objects)
-            }
+            Expr::Call {
+                callee,
+                args,
+                declared_callee_type,
+                span,
+            } => self.eval_call(
+                callee,
+                args,
+                declared_callee_type.as_ref(),
+                *span,
+                frame,
+                objects,
+            ),
             Expr::Member { base, member, span } => {
                 self.eval_member(base, member, *span, frame, objects)
             }
@@ -9032,7 +11511,10 @@ impl<'a> Interpreter<'a> {
                     self.reject_indeterminate_pointer_use(&value, span)?;
                     if value.ty.element_type().is_none() {
                         return Err(Diagnostic::error(
-                            "operand of * must have pointer type",
+                            format!(
+                                "the * operator requires a pointer, but this expression has type {}",
+                                value.ty
+                            ),
                             span,
                         ));
                     }
@@ -9084,9 +11566,10 @@ impl<'a> Interpreter<'a> {
                             missing_return: false,
                         }))
                     }
-                    ValueCategory::RValue(_) => {
-                        Err(Diagnostic::error("operand of & must be an lvalue", span))
-                    }
+                    ValueCategory::RValue(_) => Err(Diagnostic::error(
+                        "the & operator requires an object or function; a temporary value does not have an address",
+                        span,
+                    )),
                 }
             }
             UnaryOp::Dereference => {
@@ -9172,7 +11655,15 @@ impl<'a> Interpreter<'a> {
             .element_type()
             .cloned()
             .filter(|_| value.ty.is_pointer())
-            .ok_or_else(|| Diagnostic::error("operand of * must have pointer type", span))?;
+            .ok_or_else(|| {
+                Diagnostic::error(
+                    format!(
+                        "the * operator requires a pointer, but this expression has type {}",
+                        value.ty
+                    ),
+                    span,
+                )
+            })?;
         if ty.is_function() {
             return match value.data {
                 ValueData::Function(name) => Ok(ValueCategory::RValue(TypedValue {
@@ -9277,6 +11768,11 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<ValueCategory, Diagnostic> {
+        let base_ty = self.value_expr_type(base, frame, objects)?;
+        let index_ty = self.value_expr_type(index, frame, objects)?;
+        if base_ty.is_integer() && index_ty.is_pointer() {
+            return self.eval_subscript(index, base, span, frame, objects);
+        }
         let base_span = base.span();
         let base = self.eval(base, frame, objects)?;
         let index_value = self.eval_rvalue(index, frame, objects)?;
@@ -9350,6 +11846,11 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<ValueCategory, Diagnostic> {
+        let base_ty = self.value_expr_type(base, frame, objects)?;
+        let index_ty = self.value_expr_type(index, frame, objects)?;
+        if base_ty.is_integer() && index_ty.is_pointer() {
+            return self.eval_subscript_address(index, base, span, frame, objects);
+        }
         let base_span = base.span();
         let base = self.eval(base, frame, objects)?;
         let index_value = self.eval_rvalue(index, frame, objects)?;
@@ -9627,20 +12128,20 @@ impl<'a> Interpreter<'a> {
             ValueCategory::LValue(lvalue) => lvalue,
             ValueCategory::RValue(_) => {
                 return Err(Diagnostic::error(
-                    "operand of increment or decrement must be a modifiable lvalue",
+                    "++ and -- require a changeable arithmetic variable or pointer",
                     span,
                 ));
             }
         };
         if !(lvalue.ty.is_integer() || lvalue.ty.is_floating() || lvalue.ty.is_pointer()) {
             return Err(Diagnostic::error(
-                "increment and decrement require a real arithmetic or pointer operand",
+                "++ and -- require a numeric variable or pointer",
                 span,
             ));
         }
         if lvalue.ty.is_const_qualified() {
             return Err(Diagnostic::error(
-                "operand of increment or decrement must be a modifiable lvalue",
+                "++ and -- require a changeable arithmetic variable or pointer",
                 span,
             ));
         }
@@ -9742,6 +12243,7 @@ impl<'a> Interpreter<'a> {
         &mut self,
         callee: &Expr,
         args: &[Expr],
+        declared_callee_type: Option<&CType>,
         span: Span,
         frame: &mut Frame,
         objects: &mut ObjectFrames,
@@ -9757,7 +12259,13 @@ impl<'a> Interpreter<'a> {
                 return Ok(ValueCategory::RValue(value));
             }
         }
-        let callee_value = self.eval_rvalue(callee, frame, objects)?;
+        let mut callee_value = self.eval_rvalue(callee, frame, objects)?;
+        if let Some(declared_callee_type) = declared_callee_type {
+            callee_value.ty = match declared_callee_type.unqualified() {
+                CType::Function(..) => CType::pointer_to(declared_callee_type.clone()),
+                _ => declared_callee_type.clone(),
+            };
+        }
         self.reject_missing_return_value(&callee_value, span)?;
         let function_name = match callee_value.data {
             ValueData::Function(name) => name,
@@ -9771,6 +12279,7 @@ impl<'a> Interpreter<'a> {
             _ => return Err(Diagnostic::error("unsupported call target", span)),
         };
         let (_, params, is_variadic) = self.call_target_signature(&callee_value.ty, span)?;
+        let has_prototype = !params.is_empty();
         let mut evaluated = Vec::new();
         for arg in args {
             evaluated.push(self.eval_rvalue(arg, frame, objects)?);
@@ -9781,7 +12290,7 @@ impl<'a> Interpreter<'a> {
         } else {
             params.len()
         };
-        if !is_variadic && fixed_param_count != args.len() {
+        if has_prototype && !is_variadic && fixed_param_count != args.len() {
             return Err(Diagnostic::error(
                 format!(
                     "function {} expected {} argument(s), got {}",
@@ -9792,7 +12301,7 @@ impl<'a> Interpreter<'a> {
                 span,
             ));
         }
-        if is_variadic && args.len() < fixed_param_count {
+        if has_prototype && is_variadic && args.len() < fixed_param_count {
             return Err(Diagnostic::error(
                 format!(
                     "function {} expected {}+ argument(s), got {}",
@@ -9803,7 +12312,7 @@ impl<'a> Interpreter<'a> {
                 span,
             ));
         }
-        if args.len() >= fixed_param_count {
+        if has_prototype && args.len() >= fixed_param_count {
             for ((param_ty, expr), value) in
                 params.iter().zip(args.iter()).zip(evaluated.iter_mut())
             {
@@ -9826,35 +12335,47 @@ impl<'a> Interpreter<'a> {
                     *value = self.default_argument_promotion(value.clone(), args[index].span())?;
                 }
             }
+        } else if !has_prototype {
+            for (index, value) in evaluated.iter_mut().enumerate() {
+                *value = self.default_argument_promotion(value.clone(), args[index].span())?;
+            }
         }
 
         if let Some(function) = self.lookup_function_symbol(&function_name).cloned() {
+            let actual_params = function
+                .params
+                .iter()
+                .map(|param| {
+                    if function.has_prototype {
+                        Ok(param.ty.clone())
+                    } else if matches!(param.ty.unqualified(), CType::Float) {
+                        Ok(CType::Double)
+                    } else if param.ty.is_integer() {
+                        self.promoted_integer_type(&param.ty, param.span)
+                    } else {
+                        Ok(param.ty.clone())
+                    }
+                })
+                .collect::<Result<Vec<_>, Diagnostic>>()?;
             let actual_type = if function.is_variadic {
-                CType::variadic_function(
-                    function.return_type.clone(),
-                    function
-                        .params
-                        .iter()
-                        .map(|param| param.ty.clone())
-                        .collect(),
-                )
+                CType::variadic_function(function.return_type.clone(), actual_params)
             } else {
-                CType::function(
-                    function.return_type.clone(),
-                    function
-                        .params
-                        .iter()
-                        .map(|param| param.ty.clone())
-                        .collect(),
-                )
+                CType::function(function.return_type.clone(), actual_params)
             };
             let called_type = callee_value.ty.element_type().unwrap_or(&callee_value.ty);
-            if !self.cross_unit_tagged_type_compatible(called_type, &actual_type) {
+            if has_prototype && !self.cross_unit_tagged_type_compatible(called_type, &actual_type) {
                 return Err(Diagnostic::ub(
                     "call through a function pointer whose type is incompatible with the function definition",
                     span,
                     Some("6.5.2.2p9"),
                 ));
+            }
+            if !has_prototype {
+                self.validate_unprototyped_call_against_definition(
+                    function.as_ref(),
+                    &evaluated,
+                    span,
+                )?;
             }
             let value = self.call_function(
                 function.as_ref(),
@@ -9888,6 +12409,72 @@ impl<'a> Interpreter<'a> {
             format!("call to undefined function {}", function_name),
             span,
         ))
+    }
+
+    fn validate_unprototyped_call_against_definition(
+        &self,
+        function: &FunctionDef,
+        args: &[TypedValue],
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let params = if function.params.len() == 1 && function.params[0].ty == CType::Void {
+            &[][..]
+        } else {
+            function.params.as_slice()
+        };
+        if function.is_variadic || params.len() != args.len() {
+            return Err(Diagnostic::ub(
+                format!(
+                    "call without a prototype supplies {} argument(s), but the definition of {} has {} parameter(s)",
+                    args.len(),
+                    function.name,
+                    params.len()
+                ),
+                span,
+                Some("6.5.2.2p6"),
+            ));
+        }
+        for (param, arg) in params.iter().zip(args) {
+            let comparison_ty = if !function.has_prototype {
+                if matches!(param.ty.unqualified(), CType::Float) {
+                    CType::Double
+                } else if param.ty.is_integer() {
+                    self.promoted_integer_type(&param.ty, param.span)?
+                } else {
+                    param.ty.clone()
+                }
+            } else {
+                param.ty.clone()
+            };
+            if self.cross_unit_tagged_type_compatible(
+                comparison_ty.unqualified(),
+                arg.ty.unqualified(),
+            ) || self.old_style_signedness_exception(&comparison_ty, arg)
+            {
+                continue;
+            }
+            return Err(Diagnostic::ub(
+                format!(
+                    "argument of promoted type {} is incompatible with parameter type {} in the definition of {}",
+                    arg.ty, param.ty, function.name
+                ),
+                span,
+                Some("6.5.2.2p6"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn old_style_signedness_exception(&self, param_ty: &CType, arg: &TypedValue) -> bool {
+        if !Self::corresponding_signed_unsigned_types(param_ty, &arg.ty) {
+            return false;
+        }
+        let Ok(value) = arg.to_int() else {
+            return false;
+        };
+        param_ty
+            .integer_bounds()
+            .is_some_and(|(min, max)| (min..=max).contains(&value))
     }
 
     fn eval_compound_literal(
@@ -12822,6 +15409,87 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    fn pointer_value_from_integer(
+        &self,
+        address: u64,
+        target: &CType,
+        indeterminate: bool,
+    ) -> TypedValue {
+        if address == 0 {
+            return TypedValue {
+                ty: target.clone(),
+                data: ValueData::Pointer(Self::null_pointer()),
+                restrict_source: None,
+                indeterminate,
+                missing_return: false,
+            };
+        }
+
+        let target_is_function = matches!(
+            target.unqualified(),
+            CType::Pointer(inner) if matches!(inner.unqualified(), CType::Function(..))
+        );
+        if let Some(encoded) = self.decoded_pointers.get(&address) {
+            let data = match encoded {
+                EncodedPointer::Object(pointer) if !target_is_function => {
+                    Some(ValueData::Pointer(pointer.clone()))
+                }
+                EncodedPointer::Function(name) if target_is_function => {
+                    Some(ValueData::Function(name.clone()))
+                }
+                _ => None,
+            };
+            if let Some(data) = data {
+                return TypedValue {
+                    ty: target.clone(),
+                    data,
+                    restrict_source: None,
+                    indeterminate,
+                    missing_return: false,
+                };
+            }
+        }
+
+        if !target_is_function {
+            for (object, base) in &self.object_base_addresses {
+                let Some(root_ty) = self.object_type_registry.get(object) else {
+                    continue;
+                };
+                let Some(size) = self.type_size_of(root_ty).map(|size| size as u64) else {
+                    continue;
+                };
+                let Some(end) = base.checked_add(size) else {
+                    continue;
+                };
+                if address >= *base && address <= end {
+                    return TypedValue {
+                        ty: target.clone(),
+                        data: ValueData::Pointer(PointerValue {
+                            object: Some(*object),
+                            base_offset: 0,
+                            offset: 0,
+                            member_path: Vec::new(),
+                            designated_root_ty: None,
+                            byte_offset_override: Some((address - base) as usize),
+                        }),
+                        restrict_source: None,
+                        indeterminate,
+                        missing_return: false,
+                    };
+                }
+            }
+        }
+
+        TypedValue::object_representation(
+            target.clone(),
+            address
+                .to_le_bytes()
+                .into_iter()
+                .map(ByteCell::Known)
+                .collect(),
+        )
+    }
+
     fn scanf_pointer_input_standard(function_name: &str) -> &'static str {
         if function_name.contains('w') {
             "7.24.2.2"
@@ -13290,6 +15958,35 @@ impl<'a> Interpreter<'a> {
         let _ = usize::try_from(size.to_int()?).map_err(|_| {
             Diagnostic::error("malloc size is out of supported range", args[0].span())
         })?;
+        Ok(())
+    }
+
+    fn check_aligned_alloc_call(
+        &self,
+        args: &[Expr],
+        evaluated: &[TypedValue],
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if args.len() != 2 || evaluated.len() != 2 {
+            return Err(Diagnostic::error(
+                "aligned_alloc requires exactly two arguments",
+                span,
+            ));
+        }
+        for (index, label) in ["alignment", "size"].into_iter().enumerate() {
+            self.reject_missing_return_value(&evaluated[index], args[index].span())?;
+            self.reject_indeterminate_library_value(
+                &evaluated[index],
+                args[index].span(),
+                "aligned_alloc",
+            )?;
+            if evaluated[index].ty != CType::UnsignedLong {
+                return Err(Diagnostic::error(
+                    format!("aligned_alloc {label} must have type unsigned long"),
+                    args[index].span(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -14061,6 +16758,148 @@ impl<'a> Interpreter<'a> {
                 objects,
             )?;
             self.ensure_writable_object(object_id, args[2].span(), objects)?;
+        }
+        Ok(())
+    }
+
+    fn check_mbrtoc_call(
+        &mut self,
+        function_name: &str,
+        args: &[Expr],
+        evaluated: &[TypedValue],
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        if args.len() != 4 || evaluated.len() != 4 {
+            return Err(Diagnostic::error(
+                format!("{function_name} requires exactly four arguments"),
+                span,
+            ));
+        }
+        for (expr, value) in args.iter().zip(evaluated) {
+            self.reject_missing_return_value(value, expr.span())?;
+            self.reject_indeterminate_library_value(value, expr.span(), function_name)?;
+        }
+        let out = evaluated[0].as_pointer(args[0].span())?;
+        let expected_out = self.host_function_parameter_type(function_name, span.file, 0, span)?;
+        if !out.is_null() && !self.pointer_assignment_compatible(&expected_out, &evaluated[0].ty) {
+            return Err(Diagnostic::error(
+                format!("{function_name} output pointer has incompatible type"),
+                args[0].span(),
+            ));
+        }
+        if !out.is_null() {
+            let output_ty = expected_out.element_type().expect("pointer parameter");
+            let size = self
+                .type_size_of(output_ty)
+                .expect("complete character type");
+            let (object, _, _) =
+                self.byte_region_from_pointer(&out, size, args[0].span(), objects)?;
+            self.ensure_writable_object(object, args[0].span(), objects)?;
+        }
+        let source = evaluated[1].as_pointer(args[1].span())?;
+        if !source.is_null()
+            && !self.pointer_assignment_compatible(&self.const_char_ptr_type(), &evaluated[1].ty)
+        {
+            return Err(Diagnostic::error(
+                format!("{function_name} requires a const char * source"),
+                args[1].span(),
+            ));
+        }
+        if evaluated[2].ty != CType::UnsignedLong {
+            return Err(Diagnostic::error(
+                format!("{function_name} length must have type unsigned long"),
+                args[2].span(),
+            ));
+        }
+        let n = self.checked_usize_from_unsigned_long(
+            &evaluated[2],
+            args[2].span(),
+            "multibyte byte count",
+        )?;
+        if !source.is_null() && n != 0 {
+            let _ = self.byte_region_from_pointer(&source, n, args[1].span(), objects)?;
+        }
+        let state = evaluated[3].as_pointer(args[3].span())?;
+        if !state.is_null() {
+            let expected = self.host_function_parameter_type(function_name, span.file, 3, span)?;
+            if !self.pointer_assignment_compatible(&expected, &evaluated[3].ty) {
+                return Err(Diagnostic::error(
+                    format!("{function_name} state pointer has incompatible type"),
+                    args[3].span(),
+                ));
+            }
+            let (object, _, _) = self.byte_region_from_pointer(
+                &state,
+                self.host_mbstate_size(),
+                args[3].span(),
+                objects,
+            )?;
+            self.ensure_writable_object(object, args[3].span(), objects)?;
+        }
+        Ok(())
+    }
+
+    fn check_c_rtomb_call(
+        &mut self,
+        function_name: &str,
+        args: &[Expr],
+        evaluated: &[TypedValue],
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        if args.len() != 3 || evaluated.len() != 3 {
+            return Err(Diagnostic::error(
+                format!("{function_name} requires exactly three arguments"),
+                span,
+            ));
+        }
+        for (expr, value) in args.iter().zip(evaluated) {
+            self.reject_missing_return_value(value, expr.span())?;
+            self.reject_indeterminate_library_value(value, expr.span(), function_name)?;
+        }
+        let dest = evaluated[0].as_pointer(args[0].span())?;
+        if !dest.is_null()
+            && !self.pointer_assignment_compatible(&self.char_ptr_type(), &evaluated[0].ty)
+        {
+            return Err(Diagnostic::error(
+                format!("{function_name} requires a char * destination"),
+                args[0].span(),
+            ));
+        }
+        let expected_scalar =
+            self.host_function_parameter_type(function_name, span.file, 1, span)?;
+        if evaluated[1].ty != expected_scalar {
+            return Err(Diagnostic::error(
+                format!("{function_name} character argument has incompatible type"),
+                args[1].span(),
+            ));
+        }
+        if !dest.is_null() {
+            let (object, _, _) = self.byte_region_from_pointer(
+                &dest,
+                host_mb_cur_max().max(1),
+                args[0].span(),
+                objects,
+            )?;
+            self.ensure_writable_object(object, args[0].span(), objects)?;
+        }
+        let state = evaluated[2].as_pointer(args[2].span())?;
+        if !state.is_null() {
+            let expected = self.host_function_parameter_type(function_name, span.file, 2, span)?;
+            if !self.pointer_assignment_compatible(&expected, &evaluated[2].ty) {
+                return Err(Diagnostic::error(
+                    format!("{function_name} state pointer has incompatible type"),
+                    args[2].span(),
+                ));
+            }
+            let (object, _, _) = self.byte_region_from_pointer(
+                &state,
+                self.host_mbstate_size(),
+                args[2].span(),
+                objects,
+            )?;
+            self.ensure_writable_object(object, args[2].span(), objects)?;
         }
         Ok(())
     }
@@ -15480,6 +18319,57 @@ impl<'a> Interpreter<'a> {
         self.check_time_t_pointer_input("time", &evaluated[0], args[0].span(), objects, true, true)
     }
 
+    fn check_timespec_get_call(
+        &mut self,
+        args: &[Expr],
+        evaluated: &[TypedValue],
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        if args.len() != 2 || evaluated.len() != 2 {
+            return Err(Diagnostic::error(
+                "timespec_get requires exactly two arguments",
+                span,
+            ));
+        }
+        self.reject_missing_return_value(&evaluated[0], args[0].span())?;
+        self.reject_indeterminate_library_value(&evaluated[0], args[0].span(), "timespec_get")?;
+        let pointer = evaluated[0].as_pointer(args[0].span())?;
+        let pointee = evaluated[0].ty.element_type().cloned().ok_or_else(|| {
+            Diagnostic::error(
+                "timespec_get requires a struct timespec pointer",
+                args[0].span(),
+            )
+        })?;
+        let record = self.record_type(&pointee).ok_or_else(|| {
+            Diagnostic::error(
+                "timespec_get requires a struct timespec pointer",
+                args[0].span(),
+            )
+        })?;
+        if record.tag.as_deref() != Some("timespec") {
+            return Err(Diagnostic::error(
+                "timespec_get requires a struct timespec pointer",
+                args[0].span(),
+            ));
+        }
+        let size = self
+            .type_size_of(&pointee)
+            .ok_or_else(|| Diagnostic::error("struct timespec is incomplete", args[0].span()))?;
+        let (object, _, _) =
+            self.byte_region_from_pointer(&pointer, size, args[0].span(), objects)?;
+        self.ensure_writable_object(object, args[0].span(), objects)?;
+        self.reject_missing_return_value(&evaluated[1], args[1].span())?;
+        self.reject_indeterminate_library_value(&evaluated[1], args[1].span(), "timespec_get")?;
+        if evaluated[1].ty != CType::Int {
+            return Err(Diagnostic::error(
+                "timespec_get base argument must have type int",
+                args[1].span(),
+            ));
+        }
+        Ok(())
+    }
+
     fn check_asctime_call(
         &mut self,
         args: &[Expr],
@@ -15936,6 +18826,18 @@ impl<'a> Interpreter<'a> {
         main: &FunctionDef,
         objects: &mut ObjectFrames,
     ) -> Result<Vec<TypedValue>, Diagnostic> {
+        if main.return_type != CType::Int {
+            return Err(Diagnostic::error(
+                "unsupported main signature: main must return int",
+                main.return_type_span,
+            ));
+        }
+        if main.is_variadic {
+            return Err(Diagnostic::error(
+                "unsupported main signature: main cannot be variadic",
+                main.span,
+            ));
+        }
         let fixed_param_count = if main.params.len() == 1 && main.params[0].ty == CType::Void {
             0
         } else {
@@ -15943,6 +18845,37 @@ impl<'a> Interpreter<'a> {
         };
         if fixed_param_count == 0 {
             return Ok(Vec::new());
+        }
+
+        match fixed_param_count {
+            1 => {
+                return Err(Diagnostic::error(
+                    "unsupported main signature: this definition gives main 1 parameter",
+                    main.params[0].span,
+                ));
+            }
+            2 => {
+                if main.params[0].ty != CType::Int {
+                    return Err(Diagnostic::error(
+                        "unsupported main signature: first parameter must have type int",
+                        main.params[0].span,
+                    ));
+                }
+            }
+            count => {
+                let span = main
+                    .params
+                    .first()
+                    .zip(main.params.last())
+                    .map(|(first, last)| first.span.merge(last.span))
+                    .unwrap_or(main.span);
+                return Err(Diagnostic::error(
+                    format!(
+                        "unsupported main signature: this definition gives main {count} parameters"
+                    ),
+                    span,
+                ));
+            }
         }
 
         let argv_strings = ["program"];
@@ -15997,36 +18930,13 @@ impl<'a> Interpreter<'a> {
             },
         );
 
-        match fixed_param_count {
-            1 => {
-                if main.params[0].ty != CType::Int {
-                    return Err(Diagnostic::error(
-                        "unsupported main signature: one-parameter main must have type int",
-                        main.span,
-                    ));
-                }
-                Ok(vec![TypedValue::int(argc)])
-            }
-            2 => {
-                if main.params[0].ty != CType::Int {
-                    return Err(Diagnostic::error(
-                        "unsupported main signature: first parameter must have type int",
-                        main.span,
-                    ));
-                }
-                if !self.pointer_assignment_compatible(&main.params[1].ty, &argv_value.ty) {
-                    return Err(Diagnostic::error(
-                        "unsupported main signature: second parameter must have type char ** or equivalent",
-                        main.span,
-                    ));
-                }
-                Ok(vec![TypedValue::int(argc), argv_value])
-            }
-            _ => Err(Diagnostic::error(
-                "unsupported main signature: only main(void), main(int), and main(int, char **)-style forms are supported",
-                main.span,
-            )),
+        if !self.pointer_assignment_compatible(&main.params[1].ty, &argv_value.ty) {
+            return Err(Diagnostic::error(
+                "unsupported main signature: second parameter must have type char ** or equivalent",
+                main.params[1].span,
+            ));
         }
+        Ok(vec![TypedValue::int(argc), argv_value])
     }
 
     fn stream_pointer_diag(
@@ -16682,6 +19592,12 @@ impl<'a> Interpreter<'a> {
             "mbrtowc" => self.check_mbrtowc_call(args, evaluated, span, objects),
             "mbtowc" => self.check_mbtowc_call(args, evaluated, span, objects),
             "wcrtomb" => self.check_wcrtomb_call(args, evaluated, span, objects),
+            "mbrtoc16" | "mbrtoc32" => {
+                self.check_mbrtoc_call(function_name, args, evaluated, span, objects)
+            }
+            "c16rtomb" | "c32rtomb" => {
+                self.check_c_rtomb_call(function_name, args, evaluated, span, objects)
+            }
             "wctomb" => self.check_wctomb_call(args, evaluated, span, objects),
             "mbstowcs" => self.check_mbstowcs_call(args, evaluated, span, objects),
             "mbsrtowcs" => self.check_mbsrtowcs_call(args, evaluated, span, objects),
@@ -16984,12 +19900,15 @@ impl<'a> Interpreter<'a> {
             "strtoimax" => self.check_strto_call("strtoimax", args, evaluated, span, objects),
             "strtoumax" => self.check_strto_call("strtoumax", args, evaluated, span, objects),
             "malloc" => self.check_malloc_call(args, evaluated, span),
+            "aligned_alloc" => self.check_aligned_alloc_call(args, evaluated, span),
             "calloc" => self.check_calloc_call(args, evaluated, span),
             "realloc" => self.check_realloc_call(args, evaluated, span, objects),
             "free" => self.check_free_call(args, evaluated, span, objects),
             "abort" => self.check_math_helper_nullary_call("abort", args, evaluated, span),
-            "atexit" => self.check_atexit_call(args, evaluated, span),
-            "exit" | "_Exit" => self.check_exit_call(function_name, args, evaluated, span),
+            "atexit" | "at_quick_exit" => self.check_atexit_call(args, evaluated, span),
+            "exit" | "quick_exit" | "_Exit" => {
+                self.check_exit_call(function_name, args, evaluated, span)
+            }
             "bsearch" => self.check_bsearch_call(args, evaluated, span, objects),
             "qsort" => self.check_qsort_call(args, evaluated, span, objects),
             "getenv" => self.check_unary_string_call("getenv", args, evaluated, span, objects),
@@ -17013,6 +19932,7 @@ impl<'a> Interpreter<'a> {
                 self.check_ctime_call(function_name, args, evaluated, span, objects)
             }
             "strftime" => self.check_strftime_call(args, evaluated, span, objects),
+            "timespec_get" => self.check_timespec_get_call(args, evaluated, span, objects),
             "feclearexcept" | "feraiseexcept" | "fetestexcept" => {
                 self.check_fenv_mask_call(function_name, args, evaluated, span)
             }
@@ -17290,6 +20210,12 @@ impl<'a> Interpreter<'a> {
             "mbrtowc" => self.eval_mbrtowc_call(evaluated, args, span, objects),
             "mbtowc" => self.eval_mbtowc_call(evaluated, args, span, objects),
             "wcrtomb" => self.eval_wcrtomb_call(evaluated, args, span, objects),
+            "mbrtoc16" | "mbrtoc32" => {
+                self.eval_mbrtoc_call(function_name, evaluated, args, span, objects)
+            }
+            "c16rtomb" | "c32rtomb" => {
+                self.eval_c_rtomb_call(function_name, evaluated, args, span, objects)
+            }
             "wctomb" => self.eval_wctomb_call(evaluated, args, span, objects),
             "mbstowcs" => self.eval_mbstowcs_call(evaluated, args, span, objects),
             "mbsrtowcs" => self.eval_mbsrtowcs_call(evaluated, args, span, objects),
@@ -17408,13 +20334,16 @@ impl<'a> Interpreter<'a> {
                 Ok(TypedValue::integer(CType::Long, result))
             }
             "malloc" => self.eval_malloc_call(evaluated, span, objects),
+            "aligned_alloc" => self.eval_aligned_alloc_call(evaluated, span, objects),
             "calloc" => self.eval_calloc_call(evaluated, span, objects),
             "realloc" => self.eval_realloc_call(evaluated, args, span, objects),
             "free" => self.eval_free_call(evaluated, args, span, objects),
             "abort" => self.eval_abort_call(span),
             "atexit" => self.eval_atexit_call(evaluated, span),
-            "exit" => self.eval_exit_call(evaluated, span, true),
-            "_Exit" => self.eval_exit_call(evaluated, span, false),
+            "at_quick_exit" => self.eval_at_quick_exit_call(evaluated, span),
+            "exit" => self.eval_exit_call(evaluated, span, true, false),
+            "quick_exit" => self.eval_exit_call(evaluated, span, false, true),
+            "_Exit" => self.eval_exit_call(evaluated, span, false, false),
             "bsearch" => self.eval_bsearch_call(evaluated, args, span, frame, objects),
             "qsort" => self.eval_qsort_call(evaluated, args, span, frame, objects),
             "getenv" => self.eval_getenv_call(evaluated, args, span, objects),
@@ -17440,6 +20369,7 @@ impl<'a> Interpreter<'a> {
             "gmtime" => self.eval_gmtime_like_call("gmtime", evaluated, args, span, objects),
             "localtime" => self.eval_gmtime_like_call("localtime", evaluated, args, span, objects),
             "strftime" => self.eval_strftime_call(evaluated, args, span, objects),
+            "timespec_get" => self.eval_timespec_get_call(evaluated, args, span, objects),
             "feclearexcept" => Ok(TypedValue::int(unsafe {
                 feclearexcept(evaluated[0].to_int()? as c_int) as i128
             })),
@@ -25832,10 +28762,59 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
+    fn run_quick_exit_handlers(
+        &mut self,
+        objects: &mut ObjectFrames,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let handlers = std::mem::take(&mut self.quick_exit_handlers);
+        self.running_quick_exit = true;
+        for symbol in handlers.into_iter().rev() {
+            let function = self
+                .lookup_function_symbol(&symbol)
+                .cloned()
+                .ok_or_else(|| {
+                    Diagnostic::ub(
+                        "at_quick_exit registered a function that is no longer defined",
+                        span,
+                        Some("7.22.4.1"),
+                    )
+                })?;
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                self.call_function(
+                    function.as_ref(),
+                    self.function_may_setjmp_symbol(&symbol),
+                    Vec::new(),
+                    span,
+                    objects,
+                )
+            }));
+            match result {
+                Ok(result) => {
+                    let _ = result?;
+                }
+                Err(payload) => {
+                    self.running_quick_exit = false;
+                    if payload.downcast_ref::<LongjmpSignal>().is_some() {
+                        return Err(Diagnostic::ub(
+                            "using longjmp from an at_quick_exit handler is undefined behavior",
+                            span,
+                            Some("7.22.4.1"),
+                        ));
+                    }
+                    resume_unwind(payload);
+                }
+            }
+        }
+        self.running_quick_exit = false;
+        Ok(())
+    }
+
     fn eval_abort_call(&mut self, _span: Span) -> Result<TypedValue, Diagnostic> {
         panic_any(TerminationSignal {
             status: libc::EXIT_FAILURE,
             run_atexit: false,
+            run_quick_exit: false,
         });
     }
 
@@ -25857,15 +28836,42 @@ impl<'a> Interpreter<'a> {
         Ok(TypedValue::int(0))
     }
 
+    fn eval_at_quick_exit_call(
+        &mut self,
+        evaluated: &[TypedValue],
+        span: Span,
+    ) -> Result<TypedValue, Diagnostic> {
+        let symbol = match &evaluated[0].data {
+            ValueData::Function(name) => name.clone(),
+            _ => {
+                return Err(Diagnostic::error(
+                    "at_quick_exit requires a callable function pointer",
+                    span,
+                ));
+            }
+        };
+        self.quick_exit_handlers.push(symbol);
+        Ok(TypedValue::int(0))
+    }
+
     fn eval_exit_call(
         &mut self,
         evaluated: &[TypedValue],
-        _span: Span,
+        span: Span,
         run_atexit: bool,
+        run_quick_exit: bool,
     ) -> Result<TypedValue, Diagnostic> {
+        if run_quick_exit && self.running_quick_exit {
+            return Err(Diagnostic::ub(
+                "quick_exit was called from an at_quick_exit handler",
+                span,
+                Some("7.22.4.7"),
+            ));
+        }
         panic_any(TerminationSignal {
             status: evaluated[0].to_int()? as c_int,
             run_atexit,
+            run_quick_exit,
         });
     }
 
@@ -26133,6 +29139,12 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
         let state_ptr = evaluated[0].as_pointer(args[0].span())?;
+        if !state_ptr.is_null()
+            && (self.mbrtoc16_pending.contains_key(&state_ptr)
+                || self.c16rtomb_pending.contains_key(&state_ptr))
+        {
+            return Ok(TypedValue::int(0));
+        }
         let result = if state_ptr.is_null() {
             unsafe { mbsinit(std::ptr::null()) }
         } else {
@@ -26386,6 +29398,204 @@ impl<'a> Interpreter<'a> {
             self.write_mbstate_value(&state_ptr, &state, args[2].span(), objects)?;
         }
         Ok(TypedValue::integer(CType::UnsignedLong, result as i128))
+    }
+
+    fn eval_mbrtoc_call(
+        &mut self,
+        function_name: &str,
+        evaluated: &[TypedValue],
+        args: &[Expr],
+        span: Span,
+        objects: &mut ObjectFrames,
+    ) -> Result<TypedValue, Diagnostic> {
+        let out_ptr = evaluated[0].as_pointer(args[0].span())?;
+        let source = evaluated[1].as_pointer(args[1].span())?;
+        let n = self.checked_usize_from_unsigned_long(
+            &evaluated[2],
+            args[2].span(),
+            "multibyte byte count",
+        )?;
+        let state_ptr = evaluated[3].as_pointer(args[3].span())?;
+        let pending_low = if function_name == "mbrtoc16" {
+            if state_ptr.is_null() {
+                self.mbrtoc16_null_pending.take()
+            } else {
+                self.mbrtoc16_pending.remove(&state_ptr)
+            }
+        } else {
+            None
+        };
+        let mut state = if state_ptr.is_null() {
+            HostMbState { opaque: [0; 128] }
+        } else {
+            self.read_mbstate_value(&state_ptr, args[3].span(), objects)?
+        };
+        let buffer = if source.is_null() {
+            Vec::new()
+        } else {
+            self.read_multibyte_source_buffer(&source, n, args[1].span(), objects)?
+        };
+        let source_ptr = if source.is_null() {
+            std::ptr::null()
+        } else {
+            buffer.as_ptr().cast::<c_char>()
+        };
+        let (result, unit) = if let Some(low) = pending_low {
+            (usize::MAX - 2, low as i128)
+        } else {
+            let mut wide = 0 as libc::wchar_t;
+            let result = unsafe {
+                mbrtowc(
+                    &mut wide,
+                    source_ptr,
+                    if source.is_null() { 0 } else { n },
+                    if state_ptr.is_null() {
+                        std::ptr::null_mut()
+                    } else {
+                        &mut state
+                    },
+                )
+            };
+            let scalar = wide as u32;
+            if function_name == "mbrtoc16"
+                && result != usize::MAX
+                && result != usize::MAX - 1
+                && scalar > 0xffff
+            {
+                let scalar = scalar - 0x10000;
+                let high = 0xd800 | ((scalar >> 10) as u16);
+                let low = 0xdc00 | ((scalar & 0x3ff) as u16);
+                if state_ptr.is_null() {
+                    self.mbrtoc16_null_pending = Some(low);
+                } else {
+                    self.mbrtoc16_pending.insert(state_ptr.clone(), low);
+                }
+                (result, high as i128)
+            } else {
+                (result, scalar as i128)
+            }
+        };
+        if !state_ptr.is_null() {
+            self.write_mbstate_value(&state_ptr, &state, args[3].span(), objects)?;
+        }
+        if !out_ptr.is_null() && result != usize::MAX && result != usize::MAX - 1 {
+            let output_ty = evaluated[0]
+                .ty
+                .element_type()
+                .cloned()
+                .expect("validated output pointer");
+            let lvalue = self.pointer_lvalue(
+                function_name,
+                &out_ptr,
+                &output_ty,
+                args[0].span(),
+                "7.28.1",
+            )?;
+            self.store_lvalue(
+                objects,
+                &lvalue,
+                TypedValue::integer(output_ty, unit),
+                args[0].span(),
+            )?;
+        }
+        let return_ty = self.host_function_return_type(function_name, span.file, span)?;
+        Ok(TypedValue::integer(return_ty, result as i128))
+    }
+
+    fn eval_c_rtomb_call(
+        &mut self,
+        function_name: &str,
+        evaluated: &[TypedValue],
+        args: &[Expr],
+        span: Span,
+        objects: &mut ObjectFrames,
+    ) -> Result<TypedValue, Diagnostic> {
+        let dest = evaluated[0].as_pointer(args[0].span())?;
+        let state_ptr = evaluated[2].as_pointer(args[2].span())?;
+        let mut state = if state_ptr.is_null() {
+            HostMbState { opaque: [0; 128] }
+        } else {
+            self.read_mbstate_value(&state_ptr, args[2].span(), objects)?
+        };
+        let mut bytes = vec![0u8; host_mb_cur_max().max(1)];
+        let dest_ptr = if dest.is_null() {
+            std::ptr::null_mut()
+        } else {
+            bytes.as_mut_ptr().cast::<c_char>()
+        };
+        let mut scalar = evaluated[1].to_int()? as u32;
+        if function_name == "c16rtomb" {
+            let unit = scalar as u16;
+            let pending_high = if state_ptr.is_null() {
+                self.c16rtomb_null_pending
+            } else {
+                self.c16rtomb_pending.get(&state_ptr).copied()
+            };
+            if (0xd800..=0xdbff).contains(&unit) {
+                if state_ptr.is_null() {
+                    self.c16rtomb_null_pending = Some(unit);
+                } else {
+                    self.c16rtomb_pending.insert(state_ptr.clone(), unit);
+                }
+                return Ok(TypedValue::integer(
+                    self.host_function_return_type(function_name, span.file, span)?,
+                    0,
+                ));
+            }
+            if let Some(high) = pending_high {
+                if !(0xdc00..=0xdfff).contains(&unit) {
+                    Self::set_host_errno(libc::EILSEQ);
+                    return Ok(TypedValue::integer(
+                        self.host_function_return_type(function_name, span.file, span)?,
+                        usize::MAX as i128,
+                    ));
+                }
+                if state_ptr.is_null() {
+                    self.c16rtomb_null_pending = None;
+                } else {
+                    self.c16rtomb_pending.remove(&state_ptr);
+                }
+                scalar = 0x10000 + (((high as u32 - 0xd800) << 10) | (unit as u32 - 0xdc00));
+            } else if (0xdc00..=0xdfff).contains(&unit) {
+                Self::set_host_errno(libc::EILSEQ);
+                return Ok(TypedValue::integer(
+                    self.host_function_return_type(function_name, span.file, span)?,
+                    usize::MAX as i128,
+                ));
+            }
+        }
+        let result = if scalar > 0x10ffff || (0xd800..=0xdfff).contains(&scalar) {
+            Self::set_host_errno(libc::EILSEQ);
+            usize::MAX
+        } else {
+            unsafe {
+                wcrtomb(
+                    dest_ptr,
+                    scalar as libc::wchar_t,
+                    if state_ptr.is_null() {
+                        std::ptr::null_mut()
+                    } else {
+                        &mut state
+                    },
+                )
+            }
+        };
+        if !state_ptr.is_null() {
+            self.write_mbstate_value(&state_ptr, &state, args[2].span(), objects)?;
+        }
+        if !dest.is_null() && result != usize::MAX && result != 0 {
+            let (object, start, _) =
+                self.byte_region_from_pointer(&dest, result, args[0].span(), objects)?;
+            self.overlay_known_bytes_into_object(
+                object,
+                start,
+                &bytes[..result],
+                args[0].span(),
+                objects,
+            )?;
+        }
+        let return_ty = self.host_function_return_type(function_name, span.file, span)?;
+        Ok(TypedValue::integer(return_ty, result as i128))
     }
 
     fn eval_mbstowcs_call(
@@ -27214,22 +30424,6 @@ impl<'a> Interpreter<'a> {
         Ok(TypedValue::int(0))
     }
 
-    fn invalidate_time_text_bindings(&mut self, objects: &mut ObjectFrames) {
-        if !self.time_text_bindings.is_empty() {
-            let bindings = self.time_text_bindings.clone();
-            self.invalidate_object_bindings(objects, &bindings);
-            self.time_text_bindings.clear();
-        }
-    }
-
-    fn invalidate_time_tm_bindings(&mut self, objects: &mut ObjectFrames) {
-        if !self.time_tm_bindings.is_empty() {
-            let bindings = self.time_tm_bindings.clone();
-            self.invalidate_object_bindings(objects, &bindings);
-            self.time_tm_bindings.clear();
-        }
-    }
-
     fn tm_type_for_call(&self, span: Span) -> Result<CType, Diagnostic> {
         self.host_function_return_type("gmtime", span.file, span)?
             .element_type()
@@ -27387,23 +30581,89 @@ impl<'a> Interpreter<'a> {
         _span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        let mut timer_value: c_long = 0;
-        let result = if evaluated[0].as_pointer(args[0].span())?.is_null() {
-            unsafe { time(std::ptr::null_mut()) }
-        } else {
-            let result = unsafe { time(&mut timer_value) };
+        // WASI libc's time() stub traps, even though its realtime clock is available. SystemTime
+        // uses that same clock on Wasm and also avoids leaking the target's 32-bit C long ABI into
+        // the interpreter's deliberately modeled 64-bit time_t.
+        let result = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+            .map(i128::from)
+            .unwrap_or(-1);
+        if !evaluated[0].as_pointer(args[0].span())?.is_null() {
             let pointer = evaluated[0].as_pointer(args[0].span())?;
             let lvalue =
                 self.pointer_lvalue("time", &pointer, &CType::Long, args[0].span(), "7.23.2.4")?;
             self.store_lvalue(
                 objects,
                 &lvalue,
-                TypedValue::integer(CType::Long, timer_value as i128),
+                TypedValue::integer(CType::Long, result),
                 args[0].span(),
             )?;
-            result
-        };
-        Ok(TypedValue::integer(CType::Long, result as i128))
+        }
+        Ok(TypedValue::integer(CType::Long, result))
+    }
+
+    fn eval_timespec_get_call(
+        &mut self,
+        evaluated: &[TypedValue],
+        args: &[Expr],
+        span: Span,
+        objects: &mut ObjectFrames,
+    ) -> Result<TypedValue, Diagnostic> {
+        let base = evaluated[1].to_int()?;
+        if base != 1 {
+            return Ok(TypedValue::int(0));
+        }
+        let timespec_ty = evaluated[0]
+            .ty
+            .element_type()
+            .cloned()
+            .expect("validated timespec pointer type");
+        let record = self
+            .record_type(&timespec_ty)
+            .cloned()
+            .expect("validated complete timespec type");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Diagnostic::error("host clock predates the Unix epoch", span))?;
+        let mut members = Vec::with_capacity(record.members.len());
+        for member in &record.members {
+            let integer = match member.storage_name.as_str() {
+                "tv_sec" => now.as_secs() as i128,
+                "tv_nsec" => now.subsec_nanos() as i128,
+                _ => 0,
+            };
+            members.push((
+                member.storage_name.as_str().into(),
+                self.stored_value_from_typed_value(
+                    TypedValue::integer(member.ty.clone(), integer),
+                    &member.ty,
+                    span,
+                )?,
+            ));
+        }
+        let pointer = evaluated[0].as_pointer(args[0].span())?;
+        let lvalue = self.pointer_lvalue(
+            "timespec_get",
+            &pointer,
+            &timespec_ty,
+            args[0].span(),
+            "7.27.2.5",
+        )?;
+        self.store_lvalue(
+            objects,
+            &lvalue,
+            TypedValue {
+                ty: timespec_ty,
+                data: ValueData::Aggregate(Box::new(StoredValue::Record(members))),
+                restrict_source: None,
+                indeterminate: false,
+                missing_return: false,
+            },
+            args[0].span(),
+        )?;
+        Ok(TypedValue::int(1))
     }
 
     fn eval_asctime_call(
@@ -27413,7 +30673,6 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        self.invalidate_time_text_bindings(objects);
         let host_tm =
             self.load_host_tm_from_pointer("asctime", &evaluated[0], args[0].span(), objects)?;
         let result_ptr = unsafe { asctime(&host_tm) };
@@ -27421,11 +30680,11 @@ impl<'a> Interpreter<'a> {
         if result_ptr.is_null() {
             return Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()));
         }
-        let pointer =
-            self.intern_readonly_c_bytes(unsafe { CStr::from_ptr(result_ptr) }.to_bytes());
-        if let Some(id) = pointer.object {
-            self.time_text_bindings.push(id);
-        }
+        let pointer = self.intern_time_c_bytes(
+            unsafe { CStr::from_ptr(result_ptr) }.to_bytes(),
+            span,
+            objects,
+        )?;
         Ok(self.pointer_value_with_type(return_ty, pointer))
     }
 
@@ -27436,8 +30695,6 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        self.invalidate_time_tm_bindings(objects);
-        self.invalidate_time_text_bindings(objects);
         let pointer = evaluated[0].as_pointer(args[0].span())?;
         let lvalue =
             self.pointer_lvalue("ctime", &pointer, &CType::Long, args[0].span(), "7.23.3.1")?;
@@ -27449,11 +30706,11 @@ impl<'a> Interpreter<'a> {
         if result_ptr.is_null() {
             return Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()));
         }
-        let pointer =
-            self.intern_readonly_c_bytes(unsafe { CStr::from_ptr(result_ptr) }.to_bytes());
-        if let Some(id) = pointer.object {
-            self.time_text_bindings.push(id);
-        }
+        let pointer = self.intern_time_c_bytes(
+            unsafe { CStr::from_ptr(result_ptr) }.to_bytes(),
+            span,
+            objects,
+        )?;
         Ok(self.pointer_value_with_type(return_ty, pointer))
     }
 
@@ -27465,7 +30722,6 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        self.invalidate_time_tm_bindings(objects);
         let pointer = evaluated[0].as_pointer(args[0].span())?;
         let lvalue = self.pointer_lvalue(
             function_name,
@@ -27503,8 +30759,6 @@ impl<'a> Interpreter<'a> {
             state.address_taken = true;
             state.value = stored;
         }
-        pinned.insert(0, object);
-        self.time_tm_bindings = pinned;
         Ok(self.pointer_value_with_type(
             return_ty,
             PointerValue {
@@ -27765,6 +31019,50 @@ impl<'a> Interpreter<'a> {
             return Ok(self.void_pointer_value(Self::null_pointer()));
         }
         let object = self.allocate_dynamic_raw_object(objects, size, span, false, host_ptr)?;
+        Ok(self.void_pointer_value(PointerValue {
+            object: Some(object),
+            base_offset: 0,
+            offset: 0,
+            member_path: Vec::new(),
+            designated_root_ty: None,
+            byte_offset_override: None,
+        }))
+    }
+
+    fn eval_aligned_alloc_call(
+        &mut self,
+        evaluated: &[TypedValue],
+        span: Span,
+        objects: &mut ObjectFrames,
+    ) -> Result<TypedValue, Diagnostic> {
+        let alignment =
+            self.checked_usize_from_unsigned_long(&evaluated[0], span, "aligned_alloc alignment")?;
+        let size =
+            self.checked_usize_from_unsigned_long(&evaluated[1], span, "aligned_alloc size")?;
+        if size == 0
+            || alignment == 0
+            || !alignment.is_power_of_two()
+            || size % alignment != 0
+            || !self.dynamic_allocation_fits(size, None, objects)
+        {
+            return Ok(self.void_pointer_value(Self::null_pointer()));
+        }
+        let host_ptr = unsafe {
+            if alignment <= HOST_LONG_DOUBLE_ALIGN {
+                libc::malloc(size)
+            } else {
+                libc::aligned_alloc(alignment, size)
+            }
+        };
+        if host_ptr.is_null() {
+            return Ok(self.void_pointer_value(Self::null_pointer()));
+        }
+        let object = self.allocate_dynamic_raw_object(objects, size, span, false, host_ptr)?;
+        self.ensure_object_alignment(
+            object,
+            &CType::array_of(CType::UnsignedChar, size),
+            Some(alignment),
+        );
         Ok(self.void_pointer_value(PointerValue {
             object: Some(object),
             base_offset: 0,
@@ -29042,7 +32340,10 @@ impl<'a> Interpreter<'a> {
 
     fn eval_sizeof_type(&self, ty: &CType, span: Span) -> Result<TypedValue, Diagnostic> {
         let size = self.type_size_of(ty).ok_or_else(|| {
-            Diagnostic::error("sizeof requires a complete non-void object type", span)
+            Diagnostic::error(
+                format!("sizeof cannot determine the size of type {ty}"),
+                span,
+            )
         })?;
         let size = self.ensure_int_range(
             size as i128,
@@ -29171,6 +32472,12 @@ impl<'a> Interpreter<'a> {
             Some('l' | 'L') => (&text[..text.len() - 1], CType::LongDouble),
             _ => (text, CType::Double),
         };
+        if (body.starts_with("0x") || body.starts_with("0X")) && !body.contains(['p', 'P']) {
+            return Err(Diagnostic::error(
+                "hexadecimal floating literal requires a binary exponent",
+                span,
+            ));
+        }
         let c_string = CString::new(body).map_err(|_| {
             Diagnostic::error("floating literal contains an interior NUL byte", span)
         })?;
@@ -29220,17 +32527,23 @@ impl<'a> Interpreter<'a> {
             Expr::Number(text, span) => self.number_literal_type(text, *span),
             Expr::CharLiteral(_, _) => Ok(CType::Int),
             Expr::WideCharLiteral(_, _) => Ok(self.wchar_type()),
-            Expr::StringLiteral(text, _) => Ok(CType::array_of(CType::Char, text.len() + 1)),
-            Expr::WideStringLiteral(text, _) => {
-                Ok(CType::array_of(self.wchar_type(), text.chars().count() + 1))
-            }
+            Expr::Utf16CharLiteral(_, _) => Ok(CType::UnsignedShort),
+            Expr::Utf32CharLiteral(_, _) => Ok(CType::UnsignedInt),
+            Expr::StringLiteral(text, _) => Ok(CType::array_of(CType::Char, text.narrow_len() + 1)),
+            Expr::WideStringLiteral(text, _) => Ok(CType::array_of(
+                self.wchar_type(),
+                text.utf32_units().len() + 1,
+            )),
+            Expr::Utf16StringLiteral(text, _) => Ok(CType::array_of(
+                CType::UnsignedShort,
+                text.utf16_units().len() + 1,
+            )),
+            Expr::Utf32StringLiteral(text, _) => Ok(CType::array_of(
+                CType::UnsignedInt,
+                text.utf32_units().len() + 1,
+            )),
             Expr::Variable(name, span) => {
-                if let Some(object) = frame
-                    .bindings
-                    .get(name)
-                    .copied()
-                    .or_else(|| self.lookup_global_binding(name, span.file))
-                {
+                if let Some(object) = frame.bindings.get(name).copied() {
                     self.lookup_object(objects, object)
                         .map(|state| state.ty.clone())
                         .ok_or_else(|| {
@@ -29239,8 +32552,19 @@ impl<'a> Interpreter<'a> {
                                 *span,
                             )
                         })
+                } else if let Some(decl) = frame.object_decls.get(name) {
+                    Ok(decl.ty.clone())
                 } else if let Some(function_decl) = frame.function_decls.get(name) {
                     Ok(self.function_declaration_type(function_decl))
+                } else if let Some(object) = self.lookup_global_binding(name, span.file) {
+                    self.lookup_object(objects, object)
+                        .map(|state| state.ty.clone())
+                        .ok_or_else(|| {
+                            Diagnostic::error(
+                                format!("use of undeclared identifier {}", name),
+                                *span,
+                            )
+                        })
                 } else if let Some(decl) = self.lookup_global_declaration(name, span.file) {
                     Ok(decl.ty.clone())
                 } else if let Some(function_decl) =
@@ -29263,11 +32587,18 @@ impl<'a> Interpreter<'a> {
             Expr::Unary { op, expr, span } => match op {
                 UnaryOp::AddressOf => Ok(CType::pointer_to(self.expr_type(expr, frame, objects)?)),
                 UnaryOp::Dereference => {
-                    let ty = self.expr_type(expr, frame, objects)?;
+                    let ty = self.value_expr_type(expr, frame, objects)?;
                     match ty.element_type() {
-                        Some(inner) if ty.is_pointer() => Ok(inner.clone()),
+                        Some(inner)
+                            if ty.is_pointer() && !matches!(inner.unqualified(), CType::Void) =>
+                        {
+                            Ok(inner.clone())
+                        }
                         _ => Err(Diagnostic::error(
-                            format!("cannot dereference expression of type {}", ty),
+                            format!(
+                                "the * operator requires a pointer, but this expression has type {}",
+                                ty
+                            ),
                             *span,
                         )),
                     }
@@ -29302,31 +32633,91 @@ impl<'a> Interpreter<'a> {
             },
             Expr::Postfix { expr, .. } => self.expr_type(expr, frame, objects),
             Expr::Binary { op, lhs, rhs, .. } => match op {
-                BinaryOp::Comma => self.expr_type(rhs, frame, objects),
-                BinaryOp::LogicalAnd
-                | BinaryOp::LogicalOr
-                | BinaryOp::Equal
-                | BinaryOp::NotEqual => Ok(CType::Int),
+                BinaryOp::Comma => {
+                    let _ = self.value_expr_type(lhs, frame, objects)?;
+                    self.value_expr_type(rhs, frame, objects)
+                }
+                BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
+                    let lhs_ty = self.value_expr_type(lhs, frame, objects)?;
+                    let rhs_ty = self.value_expr_type(rhs, frame, objects)?;
+                    if (lhs_ty.is_arithmetic() || lhs_ty.is_pointer())
+                        && (rhs_ty.is_arithmetic() || rhs_ty.is_pointer())
+                    {
+                        Ok(CType::Int)
+                    } else {
+                        Err(Diagnostic::error(
+                            "logical operators require scalar operands",
+                            lhs.span().merge(rhs.span()),
+                        ))
+                    }
+                }
+                BinaryOp::Equal | BinaryOp::NotEqual => {
+                    let lhs_ty = self.value_expr_type(lhs, frame, objects)?;
+                    let rhs_ty = self.value_expr_type(rhs, frame, objects)?;
+                    let compatible = (lhs_ty.is_arithmetic() && rhs_ty.is_arithmetic())
+                        || (lhs_ty.is_pointer()
+                            && rhs_ty.is_pointer()
+                            && match (lhs_ty.unqualified(), rhs_ty.unqualified()) {
+                                (CType::Pointer(lhs), CType::Pointer(rhs)) => {
+                                    self.composite_pointer_target_type(lhs, rhs).is_some()
+                                }
+                                _ => false,
+                            })
+                        || (lhs_ty.is_pointer()
+                            && rhs_ty.is_integer()
+                            && self.is_null_pointer_constant(rhs, frame, objects)?)
+                        || (rhs_ty.is_pointer()
+                            && lhs_ty.is_integer()
+                            && self.is_null_pointer_constant(lhs, frame, objects)?);
+                    if compatible {
+                        Ok(CType::Int)
+                    } else {
+                        Err(Diagnostic::error(
+                            "invalid operands: equality comparison requires arithmetic operands, compatible pointer operand types, or a null pointer constant",
+                            lhs.span().merge(rhs.span()),
+                        ))
+                    }
+                }
                 BinaryOp::Less
                 | BinaryOp::LessEqual
                 | BinaryOp::Greater
                 | BinaryOp::GreaterEqual => {
                     let lhs_ty = self.value_expr_type(lhs, frame, objects)?;
                     let rhs_ty = self.value_expr_type(rhs, frame, objects)?;
-                    if lhs_ty.is_complex() || rhs_ty.is_complex() {
-                        return Err(Diagnostic::error(
-                            "relational operators require real operands",
-                            lhs.span().merge(rhs.span()),
-                        ));
+                    if lhs_ty.is_arithmetic()
+                        && rhs_ty.is_arithmetic()
+                        && !lhs_ty.is_complex()
+                        && !rhs_ty.is_complex()
+                    {
+                        return Ok(CType::Int);
                     }
-                    Ok(CType::Int)
+                    if let (CType::Pointer(lhs_inner), CType::Pointer(rhs_inner)) =
+                        (lhs_ty.unqualified(), rhs_ty.unqualified())
+                        && self.pointer_targets_are_compatible_object_types(
+                            lhs_inner, rhs_inner, false,
+                        )
+                    {
+                        return Ok(CType::Int);
+                    }
+                    Err(Diagnostic::error(
+                        "relational operators require real operands or pointers to compatible object types",
+                        lhs.span().merge(rhs.span()),
+                    ))
                 }
                 BinaryOp::Add => {
                     let lhs_ty = self.value_expr_type(lhs, frame, objects)?;
                     let rhs_ty = self.value_expr_type(rhs, frame, objects)?;
                     if lhs_ty.is_pointer() && rhs_ty.is_integer() {
+                        self.require_complete_pointer_arithmetic_type(
+                            &lhs_ty,
+                            lhs.span().merge(rhs.span()),
+                        )?;
                         Ok(lhs_ty)
                     } else if lhs_ty.is_integer() && rhs_ty.is_pointer() {
+                        self.require_complete_pointer_arithmetic_type(
+                            &rhs_ty,
+                            lhs.span().merge(rhs.span()),
+                        )?;
                         Ok(rhs_ty)
                     } else {
                         self.usual_arithmetic_type(&lhs_ty, &rhs_ty, lhs.span().merge(rhs.span()))
@@ -29336,7 +32727,23 @@ impl<'a> Interpreter<'a> {
                     let lhs_ty = self.value_expr_type(lhs, frame, objects)?;
                     let rhs_ty = self.value_expr_type(rhs, frame, objects)?;
                     if lhs_ty.is_pointer() && rhs_ty.is_integer() {
+                        self.require_complete_pointer_arithmetic_type(
+                            &lhs_ty,
+                            lhs.span().merge(rhs.span()),
+                        )?;
                         Ok(lhs_ty)
+                    } else if let (CType::Pointer(lhs_inner), CType::Pointer(rhs_inner)) =
+                        (lhs_ty.unqualified(), rhs_ty.unqualified())
+                    {
+                        if !self
+                            .pointer_targets_are_compatible_object_types(lhs_inner, rhs_inner, true)
+                        {
+                            return Err(Diagnostic::error(
+                                "pointer subtraction requires pointers to compatible complete object types",
+                                lhs.span().merge(rhs.span()),
+                            ));
+                        }
+                        Ok(CType::Long)
                     } else {
                         self.usual_arithmetic_type(&lhs_ty, &rhs_ty, lhs.span().merge(rhs.span()))
                     }
@@ -29351,7 +32758,10 @@ impl<'a> Interpreter<'a> {
                     let rhs_ty = self.value_expr_type(rhs, frame, objects)?;
                     if !lhs_ty.is_integer() || !rhs_ty.is_integer() {
                         return Err(Diagnostic::error(
-                            "operator requires integer operands",
+                            format!(
+                                "this operator requires integer operands, but the operands have types {} and {}",
+                                lhs_ty, rhs_ty
+                            ),
                             lhs.span().merge(rhs.span()),
                         ));
                     }
@@ -29370,24 +32780,26 @@ impl<'a> Interpreter<'a> {
                 }
             },
             Expr::Subscript { base, index, span } => {
-                let base_ty = self.expr_type(base, frame, objects)?;
+                let base_ty = self.value_expr_type(base, frame, objects)?;
                 let index_ty = self.value_expr_type(index, frame, objects)?;
-                if !index_ty.is_integer() {
+                let pointer_ty = if base_ty.is_pointer() && index_ty.is_integer() {
+                    base_ty
+                } else if base_ty.is_integer() && index_ty.is_pointer() {
+                    index_ty
+                } else {
                     return Err(Diagnostic::error(
-                        "array subscript must have integer type",
-                        index.span(),
-                    ));
-                }
-                match base_ty.unqualified() {
-                    CType::Array(inner, _) | CType::Pointer(inner) => Ok((**inner).clone()),
-                    _ => Err(Diagnostic::error(
                         format!(
-                            "subscripted expression has type {}, not array or pointer",
-                            base_ty
+                            "array subscripting requires an array or pointer and an integer index, but the operands have types {} and {}",
+                            base_ty, index_ty
                         ),
                         *span,
-                    )),
-                }
+                    ));
+                };
+                self.require_complete_pointer_arithmetic_type(&pointer_ty, *span)?;
+                Ok(pointer_ty
+                    .element_type()
+                    .expect("pointer type was checked")
+                    .clone())
             }
             Expr::Assign { lhs, .. } | Expr::CompoundAssign { lhs, .. } => {
                 self.expr_type(lhs, frame, objects)
@@ -29395,7 +32807,9 @@ impl<'a> Interpreter<'a> {
             Expr::SizeofType { .. } | Expr::SizeofExpr { .. } | Expr::OffsetOf { .. } => {
                 Ok(CType::UnsignedLong)
             }
-            Expr::Cast { ty, .. } => Ok(ty.clone()),
+            Expr::Cast { ty, vla_bounds, .. } => {
+                Ok(Self::resolve_vla_type_for_constraints(ty, vla_bounds).0)
+            }
             Expr::CompoundLiteral {
                 ty, initializer, ..
             } => self.complete_compound_literal_type(ty, initializer, frame, objects),
@@ -29442,6 +32856,33 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    fn require_complete_pointer_arithmetic_type(
+        &self,
+        pointer_ty: &CType,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let CType::Pointer(inner) = pointer_ty.unqualified() else {
+            return Err(Diagnostic::error(
+                "pointer arithmetic requires a pointer operand",
+                span,
+            ));
+        };
+        let message = match inner.unqualified() {
+            CType::Void => Some("pointer arithmetic cannot be performed on void*".to_owned()),
+            CType::Function(..) => {
+                Some("pointer arithmetic cannot be performed on a function pointer".to_owned())
+            }
+            _ if !self.type_is_complete(inner) => Some(format!(
+                "pointer arithmetic cannot be performed because pointed-to type {inner} is incomplete"
+            )),
+            _ => None,
+        };
+        if let Some(message) = message {
+            return Err(Diagnostic::error(message, span));
+        }
+        Ok(())
+    }
+
     fn value_expr_type(
         &self,
         expr: &Expr,
@@ -29452,6 +32893,7 @@ impl<'a> Interpreter<'a> {
         Ok(match ty.unqualified() {
             CType::Function(..) => CType::pointer_to(ty),
             CType::Array(inner, _) => CType::pointer_to((**inner).clone()),
+            _ if self.expr_is_lvalue(expr, frame) => ty.unqualified().clone(),
             _ => ty,
         })
     }
@@ -29476,46 +32918,7 @@ impl<'a> Interpreter<'a> {
     }
 
     fn generic_type_compatible(&self, lhs: &CType, rhs: &CType) -> bool {
-        match (lhs.unqualified(), rhs.unqualified()) {
-            (CType::Void, CType::Void)
-            | (CType::Bool, CType::Bool)
-            | (CType::Char, CType::Char)
-            | (CType::SignedChar, CType::SignedChar)
-            | (CType::UnsignedChar, CType::UnsignedChar)
-            | (CType::Short, CType::Short)
-            | (CType::UnsignedShort, CType::UnsignedShort)
-            | (CType::Int, CType::Int)
-            | (CType::UnsignedInt, CType::UnsignedInt)
-            | (CType::Long, CType::Long)
-            | (CType::UnsignedLong, CType::UnsignedLong)
-            | (CType::LongLong, CType::LongLong)
-            | (CType::UnsignedLongLong, CType::UnsignedLongLong)
-            | (CType::Float, CType::Float)
-            | (CType::Double, CType::Double)
-            | (CType::LongDouble, CType::LongDouble)
-            | (CType::VaList, CType::VaList) => true,
-            (CType::Complex(lhs), CType::Complex(rhs))
-            | (CType::Pointer(lhs), CType::Pointer(rhs)) => self.generic_type_compatible(lhs, rhs),
-            (CType::Array(lhs, lhs_len), CType::Array(rhs, rhs_len)) => {
-                lhs_len == rhs_len && self.generic_type_compatible(lhs, rhs)
-            }
-            (
-                CType::Function(lhs_return, lhs_params, lhs_variadic),
-                CType::Function(rhs_return, rhs_params, rhs_variadic),
-            ) => {
-                lhs_variadic == rhs_variadic
-                    && self.generic_type_compatible(lhs_return, rhs_return)
-                    && lhs_params.len() == rhs_params.len()
-                    && lhs_params
-                        .iter()
-                        .zip(rhs_params.iter())
-                        .all(|(lhs, rhs)| self.generic_type_compatible(lhs, rhs))
-            }
-            (CType::Struct(lhs, _), CType::Struct(rhs, _))
-            | (CType::Union(lhs, _), CType::Union(rhs, _))
-            | (CType::Enum(lhs, _), CType::Enum(rhs, _)) => lhs == rhs,
-            _ => false,
-        }
+        self.cross_unit_tagged_type_compatible(lhs, rhs)
     }
 
     fn select_generic_association<'b>(
@@ -30013,13 +33416,64 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn intern_string_literal(&mut self, text: &str) -> PointerValue {
-        self.intern_readonly_c_bytes(text.as_bytes())
+    fn intern_time_c_bytes(
+        &mut self,
+        bytes: &[u8],
+        span: Span,
+        objects: &mut ObjectFrames,
+    ) -> Result<PointerValue, Diagnostic> {
+        let mut c_bytes = bytes.to_vec();
+        c_bytes.push(0);
+        let array_ty = CType::array_of(CType::Char, c_bytes.len());
+        let id = if let Some(id) = self.time_text_binding {
+            id
+        } else {
+            let id = self.allocate_object(
+                objects,
+                array_ty.clone(),
+                StorageDuration::Static,
+                span,
+                false,
+                false,
+            )?;
+            self.time_text_binding = Some(id);
+            id
+        };
+        let object = self
+            .lookup_object_mut(objects, id)
+            .ok_or_else(|| Diagnostic::error("time text buffer is unavailable", span))?;
+        object.ty = array_ty.clone();
+        object.alive = true;
+        object.readonly = false;
+        object.initialized = true;
+        object.byte_size = c_bytes.len();
+        object.value = StoredValue::Array(
+            c_bytes
+                .into_iter()
+                .map(|byte| {
+                    StoredValue::Scalar(TypedValue::integer(CType::Char, byte as i8 as i128))
+                })
+                .collect(),
+        );
+        object.modification_count = object.modification_count.saturating_add(1);
+        self.object_type_registry.insert(id, array_ty);
+        Ok(PointerValue {
+            object: Some(id),
+            base_offset: 0,
+            offset: 0,
+            member_path: Vec::new(),
+            designated_root_ty: None,
+            byte_offset_override: None,
+        })
+    }
+
+    fn intern_string_literal(&mut self, text: &StringLiteralValue) -> PointerValue {
+        self.intern_readonly_c_bytes(&text.narrow_bytes())
     }
 
     fn intern_wide_string_literal(
         &mut self,
-        text: &str,
+        text: &StringLiteralValue,
         span: Span,
     ) -> Result<PointerValue, Diagnostic> {
         let mut units = self
@@ -30061,6 +33515,73 @@ impl<'a> Interpreter<'a> {
             designated_root_ty: None,
             byte_offset_override: None,
         })
+    }
+
+    fn eval_unicode_string_literal(
+        &mut self,
+        text: &StringLiteralValue,
+        utf16: bool,
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<ValueCategory, Diagnostic> {
+        let element_ty = if utf16 {
+            CType::UnsignedShort
+        } else {
+            CType::UnsignedInt
+        };
+        let mut units: Vec<u32> = if utf16 {
+            text.utf16_units().into_iter().map(u32::from).collect()
+        } else {
+            text.utf32_units()
+        };
+        units.push(0);
+        let array_ty = CType::array_of(element_ty.clone(), units.len());
+        let id = ObjectId(self.next_object);
+        self.next_object += 1;
+        self.assign_object_base_address(id, &array_ty);
+        self.retired_objects.insert(
+            id,
+            ObjectState {
+                ty: array_ty.clone(),
+                storage_duration: StorageDuration::Static,
+                alive: true,
+                readonly: true,
+                const_object: false,
+                register_object: false,
+                address_taken: true,
+                initialized: true,
+                indeterminate_reason: None,
+                byte_size: self.type_size_of(&array_ty).unwrap_or(0),
+                value: StoredValue::Array(
+                    units
+                        .into_iter()
+                        .map(|unit| {
+                            StoredValue::Scalar(TypedValue::integer(
+                                element_ty.clone(),
+                                unit as i128,
+                            ))
+                        })
+                        .collect(),
+                ),
+                declaration_span: span,
+                modification_count: 1,
+                variably_modified: false,
+                effective_types: Vec::new(),
+            },
+        );
+        self.object_type_registry.insert(id, array_ty.clone());
+        let _ = objects;
+        Ok(ValueCategory::LValue(LValue {
+            object: id,
+            ty: array_ty,
+            base_offset: 0,
+            offset: 0,
+            member_path: Vec::new(),
+            designated_root_ty: None,
+            byte_offset_override: None,
+            bit_field_width: None,
+            restrict_source: None,
+        }))
     }
 
     fn cache_pointer_address(
@@ -32612,18 +36133,18 @@ impl<'a> Interpreter<'a> {
                     self.scalar_truthy(&value, span)? as i128,
                 ))
             }
-            _ if source_ty.is_integer() && target.is_integer() => Ok(TypedValue {
-                ty: target.clone(),
-                data: ValueData::Int(self.ensure_integer_range(
-                    value.to_int()?,
-                    target,
-                    span,
-                    "value is outside the supported range of the destination type",
-                )?),
-                restrict_source: None,
-                indeterminate: value.indeterminate,
-                missing_return: false,
-            }),
+            _ if source_ty.is_integer() && target.is_integer() => {
+                let converted = target
+                    .normalize_integer_value(value.to_int()?)
+                    .expect("integer target has a representable object model");
+                Ok(TypedValue {
+                    ty: target.clone(),
+                    data: ValueData::Int(converted),
+                    restrict_source: None,
+                    indeterminate: value.indeterminate,
+                    missing_return: false,
+                })
+            }
             _ if source_ty.is_integer() && target.is_floating() => Ok(TypedValue::floating(
                 target.clone(),
                 self.convert_int_to_float(value.to_int()?, target, span)?,
@@ -32684,14 +36205,9 @@ impl<'a> Interpreter<'a> {
                     "pointer value is outside the supported range of the destination integer type",
                 )?,
             )),
-            _ if source_ty.is_integer() && target.is_pointer() && value.to_int()? == 0 => {
-                Ok(TypedValue {
-                    ty: target.clone(),
-                    data: ValueData::Pointer(Self::null_pointer()),
-                    restrict_source: None,
-                    indeterminate: value.indeterminate,
-                    missing_return: false,
-                })
+            _ if source_ty.is_integer() && target.is_pointer() => {
+                let address = value.to_int()? as u64;
+                Ok(self.pointer_value_from_integer(address, target, value.indeterminate))
             }
             _ if source_ty.is_pointer() && target.is_pointer() => {
                 let mut data = value.data;
@@ -32699,7 +36215,8 @@ impl<'a> Interpreter<'a> {
                     (target.unqualified(), source_ty.unqualified())
                     && let ValueData::Pointer(pointer) = &mut data
                 {
-                    if ((target_inner.is_character() && !source_inner.is_character())
+                    if ((target_inner.is_character()
+                        && !self.compatible_object_layout_types(target_inner, source_inner))
                         || Self::corresponding_signed_unsigned_types(target_inner, source_inner))
                         && !pointer.is_null()
                     {
@@ -32908,6 +36425,30 @@ impl<'a> Interpreter<'a> {
         self.object_base_addresses.insert(object, base);
     }
 
+    fn ensure_object_alignment(
+        &mut self,
+        object: ObjectId,
+        ty: &CType,
+        requested_alignment: Option<usize>,
+    ) {
+        let Some(requested_alignment) = requested_alignment else {
+            return;
+        };
+        let requested_alignment = requested_alignment.max(1) as u64;
+        if self
+            .object_base_addresses
+            .get(&object)
+            .is_some_and(|address| address % requested_alignment == 0)
+        {
+            return;
+        }
+        let size = self.type_size_of(ty).unwrap_or(1).max(1) as u64;
+        let base = align_address(self.next_encoded_pointer, requested_alignment);
+        self.next_encoded_pointer =
+            base.saturating_add(object_address_stride(size, requested_alignment));
+        self.object_base_addresses.insert(object, base);
+    }
+
     fn scalar_truthy(&self, value: &TypedValue, span: Span) -> Result<bool, Diagnostic> {
         self.reject_missing_return_value(value, span)?;
         self.reject_indeterminate_pointer_use(value, span)?;
@@ -32956,7 +36497,10 @@ impl<'a> Interpreter<'a> {
         ) && (!lhs.ty.is_integer() || !rhs.ty.is_integer())
         {
             return Err(Diagnostic::error(
-                "operator requires integer operands",
+                format!(
+                    "this operator requires integer operands, but the operands have types {} and {}",
+                    lhs.ty, rhs.ty
+                ),
                 span,
             ));
         }
@@ -33056,6 +36600,12 @@ impl<'a> Interpreter<'a> {
                 let CType::Pointer(rhs_inner) = rhs.ty.unqualified() else {
                     unreachable!();
                 };
+                if !self.pointer_targets_are_compatible_object_types(lhs_inner, rhs_inner, true) {
+                    return Err(Diagnostic::error(
+                        "pointer subtraction requires pointers to compatible complete object types",
+                        span,
+                    ));
+                }
                 let common_inner = self
                     .composite_pointer_target_type_inner(lhs_inner, rhs_inner, false)
                     .filter(|ty| self.type_is_complete(ty))
@@ -33144,15 +36694,17 @@ impl<'a> Interpreter<'a> {
                 span,
             ));
         };
+        if !self.pointer_targets_are_compatible_object_types(lhs_inner, rhs_inner, false) {
+            return Err(Diagnostic::error(
+                "relational comparison requires pointers to compatible object types",
+                span,
+            ));
+        }
         let common_inner = self
             .composite_pointer_target_type(lhs_inner, rhs_inner)
-            .filter(|ty| {
-                !matches!(ty.unqualified(), CType::Void | CType::Function(..))
-                    && self.type_is_complete(ty)
-            })
             .ok_or_else(|| {
                 Diagnostic::error(
-                    "relational comparison requires pointers to compatible complete object types",
+                    "relational comparison requires pointers to compatible object types",
                     span,
                 )
             })?;
@@ -33313,7 +36865,7 @@ impl<'a> Interpreter<'a> {
         let root_ty = self
             .pointer_root_type(pointer, objects)
             .unwrap_or(&object.ty);
-        let pointee_size = self.type_size_of(pointee_ty)?;
+        let pointee_size = self.type_size_of(pointee_ty);
         if !pointer.member_path.is_empty() {
             if let Some(member_ty) = self.storage_path_type(root_ty, &pointer.member_path) {
                 if let CType::Array(inner, len) = member_ty.unqualified() {
@@ -33324,7 +36876,7 @@ impl<'a> Interpreter<'a> {
                         let member_offset =
                             self.member_path_offset(root_ty, &pointer.member_path)?;
                         let remaining = object.byte_size.saturating_sub(member_offset);
-                        return Some((remaining / pointee_size) as isize);
+                        return Some((remaining / pointee_size?) as isize);
                     }
                 }
                 if let Some(limit) = self.subobject_pointer_limit_with_base(
@@ -33353,10 +36905,10 @@ impl<'a> Interpreter<'a> {
         }
         Some(match (root_ty.unqualified(), pointee_ty.unqualified()) {
             _ if pointee_ty.is_character() => {
-                (object.byte_size / pointee_size) as isize - pointer.base_offset
+                (object.byte_size / pointee_size?) as isize - pointer.base_offset
             }
             _ if object.storage_duration == StorageDuration::Dynamic => {
-                (object.byte_size / pointee_size) as isize - pointer.base_offset
+                (object.byte_size / pointee_size?) as isize - pointer.base_offset
             }
             _ if self.compatible_object_layout_types(root_ty, pointee_ty) => {
                 1 - pointer.base_offset
@@ -33456,7 +37008,9 @@ impl<'a> Interpreter<'a> {
                 .unwrap_or(&object_state.ty);
             let element_size = self.type_size_of(pointee_ty).ok_or_else(|| {
                 Diagnostic::ub(
-                    "pointer arithmetic requires a pointer to a complete object type",
+                    format!(
+                        "pointer arithmetic cannot be performed because pointed-to type {pointee_ty} is incomplete"
+                    ),
                     span,
                     Some("6.5.6"),
                 )
@@ -33632,6 +37186,11 @@ impl<'a> Interpreter<'a> {
                 self.pointer_numeric_address(&value, &value.ty, span)?,
             )),
             ValueData::Function(name) => Ok(ComparablePointer::Function(name.clone())),
+            ValueData::ObjectRepresentation(_) if value.ty.is_pointer() => Err(Diagnostic::ub(
+                "read of a pointer value with an invalid object representation",
+                span,
+                Some("6.2.6.1p5-6"),
+            )),
             ValueData::Int(_) if self.is_null_pointer_constant(expr, frame, objects)? => {
                 Ok(ComparablePointer::Null)
             }
@@ -33870,7 +37429,10 @@ impl<'a> Interpreter<'a> {
     ) -> Result<CType, Diagnostic> {
         if !lhs.is_arithmetic() || !rhs.is_arithmetic() {
             return Err(Diagnostic::error(
-                "usual arithmetic conversions require arithmetic operands",
+                format!(
+                    "this arithmetic operator requires numeric operands, but the operands have types {} and {}",
+                    lhs, rhs
+                ),
                 span,
             ));
         }
@@ -34345,6 +37907,7 @@ impl<'a> Interpreter<'a> {
         track_new_objects: bool,
         objects: &ObjectFrames,
     ) {
+        let saves_ordinary_bindings = saves_bindings || saves_function_decls;
         let existing_objects = track_new_objects.then(|| {
             objects
                 .last()
@@ -34354,8 +37917,9 @@ impl<'a> Interpreter<'a> {
         self.active_block_scopes.push(ActiveBlockScope {
             frame_id: frame.id,
             block_span: span,
-            saved_bindings: saves_bindings.then(|| frame.bindings.clone()),
-            saved_function_decls: saves_function_decls.then(|| frame.function_decls.clone()),
+            saved_bindings: saves_ordinary_bindings.then(|| frame.bindings.clone()),
+            saved_object_decls: saves_ordinary_bindings.then(|| frame.object_decls.clone()),
+            saved_function_decls: saves_ordinary_bindings.then(|| frame.function_decls.clone()),
             existing_objects,
         });
     }
@@ -34440,6 +38004,9 @@ impl<'a> Interpreter<'a> {
         if let Some(saved_bindings) = scope.saved_bindings {
             frame.bindings = saved_bindings;
         }
+        if let Some(saved_object_decls) = scope.saved_object_decls {
+            frame.object_decls = saved_object_decls;
+        }
         if let Some(saved_function_decls) = scope.saved_function_decls {
             frame.function_decls = saved_function_decls;
         }
@@ -34511,6 +38078,7 @@ impl<'a> Interpreter<'a> {
                 kind: context.kind,
             },
             bindings: frame.bindings.clone(),
+            object_decls: frame.object_decls.clone(),
             function_decls: frame.function_decls.clone(),
             object_snapshots,
             object_versions,
@@ -34545,6 +38113,7 @@ impl<'a> Interpreter<'a> {
         }
 
         frame.bindings = env.bindings.clone();
+        frame.object_decls = env.object_decls.clone();
         frame.function_decls = env.function_decls.clone();
 
         let Some(frame_objects) = objects.last_mut() else {
@@ -35398,8 +38967,12 @@ fn expr_contains_setjmp(expr: &Expr) -> bool {
         Expr::Number(..)
         | Expr::CharLiteral(..)
         | Expr::WideCharLiteral(..)
+        | Expr::Utf16CharLiteral(..)
+        | Expr::Utf32CharLiteral(..)
         | Expr::StringLiteral(..)
         | Expr::WideStringLiteral(..)
+        | Expr::Utf16StringLiteral(..)
+        | Expr::Utf32StringLiteral(..)
         | Expr::Variable(..)
         | Expr::OffsetOf { .. } => false,
         Expr::Unary { expr, .. }
@@ -35548,6 +39121,10 @@ fn cboxes_expression_has_side_effects(expr: &Expr) -> bool {
         | Expr::WideCharLiteral(..)
         | Expr::StringLiteral(..)
         | Expr::WideStringLiteral(..)
+        | Expr::Utf16CharLiteral(..)
+        | Expr::Utf32CharLiteral(..)
+        | Expr::Utf16StringLiteral(..)
+        | Expr::Utf32StringLiteral(..)
         | Expr::Variable(..)
         | Expr::OffsetOf { .. } => false,
     }
@@ -35563,19 +39140,382 @@ fn cboxes_initializer_has_side_effects(initializer: &Initializer) -> bool {
 }
 
 fn cboxes_type_string(ty: &CType) -> String {
-    let mut dims = Vec::new();
-    let mut current = ty;
-    while let CType::Array(inner, len) = current.unqualified() {
-        dims.push(*len);
-        current = inner;
+    cboxes_render_c_type(ty, String::new())
+}
+
+fn cboxes_type_help(ty: &CType) -> Option<String> {
+    cboxes_type_contains_array_or_function(ty).then(|| cboxes_describe_type(ty))
+}
+
+fn cboxes_type_help_type_names(ty: &CType) -> Vec<String> {
+    if !cboxes_type_contains_array_or_function(ty) {
+        return Vec::new();
     }
-    let mut rendered = current.to_string().replace("_Bool", "bool");
-    for dim in dims {
-        rendered.push('[');
-        rendered.push_str(&dim.to_string());
-        rendered.push(']');
+    let mut names = Vec::new();
+    cboxes_collect_type_names(ty, &mut names);
+    let help = cboxes_describe_type(ty);
+    names.retain(|name| help.contains(name));
+    names.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    names.dedup();
+    names
+}
+
+fn cboxes_type_help_tree(ty: &CType) -> Option<ProgramTypeHelpNode> {
+    cboxes_type_contains_array_or_function(ty).then(|| cboxes_type_help_node(ty))
+}
+
+fn cboxes_type_help_node(ty: &CType) -> ProgramTypeHelpNode {
+    let node = |kind: &str,
+                label: String,
+                type_name: Option<String>,
+                children: Vec<ProgramTypeHelpChild>| ProgramTypeHelpNode {
+        kind: kind.to_owned(),
+        label,
+        type_name,
+        children,
+    };
+    let child = |relation: &str, ty: &CType| ProgramTypeHelpChild {
+        relation: relation.to_owned(),
+        node: Box::new(cboxes_type_help_node(ty)),
+    };
+
+    match ty {
+        CType::Pointer(pointed_to) => node(
+            "pointer",
+            "pointer".to_owned(),
+            None,
+            vec![child("to", pointed_to)],
+        ),
+        CType::Array(element, len) => node(
+            "array",
+            if *len == 0 {
+                "array of unknown length".to_owned()
+            } else {
+                format!("array of {len}")
+            },
+            None,
+            vec![child("of", element)],
+        ),
+        CType::Function(return_type, params, is_variadic) => {
+            let no_arguments = params.len() == 1 && matches!(params[0].unqualified(), CType::Void);
+            let label = if no_arguments {
+                "function taking no arguments".to_owned()
+            } else if params.is_empty() && !is_variadic {
+                "function with unspecified argument types".to_owned()
+            } else if *is_variadic {
+                "variadic function".to_owned()
+            } else {
+                "function".to_owned()
+            };
+            let mut children = if no_arguments {
+                Vec::new()
+            } else {
+                params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, param)| child(&format!("parameter {}", index + 1), param))
+                    .collect()
+            };
+            children.push(child("returns", return_type));
+            node("function", label, None, children)
+        }
+        CType::Qualified(inner, qualifiers) => match inner.as_ref() {
+            CType::Pointer(pointed_to) => node(
+                "pointer",
+                format!("{} pointer", cboxes_qualifier_string(*qualifiers)),
+                None,
+                vec![child("to", pointed_to)],
+            ),
+            CType::Array(element, len) => {
+                let qualified_element = CType::qualified((**element).clone(), *qualifiers);
+                node(
+                    "array",
+                    if *len == 0 {
+                        "array of unknown length".to_owned()
+                    } else {
+                        format!("array of {len}")
+                    },
+                    None,
+                    vec![child("of", &qualified_element)],
+                )
+            }
+            _ => node(
+                "type",
+                cboxes_type_string(ty),
+                Some(cboxes_type_string(ty)),
+                Vec::new(),
+            ),
+        },
+        _ => node(
+            "type",
+            cboxes_type_string(ty),
+            Some(cboxes_type_string(ty)),
+            Vec::new(),
+        ),
     }
-    rendered
+}
+
+fn cboxes_collect_type_names(ty: &CType, names: &mut Vec<String>) {
+    names.push(cboxes_type_string(ty));
+    match ty {
+        CType::Pointer(inner)
+        | CType::Array(inner, _)
+        | CType::Qualified(inner, _)
+        | CType::Complex(inner) => cboxes_collect_type_names(inner, names),
+        CType::Function(return_type, params, _) => {
+            cboxes_collect_type_names(return_type, names);
+            for param in params {
+                cboxes_collect_type_names(param, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn cboxes_type_contains_array_or_function(ty: &CType) -> bool {
+    match ty {
+        CType::Array(_, _) | CType::Function(_, _, _) => true,
+        CType::Pointer(inner) | CType::Qualified(inner, _) | CType::Complex(inner) => {
+            cboxes_type_contains_array_or_function(inner)
+        }
+        _ => false,
+    }
+}
+
+fn cboxes_type_contains_declarator(ty: &CType) -> bool {
+    match ty {
+        CType::Pointer(_) | CType::Array(_, _) | CType::Function(_, _, _) => true,
+        CType::Qualified(inner, _) | CType::Complex(inner) => {
+            cboxes_type_contains_declarator(inner)
+        }
+        _ => false,
+    }
+}
+
+fn cboxes_describe_type(ty: &CType) -> String {
+    match ty {
+        CType::Pointer(pointed_to) => cboxes_describe_pointer(pointed_to, None),
+        CType::Array(element, len) => cboxes_describe_array(element, *len),
+        CType::Function(return_type, params, is_variadic) => {
+            cboxes_describe_function(return_type, params, *is_variadic)
+        }
+        CType::Qualified(inner, qualifiers) => match inner.as_ref() {
+            CType::Pointer(pointed_to) => cboxes_describe_pointer(pointed_to, Some(*qualifiers)),
+            CType::Array(element, len) => {
+                let qualified_element = CType::qualified((**element).clone(), *qualifiers);
+                cboxes_describe_array(&qualified_element, *len)
+            }
+            _ => cboxes_type_string(ty),
+        },
+        _ => cboxes_type_string(ty),
+    }
+}
+
+fn cboxes_describe_pointer(pointed_to: &CType, qualifiers: Option<TypeQualifiers>) -> String {
+    let qualifiers = qualifiers.map(cboxes_qualifier_string).unwrap_or_default();
+    let pointer = if qualifiers.is_empty() {
+        "pointer".to_owned()
+    } else {
+        format!("{qualifiers} pointer")
+    };
+    format!("{pointer} to {}", cboxes_describe_type_target(pointed_to))
+}
+
+fn cboxes_describe_array(element: &CType, len: usize) -> String {
+    if len == 0 {
+        format!(
+            "array of unknown length containing {}",
+            cboxes_describe_array_element(element)
+        )
+    } else {
+        format!("array of {len} {}", cboxes_describe_array_element(element))
+    }
+}
+
+fn cboxes_describe_array_element(element: &CType) -> String {
+    match element {
+        CType::Pointer(pointed_to) => {
+            format!("pointers to {}", cboxes_describe_type_target(pointed_to))
+        }
+        CType::Array(inner, 0) => format!(
+            "arrays of unknown length containing {}",
+            cboxes_describe_array_element(inner)
+        ),
+        CType::Array(inner, len) => {
+            format!("arrays of {len} {}", cboxes_describe_array_element(inner))
+        }
+        CType::Qualified(inner, qualifiers) => match inner.as_ref() {
+            CType::Pointer(pointed_to) => format!(
+                "{} pointers to {}",
+                cboxes_qualifier_string(*qualifiers),
+                cboxes_describe_type_target(pointed_to)
+            ),
+            CType::Array(element, len) => {
+                let qualified_element = CType::qualified((**element).clone(), *qualifiers);
+                if *len == 0 {
+                    format!(
+                        "arrays of unknown length containing {}",
+                        cboxes_describe_array_element(&qualified_element)
+                    )
+                } else {
+                    format!(
+                        "arrays of {len} {}",
+                        cboxes_describe_array_element(&qualified_element)
+                    )
+                }
+            }
+            _ => cboxes_plural_type_name(element),
+        },
+        _ => cboxes_plural_type_name(element),
+    }
+}
+
+fn cboxes_plural_type_name(ty: &CType) -> String {
+    let name = cboxes_type_string(ty);
+    if name == "int"
+        || name.ends_with(" int")
+        || name == "char"
+        || name.ends_with(" char")
+        || name == "float"
+        || name.ends_with(" float")
+        || name == "double"
+        || name.ends_with(" double")
+    {
+        format!("{name}s")
+    } else {
+        format!("{name} values")
+    }
+}
+
+fn cboxes_describe_function(return_type: &CType, params: &[CType], is_variadic: bool) -> String {
+    let parameters = if params.len() == 1 && matches!(params[0].unqualified(), CType::Void) {
+        "taking no arguments".to_owned()
+    } else if params.is_empty() && !is_variadic {
+        "whose argument types are not specified".to_owned()
+    } else {
+        let fixed = params
+            .iter()
+            .map(cboxes_type_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if is_variadic {
+            if fixed.is_empty() {
+                "taking additional arguments".to_owned()
+            } else {
+                format!("taking arguments of types {fixed}, followed by additional arguments")
+            }
+        } else {
+            format!("taking arguments of types {fixed}")
+        }
+    };
+    format!(
+        "function {parameters} and returning {}",
+        cboxes_describe_type_target(return_type)
+    )
+}
+
+fn cboxes_describe_type_target(ty: &CType) -> String {
+    if cboxes_type_contains_declarator(ty) {
+        cboxes_describe_type(ty)
+    } else {
+        cboxes_type_string(ty)
+    }
+}
+
+fn cboxes_render_c_type(ty: &CType, declarator: String) -> String {
+    match ty {
+        CType::Pointer(inner) => {
+            cboxes_render_c_type(inner, cboxes_pointer_declarator(declarator, None))
+        }
+        CType::Array(inner, len) => {
+            let suffix = if *len == 0 {
+                "[]".to_owned()
+            } else {
+                format!("[{len}]")
+            };
+            cboxes_render_c_type(inner, cboxes_suffix_declarator(declarator, &suffix))
+        }
+        CType::Function(return_type, params, is_variadic) => {
+            let mut rendered_params = params.iter().map(cboxes_type_string).collect::<Vec<_>>();
+            if *is_variadic {
+                rendered_params.push("...".to_owned());
+            }
+            let suffix = format!("({})", rendered_params.join(", "));
+            cboxes_render_c_type(return_type, cboxes_suffix_declarator(declarator, &suffix))
+        }
+        CType::Qualified(inner, qualifiers) => match inner.as_ref() {
+            CType::Pointer(pointed_to) => cboxes_render_c_type(
+                pointed_to,
+                cboxes_pointer_declarator(declarator, Some(*qualifiers)),
+            ),
+            CType::Array(element, len) => {
+                let qualified_element = CType::qualified((**element).clone(), *qualifiers);
+                let suffix = if *len == 0 {
+                    "[]".to_owned()
+                } else {
+                    format!("[{len}]")
+                };
+                cboxes_render_c_type(
+                    &qualified_element,
+                    cboxes_suffix_declarator(declarator, &suffix),
+                )
+            }
+            _ => {
+                let rendered = cboxes_render_c_type(inner, declarator);
+                let qualifiers = cboxes_qualifier_string(*qualifiers);
+                if qualifiers.is_empty() {
+                    rendered
+                } else {
+                    format!("{qualifiers} {rendered}")
+                }
+            }
+        },
+        _ => {
+            let base = ty.to_string();
+            if declarator.is_empty() || declarator.starts_with(['*', '[']) {
+                format!("{base}{declarator}")
+            } else {
+                format!("{base} {declarator}")
+            }
+        }
+    }
+}
+
+fn cboxes_pointer_declarator(declarator: String, qualifiers: Option<TypeQualifiers>) -> String {
+    let qualifiers = qualifiers.map(cboxes_qualifier_string).unwrap_or_default();
+    if declarator.is_empty() {
+        if qualifiers.is_empty() {
+            "*".to_owned()
+        } else {
+            format!("* {qualifiers}")
+        }
+    } else if qualifiers.is_empty() {
+        format!("*{declarator}")
+    } else {
+        format!("* {qualifiers} {declarator}")
+    }
+}
+
+fn cboxes_suffix_declarator(declarator: String, suffix: &str) -> String {
+    if declarator.trim_start().starts_with('*') {
+        format!("({declarator}){suffix}")
+    } else {
+        format!("{declarator}{suffix}")
+    }
+}
+
+fn cboxes_qualifier_string(qualifiers: TypeQualifiers) -> String {
+    let mut words = Vec::new();
+    if qualifiers.is_const {
+        words.push("const");
+    }
+    if qualifiers.is_restrict {
+        words.push("restrict");
+    }
+    if qualifiers.is_volatile {
+        words.push("volatile");
+    }
+    words.join(" ")
 }
 
 fn cboxes_type_kind(ty: &CType) -> &'static str {
@@ -36117,6 +40057,7 @@ mod tests {
         let err = run_source("test.c", source).unwrap_err();
         let rendered = err.render();
         assert!(rendered.contains("null pointer constant"));
+        assert!(rendered.contains("type int to pointer type int*"));
     }
 
     #[test]
@@ -36302,7 +40243,7 @@ mod tests {
         "#;
         let err = run_source("test.c", source).unwrap_err();
         let rendered = err.render();
-        assert!(rendered.contains("modifiable lvalue"));
+        assert!(rendered.contains("is const and cannot be changed"));
     }
 
     #[test]
@@ -36405,6 +40346,76 @@ mod tests {
         "#;
         let result = run_source("test.c", source).unwrap();
         assert_eq!(result.stdout, "7\n");
+    }
+
+    #[test]
+    fn runaway_recursion_reports_a_diagnostic_before_overflowing_the_host_stack() {
+        let source = r#"
+            int recurse(int n) {
+                return recurse(n + 1);
+            }
+
+            int main(void) {
+                return recurse(0);
+            }
+        "#;
+        // Rust's test harness uses a smaller worker stack than the native API and browser. Give
+        // this test a representative stack so it exercises the interpreter's guard, not the
+        // harness's unrelated limit.
+        let rendered = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || run_source("test.c", source).unwrap_err().render())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(rendered.contains("function call depth exceeded the interpreter limit"));
+        assert!(rendered.contains("check for recursion that does not reach its base case"));
+    }
+
+    #[test]
+    fn ordinary_recursive_fibonacci_stays_below_the_call_depth_guard() {
+        let source = r#"
+            int fibonacci(int n) {
+                return n < 2 ? n : fibonacci(n - 1) + fibonacci(n - 2);
+            }
+
+            int main(void) {
+                return fibonacci(10) != 55;
+            }
+        "#;
+        // Rust's test harness uses a small worker stack. The native API and browser Wasm runtime
+        // have larger stacks, so exercise ordinary recursion on a representative host stack.
+        let result = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || run_source("test.c", source).unwrap())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn casts_to_void_evaluate_the_operand_and_discard_any_value_type() {
+        let source = r#"
+            struct Pair { int first; int second; };
+
+            void increment(int *value) {
+                ++*value;
+            }
+
+            int main(void) {
+                int value = 1;
+                int *pointer = &value;
+                struct Pair pair = {2, 3};
+                (void)(value += 4);
+                (void)pointer;
+                (void)pair;
+                (void)increment(&value);
+                return value != 6;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
     }
 
     #[test]
@@ -36913,7 +40924,10 @@ mod tests {
             }
         "#;
         let err = run_source("test.c", source).unwrap_err();
-        assert!(err.render().contains("cannot convert"));
+        assert!(
+            err.render()
+                .contains("an array cannot be initialized by copying another array")
+        );
     }
 
     #[test]
@@ -36943,6 +40957,13 @@ mod tests {
         "#;
         let err = run_source("test.c", source).unwrap_err();
         assert!(err.render().contains("cannot return an array type"));
+    }
+
+    #[test]
+    fn functions_cannot_return_function_types() {
+        let source = "int function(void)(void); int main(void) { return 0; }";
+        let err = run_source("test.c", source).unwrap_err();
+        assert!(err.render().contains("cannot return a function type"));
     }
 
     #[test]
@@ -36988,7 +41009,7 @@ mod tests {
             }
         "#;
         let err = run_source("test.c", source).unwrap_err();
-        assert!(err.render().contains("not a modifiable lvalue"));
+        assert!(err.render().contains("arrays cannot be assigned"));
     }
 
     #[test]
@@ -37011,7 +41032,12 @@ mod tests {
             }
         "#;
         let err = run_source("test.c", source).unwrap_err();
-        assert!(err.render().contains("array element type must be complete"));
+        assert!(
+            err.render()
+                .contains("array element has incomplete type int[]"),
+            "{}",
+            err.render()
+        );
     }
 
     #[test]
@@ -37026,7 +41052,8 @@ mod tests {
         "#;
         let err = run_source("test.c", source).unwrap_err();
         assert!(
-            err.render().contains("array element type must be complete"),
+            err.render()
+                .contains("array element has incomplete type int[]"),
             "{}",
             err.render()
         );
@@ -37063,6 +41090,43 @@ mod tests {
         "#;
         let result = run_source("test.c", source).unwrap();
         assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn pointer_to_incomplete_array_can_point_to_a_completed_array() {
+        let source = r#"
+            int main(void) {
+                int row[3] = {4, 5, 6};
+                int (*pointer)[] = &row;
+                return (*pointer)[1] - 5;
+            }
+        "#;
+        run_source("test.c", source).unwrap();
+    }
+
+    #[test]
+    fn size_dependent_operations_reject_pointers_to_incomplete_arrays() {
+        for (source, expected) in [
+            (
+                "int main(void) { int row[3]; int (*p)[] = &row; return sizeof *p; }\n",
+                "sizeof cannot determine the size of type int[]",
+            ),
+            (
+                "int main(void) { int row[3]; int (*p)[] = &row; ++p; return 0; }\n",
+                "pointer arithmetic cannot be performed because pointed-to type int[] is incomplete",
+            ),
+            (
+                "int main(void) { void *p = 0; ++p; return 0; }\n",
+                "pointer arithmetic cannot be performed on void*",
+            ),
+            (
+                "void f(void) {} int main(void) { void (*p)(void) = f; ++p; return 0; }\n",
+                "pointer arithmetic cannot be performed on a function pointer",
+            ),
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            assert!(err.render().contains(expected), "{}", err.render());
+        }
     }
 
     #[test]
@@ -37147,6 +41211,47 @@ mod tests {
     }
 
     #[test]
+    fn pointer_subtraction_does_not_treat_void_pointer_conversion_as_compatibility() {
+        for expression in ["numbers - erased", "erased - numbers"] {
+            let source = format!(
+                r#"
+                    int main(void) {{
+                        int values[2] = {{0, 0}};
+                        int *numbers = values;
+                        void *erased = numbers;
+                        return {expression};
+                    }}
+                "#
+            );
+            let err = run_source("test.c", &source).unwrap_err();
+            assert!(
+                err.render()
+                    .contains("pointers to compatible complete object types"),
+                "unexpected diagnostic for {expression}: {}",
+                err.render()
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_subtraction_requires_complete_pointed_to_types() {
+        let source = r#"
+            struct Opaque;
+            long distance(struct Opaque *left, struct Opaque *right) {
+                return left - right;
+            }
+            int main(void) { return 0; }
+        "#;
+        let err = run_source("test.c", source).unwrap_err();
+        assert!(
+            err.render()
+                .contains("pointers to compatible complete object types"),
+            "{}",
+            err.render()
+        );
+    }
+
+    #[test]
     fn pointer_subtraction_respects_nested_array_boundaries() {
         let valid = r#"
             int main(void) {
@@ -37196,6 +41301,64 @@ mod tests {
     }
 
     #[test]
+    fn relational_pointer_constraints_require_compatible_object_types() {
+        for expression in [
+            "numbers < erased",
+            "erased < numbers",
+            "erased < other_erased",
+        ] {
+            let source = format!(
+                r#"
+                    int main(void) {{
+                        int value = 0;
+                        int *numbers = &value;
+                        void *erased = numbers;
+                        void *other_erased = numbers;
+                        if (0) return {expression};
+                        return 0;
+                    }}
+                "#
+            );
+            let err = run_source("test.c", &source).unwrap_err();
+            assert!(
+                err.render().contains("pointers to compatible object types"),
+                "unexpected diagnostic for {expression}: {}",
+                err.render()
+            );
+        }
+    }
+
+    #[test]
+    fn relational_pointer_constraints_allow_compatible_incomplete_object_types() {
+        let source = r#"
+            struct Opaque;
+            int ordered(struct Opaque *left, const struct Opaque *right) {
+                return left < right;
+            }
+            int main(void) { return 0; }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn switch_body_may_be_any_statement() {
+        let source = r#"
+            int classify(int value) {
+                switch (value)
+                    case 2: return 20;
+                return 0;
+            }
+
+            int main(void) {
+                return classify(2) != 20 || classify(3) != 0;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
     fn pointers_to_members_of_one_struct_follow_declaration_order() {
         let source = r#"
             struct Pair { int first; int second; };
@@ -37222,7 +41385,7 @@ mod tests {
             }
         "#;
         let err = run_source("test.c", source).unwrap_err();
-        assert!(err.render().contains("not a modifiable lvalue"));
+        assert!(err.render().contains("arrays cannot be assigned"));
     }
 
     #[test]
@@ -37236,7 +41399,7 @@ mod tests {
             }
         "#;
         let err = run_source("test.c", source).unwrap_err();
-        assert!(err.render().contains("not a modifiable lvalue"));
+        assert!(err.render().contains("arrays cannot be assigned"));
     }
 
     #[test]
@@ -37254,7 +41417,10 @@ mod tests {
             }
         "#;
         let err = run_source("test.c", source).unwrap_err();
-        assert!(err.render().contains("cannot convert"));
+        assert!(
+            err.render()
+                .contains("an array cannot be initialized by copying another array")
+        );
     }
 
     #[test]
@@ -37269,7 +41435,7 @@ mod tests {
             }
         "#;
         let err = run_source("test.c", source).unwrap_err();
-        assert!(err.render().contains("not a modifiable lvalue"));
+        assert!(err.render().contains("is const and cannot be changed"));
     }
 
     #[test]
@@ -37631,6 +41797,56 @@ mod tests {
     }
 
     #[test]
+    fn conditional_struct_and_union_operands_undergo_lvalue_conversion() {
+        let source = r#"
+            struct Record { int value; };
+            union Choice { int value; };
+
+            int main(void) {
+                const struct Record const_record = {11};
+                struct Record record = {12};
+                const union Choice const_choice = {21};
+                union Choice choice = {22};
+                return (1 ? const_record : record).value != 11
+                    || (0 ? const_choice : choice).value != 22;
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn generic_selection_distinguishes_qualified_types() {
+        let source = r#"
+            int main(void) {
+                int value = 3;
+                const int *pointer = &value;
+                return _Generic(1, int: 0, const int: 1)
+                    || _Generic(pointer, int *: 2, const int *: 0);
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn generic_association_types_must_be_valid_and_unique() {
+        for source in [
+            "int main(void) { return _Generic(1, int: 0, float: 1, float: 2); }\n",
+            "struct S;\nint main(void) { return _Generic(1, int: 0, struct S: 1); }\n",
+            "int main(void) { return _Generic(1, int: 0, void: 1); }\n",
+            "int main(void) { return _Generic(1, int: 0, int (*)(int): 1, int (*)(const int): 2); }\n",
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            let rendered = err.render();
+            assert!(
+                rendered.contains("complete object type")
+                    || rendered.contains("compatible types more than once"),
+                "{rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn equality_rejects_incompatible_object_pointer_types() {
         let source = r#"
             int main(void) {
@@ -37928,7 +42144,7 @@ mod tests {
         "#;
         let err = run_source("test.c", source).unwrap_err();
         let rendered = err.render();
-        assert!(rendered.contains("complete non-void"));
+        assert!(rendered.contains("sizeof cannot determine the size of type void"));
     }
 
     #[test]
@@ -38322,6 +42538,23 @@ mod tests {
     }
 
     #[test]
+    fn out_of_range_unsigned_to_signed_conversions_use_twos_complement() {
+        let source = r#"
+            #include <stdio.h>
+            int main(void) {
+                signed char byte = (unsigned char)255;
+                int word = 4294967295U;
+                long long wide = 18446744073709551615ULL;
+                long mixed = 1 - 130000UL;
+                printf("%d %d %lld %ld\n", byte, word, wide, mixed);
+                return 0;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.stdout, "-1 -1 -1 -129999\n");
+    }
+
+    #[test]
     fn printf_rejects_sizeof_with_percent_d() {
         let source = r#"
             #include <stdio.h>
@@ -38382,6 +42615,19 @@ mod tests {
         let err = run_source("test.c", source).unwrap_err();
         let rendered = err.render();
         assert!(rendered.contains("invalid octal"));
+    }
+
+    #[test]
+    fn invalid_integer_literal_suffix_order_is_rejected() {
+        for literal in ["1lul", "1ulu", "1lll", "1uul"] {
+            let source = format!("int main(void) {{ return {literal}; }}\n");
+            let err = run_source("test.c", &source).unwrap_err();
+            assert!(
+                err.render().contains("unsupported integer literal suffix"),
+                "unexpected diagnostic for {literal}: {}",
+                err.render()
+            );
+        }
     }
 
     #[test]
@@ -38526,6 +42772,35 @@ mod tests {
     }
 
     #[test]
+    fn preprocessor_integer_expressions_preserve_intmax_signedness() {
+        let source = r#"
+            #if -1 < 1U
+            #error signed value was not converted to uintmax_t
+            #endif
+            #if 18446744073709551615ULL + 1 != 0
+            #error uintmax_t arithmetic did not wrap
+            #endif
+            #if (18446744073709551615ULL >> 63) != 1
+            #error uintmax_t right shift was not logical
+            #endif
+            #if (1 ? -1 : 1U) < 0
+            #error conditional operands did not use their common type
+            #endif
+
+            int main(void) { return 0; }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+
+        for invalid in [
+            "#if 1++1\n#endif\nint main(void) { return 0; }\n",
+            "#if 1--1\n#endif\nint main(void) { return 0; }\n",
+        ] {
+            let err = run_source("test.c", invalid).unwrap_err();
+            assert!(err.render().contains("not valid in #if expressions"));
+        }
+    }
+
+    #[test]
     fn preprocessor_still_diagnoses_evaluated_division_by_zero() {
         let source = "#if 1 / 0\nint x;\n#endif\nint main(void) { return 0; }\n";
         let err = run_source("test.c", source).unwrap_err();
@@ -38627,6 +42902,42 @@ mod tests {
     }
 
     #[test]
+    fn negative_enum_constants_keep_int_type_when_used() {
+        let source = r#"
+            enum Direction {
+                MINIMUM = -2147483647 - 1,
+                LEFT = -1,
+                ALSO_LEFT = LEFT,
+                RIGHT = 1
+            };
+
+            int main(void) {
+                enum Direction direction = LEFT;
+                return direction != -1
+                    || ALSO_LEFT != -1
+                    || MINIMUM != (-2147483647 - 1)
+                    || RIGHT != 1;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn enumerator_values_must_fit_in_int() {
+        for source in [
+            "enum Number { TOO_BIG = 2147483648 };\nint main(void) { return 0; }\n",
+            "enum Number { LAST = 2147483647, TOO_BIG };\nint main(void) { return 0; }\n",
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            assert!(
+                err.render()
+                    .contains("enumerator value must be representable as int")
+            );
+        }
+    }
+
+    #[test]
     fn incomplete_struct_object_declaration_is_rejected() {
         let source = r#"
             struct S;
@@ -38638,7 +42949,7 @@ mod tests {
         "#;
         let err = run_source("test.c", source).unwrap_err();
         let rendered = err.render();
-        assert!(rendered.contains("object type must be complete"));
+        assert!(rendered.contains("object definition has incomplete type struct S"));
     }
 
     #[test]
@@ -38676,7 +42987,7 @@ mod tests {
         "#;
         let err = run_source("test.c", source).unwrap_err();
         let rendered = err.render();
-        assert!(rendered.contains("modifiable lvalue"));
+        assert!(rendered.contains("is const and cannot be changed"));
     }
 
     #[test]
@@ -38794,7 +43105,10 @@ mod tests {
             }
         "#;
         let err = run_source("test.c", incomplete_shadow).unwrap_err();
-        assert!(err.render().contains("object type must be complete"));
+        assert!(
+            err.render()
+                .contains("object definition has incomplete type struct Item")
+        );
 
         let different_kind_shadow = r#"
             union Item { int outer; };
@@ -38828,7 +43142,10 @@ mod tests {
             }
         "#;
         let err = run_source("test.c", prototype).unwrap_err();
-        assert!(err.render().contains("object type must be complete"));
+        assert!(
+            err.render()
+                .contains("object definition has incomplete type struct Hidden")
+        );
     }
 
     #[test]
@@ -38843,6 +43160,28 @@ mod tests {
         let err = run_source("test.c", source).unwrap_err();
         let rendered = err.render();
         assert!(rendered.contains("at least one member"));
+    }
+
+    #[test]
+    fn record_type_cannot_silently_consume_a_following_builtin_type_specifier() {
+        let err = run_source(
+            "test.c",
+            "struct Point { int x; }\nint main(void) { return 0; }\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.render()
+                .contains("struct Point cannot be combined with a built-in type specifier")
+        );
+    }
+
+    #[test]
+    fn record_with_only_unnamed_bit_fields_is_ub() {
+        let source = "struct Empty { unsigned int : 3; };\nint main(void) { return 0; }\n";
+        let err = run_source("test.c", source).unwrap_err();
+        let rendered = err.render();
+        assert!(rendered.contains("contains no named members"));
+        assert!(rendered.contains("6.7.2.1p8"));
     }
 
     #[test]
@@ -39582,6 +43921,20 @@ mod tests {
     }
 
     #[test]
+    fn hexadecimal_floating_literals_require_a_binary_exponent() {
+        for literal in ["0x1.2", "0x1.", "0x.8", "0x1.2f"] {
+            let source = format!("int main(void) {{ double x = {literal}; return 0; }}\n");
+            let err = run_source("test.c", &source).unwrap_err();
+            assert!(
+                err.render()
+                    .contains("hexadecimal floating literal requires a binary exponent"),
+                "unexpected diagnostic for {literal}: {}",
+                err.render()
+            );
+        }
+    }
+
+    #[test]
     fn decimal_and_fractional_hex_float_literals_parse() {
         let source = r#"
             #include <stdio.h>
@@ -39589,12 +43942,13 @@ mod tests {
                 double a = .5;
                 double b = 1e2;
                 double c = 0x1.fp+2;
-                printf("%f %f %f\n", a, b, c);
+                double d = .1e+2;
+                printf("%f %f %f %f\n", a, b, c, d);
                 return 0;
             }
         "#;
         let result = run_source("test.c", source).unwrap();
-        assert_eq!(result.stdout, "0.500000 100.000000 7.750000\n");
+        assert_eq!(result.stdout, "0.500000 100.000000 7.750000 10.000000\n");
     }
 
     #[test]
@@ -40053,6 +44407,16 @@ mod tests {
     }
 
     #[test]
+    fn function_pointers_cannot_be_restrict_qualified() {
+        let source = "int main(void) { int (* restrict function)(void) = 0; return 0; }";
+        let err = run_source("test.c", source).unwrap_err();
+        assert!(
+            err.render()
+                .contains("must point to object or incomplete types")
+        );
+    }
+
+    #[test]
     fn direct_access_after_restrict_write_is_ub() {
         let source = r#"
             #include <stdio.h>
@@ -40344,6 +44708,52 @@ mod tests {
     }
 
     #[test]
+    fn block_extern_declaration_resolves_to_definition_in_another_file() {
+        let dir = temp_test_dir("block-extern-global");
+        fs::create_dir_all(&dir).unwrap();
+        let main_file = dir.join("main.c");
+        let helper_file = dir.join("helper.c");
+        fs::write(
+            &main_file,
+            "int main(void) { extern int value; return value - 9; }\n",
+        )
+        .unwrap();
+        fs::write(&helper_file, "int value = 9;\n").unwrap();
+        run_files([main_file, helper_file]).unwrap();
+    }
+
+    #[test]
+    fn block_linkage_declarations_are_checked_across_translation_units() {
+        let dir = temp_test_dir("block-extern-conflict");
+        fs::create_dir_all(&dir).unwrap();
+        let main_file = dir.join("main.c");
+        let helper_file = dir.join("helper.c");
+        fs::write(
+            &main_file,
+            "int main(void) { extern double value; return 0; }\n",
+        )
+        .unwrap();
+        fs::write(&helper_file, "int value = 9;\n").unwrap();
+        let err = run_files([main_file, helper_file]).unwrap_err();
+        assert!(err.render().contains("conflicting declarations"));
+    }
+
+    #[test]
+    fn block_function_declaration_resolves_to_definition_in_another_file() {
+        let dir = temp_test_dir("block-function-declaration");
+        fs::create_dir_all(&dir).unwrap();
+        let main_file = dir.join("main.c");
+        let helper_file = dir.join("helper.c");
+        fs::write(
+            &main_file,
+            "int main(void) { int helper(void); return helper() - 9; }\n",
+        )
+        .unwrap();
+        fs::write(&helper_file, "int helper(void) { return 9; }\n").unwrap();
+        run_files([main_file, helper_file]).unwrap();
+    }
+
+    #[test]
     fn block_scope_extern_with_initializer_is_rejected() {
         let source = r#"
             int value;
@@ -40356,6 +44766,23 @@ mod tests {
         let err = run_source("test.c", source).unwrap_err();
         let rendered = err.render();
         assert!(rendered.contains("block-scope extern declaration cannot have an initializer"));
+    }
+
+    #[test]
+    fn block_scope_linkage_declarations_obey_storage_and_type_constraints() {
+        for (source, expected) in [
+            (
+                "int main(void) { static int helper(void); return 0; }\n",
+                "may only explicitly specify extern",
+            ),
+            (
+                "int main(void) { int n = 2; extern int values[n]; return 0; }\n",
+                "with linkage cannot have variably modified type",
+            ),
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            assert!(err.render().contains(expected), "{}", err.render());
+        }
     }
 
     #[test]
@@ -40384,6 +44811,72 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_type_specifiers_are_rejected_but_long_long_is_allowed() {
+        for specifiers in [
+            "void void",
+            "_Bool _Bool",
+            "char char",
+            "float float",
+            "double double",
+            "int int",
+            "short short",
+            "signed signed",
+            "unsigned unsigned",
+        ] {
+            let source = format!("int main(void) {{ {specifiers} value; return 0; }}\n");
+            let err = run_source("test.c", &source).unwrap_err();
+            assert!(
+                err.render().contains("duplicate type specifier"),
+                "unexpected diagnostic for {specifiers}: {}",
+                err.render()
+            );
+        }
+
+        run_source(
+            "test.c",
+            "int main(void) { long long value = 0; return (int)value; }\n",
+        )
+        .unwrap();
+
+        let err = run_source(
+            "test.c",
+            "int main(void) { _Bool _Complex value = 0; return 0; }\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.render()
+                .contains("_Bool cannot be combined with other type specifiers")
+        );
+
+        let err = run_source(
+            "test.c",
+            "int main(void) { _Complex value = 0; return 0; }\n",
+        )
+        .unwrap_err();
+        assert!(err.render().contains("_Complex requires float or double"));
+    }
+
+    #[test]
+    fn duplicate_storage_class_specifiers_are_rejected() {
+        for specifiers in [
+            "auto auto int",
+            "extern extern int",
+            "register register int",
+            "static static int",
+            "typedef typedef int",
+        ] {
+            let source = format!("int main(void) {{ {specifiers} value; return 0; }}\n");
+            let err = run_source("test.c", &source).unwrap_err();
+            assert!(
+                err.render()
+                    .contains("multiple storage class specifiers are not allowed"),
+                "unexpected diagnostic for {specifiers}: {}",
+                err.render()
+            );
+        }
+    }
+
+    #[test]
     fn duplicate_parameters_and_parameter_body_redeclarations_are_rejected() {
         for source in [
             "int f(int a, int a) { return a; }\nint main(void) { return 0; }\n",
@@ -40391,6 +44884,26 @@ mod tests {
         ] {
             let err = run_source("test.c", source).unwrap_err();
             assert!(err.render().contains("redefinition of a"));
+        }
+    }
+
+    #[test]
+    fn definition_parameters_require_names_but_prototype_parameters_do_not() {
+        run_source(
+            "test.c",
+            "int helper(int, const char *, int [3], int (*)(int));\nint main(void) { return 0; }\n",
+        )
+        .unwrap();
+
+        for source in [
+            "int helper(int) { return 0; }\nint main(void) { return helper(1); }\n",
+            "int helper(int named, int) { return named; }\nint main(void) { return helper(0, 1); }\n",
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            assert!(
+                err.render()
+                    .contains("function definition parameters must have names")
+            );
         }
     }
 
@@ -40424,7 +44937,7 @@ mod tests {
             let source = format!("int main(void) {{ {declarations} return 0; }}\n");
             let err = run_source("test.c", &source).unwrap_err();
             assert!(
-                err.render().contains("conflicting types"),
+                err.render().contains("conflicting"),
                 "unexpected diagnostic for {declarations:?}: {}",
                 err.render()
             );
@@ -40440,11 +44953,85 @@ mod tests {
             let err = run_source("test.c", source).unwrap_err();
             let rendered = err.render();
             assert!(
-                rendered.contains("conflicting types")
+                rendered.contains("conflicting")
                     || rendered.contains("already declared as a different kind"),
                 "unexpected diagnostic: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn block_extern_object_shadows_a_local_and_refers_to_the_external_object() {
+        let source = r#"
+            int value = 9;
+
+            int main(void) {
+                int value = 2;
+                {
+                    extern int value;
+                    return value - 9;
+                }
+            }
+        "#;
+        run_source("test.c", source).unwrap();
+    }
+
+    #[test]
+    fn block_function_declaration_shadows_a_local_and_refers_to_the_external_function() {
+        let source = r#"
+            int helper(void) { return 9; }
+
+            int main(void) {
+                int helper = 2;
+                {
+                    int helper(void);
+                    return helper() - 9;
+                }
+            }
+        "#;
+        run_source("test.c", source).unwrap();
+    }
+
+    #[test]
+    fn block_linkage_declarations_inherit_visible_internal_linkage() {
+        let source = r#"
+            static int value = 4;
+            static int helper(void) { return 5; }
+
+            int main(void) {
+                extern int value;
+                int helper(void);
+                return value + helper() - 9;
+            }
+        "#;
+        run_source("test.c", source).unwrap();
+    }
+
+    #[test]
+    fn block_linkage_declarations_are_checked_even_when_a_local_hides_the_file_declaration() {
+        for source in [
+            "int value; int main(void) { int value; { extern double value; } return 0; }\n",
+            "int helper(int); int main(void) { int helper; { double helper(int); } return 0; }\n",
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            assert!(
+                err.render().contains("conflicting declarations"),
+                "unexpected diagnostic: {}",
+                err.render()
+            );
+        }
+    }
+
+    #[test]
+    fn use_of_undefined_block_extern_is_not_reported_as_undeclared() {
+        let source = "int main(void) { extern int missing; return missing; }\n";
+        let err = run_source("test.c", source).unwrap_err();
+        let rendered = err.render();
+        assert!(
+            rendered.contains("does not provide a definition"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("undeclared identifier"), "{rendered}");
     }
 
     #[test]
@@ -40524,6 +45111,20 @@ mod tests {
         let err = run_source("test.c", source).unwrap_err();
         let rendered = err.render();
         assert!(rendered.contains("main shall not be declared inline"));
+    }
+
+    #[test]
+    fn main_must_return_int_and_cannot_be_variadic() {
+        for (source, expected) in [
+            ("long main(void) { return 0; }\n", "main must return int"),
+            (
+                "int main(int count, ...) { return count != 1; }\n",
+                "main cannot be variadic",
+            ),
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            assert!(err.render().contains(expected));
+        }
     }
 
     #[test]
@@ -40784,6 +45385,103 @@ mod tests {
         "#;
         let result = run_source("test.c", source).unwrap();
         assert_eq!(result.stdout, "3 4 9\n");
+    }
+
+    #[test]
+    fn array_cannot_be_initialized_from_an_array_compound_literal_expression() {
+        for source in [
+            "int values[] = (int[]){1, 2, 3}; int main(void) { return 0; }\n",
+            "int main(void) { int values[] = (int[]){1, 2, 3}; return 0; }\n",
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            assert!(
+                err.render().contains(
+                    "an array cannot be initialized by copying another array; use a brace-enclosed list instead"
+                ),
+                "{}",
+                err.render()
+            );
+        }
+    }
+
+    #[test]
+    fn array_initializer_diagnostics_explain_the_applicable_forms() {
+        for (source, expected) in [
+            (
+                "int main(void) { int a[3] = \"hi\"; }\n",
+                "cannot initialize int[3] with an ordinary string literal; use a brace-enclosed list or change the array element type to char",
+            ),
+            (
+                "int main(void) { float a[3] = \"hi\"; }\n",
+                "cannot initialize float[3] with an ordinary string literal; use a brace-enclosed list or change the array element type to char",
+            ),
+            (
+                "int main(void) { char a[3] = 1; }\n",
+                "an array of this type must use a string literal or a brace-enclosed list",
+            ),
+            (
+                "int main(void) { float a[3] = 1; }\n",
+                "an array of this type must use a brace-enclosed list",
+            ),
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            assert!(err.render().contains(expected), "{}", err.render());
+        }
+    }
+
+    #[test]
+    fn array_copy_initializer_diagnostic_does_not_report_the_decayed_pointer_type() {
+        let err = run_source(
+            "test.c",
+            "int main(void) { int a[3] = {1, 2, 3}; int b[3] = a; }\n",
+        )
+        .unwrap_err();
+        let rendered = err.render();
+        assert!(rendered.contains("an array cannot be initialized by copying another array"));
+        assert!(!rendered.contains("int*"), "{rendered}");
+    }
+
+    #[test]
+    fn common_constraint_diagnostics_describe_the_c_rule_without_lvalue_jargon() {
+        for (source, expected) in [
+            (
+                "int main(void) { int value = 1; return *value; }\n",
+                "the * operator requires a pointer, but this expression has type int",
+            ),
+            (
+                "int main(void) { int *pointer = &3; return 0; }\n",
+                "the & operator requires an object or function",
+            ),
+            (
+                "int main(void) { int a[2], b[2]; a = b; return 0; }\n",
+                "arrays cannot be assigned; assign their elements individually",
+            ),
+            (
+                "int main(void) { const int value = 1; value = 2; return 0; }\n",
+                "the left side of = is const and cannot be changed",
+            ),
+            (
+                "struct P { int x; }; int main(void) { struct P p = {1}; return p + 1; }\n",
+                "this arithmetic operator requires numeric operands",
+            ),
+            (
+                "int main(void) { int value = 1; return value[0]; }\n",
+                "array subscripting requires an array or pointer and an integer index",
+            ),
+            (
+                "int main(void) { (1 + 2)++; return 0; }\n",
+                "++ and -- require a changeable arithmetic variable or pointer",
+            ),
+            (
+                "int main(void) { int value = 1 return value; }\n",
+                "expected ';', found keyword 'return'",
+            ),
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            let rendered = err.render();
+            assert!(rendered.contains(expected), "{rendered}");
+            assert!(!rendered.contains("lvalue"), "{rendered}");
+        }
     }
 
     #[test]
@@ -41072,6 +45770,49 @@ mod tests {
     }
 
     #[test]
+    fn flexible_array_requires_another_named_member() {
+        let invalid = "struct S { int : 3; int values[]; };\nint main(void) { return 0; }\n";
+        let err = run_source("test.c", invalid).unwrap_err();
+        assert!(err.render().contains("at least one other named member"));
+
+        let valid = r#"
+            struct S {
+                struct { int count; };
+                int values[];
+            };
+            int main(void) { return sizeof(struct S) < sizeof(int); }
+        "#;
+        let result = run_source("test.c", valid).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn flexible_array_containers_cannot_be_struct_members_or_array_elements() {
+        for source in [
+            "struct Flex { int count; int values[]; };\nstruct Outer { int prefix; struct Flex flex; };\nint main(void) { return 0; }\n",
+            "struct Flex { int count; int values[]; };\nstruct Flex items[2];\nint main(void) { return 0; }\n",
+            "struct Flex { int count; int values[]; };\nunion Holder { struct Flex flex; int word; };\nunion Holder items[2];\nint main(void) { return 0; }\n",
+            "struct Flex { int count; int values[]; };\nunion Holder { struct Flex flex; int word; };\nstruct Outer { union Holder holder; };\nint main(void) { return 0; }\n",
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            let rendered = err.render();
+            assert!(
+                rendered.contains("cannot be a member of another structure")
+                    || rendered.contains("cannot be an array element"),
+                "{rendered}"
+            );
+        }
+
+        let valid = r#"
+            struct Flex { int count; int values[]; };
+            union Holder { struct Flex flex; int word; };
+            int main(void) { union Holder holder; return sizeof holder < sizeof(int); }
+        "#;
+        let result = run_source("test.c", valid).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
     fn flexible_array_member_pointers_survive_raw_storage_round_trips() {
         let source = r#"
             #include <stdio.h>
@@ -41172,18 +45913,19 @@ mod tests {
     }
 
     #[test]
-    fn vla_type_names_work_in_compound_literals() {
+    fn vla_type_names_are_rejected_in_compound_literals() {
         let source = r#"
-            #include <stdio.h>
             int main(void) {
                 int n = 3;
                 int *p = (int[n]){1, 2, 5};
-                printf("%d %d %d\n", p[0], p[1], p[2]);
-                return 0;
+                return p[0];
             }
         "#;
-        let result = run_source("test.c", source).unwrap();
-        assert_eq!(result.stdout, "1 2 5\n");
+        let err = run_source("test.c", source).unwrap_err();
+        assert!(
+            err.render()
+                .contains("compound literal cannot have variable length array type")
+        );
     }
 
     #[test]
@@ -41344,12 +46086,67 @@ mod tests {
             #include <stdio.h>
             int main(void) {
                 char text[] = "\x41\101\n";
-                printf("%d %d %d %d\n", text[0], text[1], text[2], '\u0041');
+                printf("%d %d %d %u\n", text[0], text[1], text[2], U'\u03a9');
                 return 0;
             }
         "#;
         let result = run_source("test.c", source).unwrap();
-        assert_eq!(result.stdout, "65 65 10 65\n");
+        assert_eq!(result.stdout, "65 65 10 937\n");
+    }
+
+    #[test]
+    fn narrow_numeric_escapes_produce_single_bytes() {
+        let source = r#"
+            #include <stdio.h>
+            int main(void) {
+                char text[] = "\xff";
+                printf("%zu %d\n", sizeof text, (unsigned char)text[0]);
+                return 0;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.stdout, "2 255\n");
+    }
+
+    #[test]
+    fn casts_between_character_pointer_types_preserve_the_array_byte_domain() {
+        let source = r#"
+            int main(void) {
+                char values[] = "abc";
+                unsigned char *bytes = (unsigned char *)values;
+                if (bytes[1] != 'b') return 1;
+                bytes[1] = 'z';
+                if (values[1] != 'z') return 2;
+                if (((unsigned char *)"abc")[2] != 'c') return 3;
+                return 0;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn invalid_escape_sequences_are_rejected() {
+        for literal in [r#""\8""#, r#""\400""#, r#"'\8'"#, r#"'\400'"#] {
+            let source = format!("int main(void) {{ (void)({literal}); return 0; }}\n");
+            assert!(run_source("test.c", &source).is_err(), "accepted {literal}");
+        }
+
+        for literal in [r#""\u0061""#, r#"'\U00000061'"#] {
+            let source = format!("int main(void) {{ (void)({literal}); return 0; }}\n");
+            let err = run_source("test.c", &source).unwrap_err();
+            assert!(err.render().contains("invalid universal character name"));
+        }
+
+        for condition in [r#"'\400'"#, r#"'\u0061'"#] {
+            let source = format!(
+                "#if {condition}\nint main(void) {{ return 0; }}\n#else\nint main(void) {{ return 1; }}\n#endif\n"
+            );
+            assert!(
+                run_source("test.c", &source).is_err(),
+                "accepted #if {condition}"
+            );
+        }
     }
 
     #[test]
@@ -41567,6 +46364,25 @@ mod tests {
         "#;
         let result = run_source("test.c", source).unwrap();
         assert_eq!(result.stdout, "10\n");
+    }
+
+    #[test]
+    fn variadic_function_requires_a_fixed_parameter() {
+        let err = run_source(
+            "test.c",
+            "int invalid(...);\nint main(void) { return 0; }\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.render()
+                .contains("requires at least one fixed parameter")
+        );
+
+        run_source(
+            "test.c",
+            "int valid(int, ...);\nint main(void) { return 0; }\n",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -41798,7 +46614,7 @@ mod tests {
             int sum_array(int marker, ...) {
                 va_list ap;
                 va_start(ap, marker);
-                int values[3] = va_arg(ap, int[3]);
+                int *values = va_arg(ap, int[3]);
                 va_end(ap);
                 values[0] = 10;
                 return values[0] + values[1] + values[2];
@@ -41812,7 +46628,9 @@ mod tests {
         let err = run_source("test.c", source).unwrap_err();
         assert!(
             err.render()
-                .contains("next variadic argument has type int*")
+                .contains("next variadic argument has type int*"),
+            "{}",
+            err.render()
         );
     }
 
@@ -41868,6 +46686,27 @@ mod tests {
     }
 
     #[test]
+    fn empty_macro_arguments_follow_c11_argument_counting() {
+        let source = r#"
+            #define IGNORE(value) 7
+            #define ZERO() 9
+            #define VARIADIC_ONLY(...) 11
+
+            int main(void) {
+                return IGNORE() != 7 || ZERO() != 9 || VARIADIC_ONLY() != 11;
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+
+        for invalid in [
+            "#define F(value, ...) 0\nint main(void) { return F(); }\n",
+            "#define F(value, ...) 0\nint main(void) { return F(1); }\n",
+        ] {
+            assert!(run_source("test.c", invalid).is_err());
+        }
+    }
+
+    #[test]
     fn macro_stringizing_and_token_pasting_work() {
         let source = r#"
             #include <stdio.h>
@@ -41882,6 +46721,78 @@ mod tests {
         "#;
         let result = run_source("test.c", source).unwrap();
         assert_eq!(result.stdout, "a + b 7\n");
+
+        let err = run_source(
+            "test.c",
+            "#define BAD(parameter) # not_a_parameter\nint main(void) { return 0; }\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.render()
+                .contains("# in macro replacement must be followed by a parameter name")
+        );
+    }
+
+    #[test]
+    fn token_pasting_uses_unexpanded_arguments_on_both_sides() {
+        let source = r#"
+            #define A x
+            #define B y
+            #define CAT_RAW(a, b) a ## b
+            #define CAT_EXPANDED(a, b) CAT_RAW(a, b)
+
+            int main(void) {
+                int Ay = 3;
+                int xB = 4;
+                int xy = 5;
+                return CAT_RAW(A, y) != 3
+                    || CAT_RAW(x, B) != 4
+                    || CAT_EXPANDED(A, B) != 5;
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn macro_redefinitions_must_be_effectively_identical() {
+        let equivalent = r#"
+            #define VALUE 1  +  2
+            #define VALUE 1 + 2
+            #define APPLY(value) (value)
+            #define APPLY(value) (value)
+            int main(void) { return APPLY(VALUE) != 3; }
+        "#;
+        assert_eq!(run_source("test.c", equivalent).unwrap().exit_status, 0);
+
+        for incompatible in [
+            "#define VALUE 1\n#define VALUE 2\nint main(void) { return 0; }\n",
+            "#define APPLY(value) value\n#define APPLY(other) other\nint main(void) { return 0; }\n",
+            "#define VALUE 1\n#define VALUE() 1\nint main(void) { return 0; }\n",
+        ] {
+            let err = run_source("test.c", incompatible).unwrap_err();
+            assert!(err.render().contains("incompatible redefinition of macro"));
+        }
+    }
+
+    #[test]
+    fn macro_rescanning_can_form_a_function_like_invocation() {
+        let source = r#"
+            #define ALIAS INCREMENT
+            #define INCREMENT(value) ((value) + 1)
+            #define FUNCTION_NAME(ignored) INCREMENT
+
+            int main(void) {
+                return ALIAS(2) != 3 || FUNCTION_NAME(0)(4) != 5;
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+
+        let recursive = r#"
+            int SELF(int value) { return value; }
+            #define SELF(value) SELF
+            int main(void) { return SELF(0)(6) != 6; }
+        "#;
+        assert_eq!(run_source("test.c", recursive).unwrap().exit_status, 0);
     }
 
     #[test]
@@ -42345,6 +47256,65 @@ mod tests {
     }
 
     #[test]
+    fn unterminated_literals_and_comments_point_to_the_opening_delimiter() {
+        let cases = [
+            (
+                "int main(void) {\n    char a[] = \"hi\n}\n",
+                "unterminated quoted literal",
+                "test.c:2:16",
+            ),
+            (
+                "int main(void) {\n    char c = 'x;\n}\n",
+                "unterminated quoted literal",
+                "test.c:2:14",
+            ),
+            (
+                "int main(void) {\n  /* never ends\n}\n",
+                "unterminated block comment",
+                "test.c:2:3",
+            ),
+        ];
+
+        for (source, message, location) in cases {
+            let rendered = run_source("test.c", source).unwrap_err().render();
+            assert!(rendered.contains(message), "{rendered}");
+            assert!(rendered.contains(location), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn preprocessor_diagnostics_do_not_default_to_the_start_of_the_file() {
+        let cases = [
+            (
+                "int x;\n\n  #ifdef\n#endif\nint main(void) { return 0; }\n",
+                "expected macro name after #ifdef",
+                "test.c:3:3",
+            ),
+            (
+                "int x;\n  #if @\n#endif\nint main(void) { return 0; }\n",
+                "invalid token in #if expression",
+                "test.c:2:3",
+            ),
+            (
+                "int x;\n  #if 1\nint main(void) { return 0; }\n",
+                "unterminated conditional directive",
+                "test.c:2:3",
+            ),
+            (
+                "#define F(x) x\nint main(void) {\n  F(1, 2);\n}\n",
+                "expects 1 argument(s), got 2",
+                "test.c:3:3",
+            ),
+        ];
+
+        for (source, message, location) in cases {
+            let rendered = run_source("test.c", source).unwrap_err().render();
+            assert!(rendered.contains(message), "{rendered}");
+            assert!(rendered.contains(location), "{rendered}");
+        }
+    }
+
+    #[test]
     fn preprocessor_error_directive_reports_an_error() {
         let source = r#"
             #error stop here
@@ -42359,7 +47329,7 @@ mod tests {
     fn if_expression_character_constants_support_universal_escapes() {
         let source = r#"
             #include <stdio.h>
-            #if '\u0041' == 65
+            #if '\u0024' == 36
             int main(void) { printf("ok\n"); return 0; }
             #else
             int main(void) { printf("bad\n"); return 0; }
@@ -42860,19 +47830,52 @@ mod tests {
     }
 
     #[test]
-    fn tentative_definition_with_incomplete_array_becomes_one_element() {
+    fn tentative_definition_with_incomplete_array_becomes_one_element_for_storage() {
         let source = r#"
-            #include <stdio.h>
-
             int a[];
-
             int main(void) {
-                printf("%lu %d\n", sizeof a / sizeof a[0], a[0]);
-                return 0;
+                return a[0];
             }
         "#;
         let result = run_source("test.c", source).unwrap();
-        assert_eq!(result.stdout, "1 0\n");
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn sizeof_rejects_a_tentative_array_that_is_incomplete_at_the_use() {
+        for source in [
+            "int a[]; int main(void) { return sizeof a; }\n",
+            "extern int a[]; int main(void) { return sizeof a; } int a[3];\n",
+        ] {
+            let err = run_source("test.c", source).unwrap_err();
+            assert!(
+                err.render()
+                    .contains("sizeof cannot determine the size of type int[]"),
+                "{}",
+                err.render()
+            );
+        }
+    }
+
+    #[test]
+    fn internal_tentative_definition_must_have_complete_type() {
+        let err =
+            run_source("test.c", "static int a[]; int main(void) { return 0; }\n").unwrap_err();
+        assert!(
+            err.render().contains("must have complete type"),
+            "{}",
+            err.render()
+        );
+    }
+
+    #[test]
+    fn later_declaration_can_complete_an_internal_tentative_array() {
+        let source = r#"
+            static int a[];
+            extern int a[2];
+            int main(void) { return (int)(sizeof a / sizeof a[0]) - 2; }
+        "#;
+        run_source("test.c", source).unwrap();
     }
 
     #[test]
@@ -42927,6 +47930,16 @@ mod tests {
     }
 
     #[test]
+    fn function_without_storage_class_inherits_visible_internal_linkage() {
+        let source = r#"
+            static int helper(void);
+            int helper(void) { return 7; }
+            int main(void) { return helper() - 7; }
+        "#;
+        run_source("test.c", source).unwrap();
+    }
+
+    #[test]
     fn static_after_extern_in_same_file_is_reported_as_linkage_ub() {
         let source = r#"
             extern int x;
@@ -42939,6 +47952,36 @@ mod tests {
         let err = run_source("test.c", source).unwrap_err();
         let rendered = err.render();
         assert!(rendered.contains("internal and external linkage"));
+    }
+
+    #[test]
+    fn static_function_after_external_declaration_is_reported_as_linkage_ub() {
+        let source = "int helper(void); static int helper(void); int main(void) { return 0; }\n";
+        let err = run_source("test.c", source).unwrap_err();
+        assert!(err.render().contains("internal and external linkage"));
+    }
+
+    #[test]
+    fn plain_file_scope_object_after_static_is_reported_as_linkage_ub() {
+        let source = "static int x; int x; int main(void) { return 0; }\n";
+        let err = run_source("test.c", source).unwrap_err();
+        assert!(err.render().contains("internal and external linkage"));
+    }
+
+    #[test]
+    fn hidden_no_linkage_object_prevents_extern_from_inheriting_internal_linkage() {
+        let source = r#"
+            static int x;
+            int main(void) {
+                int x;
+                {
+                    extern int x;
+                }
+                return 0;
+            }
+        "#;
+        let err = run_source("test.c", source).unwrap_err();
+        assert!(err.render().contains("internal and external linkage"));
     }
 
     #[test]
@@ -44048,7 +49091,7 @@ mod tests {
             }
 
             int main(void) {
-                __codex_sighandler_t *prev = signal(SIGINT, handler);
+                void (*prev)(int) = signal(SIGINT, handler);
                 raise(SIGINT);
                 printf("%d %d\n", prev == SIG_DFL, seen == SIGINT);
                 return 0;
@@ -44161,7 +49204,7 @@ mod tests {
     }
 
     #[test]
-    fn ctime_invalidates_prior_localtime_result() {
+    fn ctime_keeps_prior_localtime_result_live() {
         let source = r#"
             #include <time.h>
 
@@ -44169,16 +49212,34 @@ mod tests {
                 time_t t = time(0);
                 struct tm *tm = localtime(&t);
                 ctime(&t);
-                return tm->tm_sec;
+                (void)tm->tm_sec;
+                return 0;
             }
         "#;
-        let err = run_source("test.c", source).unwrap_err();
-        let rendered = err.render();
-        assert!(rendered.contains("lifetime has ended"));
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
     }
 
     #[test]
-    fn asctime_invalidates_prior_asctime_result() {
+    fn localtime_keeps_prior_gmtime_result_live() {
+        let source = r#"
+            #include <time.h>
+
+            int main(void) {
+                time_t t = time(0);
+                struct tm *utc = gmtime(&t);
+                localtime(&t);
+                (void)utc->tm_sec;
+                utc->tm_sec = 0;
+                return utc->tm_sec;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn asctime_keeps_prior_results_live_and_writable() {
         let source = r#"
             #include <time.h>
 
@@ -44187,12 +49248,12 @@ mod tests {
                 struct tm *tm = localtime(&t);
                 char *first = asctime(tm);
                 asctime(tm);
-                return first[0];
+                first[0] = 'X';
+                return first[0] != 'X';
             }
         "#;
-        let err = run_source("test.c", source).unwrap_err();
-        let rendered = err.render();
-        assert!(rendered.contains("lifetime has ended"));
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
     }
 
     #[test]
@@ -44669,17 +49730,19 @@ mod tests {
             int main(void) {
                 float xf = 4.0f;
                 double xd = 9.0;
-                double _Complex z = 1.0 + 2.0 * I;
-                printf("%lu %lu %lu %lu\n",
+                double _Complex z = 3.0 + 4.0 * I;
+                printf("%lu %lu %lu %lu %lu %d\n",
                     sizeof(sqrt(xf)),
                     sizeof(sqrt(xd)),
                     sizeof(sqrt(z)),
-                    sizeof(cabs(xf)));
+                    sizeof(fabs(z)),
+                    sizeof(cabs(xf)),
+                    fabs(z) == 5.0);
                 return 0;
             }
         "#;
         let result = run_source("test.c", source).unwrap();
-        assert_eq!(result.stdout, "4 8 16 4\n");
+        assert_eq!(result.stdout, "4 8 16 8 8 1\n");
     }
 
     #[test]
@@ -45013,6 +50076,7 @@ mod tests {
         let err = crate_run_source("test.c", "int main(void) { return 0; }").unwrap_err();
         let rendered = err.render();
         assert!(rendered.contains("must end in a newline character"));
+        assert!(rendered.contains("test.c:1:29"), "{rendered}");
     }
 
     #[test]
@@ -45556,6 +50620,336 @@ mod tests {
         let err = run_source("test.c", source).unwrap_err();
         let rendered = err.render();
         assert!(rendered.contains("%p input must be a pointer value previously produced"));
+    }
+
+    #[test]
+    fn constraints_are_checked_in_unreachable_and_uncalled_code() {
+        let sources = [
+            "int main(void) { if (0) { int *p = 1; } return 0; }",
+            "int bad(void) { int value = 0; value(); return 0; } int main(void) { return 0; }",
+            "int bad(void) { int value; return &value; } int main(void) { return 0; }",
+            "int main(void) { if (0) { break; } return 0; }",
+            "int main(void) { if (0) { struct S { int x; } a, b; return a == b; } return 0; }",
+            "int main(void) { if (0) { void *p = 0; p + 1; } return 0; }",
+            "int main(void) { if (0) { struct S { int x; } a, b; (struct S)a; } return 0; }",
+            "int main(void) { if (0) { int values[2] = { \"wrong\" }; } return 0; }",
+            "int main(void) { if (0) { struct S { int value; } s = { \"wrong\" }; } return 0; }",
+            "int main(void) { goto target; int n = 2; int values[n]; target: return 0; }",
+            "int main(void) { switch (0) { int n = 2; int values[n]; case 0: return 0; } }",
+            "int values[2] = {}; int main(void) { return 0; }",
+            "int values[0]; int main(void) { return 0; }",
+            "struct S { int count; int values[]; }; int main(void) { if (0) { struct S s = { 1, { 2 } }; } return 0; }",
+            "struct S; int main(void) { if (0) { struct S value; } return 0; }",
+            "int main(void) { if (0) { void value; } return 0; }",
+            "struct S; int f(struct S value); int main(void) { return 0; }",
+            "struct S; struct S f(void) { } int main(void) { return 0; }",
+            "int f(void value); int main(void) { return 0; }",
+            "extern void value; int main(void) { return 0; }",
+            "struct S; extern struct S values[2]; int main(void) { return 0; }",
+        ];
+        for source in sources {
+            assert!(run_source("test.c", source).is_err(), "accepted {source}");
+        }
+    }
+
+    #[test]
+    fn constraint_checking_does_not_evaluate_unreachable_expressions() {
+        let source = r#"
+            int main(void) {
+                if (0) {
+                    int zero = 0;
+                    int value = 1 / zero;
+                    int *null = 0;
+                    value += *null;
+                }
+                return 0;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn jumping_out_of_a_vla_scope_is_allowed() {
+        let source = r#"
+            int main(void) {
+                int result = 1;
+                {
+                    int n = 2;
+                    int values[n];
+                    values[0] = 0;
+                    goto done;
+                }
+            done:
+                return result - 1;
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn implicit_pointer_to_integer_conversion_is_rejected() {
+        let source = "int main(void) { int value; int converted = &value; return converted; }";
+        let err = run_source("test.c", source).unwrap_err();
+        assert!(err.render().contains("cannot convert int* to int"));
+
+        let allowed = r#"
+            int main(void) {
+                int value;
+                unsigned long address = (unsigned long)&value;
+                _Bool truth = &value;
+                return address == 0 || !truth;
+            }
+        "#;
+        assert_eq!(run_source("test.c", allowed).unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn character_constant_to_pointer_diagnostic_preserves_the_expected_type() {
+        for (source, expected_type) in [
+            ("int main(void) { char *p = 'a'; }\n", "char*"),
+            ("int main(void) { int *p = 'a'; }\n", "int*"),
+        ] {
+            let rendered = run_source("test.c", source).unwrap_err().render();
+            assert!(
+                rendered.contains(&format!(
+                    "cannot convert a character constant to pointer type {expected_type}"
+                )),
+                "{rendered}"
+            );
+        }
+
+        run_source(
+            "test.c",
+            "int main(void) { char *p = '\\0'; return p != 0; }\n",
+        )
+        .unwrap();
+
+        let rendered = run_source("test.c", "int main(void) {\n  char *p;\n  p = 'a';\n}\n")
+            .unwrap_err()
+            .render();
+        assert!(rendered.contains("test.c:3:7"), "{rendered}");
+    }
+
+    #[test]
+    fn explicit_integer_pointer_conversions_round_trip_addresses() {
+        let source = r#"
+            #include <stdint.h>
+
+            int function(void) { return 1; }
+
+            int main(void) {
+                int scalar;
+                int array[3];
+                struct Pair { int first; int second; } pair;
+
+                uintptr_t scalar_address = (uintptr_t)&scalar;
+                uintptr_t element_address = (uintptr_t)&array[1];
+                uintptr_t member_address = (uintptr_t)&pair.second;
+                uintptr_t one_past_address = (uintptr_t)(array + 3);
+                uintptr_t function_address = (uintptr_t)function;
+
+                return (int *)scalar_address != &scalar
+                    || (int *)element_address != &array[1]
+                    || (int *)member_address != &pair.second
+                    || (int *)one_past_address != array + 3
+                    || (int (*)(void))function_address != function;
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+
+        let trap = "int main(void) { return (int *)1234 != 0; }";
+        let err = run_source("test.c", trap).unwrap_err();
+        let rendered = err.render();
+        assert!(rendered.contains("undefined behavior"));
+        assert!(rendered.contains("invalid object representation"));
+    }
+
+    #[test]
+    fn sizeof_pointer_difference_and_reversed_subscript_work() {
+        let source = r#"
+            int main(void) {
+                int values[3] = {4, 5, 6};
+                return sizeof(&values[2] - &values[0]) != sizeof(long)
+                    || 1[values] != 5
+                    || *(&1[values]) != 5;
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn sizeof_dereferenced_array_uses_the_inner_array_to_pointer_conversion() {
+        let source = r#"
+            int main(void) {
+                int values[5];
+                return sizeof *values != sizeof(int)
+                    || sizeof *(values + 1) != sizeof(int);
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn comma_operator_converts_array_and_function_designators() {
+        let source = r#"
+            int function(void) { return 0; }
+
+            int main(void) {
+                int values[5];
+                return sizeof(0, values) != sizeof(int *)
+                    || sizeof(0, function) != sizeof(int (*)(void));
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn exact_length_string_array_initializers_may_omit_the_terminator() {
+        let source = r#"
+            #include <wchar.h>
+            int main(void) {
+                char narrow[3] = "abc";
+                wchar_t wide[2] = L"xy";
+                return narrow[0] != 'a' || narrow[2] != 'c'
+                    || wide[0] != L'x' || wide[1] != L'y';
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+
+        let too_short = "int main(void) { char text[2] = \"abc\"; return 0; }";
+        assert!(run_source("test.c", too_short).is_err());
+    }
+
+    #[test]
+    fn calls_without_prototypes_use_default_argument_promotions() {
+        let source = r#"
+            int twice();
+            int main(void) { return twice(4) - 8; }
+            int twice(int value) { return value * 2; }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+
+        let void_source = "int f(); int f(void) { return 3; } int main(void) { return f() - 3; }";
+        assert_eq!(run_source("test.c", void_source).unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn calls_without_prototypes_detect_definition_mismatches() {
+        let bad_declaration =
+            "int f(); int f(float value) { return value; } int main(void) { return f(1.0f); }";
+        assert!(run_source("test.c", bad_declaration).is_err());
+
+        let bad_call =
+            "int f(); int main(void) { return f(1.0); } int f(int value) { return value; }";
+        let err = run_source("test.c", bad_call).unwrap_err();
+        assert!(
+            err.render()
+                .contains("incompatible with parameter type int in the definition of f"),
+            "{}",
+            err.render()
+        );
+
+        let extra_argument = "int f() { return 0; } int main(void) { return f(1); }";
+        let err = run_source("test.c", extra_argument).unwrap_err();
+        assert!(
+            err.render().contains("call without a prototype"),
+            "{}",
+            err.render()
+        );
+    }
+
+    #[test]
+    fn c11_alignment_static_assert_noreturn_and_func_features_work() {
+        let source = r#"
+#include <assert.h>
+#include <stdalign.h>
+#include <stddef.h>
+_Static_assert(_Alignof(long double) == _Alignof(max_align_t), "max alignment");
+static_assert(__STDC__ == 1 && __STDC_VERSION__ == 201112L, "C11 macros");
+struct checked { _Static_assert(sizeof(int) == 4, "record assertion"); int value; };
+alignas(64) int aligned_value;
+int main(void) {
+    static_assert(_Alignof(int) == 4, "int alignment");
+    return ((unsigned long)&aligned_value % 64) || __func__[0] != 'm';
+}
+"#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+
+        let noreturn = "_Noreturn void f(void) { return; } int main(void) { f(); }";
+        let err = run_source("test.c", noreturn).unwrap_err();
+        assert!(err.render().contains("_Noreturn function f returned"));
+    }
+
+    #[test]
+    fn c11_alternative_tokens_predefined_macros_and_old_style_definitions_work() {
+        let source = r#"
+??=include <stddef.h>
+int add(int, int);
+int add(a, b)
+int a;
+char b;
+<%
+    int values<:2:> = <% a, b %>;
+    return values<:0:> + values<:1:>;
+%>
+int main(void) {
+    /* Unicode is allowed in comments too: 🍌 */
+#if !defined(__DATE__) || !defined(__TIME__) || !defined(__STDC_NO_THREADS__) || !defined(__STDC_NO_ATOMICS__)
+#error missing predefined macro
+#endif
+    return add(2, 3) - 5;
+}
+"#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn c11_unicode_identifiers_literals_and_uchar_conversions_work() {
+        let source = r#"
+#include <uchar.h>
+#include <string.h>
+int main(void) {
+    int α = 4;
+    int a\u0301 = 6;
+    char16_t s16[] = u"A🍌";
+    char32_t s32[] = U"A🍌";
+    char utf8[] = u8"é";
+    char16_t converted = 0;
+    mbstate_t state = {0};
+    if (\u03b1 != 4 || á != 6 || sizeof s16 / sizeof s16[0] != 4) return 1;
+    if (sizeof s32 / sizeof s32[0] != 3 || s32[1] != U'🍌') return 2;
+    if (strlen(utf8) != 2 || u'A' != 65 || U'A' != 65) return 3;
+    if (mbrtoc16(&converted, "A", 1, &state) != 1 || converted != u'A') return 4;
+    return 0;
+}
+"#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+        assert!(run_source("test.c", "int \\u0301invalid;").is_err());
+    }
+
+    #[test]
+    fn c11_library_additions_work() {
+        let source = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+void finish(void) { _Exit(7); }
+int main(void) {
+    FILE *first = fopen("exclusive", "wx");
+    FILE *second = fopen("exclusive", "wx");
+    struct timespec ts;
+    void *memory = aligned_alloc(64, 128);
+    void *small = aligned_alloc(4, 4);
+    if (!first || second || timespec_get(&ts, TIME_UTC) != TIME_UTC) return 1;
+    if (!memory || !small || (unsigned long)memory % 64 || (unsigned long)small % 4 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000L) return 2;
+    free(memory);
+    free(small);
+    if (at_quick_exit(finish)) return 3;
+    quick_exit(4);
+}
+"#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 7);
     }
 
     fn temp_test_dir(label: &str) -> PathBuf {

@@ -1,5 +1,6 @@
 import { applyTextTokenReplacements, appendStateObjects, bindBtnRefPulse, clearNode, createStepper, ensurePanelizedMain, flashStatus, getNavLabelForHref, queryElement, queryRole, renderParts, setPartsContent, syncDocumentTitleFromNav, } from "./shared-core.js";
 import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
+import { diagnosticDecorations, renderDiagnosticMessage, } from "./shared-diagnostics.js";
 import { boxValueMatchesSpec, runCProgram } from "./shared-c-interpreter.js";
 import { clearLevelProgress, currentLevelId, maybeRestoreLevelProgress, writeLevelProgress, } from "./shared-progress.js";
 function collectCodeEditorElements(root = document) {
@@ -211,18 +212,6 @@ function createCodeEditorTemplate(config) {
         const result = runCProgram(getEditorText());
         return result.kind === "ok" ? null : result.diagnostic;
     }
-    function diagnosticDecoration(diagnostic) {
-        if (!diagnostic)
-            return [];
-        return [
-            {
-                line: diagnostic.range.startLine,
-                startCol: diagnostic.range.startCol,
-                endCol: diagnostic.range.endCol,
-                className: "code-highlight-error",
-            },
-        ];
-    }
     function renderDiagnostic(diagnostic) {
         if (!diagnosticEl)
             return;
@@ -239,7 +228,7 @@ function createCodeEditorTemplate(config) {
         heading.textContent = `${diagnostic.kind === "ub" ? "Undefined behavior" : "Error"} on line ${diagnostic.range.startLine + 1}, column ${diagnostic.range.startCol + 1}`;
         const message = document.createElement("div");
         message.className = "code-diagnostic-message";
-        message.textContent = diagnostic.message;
+        renderDiagnosticMessage(message, diagnostic);
         diagnosticEl.append(heading, message);
         if (diagnostic.tip) {
             const tip = document.createElement("div");
@@ -261,7 +250,7 @@ function createCodeEditorTemplate(config) {
             highlightEl,
             measureEl,
             lines,
-            decorations: diagnosticDecoration(diagnostic),
+            decorations: diagnosticDecorations(diagnostic, lines),
             lineNumberClasses,
         });
         renderDiagnostic(diagnostic);

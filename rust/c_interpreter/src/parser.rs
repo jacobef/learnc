@@ -2,13 +2,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     BinaryOp, Block, BlockItem, Declaration, Designator, Expr, ExternalDeclaration, ForInit,
-    FunctionDecl, FunctionDef, GenericAssociation, Initializer, InitializerItem, Parameter,
-    PostfixOp, Statement, StorageClass, SwitchLabel, TranslationUnit, UnaryOp,
+    FunctionDecl, FunctionDef, GenericAssociation, Initializer, InitializerItem, Linkage,
+    Parameter, PostfixOp, Statement, StorageClass, SwitchLabel, TranslationUnit, UnaryOp,
 };
 use crate::diag::Diagnostic;
 use crate::integer::parse_integer_literal;
 use crate::source::{SourceManager, Span};
-use crate::token::{Keyword, Token, TokenKind};
+use crate::token::{Keyword, StringLiteralValue, Token, TokenKind};
 use crate::types::{
     CType, EnumType, HOST_LONG_DOUBLE_ALIGN, RecordKind, RecordMember, RecordType, TypeQualifiers,
 };
@@ -44,7 +44,7 @@ struct ScopeEntry {
     ordinary: Option<SymbolKind>,
     ordinary_ty: Option<CType>,
     ordinary_storage_class: Option<ParsedStorageClass>,
-    ordinary_has_linkage: bool,
+    ordinary_linkage: Option<Linkage>,
     typedef_ty: Option<CType>,
     enum_constant: Option<i128>,
 }
@@ -69,12 +69,15 @@ struct DeclarationSpecifiers {
     base_type: CType,
     storage_class: Option<ParsedStorageClass>,
     is_inline: bool,
+    is_noreturn: bool,
+    alignment: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
 struct ParsedTypeName {
     ty: CType,
     vla_bounds: Vec<Option<Expr>>,
+    span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +87,14 @@ enum DeclContext {
     Parameter,
     RecordMember,
     TypeName,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StringEncoding {
+    Narrow,
+    Wide,
+    Utf16,
+    Utf32,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +123,7 @@ enum ParsedDeclarator {
         params: Vec<Parameter>,
         is_variadic: bool,
         parameter_tags: HashMap<String, TagBinding>,
+        old_style: bool,
         span: Span,
     },
 }
@@ -122,7 +134,7 @@ struct ParsedArraySpec {
     static_bound: Option<Expr>,
 }
 
-type ParsedFunctionInfo = (Vec<Parameter>, bool, HashMap<String, TagBinding>);
+type ParsedFunctionInfo = (Vec<Parameter>, bool, HashMap<String, TagBinding>, bool);
 
 impl ParsedDeclarator {
     fn span(&self) -> Span {
@@ -137,7 +149,7 @@ impl ParsedDeclarator {
 }
 
 pub struct Parser<'a> {
-    _sources: &'a SourceManager,
+    sources: &'a SourceManager,
     tokens: Vec<Token>,
     index: usize,
     file_tags: HashMap<String, TagBinding>,
@@ -149,6 +161,7 @@ pub struct Parser<'a> {
     next_member_id: usize,
     file_scope: HashMap<String, ScopeEntry>,
     block_scopes: Vec<HashMap<String, ScopeEntry>>,
+    block_linkage_declarations: Vec<ExternalDeclaration>,
     allow_undeclared_identifiers: bool,
 }
 
@@ -161,13 +174,13 @@ impl<'a> Parser<'a> {
                 ordinary: None,
                 ordinary_ty: None,
                 ordinary_storage_class: None,
-                ordinary_has_linkage: false,
+                ordinary_linkage: None,
                 typedef_ty: Some(CType::VaList),
                 enum_constant: None,
             },
         );
         Self {
-            _sources: sources,
+            sources,
             tokens,
             index: 0,
             file_tags: HashMap::new(),
@@ -179,6 +192,7 @@ impl<'a> Parser<'a> {
             next_member_id: 0,
             file_scope,
             block_scopes: Vec::new(),
+            block_linkage_declarations: Vec::new(),
             allow_undeclared_identifiers: false,
         }
     }
@@ -186,6 +200,10 @@ impl<'a> Parser<'a> {
     pub fn parse_translation_unit(mut self) -> Result<TranslationUnit, Diagnostic> {
         let mut externals = Vec::new();
         while !self.at(TokenKind::Eof) {
+            if self.at_keyword(Keyword::StaticAssert) {
+                self.parse_static_assertion()?;
+                continue;
+            }
             match self.parse_external_declaration()? {
                 ExternalDecl::Function(function) => {
                     externals.push(ExternalDeclaration::Function(function));
@@ -207,12 +225,14 @@ impl<'a> Parser<'a> {
                 ExternalDecl::Empty => {}
             }
         }
+        externals.append(&mut self.block_linkage_declarations);
         Ok(TranslationUnit {
             externals,
             functions: Vec::new(),
             function_declarations: Vec::new(),
             globals: Vec::new(),
             global_definitions: Vec::new(),
+            inline_function_definitions: Vec::new(),
             records: self.records,
             enums: self.enums,
             enum_constants: self.enum_constants,
@@ -228,9 +248,15 @@ impl<'a> Parser<'a> {
 
     fn parse_external_declaration(&mut self) -> Result<ExternalDecl, Diagnostic> {
         self.skip_gnu_attributes()?;
+        let declaration_start = self.current_span();
         let specs = self.parse_declaration_specifiers(DeclContext::FileScope)?;
+        let return_type_span = declaration_start.merge(self.prev_span());
         if self.eat(TokenKind::Semicolon) {
-            if specs.storage_class.is_some() || specs.is_inline {
+            if specs.storage_class.is_some()
+                || specs.is_inline
+                || specs.is_noreturn
+                || specs.alignment.is_some()
+            {
                 return Err(Diagnostic::error(
                     "storage class specifiers and inline require a declarator",
                     self.prev_span(),
@@ -240,6 +266,18 @@ impl<'a> Parser<'a> {
         }
         let (name, ty, vla_bounds, _, base_span, function_params) =
             self.parse_declarator(specs.base_type.clone(), DeclContext::FileScope)?;
+        if specs.is_noreturn && !ty.is_function() {
+            return Err(Diagnostic::error(
+                "_Noreturn is only valid on functions",
+                base_span,
+            ));
+        }
+        if specs.alignment.is_some() && ty.is_function() {
+            return Err(Diagnostic::error(
+                "_Alignas is not valid on functions",
+                base_span,
+            ));
+        }
         if vla_bounds.iter().any(|bound| bound.is_some()) {
             return Err(Diagnostic::error(
                 "file-scope declarations cannot have variable length array type",
@@ -254,19 +292,28 @@ impl<'a> Parser<'a> {
                 base_span,
                 specs.storage_class,
                 specs.is_inline,
+                specs.alignment,
                 DeclContext::FileScope,
             )?));
         }
         if ty.is_function() && function_params.is_none() {
             self.validate_function_decl_specifiers(&specs, base_span)?;
             let mut decls = Vec::new();
-            self.declare_function_symbol(&name, &ty, base_span, DeclContext::FileScope)?;
+            let linkage = self.declare_function_symbol(
+                &name,
+                &ty,
+                specs.storage_class,
+                base_span,
+                DeclContext::FileScope,
+            )?;
             decls.push(self.build_function_declaration(
                 name,
                 ty,
                 base_span,
                 specs.storage_class,
                 specs.is_inline,
+                specs.is_noreturn,
+                linkage,
             )?);
             while self.eat(TokenKind::Comma) {
                 let (name, ty, vla_bounds, _, span, _) =
@@ -283,13 +330,21 @@ impl<'a> Parser<'a> {
                         span,
                     ));
                 }
-                self.declare_function_symbol(&name, &ty, span, DeclContext::FileScope)?;
+                let linkage = self.declare_function_symbol(
+                    &name,
+                    &ty,
+                    specs.storage_class,
+                    span,
+                    DeclContext::FileScope,
+                )?;
                 decls.push(self.build_function_declaration(
                     name,
                     ty,
                     span,
                     specs.storage_class,
                     specs.is_inline,
+                    specs.is_noreturn,
+                    linkage,
                 )?);
             }
             let end = self.expect(TokenKind::Semicolon)?.span;
@@ -298,7 +353,7 @@ impl<'a> Parser<'a> {
             }
             return Ok(ExternalDecl::FunctionDeclarations(decls));
         }
-        let Some((params, is_variadic, parameter_tags)) = function_params else {
+        let Some((mut params, is_variadic, parameter_tags, old_style)) = function_params else {
             return Ok(ExternalDecl::Globals(self.finish_declarator_list(
                 name,
                 ty,
@@ -306,6 +361,7 @@ impl<'a> Parser<'a> {
                 base_span,
                 specs.storage_class,
                 specs.is_inline,
+                specs.alignment,
                 DeclContext::FileScope,
             )?));
         };
@@ -316,32 +372,84 @@ impl<'a> Parser<'a> {
             ));
         }
         self.validate_function_decl_specifiers(&specs, base_span)?;
-        self.declare_function_symbol(&name, &ty, base_span, DeclContext::FileScope)?;
+        let linkage = self.declare_function_symbol(
+            &name,
+            &ty,
+            specs.storage_class,
+            base_span,
+            DeclContext::FileScope,
+        )?;
         let return_type = match ty.unqualified() {
             CType::Function(return_type, _, _) => (**return_type).clone(),
             _ => unreachable!("outermost function declarator must produce a function type"),
         };
-        if matches!(return_type.unqualified(), CType::Array(_, _)) {
-            return Err(Diagnostic::error(
-                "a function cannot return an array type",
-                base_span,
-            ));
+        match return_type.unqualified() {
+            CType::Array(_, _) => {
+                return Err(Diagnostic::error(
+                    "a function cannot return an array type",
+                    base_span,
+                ));
+            }
+            CType::Function(..) => {
+                return Err(Diagnostic::error(
+                    "a function cannot return a function type",
+                    base_span,
+                ));
+            }
+            _ => {}
         }
         if self.eat(TokenKind::Semicolon) {
+            if old_style && !params.is_empty() {
+                return Err(Diagnostic::error(
+                    "an identifier-list function declarator is only valid in a definition",
+                    base_span,
+                ));
+            }
             return Ok(ExternalDecl::FunctionDeclarations(vec![FunctionDecl {
                 name,
                 return_type,
                 params,
                 is_variadic,
                 storage_class: specs.storage_class.and_then(ast_storage_class),
+                linkage,
                 is_inline: specs.is_inline,
+                is_noreturn: specs.is_noreturn,
+                has_prototype: !old_style,
                 span: base_span,
             }]));
         }
+        if self.at(TokenKind::Eof) {
+            return Err(Diagnostic::error(
+                format!("function header for {name} is missing a body or semicolon"),
+                base_span,
+            ));
+        }
+        if let Some(param) = params
+            .iter()
+            .find(|param| param.ty != CType::Void && param.name.is_none())
+        {
+            return Err(Diagnostic::error(
+                "function definition parameters must have names",
+                param.span,
+            ));
+        }
+        if !matches!(return_type.unqualified(), CType::Void) && !self.type_is_complete(&return_type)
+        {
+            return Err(Diagnostic::error(
+                "a function definition must return void or a complete object type",
+                base_span,
+            ));
+        }
         self.push_block_scope();
         self.current_tag_scope_mut().extend(parameter_tags);
+        if old_style {
+            self.parse_old_style_parameter_declarations(&mut params, &name, base_span)?;
+        }
         for param in &params {
             if let Some(name) = &param.name {
+                if old_style && self.current_scope_entry(name).is_some() {
+                    continue;
+                }
                 self.declare_object_symbol(
                     name,
                     &param.ty,
@@ -351,6 +459,23 @@ impl<'a> Parser<'a> {
                 )?;
             }
         }
+        let func_name_ty = CType::array_of(
+            CType::qualified(
+                CType::Char,
+                TypeQualifiers {
+                    is_const: true,
+                    ..TypeQualifiers::default()
+                },
+            ),
+            name.len() + 1,
+        );
+        self.declare_object_symbol(
+            "__func__",
+            &func_name_ty,
+            Some(ParsedStorageClass::Static),
+            base_span,
+            DeclContext::BlockScope,
+        )?;
         let body = self.parse_block()?;
         self.pop_block_scope();
         self.validate_function_labels(&body)?;
@@ -358,10 +483,14 @@ impl<'a> Parser<'a> {
         Ok(ExternalDecl::Function(FunctionDef {
             name,
             return_type,
+            return_type_span,
             params,
             is_variadic,
             storage_class: specs.storage_class.and_then(ast_storage_class),
+            linkage,
             is_inline: specs.is_inline,
+            is_noreturn: specs.is_noreturn,
+            has_prototype: !old_style,
             body,
             span,
         }))
@@ -374,6 +503,8 @@ impl<'a> Parser<'a> {
         span: Span,
         storage_class: Option<ParsedStorageClass>,
         is_inline: bool,
+        is_noreturn: bool,
+        linkage: Linkage,
     ) -> Result<FunctionDecl, Diagnostic> {
         let (return_type, params, is_variadic) = match ty.unqualified() {
             CType::Function(return_type, params, is_variadic) => {
@@ -381,6 +512,21 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(Diagnostic::error("expected function declarator", span)),
         };
+        match return_type.unqualified() {
+            CType::Array(_, _) => {
+                return Err(Diagnostic::error(
+                    "a function cannot return an array type",
+                    span,
+                ));
+            }
+            CType::Function(..) => {
+                return Err(Diagnostic::error(
+                    "a function cannot return a function type",
+                    span,
+                ));
+            }
+            _ => {}
+        }
         let params = params
             .into_iter()
             .map(|ty| Parameter {
@@ -399,7 +545,10 @@ impl<'a> Parser<'a> {
             params,
             is_variadic,
             storage_class: storage_class.and_then(ast_storage_class),
+            linkage,
             is_inline,
+            is_noreturn,
+            has_prototype: true,
             span,
         })
     }
@@ -432,16 +581,30 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_gnu_attributes()?;
                 if self.eat(TokenKind::Ellipsis) {
+                    if params.is_empty() {
+                        return Err(Diagnostic::error(
+                            "a variadic function requires at least one fixed parameter before ...",
+                            self.prev_span(),
+                        ));
+                    }
                     is_variadic = true;
                     break;
                 }
                 let start = self.current_span();
                 let specs = self.parse_declaration_specifiers(DeclContext::Parameter)?;
+                if self.at(TokenKind::LBrace) || self.at(TokenKind::Eof) {
+                    return Err(Diagnostic::error(
+                        "function parameter list is missing a closing parenthesis",
+                        self.current_span(),
+                    ));
+                }
                 if self.at(TokenKind::Comma) || self.at(TokenKind::RParen) {
                     self.validate_parameter_decl_specifiers(&specs, start)?;
+                    let ty = self.adjust_parameter_type(specs.base_type);
+                    self.validate_parameter_type(&ty, start)?;
                     params.push(Parameter {
                         name: None,
-                        ty: self.adjust_parameter_type(specs.base_type),
+                        ty,
                         vla_bounds: Vec::new(),
                         static_array_bound: None,
                         adjusted_from_array_or_function: false,
@@ -453,27 +616,33 @@ impl<'a> Parser<'a> {
                     }
                     continue;
                 }
+                let declarator = self.parse_declarator_tree_inner(DeclContext::Parameter, true)?;
                 let (name, ty, vla_bounds, static_array_bound, span, _) =
-                    self.parse_declarator(specs.base_type.clone(), DeclContext::Parameter)?;
-                self.validate_parameter_decl_specifiers(&specs, span)?;
-                self.declare_object_symbol(
-                    &name,
-                    &ty,
-                    specs.storage_class,
-                    span,
-                    DeclContext::Parameter,
-                )?;
+                    self.apply_parsed_declarator(declarator, specs.base_type.clone(), true)?;
+                let parameter_span = start.merge(span);
+                self.validate_parameter_decl_specifiers(&specs, parameter_span)?;
+                if !name.is_empty() {
+                    self.declare_object_symbol(
+                        &name,
+                        &ty,
+                        specs.storage_class,
+                        parameter_span,
+                        DeclContext::Parameter,
+                    )?;
+                }
+                let adjusted_ty = self.adjust_parameter_type(ty.clone());
+                self.validate_parameter_type(&adjusted_ty, parameter_span)?;
                 params.push(Parameter {
-                    name: Some(name),
+                    name: (!name.is_empty()).then_some(name),
                     adjusted_from_array_or_function: matches!(
                         ty.unqualified(),
                         CType::Array(_, _) | CType::Function(..)
                     ),
-                    ty: self.adjust_parameter_type(ty),
+                    ty: adjusted_ty,
                     vla_bounds,
                     static_array_bound,
                     storage_class: specs.storage_class.and_then(ast_storage_class),
-                    span,
+                    span: parameter_span,
                 });
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -483,14 +652,148 @@ impl<'a> Parser<'a> {
         })();
         let parameter_tags = self.block_tag_scopes.last().cloned().unwrap_or_default();
         self.pop_block_scope();
-        result.map(|(params, is_variadic)| (params, is_variadic, parameter_tags))
+        result.map(|(params, is_variadic)| (params, is_variadic, parameter_tags, false))
+    }
+
+    fn parse_function_parameter_clause(&mut self) -> Result<ParsedFunctionInfo, Diagnostic> {
+        if self.peek_kind(0) == Some(&TokenKind::LParen)
+            && self.peek_kind(1) == Some(&TokenKind::RParen)
+        {
+            self.bump();
+            return Ok((Vec::new(), false, HashMap::new(), true));
+        }
+        let identifier_list = matches!(self.peek_kind(1), Some(TokenKind::Identifier(name))
+            if self.lookup_typedef_name(name).is_none());
+        if !identifier_list {
+            return self.parse_parameter_list();
+        }
+        self.expect(TokenKind::LParen)?;
+        let mut params = Vec::new();
+        let mut names = HashSet::new();
+        loop {
+            let token = self.bump().clone();
+            let TokenKind::Identifier(name) = token.kind else {
+                return Err(Diagnostic::error(
+                    "expected identifier in old-style function parameter list",
+                    token.span,
+                ));
+            };
+            if !names.insert(name.clone()) {
+                return Err(Diagnostic::error(
+                    "duplicate name in old-style function parameter list",
+                    token.span,
+                ));
+            }
+            params.push(Parameter {
+                name: Some(name),
+                ty: CType::Int,
+                vla_bounds: Vec::new(),
+                static_array_bound: None,
+                adjusted_from_array_or_function: false,
+                storage_class: None,
+                span: token.span,
+            });
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok((params, false, HashMap::new(), true))
+    }
+
+    fn parse_old_style_parameter_declarations(
+        &mut self,
+        params: &mut [Parameter],
+        function_name: &str,
+        header_span: Span,
+    ) -> Result<(), Diagnostic> {
+        let mut declared = HashSet::new();
+        while !self.at(TokenKind::LBrace) {
+            if self.at(TokenKind::Eof) {
+                return Err(Diagnostic::error(
+                    format!("function header for {function_name} is missing a body or semicolon"),
+                    header_span,
+                ));
+            }
+            let declarations = self.parse_declaration_list()?;
+            if declarations.is_empty() {
+                return Err(Diagnostic::error(
+                    "expected old-style parameter declaration",
+                    self.current_span(),
+                ));
+            }
+            for declaration in declarations {
+                let Some(param) = params
+                    .iter_mut()
+                    .find(|param| param.name.as_deref() == Some(&declaration.name))
+                else {
+                    return Err(Diagnostic::error(
+                        format!(
+                            "declaration for {} does not name an old-style parameter",
+                            declaration.name
+                        ),
+                        declaration.span,
+                    ));
+                };
+                if !declared.insert(declaration.name.clone()) {
+                    return Err(Diagnostic::error(
+                        format!(
+                            "duplicate declaration of old-style parameter {}",
+                            declaration.name
+                        ),
+                        declaration.span,
+                    ));
+                }
+                if declaration.init.is_some()
+                    || !matches!(
+                        declaration.storage_class,
+                        None | Some(StorageClass::Register)
+                    )
+                {
+                    return Err(Diagnostic::error(
+                        "old-style parameter declarations cannot have initializers or this storage class",
+                        declaration.span,
+                    ));
+                }
+                let adjusted = self.adjust_parameter_type(declaration.ty.clone());
+                self.validate_parameter_type(&adjusted, declaration.span)?;
+                param.ty = adjusted;
+                param.vla_bounds = declaration.vla_bounds;
+                param.adjusted_from_array_or_function = matches!(
+                    declaration.ty.unqualified(),
+                    CType::Array(..) | CType::Function(..)
+                );
+                param.storage_class = declaration.storage_class;
+                param.span = declaration.span;
+                if let Some(entry) = self.current_scope_mut().get_mut(&declaration.name) {
+                    entry.ordinary_ty = Some(param.ty.clone());
+                }
+            }
+        }
+        if let Some(param) = params.iter().find(|param| {
+            param
+                .name
+                .as_ref()
+                .is_some_and(|name| !declared.contains(name))
+        }) {
+            let name = param
+                .name
+                .as_deref()
+                .expect("old-style parameters always have names");
+            return Err(Diagnostic::error(
+                format!("old-style parameter {name} is missing its declaration"),
+                param.span,
+            ));
+        }
+        Ok(())
     }
 
     fn parse_block(&mut self) -> Result<Block, Diagnostic> {
         let start = self.expect(TokenKind::LBrace)?.span;
         let mut items = Vec::new();
         while !self.at(TokenKind::RBrace) {
-            if self.is_declaration_start() {
+            if self.at_keyword(Keyword::StaticAssert) {
+                self.parse_static_assertion()?;
+            } else if self.is_declaration_start() {
                 items.extend(self.parse_block_declaration_items()?);
             } else {
                 items.push(BlockItem::Statement(self.parse_statement()?));
@@ -544,6 +847,8 @@ impl<'a> Parser<'a> {
             first_function_params,
             specs.storage_class,
             specs.is_inline,
+            specs.is_noreturn,
+            specs.alignment,
             first_init,
             first_predeclared,
             first_span,
@@ -576,6 +881,8 @@ impl<'a> Parser<'a> {
                 function_params,
                 specs.storage_class,
                 specs.is_inline,
+                specs.is_noreturn,
+                specs.alignment,
                 init,
                 predeclared,
                 span,
@@ -613,7 +920,7 @@ impl<'a> Parser<'a> {
             self.parse_declarator(specs.base_type, DeclContext::BlockScope)?;
         if function_params.is_some() && specs.storage_class != Some(ParsedStorageClass::Typedef) {
             return Err(Diagnostic::error(
-                "function declarations are only supported at file scope",
+                "function declaration is not allowed in this declaration context",
                 span,
             ));
         }
@@ -624,6 +931,7 @@ impl<'a> Parser<'a> {
             span,
             specs.storage_class,
             specs.is_inline,
+            specs.alignment,
             DeclContext::BlockScope,
         )
     }
@@ -636,6 +944,7 @@ impl<'a> Parser<'a> {
         first_span: Span,
         storage_class: Option<ParsedStorageClass>,
         is_inline: bool,
+        alignment: Option<usize>,
         context: DeclContext,
     ) -> Result<Vec<Declaration>, Diagnostic> {
         if is_inline {
@@ -667,6 +976,7 @@ impl<'a> Parser<'a> {
             first_ty.clone(),
             first_vla_bounds,
             storage_class,
+            alignment,
             first_init,
             first_predeclared,
             first_span,
@@ -677,7 +987,7 @@ impl<'a> Parser<'a> {
                 self.parse_declarator(self.base_type_for_redeclaration(&first_ty), context)?;
             if function_params.is_some() && storage_class != Some(ParsedStorageClass::Typedef) {
                 return Err(Diagnostic::error(
-                    "function declarations are only supported at file scope",
+                    "function declaration is not allowed in this declaration context",
                     span,
                 ));
             }
@@ -696,6 +1006,7 @@ impl<'a> Parser<'a> {
                 ty,
                 vla_bounds,
                 storage_class,
+                alignment,
                 init,
                 predeclared,
                 span,
@@ -720,10 +1031,24 @@ impl<'a> Parser<'a> {
         function_params: Option<ParsedFunctionInfo>,
         storage_class: Option<ParsedStorageClass>,
         is_inline: bool,
+        is_noreturn: bool,
+        alignment: Option<usize>,
         init: Option<Initializer>,
         symbol_predeclared: bool,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        if is_noreturn && function_params.is_none() {
+            return Err(Diagnostic::error(
+                "_Noreturn is only valid on functions",
+                span,
+            ));
+        }
+        if alignment.is_some() && function_params.is_some() {
+            return Err(Diagnostic::error(
+                "_Alignas is not valid on functions",
+                span,
+            ));
+        }
         if is_inline
             && (function_params.is_none() || storage_class == Some(ParsedStorageClass::Typedef))
         {
@@ -743,12 +1068,35 @@ impl<'a> Parser<'a> {
                 base_type: self.base_type_for_redeclaration(&ty),
                 storage_class,
                 is_inline,
+                is_noreturn,
+                alignment,
             };
+            if storage_class == Some(ParsedStorageClass::Static) {
+                return Err(Diagnostic::error(
+                    "a block-scope function declaration may only explicitly specify extern",
+                    span,
+                ));
+            }
             self.validate_function_decl_specifiers(&specs, span)?;
-            self.declare_function_symbol(&name, &ty, span, DeclContext::BlockScope)?;
-            items.push(BlockItem::FunctionDeclaration(
-                self.build_function_declaration(name, ty, span, storage_class, is_inline)?,
-            ));
+            let linkage = self.declare_function_symbol(
+                &name,
+                &ty,
+                storage_class,
+                span,
+                DeclContext::BlockScope,
+            )?;
+            let decl = self.build_function_declaration(
+                name,
+                ty,
+                span,
+                storage_class,
+                is_inline,
+                is_noreturn,
+                linkage,
+            )?;
+            self.block_linkage_declarations
+                .push(ExternalDeclaration::FunctionDeclaration(decl.clone()));
+            items.push(BlockItem::FunctionDeclaration(decl));
             return Ok(());
         }
         let mut declarations = Vec::new();
@@ -758,6 +1106,7 @@ impl<'a> Parser<'a> {
             ty,
             vla_bounds,
             storage_class,
+            alignment,
             init,
             symbol_predeclared,
             span,
@@ -774,13 +1123,43 @@ impl<'a> Parser<'a> {
         ty: CType,
         vla_bounds: Vec<Option<Expr>>,
         storage_class: Option<ParsedStorageClass>,
+        alignment: Option<usize>,
         init: Option<Initializer>,
         symbol_predeclared: bool,
         span: Span,
         context: DeclContext,
     ) -> Result<(), Diagnostic> {
         self.validate_restrict_usage(&ty, span)?;
+        if alignment.is_some() && storage_class == Some(ParsedStorageClass::Typedef) {
+            return Err(Diagnostic::error(
+                "_Alignas cannot appear in a typedef",
+                span,
+            ));
+        }
+        if alignment.is_some() && storage_class == Some(ParsedStorageClass::Register) {
+            return Err(Diagnostic::error(
+                "_Alignas cannot appear on a register object",
+                span,
+            ));
+        }
+        if let Some(alignment) = alignment
+            && alignment < self.type_align_of(&ty)?
+        {
+            return Err(Diagnostic::error(
+                "_Alignas cannot request an alignment weaker than the type's natural alignment",
+                span,
+            ));
+        }
         let has_variably_modified_type = vla_bounds.iter().any(|bound| bound.is_some());
+        if !has_variably_modified_type
+            && let CType::Array(inner, _) = ty.unqualified()
+            && !self.type_is_complete(inner)
+        {
+            return Err(Diagnostic::error(
+                format!("array element has incomplete type {inner}"),
+                span,
+            ));
+        }
         let has_vla_object_type =
             has_variably_modified_type && matches!(ty.unqualified(), CType::Array(_, _));
         if has_variably_modified_type {
@@ -802,16 +1181,27 @@ impl<'a> Parser<'a> {
                     span,
                 ));
             }
+            if context == DeclContext::BlockScope
+                && storage_class == Some(ParsedStorageClass::Extern)
+            {
+                return Err(Diagnostic::error(
+                    "an identifier with linkage cannot have variably modified type",
+                    span,
+                ));
+            }
         }
         if storage_class == Some(ParsedStorageClass::Typedef) {
-            if init.is_some() {
+            if let Some(initializer) = init.as_ref() {
                 return Err(Diagnostic::error(
                     "typedef declaration cannot have an initializer",
-                    span,
+                    initializer.span(),
                 ));
             }
             self.declare_typedef_name(&name, ty, span)?;
             return Ok(());
+        }
+        if matches!(ty.unqualified(), CType::Void) {
+            return Err(Diagnostic::error("an object cannot have void type", span));
         }
         if context == DeclContext::BlockScope
             && storage_class == Some(ParsedStorageClass::Extern)
@@ -825,14 +1215,25 @@ impl<'a> Parser<'a> {
         if !symbol_predeclared {
             self.declare_object_symbol(&name, &ty, storage_class, span, context)?;
         }
-        declarations.push(Declaration {
+        let linkage = self
+            .current_scope_entry(&name)
+            .and_then(|entry| entry.ordinary_linkage);
+        let declaration = Declaration {
             name,
             ty,
             vla_bounds,
             storage_class: storage_class.and_then(ast_storage_class),
+            linkage,
+            alignment,
             init,
+            declarator_span: span,
             span,
-        });
+        };
+        if context == DeclContext::BlockScope && storage_class == Some(ParsedStorageClass::Extern) {
+            self.block_linkage_declarations
+                .push(ExternalDeclaration::ObjectDeclaration(declaration.clone()));
+        }
+        declarations.push(declaration);
         Ok(())
     }
 
@@ -840,27 +1241,28 @@ impl<'a> Parser<'a> {
         if self.eat(TokenKind::LBrace) {
             let start = self.prev_span();
             let mut items = Vec::new();
-            if !self.at(TokenKind::RBrace) {
-                loop {
-                    let item_start = self.current_span();
-                    let designators = self.parse_initializer_designators()?;
-                    let initializer = self.parse_initializer()?;
-                    let span = if designators.is_empty() {
-                        initializer.span()
-                    } else {
-                        item_start.merge(initializer.span())
-                    };
-                    items.push(InitializerItem {
-                        designators,
-                        initializer,
-                        span,
-                    });
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                    if self.at(TokenKind::RBrace) {
-                        break;
-                    }
+            if self.at(TokenKind::RBrace) {
+                return Err(Diagnostic::error(
+                    "initializer list cannot be empty in C11",
+                    start.merge(self.current_span()),
+                ));
+            }
+            loop {
+                let item_start = self.current_span();
+                let designators = self.parse_initializer_designators()?;
+                let initializer = self.parse_initializer()?;
+                let span = if designators.is_empty() {
+                    initializer.span()
+                } else {
+                    item_start.merge(initializer.span())
+                };
+                items.push(InitializerItem {
+                    designators,
+                    initializer,
+                    span,
+                });
+                if !self.eat(TokenKind::Comma) || self.at(TokenKind::RBrace) {
+                    break;
                 }
             }
             let end = self.expect(TokenKind::RBrace)?.span;
@@ -888,6 +1290,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.eat(TokenKind::LBracket) {
+                let start = self.prev_span();
                 let expr = self.parse_assignment()?;
                 let value = self.eval_integer_constant_expr(&expr)?;
                 if value < 0 {
@@ -901,7 +1304,7 @@ impl<'a> Parser<'a> {
                     usize::try_from(value).map_err(|_| {
                         Diagnostic::error("array designator index is out of range", expr.span())
                     })?,
-                    expr.span().merge(end),
+                    start.merge(end),
                 ));
                 continue;
             }
@@ -1065,14 +1468,13 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::LParen)?;
             let expr = self.parse_expression()?;
             self.expect(TokenKind::RParen)?;
-            let body = match self.parse_statement()? {
+            let statement = self.parse_statement()?;
+            let body = match statement {
                 Statement::Block(block) => block,
-                other => {
-                    return Err(Diagnostic::error(
-                        "switch body is currently required to be a compound statement",
-                        other.span(),
-                    ));
-                }
+                statement => Block {
+                    span: statement.span(),
+                    items: vec![BlockItem::Statement(statement)],
+                },
             };
             self.validate_switch_labels(&body)?;
             let span = start.merge(body.span);
@@ -1411,6 +1813,22 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, Diagnostic> {
+        if self.at_keyword(Keyword::Alignof) {
+            let start = self.bump().span;
+            self.expect(TokenKind::LParen)?;
+            let parsed = self.parse_type_name()?;
+            let end = self.expect(TokenKind::RParen)?.span;
+            if parsed.vla_bounds.iter().any(Option::is_some) {
+                return Err(Diagnostic::error(
+                    "_Alignof cannot be applied to a variably modified type",
+                    start.merge(end),
+                ));
+            }
+            let alignment = self.type_align_of(&parsed.ty).map_err(|_| {
+                Diagnostic::error("_Alignof requires a complete object type", start.merge(end))
+            })?;
+            return Ok(Expr::Number(alignment.to_string(), start.merge(end)));
+        }
         if self.at_keyword(Keyword::Sizeof) {
             let start = self.bump().span;
             if self.at(TokenKind::LParen) && self.is_type_name_start() {
@@ -1453,72 +1871,80 @@ impl<'a> Parser<'a> {
                 span,
             });
         }
-        if self.eat(TokenKind::DoublePlus) {
+        if self.at(TokenKind::DoublePlus) {
+            let start = self.bump().span;
             let expr = self.parse_unary()?;
-            let span = self.prev_span().merge(expr.span());
+            let span = start.merge(expr.span());
             return Ok(Expr::Unary {
                 op: UnaryOp::PreIncrement,
                 expr: Box::new(expr),
                 span,
             });
         }
-        if self.eat(TokenKind::DoubleMinus) {
+        if self.at(TokenKind::DoubleMinus) {
+            let start = self.bump().span;
             let expr = self.parse_unary()?;
-            let span = self.prev_span().merge(expr.span());
+            let span = start.merge(expr.span());
             return Ok(Expr::Unary {
                 op: UnaryOp::PreDecrement,
                 expr: Box::new(expr),
                 span,
             });
         }
-        if self.eat(TokenKind::Amp) {
+        if self.at(TokenKind::Amp) {
+            let start = self.bump().span;
             let expr = self.parse_unary()?;
-            let span = self.prev_span().merge(expr.span());
+            let span = start.merge(expr.span());
             return Ok(Expr::Unary {
                 op: UnaryOp::AddressOf,
                 expr: Box::new(expr),
                 span,
             });
         }
-        if self.eat(TokenKind::Star) {
+        if self.at(TokenKind::Star) {
+            let start = self.bump().span;
             let expr = self.parse_unary()?;
-            let span = self.prev_span().merge(expr.span());
+            let span = start.merge(expr.span());
             return Ok(Expr::Unary {
                 op: UnaryOp::Dereference,
                 expr: Box::new(expr),
                 span,
             });
         }
-        if self.eat(TokenKind::Plus) {
+        if self.at(TokenKind::Plus) {
+            let start = self.bump().span;
             let expr = self.parse_unary()?;
-            let span = self.prev_span().merge(expr.span());
+            let span = start.merge(expr.span());
             return Ok(Expr::Unary {
                 op: UnaryOp::Plus,
                 expr: Box::new(expr),
                 span,
             });
         }
-        if self.eat(TokenKind::Minus) {
+        if self.at(TokenKind::Minus) {
+            let start = self.bump().span;
             let expr = self.parse_unary()?;
-            let span = self.prev_span().merge(expr.span());
+            let span = start.merge(expr.span());
             return Ok(Expr::Unary {
                 op: UnaryOp::Minus,
                 expr: Box::new(expr),
                 span,
             });
         }
-        if self.eat(TokenKind::Bang) {
+        if self.at(TokenKind::Bang) {
+            let start = self.bump().span;
             let expr = self.parse_unary()?;
-            let span = self.prev_span().merge(expr.span());
+            let span = start.merge(expr.span());
             return Ok(Expr::Unary {
                 op: UnaryOp::LogicalNot,
                 expr: Box::new(expr),
                 span,
             });
         }
-        if self.eat(TokenKind::Tilde) {
+        if self.at(TokenKind::Tilde) {
+            let start = self.bump().span;
             let expr = self.parse_unary()?;
-            let span = self.prev_span().merge(expr.span());
+            let span = start.merge(expr.span());
             return Ok(Expr::Unary {
                 op: UnaryOp::BitNot,
                 expr: Box::new(expr),
@@ -1526,6 +1952,46 @@ impl<'a> Parser<'a> {
             });
         }
         self.parse_postfix()
+    }
+
+    fn parse_static_assertion(&mut self) -> Result<(), Diagnostic> {
+        let start = self.bump().span;
+        self.expect(TokenKind::LParen)?;
+        let condition = self.parse_conditional()?;
+        self.expect(TokenKind::Comma)?;
+        let message = match self.bump().clone() {
+            Token {
+                kind: TokenKind::StringLiteral(text),
+                ..
+            }
+            | Token {
+                kind: TokenKind::WideStringLiteral(text),
+                ..
+            }
+            | Token {
+                kind: TokenKind::Utf16StringLiteral(text),
+                ..
+            }
+            | Token {
+                kind: TokenKind::Utf32StringLiteral(text),
+                ..
+            } => text,
+            token => {
+                return Err(Diagnostic::error(
+                    "_Static_assert requires a string literal message",
+                    token.span,
+                ));
+            }
+        };
+        self.expect(TokenKind::RParen)?;
+        let end = self.expect(TokenKind::Semicolon)?.span;
+        if self.eval_typed_integer_constant_expr(&condition)?.value == 0 {
+            return Err(Diagnostic::error(
+                format!("static assertion failed: {message}"),
+                start.merge(end),
+            ));
+        }
+        Ok(())
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, Diagnostic> {
@@ -1543,9 +2009,16 @@ impl<'a> Parser<'a> {
                 }
                 let end = self.expect(TokenKind::RParen)?.span;
                 let span = expr.span().merge(end);
+                let declared_callee_type = match &expr {
+                    Expr::Variable(name, _) => self
+                        .visible_scope_entry(name)
+                        .and_then(|entry| entry.ordinary_ty.clone()),
+                    _ => None,
+                };
                 expr = Expr::Call {
                     callee: Box::new(expr),
                     args,
+                    declared_callee_type,
                     span,
                 };
                 continue;
@@ -1633,11 +2106,19 @@ impl<'a> Parser<'a> {
             TokenKind::Number(text) => Ok(Expr::Number(text, token.span)),
             TokenKind::CharLiteral(value) => Ok(Expr::CharLiteral(value, token.span)),
             TokenKind::WideCharLiteral(value) => Ok(Expr::WideCharLiteral(value, token.span)),
+            TokenKind::Utf16CharLiteral(value) => Ok(Expr::Utf16CharLiteral(value, token.span)),
+            TokenKind::Utf32CharLiteral(value) => Ok(Expr::Utf32CharLiteral(value, token.span)),
             TokenKind::StringLiteral(text) => {
-                self.parse_string_literal_primary(text, false, token.span)
+                self.parse_string_literal_primary(text, StringEncoding::Narrow, token.span)
             }
             TokenKind::WideStringLiteral(text) => {
-                self.parse_string_literal_primary(text, true, token.span)
+                self.parse_string_literal_primary(text, StringEncoding::Wide, token.span)
+            }
+            TokenKind::Utf16StringLiteral(text) => {
+                self.parse_string_literal_primary(text, StringEncoding::Utf16, token.span)
+            }
+            TokenKind::Utf32StringLiteral(text) => {
+                self.parse_string_literal_primary(text, StringEncoding::Utf32, token.span)
             }
             TokenKind::Keyword(Keyword::Generic) => self.parse_generic_selection(token.span),
             TokenKind::Identifier(name) => {
@@ -1668,6 +2149,12 @@ impl<'a> Parser<'a> {
                             token.span,
                         ));
                     }
+                    if !matches!(ty.ty.unqualified(), CType::Struct(..) | CType::Union(..)) {
+                        return Err(Diagnostic::error(
+                            "__builtin_offsetof requires a struct or union type",
+                            ty.span,
+                        ));
+                    }
                     self.expect(TokenKind::Comma)?;
                     let designators = self.parse_offsetof_designators()?;
                     let end = self.expect(TokenKind::RParen)?.span;
@@ -1678,7 +2165,7 @@ impl<'a> Parser<'a> {
                     });
                 }
                 if let Some(value) = self.lookup_enum_constant_value(&name) {
-                    return Ok(Expr::Number(value.to_string(), token.span));
+                    return Ok(Self::enum_constant_expr(value, token.span));
                 }
                 if !self.allow_undeclared_identifiers
                     && !self.identifier_is_visible(&name)
@@ -1692,45 +2179,75 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Variable(name, token.span))
             }
             TokenKind::LParen => {
-                let expr = self.parse_expression()?;
-                self.expect(TokenKind::RParen)?;
+                let mut expr = self.parse_expression()?;
+                let end = self.expect(TokenKind::RParen)?.span;
+                expr.set_span(token.span.merge(end));
                 Ok(expr)
             }
             _ => Err(Diagnostic::error("expected expression", token.span)),
         }
     }
 
+    fn enum_constant_expr(value: i128, span: Span) -> Expr {
+        if value >= 0 {
+            return Expr::Number(value.to_string(), span);
+        }
+        let magnitude_before_last = value
+            .checked_add(1)
+            .and_then(i128::checked_neg)
+            .expect("enumerator values are constrained to the range of int");
+        Expr::Binary {
+            op: BinaryOp::Sub,
+            lhs: Box::new(Expr::Unary {
+                op: UnaryOp::Minus,
+                expr: Box::new(Expr::Number(magnitude_before_last.to_string(), span)),
+                span,
+            }),
+            rhs: Box::new(Expr::Number("1".to_owned(), span)),
+            span,
+        }
+    }
+
     fn parse_string_literal_primary(
         &mut self,
-        text: String,
-        is_wide: bool,
+        text: StringLiteralValue,
+        mut encoding: StringEncoding,
         span: Span,
     ) -> Result<Expr, Diagnostic> {
         let mut combined = text;
         let mut combined_span = span;
-        let mut wide = is_wide;
         loop {
-            match self.peek_kind(0).cloned() {
-                Some(TokenKind::StringLiteral(text)) => {
-                    let next_span = self.tokens[self.index].span;
-                    self.bump();
-                    combined.push_str(&text);
-                    combined_span = combined_span.merge(next_span);
-                }
-                Some(TokenKind::WideStringLiteral(text)) => {
-                    let next_span = self.tokens[self.index].span;
-                    self.bump();
-                    combined.push_str(&text);
-                    combined_span = combined_span.merge(next_span);
-                    wide = true;
-                }
+            let (text, next_encoding) = match self.peek_kind(0).cloned() {
+                Some(TokenKind::StringLiteral(text)) => (text, StringEncoding::Narrow),
+                Some(TokenKind::WideStringLiteral(text)) => (text, StringEncoding::Wide),
+                Some(TokenKind::Utf16StringLiteral(text)) => (text, StringEncoding::Utf16),
+                Some(TokenKind::Utf32StringLiteral(text)) => (text, StringEncoding::Utf32),
                 _ => break,
+            };
+            if encoding != StringEncoding::Narrow
+                && next_encoding != StringEncoding::Narrow
+                && encoding != next_encoding
+            {
+                return Err(Diagnostic::error(
+                    "adjacent string literals have incompatible encoding prefixes",
+                    combined_span.merge(self.tokens[self.index].span),
+                ));
+            }
+            if encoding == StringEncoding::Narrow {
+                encoding = next_encoding;
+            }
+            {
+                let next_span = self.tokens[self.index].span;
+                self.bump();
+                combined.append(text);
+                combined_span = combined_span.merge(next_span);
             }
         }
-        Ok(if wide {
-            Expr::WideStringLiteral(combined, combined_span)
-        } else {
-            Expr::StringLiteral(combined, combined_span)
+        Ok(match encoding {
+            StringEncoding::Narrow => Expr::StringLiteral(combined, combined_span),
+            StringEncoding::Wide => Expr::WideStringLiteral(combined, combined_span),
+            StringEncoding::Utf16 => Expr::Utf16StringLiteral(combined, combined_span),
+            StringEncoding::Utf32 => Expr::Utf32StringLiteral(combined, combined_span),
         })
     }
 
@@ -1757,6 +2274,20 @@ impl<'a> Parser<'a> {
                     return Err(Diagnostic::error(
                         "_Generic does not support variably modified association types",
                         start,
+                    ));
+                }
+                if !self.type_is_complete(&ty.ty) {
+                    return Err(Diagnostic::error(
+                        "_Generic association type must be a complete object type",
+                        ty.span,
+                    ));
+                }
+                if associations.iter().any(|association: &GenericAssociation| {
+                    generic_types_compatible(&association.ty, &ty.ty)
+                }) {
+                    return Err(Diagnostic::error(
+                        "_Generic associations may not specify compatible types more than once",
+                        ty.span,
                     ));
                 }
                 self.expect(TokenKind::Colon)?;
@@ -1925,6 +2456,8 @@ impl<'a> Parser<'a> {
         let start = self.current_span();
         let mut storage_class = None;
         let mut is_inline = false;
+        let mut is_noreturn = false;
+        let mut alignment = None;
         let mut qualifiers = TypeQualifiers::default();
         let mut direct_type = None;
         let mut saw_any = false;
@@ -1946,32 +2479,64 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Keyword(Keyword::Auto)) => {
                     self.bump();
                     saw_any = true;
-                    set_storage_class(&mut storage_class, ParsedStorageClass::Auto, start)?;
+                    set_storage_class(
+                        &mut storage_class,
+                        ParsedStorageClass::Auto,
+                        self.prev_span(),
+                    )?;
                 }
                 Some(TokenKind::Keyword(Keyword::Extern)) => {
                     self.bump();
                     saw_any = true;
-                    set_storage_class(&mut storage_class, ParsedStorageClass::Extern, start)?;
+                    set_storage_class(
+                        &mut storage_class,
+                        ParsedStorageClass::Extern,
+                        self.prev_span(),
+                    )?;
                 }
                 Some(TokenKind::Keyword(Keyword::Register)) => {
                     self.bump();
                     saw_any = true;
-                    set_storage_class(&mut storage_class, ParsedStorageClass::Register, start)?;
+                    set_storage_class(
+                        &mut storage_class,
+                        ParsedStorageClass::Register,
+                        self.prev_span(),
+                    )?;
                 }
                 Some(TokenKind::Keyword(Keyword::Static)) => {
                     self.bump();
                     saw_any = true;
-                    set_storage_class(&mut storage_class, ParsedStorageClass::Static, start)?;
+                    set_storage_class(
+                        &mut storage_class,
+                        ParsedStorageClass::Static,
+                        self.prev_span(),
+                    )?;
                 }
                 Some(TokenKind::Keyword(Keyword::Typedef)) => {
                     self.bump();
                     saw_any = true;
-                    set_storage_class(&mut storage_class, ParsedStorageClass::Typedef, start)?;
+                    set_storage_class(
+                        &mut storage_class,
+                        ParsedStorageClass::Typedef,
+                        self.prev_span(),
+                    )?;
                 }
                 Some(TokenKind::Keyword(Keyword::Inline)) => {
                     self.bump();
                     saw_any = true;
                     is_inline = true;
+                }
+                Some(TokenKind::Keyword(Keyword::Noreturn)) => {
+                    self.bump();
+                    saw_any = true;
+                    is_noreturn = true;
+                }
+                Some(TokenKind::Keyword(Keyword::Alignas)) => {
+                    let align = self.parse_alignment_specifier()?;
+                    saw_any = true;
+                    if align != 0 {
+                        alignment = Some(alignment.map_or(align, |old: usize| old.max(align)));
+                    }
                 }
                 Some(TokenKind::Keyword(Keyword::Const)) => {
                     self.bump();
@@ -2007,7 +2572,7 @@ impl<'a> Parser<'a> {
                     {
                         return Err(Diagnostic::error(
                             "struct type cannot be combined with other type specifiers",
-                            start,
+                            self.current_span(),
                         ));
                     }
                     direct_type = Some(self.parse_record_specifier(RecordKind::Struct)?);
@@ -2031,7 +2596,7 @@ impl<'a> Parser<'a> {
                     {
                         return Err(Diagnostic::error(
                             "union type cannot be combined with other type specifiers",
-                            start,
+                            self.current_span(),
                         ));
                     }
                     direct_type = Some(self.parse_record_specifier(RecordKind::Union)?);
@@ -2055,7 +2620,7 @@ impl<'a> Parser<'a> {
                     {
                         return Err(Diagnostic::error(
                             "enum type cannot be combined with other type specifiers",
-                            start,
+                            self.current_span(),
                         ));
                     }
                     direct_type = Some(self.parse_enum_specifier()?);
@@ -2063,41 +2628,89 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Keyword(Keyword::Void)) => {
                     self.bump();
                     saw_any = true;
+                    if saw_void {
+                        return Err(Diagnostic::error(
+                            "duplicate type specifier void",
+                            self.prev_span(),
+                        ));
+                    }
                     saw_void = true;
                 }
                 Some(TokenKind::Keyword(Keyword::Bool)) => {
                     self.bump();
                     saw_any = true;
+                    if saw_bool {
+                        return Err(Diagnostic::error(
+                            "duplicate type specifier _Bool",
+                            self.prev_span(),
+                        ));
+                    }
                     saw_bool = true;
                 }
                 Some(TokenKind::Keyword(Keyword::Char)) => {
                     self.bump();
                     saw_any = true;
+                    if saw_char {
+                        return Err(Diagnostic::error(
+                            "duplicate type specifier char",
+                            self.prev_span(),
+                        ));
+                    }
                     saw_char = true;
                 }
                 Some(TokenKind::Keyword(Keyword::Float)) => {
                     self.bump();
                     saw_any = true;
+                    if saw_float {
+                        return Err(Diagnostic::error(
+                            "duplicate type specifier float",
+                            self.prev_span(),
+                        ));
+                    }
                     saw_float = true;
                 }
                 Some(TokenKind::Keyword(Keyword::Complex)) => {
                     self.bump();
                     saw_any = true;
+                    if saw_complex {
+                        return Err(Diagnostic::error(
+                            "duplicate type specifier _Complex",
+                            self.prev_span(),
+                        ));
+                    }
                     saw_complex = true;
                 }
                 Some(TokenKind::Keyword(Keyword::Double)) => {
                     self.bump();
                     saw_any = true;
+                    if saw_double {
+                        return Err(Diagnostic::error(
+                            "duplicate type specifier double",
+                            self.prev_span(),
+                        ));
+                    }
                     saw_double = true;
                 }
                 Some(TokenKind::Keyword(Keyword::Int)) => {
                     self.bump();
                     saw_any = true;
+                    if saw_int {
+                        return Err(Diagnostic::error(
+                            "duplicate type specifier int",
+                            self.prev_span(),
+                        ));
+                    }
                     saw_int = true;
                 }
                 Some(TokenKind::Keyword(Keyword::Short)) => {
                     self.bump();
                     saw_any = true;
+                    if saw_short {
+                        return Err(Diagnostic::error(
+                            "duplicate type specifier short",
+                            self.prev_span(),
+                        ));
+                    }
                     saw_short = true;
                 }
                 Some(TokenKind::Keyword(Keyword::Long)) => {
@@ -2108,11 +2721,23 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Keyword(Keyword::Signed)) => {
                     self.bump();
                     saw_any = true;
+                    if saw_signed {
+                        return Err(Diagnostic::error(
+                            "duplicate type specifier signed",
+                            self.prev_span(),
+                        ));
+                    }
                     saw_signed = true;
                 }
                 Some(TokenKind::Keyword(Keyword::Unsigned)) => {
                     self.bump();
                     saw_any = true;
+                    if saw_unsigned {
+                        return Err(Diagnostic::error(
+                            "duplicate type specifier unsigned",
+                            self.prev_span(),
+                        ));
+                    }
                     saw_unsigned = true;
                 }
                 Some(TokenKind::Identifier(name)) => {
@@ -2148,6 +2773,44 @@ impl<'a> Parser<'a> {
             return Err(Diagnostic::error("expected declaration specifiers", start));
         }
         self.validate_decl_specifier_context(storage_class, is_inline, context, start)?;
+        if is_noreturn && context != DeclContext::FileScope && context != DeclContext::BlockScope {
+            return Err(Diagnostic::error(
+                "_Noreturn is only valid in a function declaration",
+                start,
+            ));
+        }
+        if alignment.is_some()
+            && matches!(
+                context,
+                DeclContext::Parameter | DeclContext::RecordMember | DeclContext::TypeName
+            )
+        {
+            return Err(Diagnostic::error(
+                "_Alignas is not valid in this declaration context",
+                start,
+            ));
+        }
+        if let Some(ty) = direct_type.as_ref()
+            && saw_builtin_type_specifier(
+                saw_void,
+                saw_bool,
+                saw_char,
+                saw_float,
+                saw_double,
+                saw_complex,
+                saw_int,
+                saw_short,
+                long_count,
+                saw_signed,
+                saw_unsigned,
+            )
+        {
+            return Err(Diagnostic::error(
+                format!("{} cannot be combined with a built-in type specifier", ty),
+                start,
+            ));
+        }
+        let type_error_span = self.prev_span();
         let base_type = if let Some(ty) = direct_type {
             CType::qualified(ty, qualifiers)
         } else {
@@ -2164,7 +2827,7 @@ impl<'a> Parser<'a> {
                     long_count,
                     saw_signed,
                     saw_unsigned,
-                    start,
+                    type_error_span,
                 )?,
                 qualifiers,
             )
@@ -2173,11 +2836,43 @@ impl<'a> Parser<'a> {
             base_type,
             storage_class,
             is_inline,
+            is_noreturn,
+            alignment,
         })
+    }
+
+    fn parse_alignment_specifier(&mut self) -> Result<usize, Diagnostic> {
+        let start = self.bump().span;
+        self.expect(TokenKind::LParen)?;
+        let alignment = if self.starts_type_name_at(0) {
+            let parsed = self.parse_type_name()?;
+            if parsed.vla_bounds.iter().any(Option::is_some) {
+                return Err(Diagnostic::error(
+                    "_Alignas type name cannot be variably modified",
+                    start,
+                ));
+            }
+            self.type_align_of(&parsed.ty)?
+        } else {
+            let expr = self.parse_conditional()?;
+            let value = self.eval_typed_integer_constant_expr(&expr)?.value;
+            usize::try_from(value).map_err(|_| {
+                Diagnostic::error("_Alignas requires a nonnegative alignment", expr.span())
+            })?
+        };
+        let end = self.expect(TokenKind::RParen)?.span;
+        if alignment != 0 && (!alignment.is_power_of_two() || alignment > (1usize << 29)) {
+            return Err(Diagnostic::error(
+                "requested alignment is not supported",
+                start.merge(end),
+            ));
+        }
+        Ok(alignment)
     }
 
     fn parse_type_name(&mut self) -> Result<ParsedTypeName, Diagnostic> {
         self.skip_gnu_attributes()?;
+        let start = self.current_span();
         let specs = self.parse_declaration_specifiers(DeclContext::TypeName)?;
         let (ty, vla_bounds) = if self.at(TokenKind::LParen) {
             let declarator = self.parse_abstract_declarator_tree(DeclContext::TypeName)?;
@@ -2194,7 +2889,11 @@ impl<'a> Parser<'a> {
             self.parse_type_suffix(specs.base_type)?
         };
         self.validate_restrict_usage(&ty, self.current_span())?;
-        Ok(ParsedTypeName { ty, vla_bounds })
+        Ok(ParsedTypeName {
+            ty,
+            vla_bounds,
+            span: start.merge(self.prev_span()),
+        })
     }
 
     fn finish_builtin_type_specifier(
@@ -2241,6 +2940,7 @@ impl<'a> Parser<'a> {
             if saw_char
                 || saw_float
                 || saw_double
+                || saw_complex
                 || saw_int
                 || saw_short
                 || long_count > 0
@@ -2318,7 +3018,10 @@ impl<'a> Parser<'a> {
             if long_count > 0 {
                 return Err(Diagnostic::error("long _Complex requires double", start));
             }
-            return Ok(CType::complex_of(CType::Double));
+            return Err(Diagnostic::error(
+                "_Complex requires float or double",
+                start,
+            ));
         }
         if saw_double {
             if saw_char || saw_int || saw_short || saw_signed || saw_unsigned || long_count > 1 {
@@ -2418,6 +3121,14 @@ impl<'a> Parser<'a> {
         &mut self,
         context: DeclContext,
     ) -> Result<ParsedDeclarator, Diagnostic> {
+        self.parse_declarator_tree_inner(context, false)
+    }
+
+    fn parse_declarator_tree_inner(
+        &mut self,
+        context: DeclContext,
+        allow_abstract: bool,
+    ) -> Result<ParsedDeclarator, Diagnostic> {
         self.skip_gnu_attributes()?;
         let mut pointer_qualifiers = Vec::new();
         while self.eat(TokenKind::Star) {
@@ -2426,9 +3137,11 @@ impl<'a> Parser<'a> {
         }
 
         let mut declarator = if self.eat(TokenKind::LParen) {
-            let inner = self.parse_declarator_tree(context)?;
+            let inner = self.parse_declarator_tree_inner(context, allow_abstract)?;
             self.expect(TokenKind::RParen)?;
             inner
+        } else if allow_abstract && !matches!(self.peek_kind(0), Some(TokenKind::Identifier(_))) {
+            ParsedDeclarator::Abstract(self.current_span())
         } else {
             let token = self.bump().clone();
             match token.kind {
@@ -2453,7 +3166,8 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.at(TokenKind::LParen) {
-                let (params, is_variadic, parameter_tags) = self.parse_parameter_list()?;
+                let (params, is_variadic, parameter_tags, old_style) =
+                    self.parse_function_parameter_clause()?;
                 let end = self.expect(TokenKind::RParen)?.span;
                 let span = declarator.span().merge(end);
                 declarator = ParsedDeclarator::Function {
@@ -2461,6 +3175,7 @@ impl<'a> Parser<'a> {
                     params,
                     is_variadic,
                     parameter_tags,
+                    old_style,
                     span,
                 };
                 self.skip_gnu_attributes()?;
@@ -2515,7 +3230,8 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.at(TokenKind::LParen) {
-                let (params, is_variadic, parameter_tags) = self.parse_parameter_list()?;
+                let (params, is_variadic, parameter_tags, old_style) =
+                    self.parse_function_parameter_clause()?;
                 let end = self.expect(TokenKind::RParen)?.span;
                 let span = declarator.span().merge(end);
                 declarator = ParsedDeclarator::Function {
@@ -2523,6 +3239,7 @@ impl<'a> Parser<'a> {
                     params,
                     is_variadic,
                     parameter_tags,
+                    old_style,
                     span,
                 };
                 self.skip_gnu_attributes()?;
@@ -2590,6 +3307,12 @@ impl<'a> Parser<'a> {
                     bound,
                     static_bound,
                 } = spec;
+                if self.type_contains_flexible_array_structure(&base) {
+                    return Err(Diagnostic::error(
+                        "a structure containing a flexible array member cannot be an array element",
+                        span,
+                    ));
+                }
                 let array_ty = match &bound {
                     ParsedArrayBound::Fixed(len) => CType::array_of(base, *len),
                     ParsedArrayBound::Unspecified | ParsedArrayBound::Variable(_) => {
@@ -2619,9 +3342,12 @@ impl<'a> Parser<'a> {
                 params,
                 is_variadic,
                 parameter_tags,
+                old_style,
                 span,
             } => {
-                let function_ty = if is_variadic {
+                let function_ty = if old_style {
+                    CType::function(base, Vec::new())
+                } else if is_variadic {
                     CType::variadic_function(
                         base,
                         params.iter().map(|param| param.ty.clone()).collect(),
@@ -2639,7 +3365,7 @@ impl<'a> Parser<'a> {
                     static_array_bound,
                     span.merge(inner_span),
                     if surfaces_function {
-                        Some((params, is_variadic, parameter_tags))
+                        Some((params, is_variadic, parameter_tags, old_style))
                     } else {
                         nested_function_params
                     },
@@ -2718,9 +3444,9 @@ impl<'a> Parser<'a> {
     ) -> Result<ParsedArrayBound, Diagnostic> {
         match self.eval_integer_constant_expr(&expr) {
             Ok(value) => {
-                if value < 0 {
+                if value <= 0 {
                     return Err(Diagnostic::error(
-                        "array bound must be non-negative",
+                        "array bound must be greater than zero",
                         expr.span(),
                     ));
                 }
@@ -2789,9 +3515,23 @@ impl<'a> Parser<'a> {
             }
             let members = self.parse_record_members()?;
             if members.is_empty() {
+                let kind_name = match kind {
+                    RecordKind::Struct => "struct",
+                    RecordKind::Union => "union",
+                };
                 return Err(Diagnostic::error(
-                    "structs and unions must declare at least one member",
+                    format!("{kind_name} must declare at least one member"),
                     start,
+                ));
+            }
+            let has_named_member = members.iter().try_fold(false, |found, member| {
+                Ok::<_, Diagnostic>(found || !self.visible_member_names_for(member)?.is_empty())
+            })?;
+            if !has_named_member {
+                return Err(Diagnostic::ub(
+                    "structure or union declaration list contains no named members",
+                    start,
+                    Some("6.7.2.1p8"),
                 ));
             }
             if let Some((index, _)) = members
@@ -2799,24 +3539,41 @@ impl<'a> Parser<'a> {
                 .enumerate()
                 .find(|(_, member)| matches!(member.ty.unqualified(), CType::Array(_, 0)))
             {
+                let flexible_member_span = members[index].declaration_span.unwrap_or(start);
                 if kind != RecordKind::Struct {
                     return Err(Diagnostic::error(
                         "flexible array members are only allowed in structures",
-                        start,
+                        flexible_member_span,
                     ));
                 }
                 if index + 1 != members.len() {
                     return Err(Diagnostic::error(
                         "flexible array member must be the last member of a structure",
-                        start,
+                        flexible_member_span,
                     ));
                 }
-                if index == 0 {
+                let has_other_named_member =
+                    members[..index].iter().try_fold(false, |found, member| {
+                        Ok::<_, Diagnostic>(
+                            found || !self.visible_member_names_for(member)?.is_empty(),
+                        )
+                    })?;
+                if !has_other_named_member {
                     return Err(Diagnostic::error(
-                        "structure with a flexible array member must have at least one other member",
-                        start,
+                        "structure with a flexible array member must have at least one other named member",
+                        flexible_member_span,
                     ));
                 }
+            }
+            if kind == RecordKind::Struct
+                && members
+                    .iter()
+                    .any(|member| self.type_contains_flexible_array_structure(&member.ty))
+            {
+                return Err(Diagnostic::error(
+                    "a structure containing a flexible array member cannot be a member of another structure",
+                    start,
+                ));
             }
             let end = self.expect(TokenKind::RBrace)?.span;
             let (members, size, align) = self.layout_record_members(kind, members)?;
@@ -2835,8 +3592,12 @@ impl<'a> Parser<'a> {
             let span = start.merge(end);
             let _ = span;
         } else if tag.is_none() {
+            let kind_name = match kind {
+                RecordKind::Struct => "struct",
+                RecordKind::Union => "union",
+            };
             return Err(Diagnostic::error(
-                "record type specifier requires a tag or a definition",
+                format!("{kind_name} type specifier requires a tag or a definition"),
                 start,
             ));
         }
@@ -2850,20 +3611,33 @@ impl<'a> Parser<'a> {
         let mut members = Vec::new();
         let mut visible_names = HashSet::new();
         while !self.at(TokenKind::RBrace) {
+            if self.at(TokenKind::Eof) {
+                return Err(Diagnostic::error(
+                    "struct or union definition is missing a closing brace",
+                    self.current_span(),
+                ));
+            }
+            if self.at_keyword(Keyword::StaticAssert) {
+                self.parse_static_assertion()?;
+                continue;
+            }
             self.skip_gnu_attributes()?;
+            let member_start = self.current_span();
             let specs = self.parse_declaration_specifiers(DeclContext::RecordMember)?;
             let base = specs.base_type;
             let mut parsed_members = Vec::new();
             if self.at(TokenKind::Colon) {
-                let width = self.parse_bit_field_width()?;
+                let (width, width_span) = self.parse_bit_field_width()?;
                 parsed_members.push(RecordMember {
                     name: None,
                     storage_name: self.alloc_member_storage_name("__bitfield"),
                     ty: base,
                     offset: 0,
                     bit_width: Some(width),
+                    bit_width_span: Some(width_span),
                     bit_offset: 0,
                     bit_storage_size: 0,
+                    declaration_span: None,
                 });
             } else if self.at(TokenKind::Semicolon) {
                 self.validate_anonymous_record_member_type(&base, self.current_span())?;
@@ -2873,13 +3647,21 @@ impl<'a> Parser<'a> {
                     ty: base,
                     offset: 0,
                     bit_width: None,
+                    bit_width_span: None,
                     bit_offset: 0,
                     bit_storage_size: 0,
+                    declaration_span: None,
                 });
             } else {
                 let (first_name, first_ty, first_vla_bounds, _, first_span, function_params) =
                     self.parse_declarator(base, DeclContext::RecordMember)?;
                 if function_params.is_some() || first_ty.is_function() {
+                    if self.at(TokenKind::LBrace) && !members.is_empty() {
+                        return Err(Diagnostic::error(
+                            "struct or union definition is missing } and ; before this function definition",
+                            member_start.merge(first_span),
+                        ));
+                    }
                     return Err(Diagnostic::error(
                         "record members cannot have function type",
                         first_span,
@@ -2891,10 +3673,11 @@ impl<'a> Parser<'a> {
                         first_span,
                     ));
                 }
-                let bit_width = if self.at(TokenKind::Colon) {
-                    Some(self.parse_bit_field_width()?)
+                let (bit_width, bit_width_span) = if self.at(TokenKind::Colon) {
+                    let (width, span) = self.parse_bit_field_width()?;
+                    (Some(width), Some(span))
                 } else {
-                    None
+                    (None, None)
                 };
                 parsed_members.push(RecordMember {
                     name: Some(first_name.clone()),
@@ -2902,8 +3685,10 @@ impl<'a> Parser<'a> {
                     ty: first_ty.clone(),
                     offset: 0,
                     bit_width,
+                    bit_width_span,
                     bit_offset: 0,
                     bit_storage_size: 0,
+                    declaration_span: Some(first_span),
                 });
                 while self.eat(TokenKind::Comma) {
                     let (name, ty, vla_bounds, _, span, function_params) = self.parse_declarator(
@@ -2922,10 +3707,11 @@ impl<'a> Parser<'a> {
                             span,
                         ));
                     }
-                    let bit_width = if self.at(TokenKind::Colon) {
-                        Some(self.parse_bit_field_width()?)
+                    let (bit_width, bit_width_span) = if self.at(TokenKind::Colon) {
+                        let (width, span) = self.parse_bit_field_width()?;
+                        (Some(width), Some(span))
                     } else {
-                        None
+                        (None, None)
                     };
                     parsed_members.push(RecordMember {
                         name: Some(name.clone()),
@@ -2933,18 +3719,23 @@ impl<'a> Parser<'a> {
                         ty,
                         offset: 0,
                         bit_width,
+                        bit_width_span,
                         bit_offset: 0,
                         bit_storage_size: 0,
+                        declaration_span: Some(span),
                     });
                 }
             }
             for member in parsed_members {
-                self.validate_record_member_type(&member, self.current_span())?;
+                let member_span = member.declaration_span.unwrap_or_else(|| {
+                    member.bit_width_span.unwrap_or_else(|| self.current_span())
+                });
+                self.validate_record_member_type(&member, member_span)?;
                 for visible_name in self.visible_member_names_for(&member)? {
                     if !visible_names.insert(visible_name.clone()) {
                         return Err(Diagnostic::error(
                             format!("duplicate member declaration {}", visible_name),
-                            self.current_span(),
+                            member_span,
                         ));
                     }
                 }
@@ -2980,7 +3771,7 @@ impl<'a> Parser<'a> {
             if width == 0 && member.name.is_some() {
                 return Err(Diagnostic::error(
                     "zero-width bit-field must be unnamed",
-                    span,
+                    member.bit_width_span.unwrap_or(span),
                 ));
             }
             return Ok(());
@@ -2996,7 +3787,7 @@ impl<'a> Parser<'a> {
             )),
             CType::Array(_, 0) => Ok(()),
             _ if !self.type_is_complete(&member.ty) => Err(Diagnostic::error(
-                "record members must have complete type",
+                format!("record member has incomplete type {}", member.ty),
                 span,
             )),
             _ => Ok(()),
@@ -3079,9 +3870,10 @@ impl<'a> Parser<'a> {
         Ok((members, size, align))
     }
 
-    fn parse_bit_field_width(&mut self) -> Result<u8, Diagnostic> {
+    fn parse_bit_field_width(&mut self) -> Result<(u8, Span), Diagnostic> {
         self.expect(TokenKind::Colon)?;
         let expr = self.parse_assignment()?;
+        let span = expr.span();
         let value = self.eval_integer_constant_expr(&expr)?;
         if value < 0 {
             return Err(Diagnostic::error(
@@ -3089,9 +3881,10 @@ impl<'a> Parser<'a> {
                 expr.span(),
             ));
         }
-        u8::try_from(value).map_err(|_| {
+        let width = u8::try_from(value).map_err(|_| {
             Diagnostic::error("bit-field width is out of supported range", expr.span())
-        })
+        })?;
+        Ok((width, span))
     }
 
     fn validate_anonymous_record_member_type(
@@ -3102,11 +3895,11 @@ impl<'a> Parser<'a> {
         match ty.unqualified() {
             CType::Struct(_, _) | CType::Union(_, _) if self.type_is_complete(ty) => Ok(()),
             CType::Struct(_, _) | CType::Union(_, _) => Err(Diagnostic::error(
-                "anonymous structure or union member must have complete type",
+                format!("anonymous member has incomplete type {ty}"),
                 span,
             )),
             _ => Err(Diagnostic::error(
-                "declaration without a declarator is only allowed for anonymous structure or union members",
+                format!("declaration of type {ty} requires a name"),
                 span,
             )),
         }
@@ -3197,6 +3990,14 @@ impl<'a> Parser<'a> {
                 } else {
                     next_value
                 };
+                let (int_min, int_max) =
+                    CType::Int.integer_bounds().expect("int has integer bounds");
+                if !(int_min..=int_max).contains(&value) {
+                    return Err(Diagnostic::error(
+                        "enumerator value must be representable as int",
+                        token.span,
+                    ));
+                }
                 self.declare_enum_constant(&name, value, token.span)?;
                 if self.block_scopes.is_empty() {
                     self.enum_constants.insert(name, value);
@@ -3402,6 +4203,19 @@ impl<'a> Parser<'a> {
     fn eval_typed_integer_constant_expr(&self, expr: &Expr) -> Result<ConstantInteger, Diagnostic> {
         match expr {
             Expr::Number(text, span) => {
+                let hexadecimal = text.starts_with("0x") || text.starts_with("0X");
+                let floating = text.contains('.')
+                    || if hexadecimal {
+                        text.contains('p') || text.contains('P')
+                    } else {
+                        text.contains('e') || text.contains('E')
+                    };
+                if floating {
+                    return Err(Diagnostic::error(
+                        "an integer constant expression cannot use a floating-point value",
+                        *span,
+                    ));
+                }
                 let (ty, value, _) = parse_integer_literal(text, *span)?;
                 Ok(ConstantInteger { ty, value })
             }
@@ -3943,6 +4757,37 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn type_contains_flexible_array_structure(&self, ty: &CType) -> bool {
+        match ty.unqualified() {
+            CType::Struct(id, _) => self.records.get(id).is_some_and(|record| {
+                record
+                    .members
+                    .last()
+                    .is_some_and(|member| matches!(member.ty.unqualified(), CType::Array(_, 0)))
+            }),
+            CType::Union(id, _) => self.records.get(id).is_some_and(|record| {
+                record
+                    .members
+                    .iter()
+                    .any(|member| self.type_contains_flexible_array_structure(&member.ty))
+            }),
+            CType::Array(inner, _) => self.type_contains_flexible_array_structure(inner),
+            _ => false,
+        }
+    }
+
+    fn validate_parameter_type(&self, ty: &CType, span: Span) -> Result<(), Diagnostic> {
+        if matches!(ty.unqualified(), CType::Void | CType::Function(..))
+            || !self.type_is_complete(ty)
+        {
+            return Err(Diagnostic::error(
+                "a function parameter must have complete object type after adjustment",
+                span,
+            ));
+        }
+        Ok(())
+    }
+
     fn type_size_of(&self, ty: &CType) -> Result<usize, Diagnostic> {
         match ty.unqualified() {
             CType::Struct(id, _) | CType::Union(id, _) => self
@@ -4000,7 +4845,7 @@ impl<'a> Parser<'a> {
     }
 
     fn is_declaration_start(&self) -> bool {
-        self.starts_declaration_specifier_at(0)
+        self.at_keyword(Keyword::Alignas) || self.starts_declaration_specifier_at(0)
     }
 
     fn is_type_name_start(&self) -> bool {
@@ -4016,6 +4861,7 @@ impl<'a> Parser<'a> {
                     | Keyword::Const
                     | Keyword::Extern
                     | Keyword::Inline
+                    | Keyword::Noreturn
                     | Keyword::Register
                     | Keyword::Restrict
                     | Keyword::Static
@@ -4155,6 +5001,12 @@ impl<'a> Parser<'a> {
                 span,
             ));
         }
+        if specs.alignment.is_some() {
+            return Err(Diagnostic::error(
+                "_Alignas is not valid on functions",
+                span,
+            ));
+        }
         Ok(())
     }
 
@@ -4189,9 +5041,15 @@ impl<'a> Parser<'a> {
     fn validate_restrict_usage(&self, ty: &CType, span: Span) -> Result<(), Diagnostic> {
         match ty {
             CType::Qualified(inner, qualifiers) if qualifiers.is_restrict => {
-                if !matches!(inner.unqualified(), CType::Pointer(_)) {
+                let CType::Pointer(pointee) = inner.unqualified() else {
                     return Err(Diagnostic::error(
                         "restrict qualifier requires a pointer type",
+                        span,
+                    ));
+                };
+                if matches!(pointee.unqualified(), CType::Function(..)) {
+                    return Err(Diagnostic::error(
+                        "restrict-qualified pointers must point to object or incomplete types",
                         span,
                     ));
                 }
@@ -4330,7 +5188,8 @@ impl<'a> Parser<'a> {
         storage_class: Option<ParsedStorageClass>,
         span: Span,
         context: DeclContext,
-    ) -> Result<(), Diagnostic> {
+    ) -> Result<Option<Linkage>, Diagnostic> {
+        let linkage = self.object_linkage(name, storage_class, context);
         let existing = self.current_scope_entry(name).cloned();
         if let Some(existing) = existing {
             if existing.typedef_ty.is_some() || existing.enum_constant.is_some() {
@@ -4352,38 +5211,20 @@ impl<'a> Parser<'a> {
                 if context != DeclContext::FileScope && !repeated_block_extern {
                     return Err(Diagnostic::error(format!("redefinition of {}", name), span));
                 }
-                if repeated_block_extern
-                    && existing
-                        .ordinary_ty
-                        .as_ref()
-                        .is_some_and(|existing_ty| !declaration_types_compatible(existing_ty, ty))
-                {
-                    return Err(Diagnostic::error(
-                        format!("conflicting types for {}", name),
-                        span,
-                    ));
+                if existing.ordinary_linkage != linkage {
+                    return Err(mixed_linkage_diag(name, span));
                 }
-                return Ok(());
+                return Ok(linkage);
             }
         }
         if context == DeclContext::BlockScope
             && storage_class == Some(ParsedStorageClass::Extern)
             && let Some(outer) = self.outer_scope_entry(name)
-            && outer.ordinary_has_linkage
+            && outer.ordinary_linkage.is_some()
         {
             if outer.ordinary != Some(SymbolKind::Object) {
                 return Err(Diagnostic::error(
                     format!("{} is already declared as a different kind of symbol", name),
-                    span,
-                ));
-            }
-            if outer
-                .ordinary_ty
-                .as_ref()
-                .is_some_and(|outer_ty| !declaration_types_compatible(outer_ty, ty))
-            {
-                return Err(Diagnostic::error(
-                    format!("conflicting types for {}", name),
                     span,
                 ));
             }
@@ -4392,21 +5233,45 @@ impl<'a> Parser<'a> {
         entry.ordinary = Some(SymbolKind::Object);
         entry.ordinary_ty = Some(ty.clone());
         entry.ordinary_storage_class = storage_class;
-        entry.ordinary_has_linkage = context == DeclContext::FileScope
-            || (context == DeclContext::BlockScope
-                && storage_class == Some(ParsedStorageClass::Extern));
+        entry.ordinary_linkage = linkage;
         entry.typedef_ty = None;
         entry.enum_constant = None;
-        Ok(())
+        Ok(linkage)
+    }
+
+    fn object_linkage(
+        &self,
+        name: &str,
+        storage_class: Option<ParsedStorageClass>,
+        context: DeclContext,
+    ) -> Option<Linkage> {
+        match (context, storage_class) {
+            (DeclContext::FileScope, Some(ParsedStorageClass::Static)) => Some(Linkage::Internal),
+            (DeclContext::FileScope, Some(ParsedStorageClass::Extern))
+            | (DeclContext::BlockScope, Some(ParsedStorageClass::Extern)) => self
+                .visible_scope_entry(name)
+                .and_then(|entry| entry.ordinary_linkage)
+                .or(Some(Linkage::External)),
+            (DeclContext::FileScope, _) => Some(Linkage::External),
+            _ => None,
+        }
     }
 
     fn declare_function_symbol(
         &mut self,
         name: &str,
         ty: &CType,
+        storage_class: Option<ParsedStorageClass>,
         span: Span,
         context: DeclContext,
-    ) -> Result<(), Diagnostic> {
+    ) -> Result<Linkage, Diagnostic> {
+        let linkage = if storage_class == Some(ParsedStorageClass::Static) {
+            Linkage::Internal
+        } else {
+            self.visible_scope_entry(name)
+                .and_then(|entry| entry.ordinary_linkage)
+                .unwrap_or(Linkage::External)
+        };
         let existing = self.current_scope_entry(name).cloned();
         if let Some(existing) = existing {
             if existing.typedef_ty.is_some()
@@ -4421,23 +5286,15 @@ impl<'a> Parser<'a> {
                 ));
             }
             if existing.ordinary == Some(SymbolKind::Function) {
-                if context == DeclContext::BlockScope
-                    && existing
-                        .ordinary_ty
-                        .as_ref()
-                        .is_some_and(|existing_ty| !declaration_types_compatible(existing_ty, ty))
-                {
-                    return Err(Diagnostic::error(
-                        format!("conflicting types for {}", name),
-                        span,
-                    ));
+                if existing.ordinary_linkage != Some(linkage) {
+                    return Err(mixed_linkage_diag(name, span));
                 }
-                return Ok(());
+                return Ok(linkage);
             }
         }
         if context == DeclContext::BlockScope
             && let Some(outer) = self.outer_scope_entry(name)
-            && outer.ordinary_has_linkage
+            && outer.ordinary_linkage.is_some()
         {
             if outer.ordinary != Some(SymbolKind::Function) {
                 return Err(Diagnostic::error(
@@ -4445,25 +5302,15 @@ impl<'a> Parser<'a> {
                     span,
                 ));
             }
-            if outer
-                .ordinary_ty
-                .as_ref()
-                .is_some_and(|outer_ty| !declaration_types_compatible(outer_ty, ty))
-            {
-                return Err(Diagnostic::error(
-                    format!("conflicting types for {}", name),
-                    span,
-                ));
-            }
         }
         let entry = self.current_scope_mut().entry(name.to_owned()).or_default();
         entry.ordinary = Some(SymbolKind::Function);
         entry.ordinary_ty = Some(ty.clone());
-        entry.ordinary_storage_class = None;
-        entry.ordinary_has_linkage = true;
+        entry.ordinary_storage_class = storage_class;
+        entry.ordinary_linkage = Some(linkage);
         entry.typedef_ty = None;
         entry.enum_constant = None;
-        Ok(())
+        Ok(linkage)
     }
 
     fn declare_typedef_name(
@@ -4494,7 +5341,7 @@ impl<'a> Parser<'a> {
         entry.ordinary = None;
         entry.ordinary_ty = None;
         entry.ordinary_storage_class = None;
-        entry.ordinary_has_linkage = false;
+        entry.ordinary_linkage = None;
         entry.enum_constant = None;
         entry.typedef_ty = Some(ty);
         Ok(())
@@ -4516,7 +5363,7 @@ impl<'a> Parser<'a> {
         entry.ordinary = Some(SymbolKind::EnumConstant);
         entry.ordinary_ty = None;
         entry.ordinary_storage_class = None;
-        entry.ordinary_has_linkage = false;
+        entry.ordinary_linkage = None;
         entry.enum_constant = Some(value);
         Ok(())
     }
@@ -4545,8 +5392,24 @@ impl<'a> Parser<'a> {
             Ok(token)
         } else {
             let token = &self.tokens[self.index];
+            if kind == TokenKind::Semicolon
+                && let Some(previous) = self.tokens.get(self.index.saturating_sub(1))
+            {
+                let (previous_path, _, _) = self.sources.span_location(previous.span);
+                let (current_path, _, _) = self.sources.span_location(token.span);
+                if previous_path != current_path {
+                    return Err(Diagnostic::error(
+                        "expected ';' before continuing in another source file",
+                        previous.span,
+                    ));
+                }
+            }
             Err(Diagnostic::error(
-                format!("expected {:?}", kind),
+                format!(
+                    "expected {}, found {}",
+                    kind.diagnostic_name(),
+                    token.kind.diagnostic_name()
+                ),
                 token.span,
             ))
         }
@@ -4603,6 +5466,73 @@ fn declaration_types_compatible(lhs: &CType, rhs: &CType) -> bool {
     }
 }
 
+fn generic_types_compatible(lhs: &CType, rhs: &CType) -> bool {
+    match (lhs, rhs) {
+        (CType::Qualified(lhs, lhs_qualifiers), CType::Qualified(rhs, rhs_qualifiers)) => {
+            lhs_qualifiers == rhs_qualifiers && generic_types_compatible(lhs, rhs)
+        }
+        (CType::Qualified(..), _) | (_, CType::Qualified(..)) => false,
+        (CType::Complex(lhs), CType::Complex(rhs)) | (CType::Pointer(lhs), CType::Pointer(rhs)) => {
+            generic_types_compatible(lhs, rhs)
+        }
+        (CType::Array(lhs, lhs_len), CType::Array(rhs, rhs_len)) => {
+            (*lhs_len == 0 || *rhs_len == 0 || lhs_len == rhs_len)
+                && generic_types_compatible(lhs, rhs)
+        }
+        (
+            CType::Function(lhs_return, lhs_params, lhs_variadic),
+            CType::Function(rhs_return, rhs_params, rhs_variadic),
+        ) => {
+            lhs_variadic == rhs_variadic
+                && generic_types_compatible(lhs_return, rhs_return)
+                && function_parameter_lists_compatible(lhs_params, rhs_params)
+        }
+        _ => lhs == rhs,
+    }
+}
+
+fn function_parameter_lists_compatible(lhs: &[CType], rhs: &[CType]) -> bool {
+    if lhs.is_empty() {
+        return prototype_compatible_with_unspecified_parameters(rhs);
+    }
+    if rhs.is_empty() {
+        return prototype_compatible_with_unspecified_parameters(lhs);
+    }
+    lhs.len() == rhs.len()
+        && lhs
+            .iter()
+            .zip(rhs)
+            .all(|(lhs, rhs)| generic_types_compatible(lhs.unqualified(), rhs.unqualified()))
+}
+
+fn prototype_compatible_with_unspecified_parameters(params: &[CType]) -> bool {
+    params == [CType::Void]
+        || params.iter().all(|param| {
+            !matches!(
+                param.unqualified(),
+                CType::Bool
+                    | CType::Char
+                    | CType::SignedChar
+                    | CType::UnsignedChar
+                    | CType::Short
+                    | CType::UnsignedShort
+                    | CType::Enum(..)
+                    | CType::Float
+            )
+        })
+}
+
+fn mixed_linkage_diag(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::ub(
+        format!(
+            "identifier {} is declared with both internal and external linkage",
+            name
+        ),
+        span,
+        Some("6.2.2"),
+    )
+}
+
 fn ast_storage_class(storage_class: ParsedStorageClass) -> Option<StorageClass> {
     match storage_class {
         ParsedStorageClass::Auto => Some(StorageClass::Auto),
@@ -4618,16 +5548,13 @@ fn set_storage_class(
     value: ParsedStorageClass,
     span: Span,
 ) -> Result<(), Diagnostic> {
-    if let Some(existing) = *slot {
-        if existing != value {
-            return Err(Diagnostic::error(
-                "multiple storage class specifiers are not allowed",
-                span,
-            ));
-        }
-    } else {
-        *slot = Some(value);
+    if slot.is_some() {
+        return Err(Diagnostic::error(
+            "multiple storage class specifiers are not allowed",
+            span,
+        ));
     }
+    *slot = Some(value);
     Ok(())
 }
 

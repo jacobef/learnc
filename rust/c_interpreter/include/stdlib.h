@@ -51,11 +51,14 @@ lldiv_t lldiv(long long numer, long long denom);
 void *malloc(size_t size);
 void *calloc(size_t count, size_t size);
 void *realloc(void *ptr, size_t size);
+void *aligned_alloc(size_t alignment, size_t size);
 void free(void *ptr);
 
 void abort(void);
 int atexit(void (*func)(void));
+int at_quick_exit(void (*func)(void));
 void exit(int status);
+void quick_exit(int status);
 void _Exit(int status);
 
 void *bsearch(

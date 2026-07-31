@@ -1,7 +1,6 @@
 use std::fmt::Write as _;
 #[cfg(test)]
 use std::io;
-#[cfg(test)]
 use std::path::PathBuf;
 
 use crate::source::{Snippet, SourceManager, Span};
@@ -29,7 +28,32 @@ pub struct Diagnostic {
     notes: Vec<String>,
     standard_reference: Option<&'static str>,
     rendered_with_sources: Option<String>,
+    display_range: Option<DiagnosticDisplayRange>,
+    related_spans: Vec<DiagnosticRelatedSpan>,
+    display_annotations: Vec<DiagnosticDisplayAnnotation>,
     control: Option<DiagnosticControl>,
+}
+
+#[derive(Debug, Clone)]
+struct DiagnosticRelatedSpan {
+    id: String,
+    label: String,
+    span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticDisplayAnnotation {
+    pub id: String,
+    pub range: DiagnosticDisplayRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticDisplayRange {
+    pub path: PathBuf,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +71,9 @@ impl Diagnostic {
             notes: Vec::new(),
             standard_reference: None,
             rendered_with_sources: None,
+            display_range: None,
+            related_spans: Vec::new(),
+            display_annotations: Vec::new(),
             control: None,
         }
     }
@@ -63,6 +90,9 @@ impl Diagnostic {
             notes: Vec::new(),
             standard_reference,
             rendered_with_sources: None,
+            display_range: None,
+            related_spans: Vec::new(),
+            display_annotations: Vec::new(),
             control: None,
         }
     }
@@ -75,6 +105,9 @@ impl Diagnostic {
             notes: Vec::new(),
             standard_reference: None,
             rendered_with_sources: None,
+            display_range: None,
+            related_spans: Vec::new(),
+            display_annotations: Vec::new(),
             control: Some(DiagnosticControl::Blocked(function_name)),
         }
     }
@@ -94,6 +127,9 @@ impl Diagnostic {
             notes: Vec::new(),
             standard_reference: None,
             rendered_with_sources: None,
+            display_range: None,
+            related_spans: Vec::new(),
+            display_annotations: Vec::new(),
             control: Some(DiagnosticControl::ExecutionStepLimit),
         }
     }
@@ -111,12 +147,44 @@ impl Diagnostic {
             notes: Vec::new(),
             standard_reference: None,
             rendered_with_sources: None,
+            display_range: None,
+            related_spans: Vec::new(),
+            display_annotations: Vec::new(),
             control: None,
         }
     }
 
     pub fn with_note(mut self, note: impl Into<String>) -> Self {
         self.notes.push(note.into());
+        self
+    }
+
+    pub fn with_message_prefix(mut self, prefix: impl AsRef<str>) -> Self {
+        self.message = format!("{}: {}", prefix.as_ref(), self.message);
+        self
+    }
+
+    pub fn with_related_span(
+        mut self,
+        id: impl Into<String>,
+        label: impl Into<String>,
+        span: Span,
+    ) -> Self {
+        let id = id.into();
+        if !self.related_spans.iter().any(|related| related.id == id) {
+            self.related_spans.push(DiagnosticRelatedSpan {
+                id,
+                label: label.into(),
+                span,
+            });
+        }
+        self
+    }
+
+    pub(crate) fn replace_placeholder_span(mut self, fallback: Span) -> Self {
+        if self.span == Some(Span::new(fallback.file, 0, 0)) {
+            self.span = Some(fallback);
+        }
         self
     }
 
@@ -142,6 +210,10 @@ impl Diagnostic {
             let snippet = sources.snippet(span);
             render_snippet(&mut out, snippet);
         }
+        for related in &self.related_spans {
+            let _ = writeln!(out, "note: {}", related.label);
+            render_snippet(&mut out, sources.snippet(related.span));
+        }
         for note in &self.notes {
             let _ = writeln!(out, "note: {}", note);
         }
@@ -152,8 +224,45 @@ impl Diagnostic {
     }
 
     pub fn with_sources(mut self, sources: &SourceManager) -> Self {
+        self.display_range = self.span.map(|span| {
+            let (path, start_line, start_column, end_line, end_column) =
+                sources.span_display_range(span);
+            DiagnosticDisplayRange {
+                path,
+                start_line,
+                start_column,
+                end_line,
+                end_column,
+            }
+        });
+        self.display_annotations = self
+            .related_spans
+            .iter()
+            .map(|related| {
+                let (path, start_line, start_column, end_line, end_column) =
+                    sources.span_display_range(related.span);
+                DiagnosticDisplayAnnotation {
+                    id: related.id.clone(),
+                    range: DiagnosticDisplayRange {
+                        path,
+                        start_line,
+                        start_column,
+                        end_line,
+                        end_column,
+                    },
+                }
+            })
+            .collect();
         self.rendered_with_sources = Some(self.render_with_sources(sources));
         self
+    }
+
+    pub fn display_range(&self) -> Option<&DiagnosticDisplayRange> {
+        self.display_range.as_ref()
+    }
+
+    pub fn display_annotations(&self) -> &[DiagnosticDisplayAnnotation] {
+        &self.display_annotations
     }
 }
 

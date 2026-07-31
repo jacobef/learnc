@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::source::Span;
+
 pub const HOST_LONG_DOUBLE_SIZE: usize = if cfg!(all(target_os = "macos", target_arch = "aarch64"))
 {
     8
@@ -47,16 +49,32 @@ pub enum RecordKind {
     Union,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RecordMember {
     pub name: Option<String>,
     pub storage_name: String,
     pub ty: CType,
     pub offset: usize,
     pub bit_width: Option<u8>,
+    pub bit_width_span: Option<Span>,
     pub bit_offset: u8,
     pub bit_storage_size: usize,
+    pub declaration_span: Option<Span>,
 }
+
+impl PartialEq for RecordMember {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.storage_name == other.storage_name
+            && self.ty == other.ty
+            && self.offset == other.offset
+            && self.bit_width == other.bit_width
+            && self.bit_offset == other.bit_offset
+            && self.bit_storage_size == other.bit_storage_size
+    }
+}
+
+impl Eq for RecordMember {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordType {
@@ -409,6 +427,7 @@ impl fmt::Display for CType {
                 write!(f, "{}", inner)
             }
             CType::Pointer(inner) => write!(f, "{}*", inner),
+            CType::Array(inner, 0) => write!(f, "{}[]", inner),
             CType::Array(inner, len) => write!(f, "{}[{}]", inner, len),
         }
     }

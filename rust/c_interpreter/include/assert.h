@@ -1,6 +1,8 @@
 #ifndef __CODEX_ASSERT_H
 #define __CODEX_ASSERT_H
 
+#define static_assert _Static_assert
+
 #ifdef NDEBUG
 #define assert(ignore) ((void)0)
 #else
