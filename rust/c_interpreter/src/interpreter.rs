@@ -1,11 +1,13 @@
 use libc::{
     self, c_char, c_double, c_float, c_int, c_long, c_longlong, c_ulong, c_ulonglong, c_void,
 };
+use std::cell::RefCell;
 use std::collections;
 use std::ffi::{CStr, CString};
 use std::hash::{BuildHasherDefault, Hasher};
-use std::panic::{AssertUnwindSafe, catch_unwind, panic_any, resume_unwind};
+use std::panic::{AssertUnwindSafe, catch_unwind, panic_any, resume_unwind, set_hook, take_hook};
 use std::rc::Rc;
+use std::sync::Once;
 
 use crate::ast::{
     BinaryOp, Block, BlockItem, Declaration, Designator, Expr, ExternalDeclaration, ForInit,
@@ -13,7 +15,7 @@ use crate::ast::{
     Statement, StorageClass, SwitchLabel, TranslationUnit, UnaryOp,
 };
 use crate::diag::Diagnostic;
-use crate::integer::parse_integer_literal;
+use crate::number::{NumberLiteral, NumberValue, parse_number_literal};
 use crate::source::{FileId, SourceManager, Span};
 use crate::token::StringLiteralValue;
 use crate::types::{CType, HOST_LONG_DOUBLE_ALIGN, RecordMember, RecordType, TypeQualifiers};
@@ -33,9 +35,9 @@ const HOST_BUFSIZ: usize = 1024;
 const MAX_DYNAMIC_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
 const MAX_NON_DYNAMIC_OBJECT_BYTES: usize = 64 * 1024 * 1024;
 const COMPACT_OBJECT_REPRESENTATION_THRESHOLD: usize = 1024 * 1024;
-// Debug builds need a lower ceiling because the unoptimized evaluator uses substantially more
-// native stack per interpreted call. Release/Wasm builds can safely support deeper beginner code.
-const MAX_FUNCTION_CALL_DEPTH: usize = if cfg!(debug_assertions) { 12 } else { 64 };
+// The execution entry point provides a fixed-size evaluator stack in every build profile/target,
+// so this interpreted-C limit is independent of the host compiler's optimization choices.
+const MAX_FUNCTION_CALL_DEPTH: usize = 64;
 
 // The runtime currently backs all real floating types with f64, so host long double calls
 // are marshalled through f64 even when the nominal C type is long double.
@@ -655,7 +657,8 @@ pub struct Interpreter<'a> {
     next_encoded_pointer: u64,
     object_type_registry: HashMap<ObjectId, CType>,
     object_base_addresses: HashMap<ObjectId, u64>,
-    host_allocations: HashMap<ObjectId, *mut c_void>,
+    dynamic_allocations: HashSet<ObjectId>,
+    dynamic_bytes_allocated: usize,
     virtual_filesystem: VirtualFileSystem,
     host_streams: HashMap<ObjectId, HostStream>,
     host_stdio_bindings: HashMap<String, ObjectId>,
@@ -671,6 +674,16 @@ pub struct Interpreter<'a> {
     locale_generation: u64,
     signal_handlers: HashMap<i32, SignalHandlerState>,
     fe_dfl_env_binding: Option<ObjectId>,
+    fexcept_provenance: HashMap<(ObjectId, usize), (u64, i128)>,
+    fenv_provenance: HashMap<(ObjectId, usize), u64>,
+    mbstate_provenance: HashMap<(ObjectId, usize), (u64, u64)>,
+    internal_mbstate_generations: HashMap<String, u64>,
+    wcstok_state_provenance: HashMap<(ObjectId, usize), (u64, PointerValue)>,
+    fpos_provenance: HashMap<(ObjectId, usize), (u64, StreamBacking)>,
+    ftell_provenance: HashSet<(StreamBacking, i128)>,
+    pending_qsort_order: Option<Vec<usize>>,
+    pending_bsearch_result: Option<Option<usize>>,
+    pending_heap_call: Option<PendingHeapCall>,
     wctrans_descriptors: HashMap<i128, u64>,
     wctype_descriptors: HashMap<i128, u64>,
     atexit_handlers: Vec<String>,
@@ -684,7 +697,8 @@ pub struct Interpreter<'a> {
     c16rtomb_null_pending: Option<u16>,
     encoded_object_pointers: HashMap<PointerValue, u64>,
     encoded_function_pointers: HashMap<String, u64>,
-    decoded_pointers: HashMap<u64, EncodedPointer>,
+    decoded_pointers: HashMap<u64, Vec<EncodedPointer>>,
+    opaque_integer_pointer_addresses: RefCell<HashSet<u64>>,
     current_variadic_args: Vec<Vec<TypedValue>>,
     va_lists: HashMap<u64, VaListCursor>,
     next_va_list_handle: u64,
@@ -693,14 +707,17 @@ pub struct Interpreter<'a> {
     active_block_scopes: Vec<ActiveBlockScope>,
     next_frame_id: usize,
     setjmp_envs: HashMap<u64, SetjmpEnvironment>,
+    setjmp_provenance: HashMap<(ObjectId, usize), (u64, Vec<ByteCell>)>,
     live_setjmp_frames: HashSet<usize>,
     next_setjmp_handle: u64,
     active_setjmp_contexts: Vec<ActiveSetjmpContext>,
     expr_setjmp_cache: HashMap<usize, bool>,
+    variable_cache: HashMap<usize, VariableCacheEntry>,
     pending_longjmp_return: Option<PendingLongjmpReturn>,
     host_library_runtime_depth: usize,
     active_switch_dispatch_depth: usize,
     strtok_state: Option<PointerValue>,
+    strtok_started: bool,
     cboxes_main_state: Vec<ProgramStateBox>,
     cboxes_trace: Vec<ProgramTraceEvent>,
     cboxes_expression_request: Option<ProgramExpressionEvalRequest>,
@@ -717,6 +734,12 @@ struct Frame {
     bindings: HashMap<String, ObjectId>,
     object_decls: HashMap<String, Declaration>,
     function_decls: HashMap<String, FunctionDecl>,
+}
+
+#[derive(Debug, Clone)]
+struct VariableCacheEntry {
+    frame_id: Option<usize>,
+    value: ValueCategory,
 }
 
 #[derive(Debug, Clone)]
@@ -799,8 +822,10 @@ struct ObjectState {
     value: StoredValue,
     declaration_span: Span,
     modification_count: u64,
+    raw_indeterminate_bytes: Option<(u64, usize)>,
     variably_modified: bool,
     effective_types: Vec<EffectiveTypeRegion>,
+    pointer_slots: HashMap<(usize, usize), StoredPointerValue>,
 }
 
 #[derive(Debug, Clone)]
@@ -808,6 +833,18 @@ struct EffectiveTypeRegion {
     start: usize,
     size: usize,
     ty: CType,
+    coalesced_element_type: Option<CType>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PendingHeapCall {
+    Malloc(usize),
+    Calloc(Option<usize>),
+    Realloc {
+        object: Option<ObjectId>,
+        size: usize,
+    },
+    Free(Option<ObjectId>),
 }
 
 #[derive(Debug, Clone)]
@@ -1032,7 +1069,7 @@ impl VirtualFileSystem {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum StreamBacking {
     Capture(CaptureStream),
     File { file_id: u64 },
@@ -1291,6 +1328,12 @@ enum ValueData {
     ObjectRepresentation(Vec<ByteCell>),
 }
 
+#[derive(Debug, Clone)]
+enum StoredPointerValue {
+    Object(PointerValue),
+    Function(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ComplexValue {
     real: f64,
@@ -1305,11 +1348,15 @@ struct PointerValue {
     member_path: Vec<String>,
     designated_root_ty: Option<CType>,
     byte_offset_override: Option<usize>,
+    arithmetic_domain_start: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum EncodedPointer {
-    Object(PointerValue),
+    Object {
+        pointer: PointerValue,
+        pointee_ty: Option<CType>,
+    },
     Function(String),
 }
 
@@ -1335,6 +1382,7 @@ struct LValue {
     member_path: Vec<String>,
     designated_root_ty: Option<CType>,
     byte_offset_override: Option<usize>,
+    arithmetic_domain_start: Option<usize>,
     bit_field_width: Option<u8>,
     restrict_source: Option<RestrictSource>,
 }
@@ -1350,6 +1398,8 @@ struct RestrictSource {
 #[derive(Debug, Default, Clone)]
 struct RestrictTracker {
     accesses: HashMap<ObjectId, Vec<RestrictAccess>>,
+    unrestricted_accesses: HashMap<ObjectId, HashMap<(usize, usize), RestrictAccess>>,
+    source_objects: HashSet<ObjectId>,
 }
 
 #[derive(Debug, Clone)]
@@ -1451,6 +1501,19 @@ struct LongjmpSignal {
     handle: u64,
     target_frame_id: usize,
     value: i128,
+}
+
+fn install_control_flow_panic_hook() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let previous = take_hook();
+        set_hook(Box::new(move |info| {
+            if info.payload().is::<LongjmpSignal>() || info.payload().is::<TerminationSignal>() {
+                return;
+            }
+            previous(info);
+        }));
+    });
 }
 
 #[derive(Debug, Clone)]
@@ -1735,6 +1798,7 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
         }
     }
 
@@ -2277,6 +2341,7 @@ impl<'a> Interpreter<'a> {
         program: TranslationUnit,
         run_options: &RunOptions,
     ) -> Self {
+        install_control_flow_panic_hook();
         let mut functions = HashMap::default();
         let mut internal_functions: FileScopedMap<Rc<FunctionDef>> = HashMap::default();
         let mut declared_functions = HashMap::default();
@@ -2348,7 +2413,7 @@ impl<'a> Interpreter<'a> {
             let address = next_encoded_pointer;
             next_encoded_pointer = next_encoded_pointer.saturating_add(0x1000);
             encoded_function_pointers.insert(name.clone(), address);
-            decoded_pointers.insert(address, EncodedPointer::Function(name));
+            decoded_pointers.insert(address, vec![EncodedPointer::Function(name)]);
         }
         Self {
             sources,
@@ -2379,7 +2444,8 @@ impl<'a> Interpreter<'a> {
             next_encoded_pointer,
             object_type_registry: HashMap::default(),
             object_base_addresses: HashMap::default(),
-            host_allocations: HashMap::default(),
+            dynamic_allocations: HashSet::default(),
+            dynamic_bytes_allocated: 0,
             virtual_filesystem: VirtualFileSystem::new(),
             host_streams: HashMap::default(),
             host_stdio_bindings: HashMap::default(),
@@ -2395,6 +2461,16 @@ impl<'a> Interpreter<'a> {
             locale_generation: 0,
             signal_handlers: HashMap::default(),
             fe_dfl_env_binding: None,
+            fexcept_provenance: HashMap::default(),
+            fenv_provenance: HashMap::default(),
+            mbstate_provenance: HashMap::default(),
+            internal_mbstate_generations: HashMap::default(),
+            wcstok_state_provenance: HashMap::default(),
+            fpos_provenance: HashMap::default(),
+            ftell_provenance: HashSet::default(),
+            pending_qsort_order: None,
+            pending_bsearch_result: None,
+            pending_heap_call: None,
             wctrans_descriptors: HashMap::default(),
             wctype_descriptors: HashMap::default(),
             atexit_handlers: Vec::new(),
@@ -2409,6 +2485,7 @@ impl<'a> Interpreter<'a> {
             encoded_object_pointers: HashMap::default(),
             encoded_function_pointers,
             decoded_pointers,
+            opaque_integer_pointer_addresses: RefCell::new(HashSet::default()),
             current_variadic_args: Vec::new(),
             va_lists: HashMap::default(),
             next_va_list_handle: 1,
@@ -2417,14 +2494,17 @@ impl<'a> Interpreter<'a> {
             active_block_scopes: Vec::new(),
             next_frame_id: 1,
             setjmp_envs: HashMap::default(),
+            setjmp_provenance: HashMap::default(),
             live_setjmp_frames: HashSet::default(),
             next_setjmp_handle: 1,
             active_setjmp_contexts: Vec::new(),
             expr_setjmp_cache: HashMap::default(),
+            variable_cache: HashMap::default(),
             pending_longjmp_return: None,
             host_library_runtime_depth: 0,
             active_switch_dispatch_depth: 0,
             strtok_state: None,
+            strtok_started: false,
             cboxes_main_state: Vec::new(),
             cboxes_trace: Vec::new(),
             cboxes_expression_request: None,
@@ -3685,7 +3765,8 @@ impl<'a> Interpreter<'a> {
         } else if target.is_arithmetic() && source.is_arithmetic() {
             true
         } else if target.is_pointer() && source.is_pointer() {
-            self.pointer_assignment_compatible(target, &source)
+            self.is_null_pointer_constant(expr, frame, objects)?
+                || self.pointer_assignment_compatible(target, &source)
         } else if target.is_pointer() && source.is_integer() {
             self.is_null_pointer_constant(expr, frame, objects)?
         } else if matches!(target.unqualified(), CType::Struct(..) | CType::Union(..)) {
@@ -4241,7 +4322,10 @@ impl<'a> Interpreter<'a> {
             }
             allocated.push((object, decl.clone()));
         }
-        for (object, decl) in allocated {
+        // Keep the cloned declarations at stable addresses for the entire pass. Expression
+        // caches use AST addresses as keys, so moving each declaration through the same loop
+        // variable would make unrelated global initializers share cache entries.
+        for (object, decl) in &allocated {
             let mut frame = Frame {
                 id: 0,
                 bindings: HashMap::default(),
@@ -4253,7 +4337,7 @@ impl<'a> Interpreter<'a> {
                 self.validate_static_initializer(initializer)?;
             }
             self.initialize_declared_object(
-                object,
+                *object,
                 &decl.ty,
                 decl.init.as_ref(),
                 &mut frame,
@@ -4262,6 +4346,9 @@ impl<'a> Interpreter<'a> {
                 decl.span,
             )?;
         }
+        // These keys belong to the cloned global AST above, which is dropped on return. Do not
+        // let its addresses collide with persistent function-body expressions during execution.
+        self.variable_cache.clear();
         self.sequence_point();
         Ok(())
     }
@@ -4431,6 +4518,7 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
         };
         let stored = StoredValue::Scalar(TypedValue {
             ty: decl.ty.clone(),
@@ -5076,6 +5164,11 @@ impl<'a> Interpreter<'a> {
             Expr::Variable(name, span) => {
                 if self.program.enum_constants.contains_key(name)
                     || self.lookup_function(name, span.file).is_some()
+                    || self
+                        .lookup_global_declaration(name, span.file)
+                        .is_some_and(|declaration| {
+                            matches!(declaration.ty.unqualified(), CType::Array(_, _))
+                        })
                 {
                     Ok(())
                 } else {
@@ -5197,6 +5290,10 @@ impl<'a> Interpreter<'a> {
                 ..
             } => self.validate_static_address_value_expr(expr),
             Expr::Member { base, .. } => self.validate_static_address_designator(base),
+            Expr::Subscript { base, index, .. } => {
+                self.validate_static_address_value_expr(base)?;
+                self.validate_static_initializer_expr(index)
+            }
             Expr::Binary {
                 op: BinaryOp::Add | BinaryOp::Sub,
                 lhs,
@@ -6515,6 +6612,8 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Vec<ByteCell>, Diagnostic> {
         let size = if member.bit_width.is_some() {
             member.bit_storage_size
+        } else if matches!(member.ty.unqualified(), CType::Array(_, 0)) {
+            0
         } else {
             self.type_size_of(&member.ty).ok_or_else(|| {
                 Diagnostic::error(
@@ -6657,6 +6756,8 @@ impl<'a> Interpreter<'a> {
                     let slot = self.record_slot(values, &member.storage_name, span)?;
                     let member_size = if member.bit_width.is_some() {
                         member.bit_storage_size
+                    } else if matches!(member.ty.unqualified(), CType::Array(_, 0)) {
+                        0
                     } else {
                         self.type_size_of(&member.ty).ok_or_else(|| {
                             Diagnostic::error(
@@ -6855,6 +6956,9 @@ impl<'a> Interpreter<'a> {
                 if pointer.is_null() {
                     return Ok(0);
                 }
+                if let Some(address) = Self::opaque_integer_pointer_address(pointer) {
+                    return Ok(address);
+                }
                 if matches!(inner.unqualified(), CType::Function(..)) {
                     return Err(Diagnostic::ub(
                         "read of a function pointer with an invalid object representation",
@@ -6889,7 +6993,12 @@ impl<'a> Interpreter<'a> {
                 self.encoded_object_pointers
                     .insert(pointer.clone(), address);
                 self.decoded_pointers
-                    .insert(address, EncodedPointer::Object(pointer.clone()));
+                    .entry(address)
+                    .or_default()
+                    .push(EncodedPointer::Object {
+                        pointer: pointer.clone(),
+                        pointee_ty: Some((**inner).clone()),
+                    });
                 Ok(address)
             }
             ValueData::Function(name) => {
@@ -6907,7 +7016,9 @@ impl<'a> Interpreter<'a> {
                 self.next_encoded_pointer += 0x1000;
                 self.encoded_function_pointers.insert(name.clone(), address);
                 self.decoded_pointers
-                    .insert(address, EncodedPointer::Function(name.clone()));
+                    .entry(address)
+                    .or_default()
+                    .push(EncodedPointer::Function(name.clone()));
                 Ok(address)
             }
             _ => Err(Diagnostic::error(
@@ -6933,6 +7044,9 @@ impl<'a> Interpreter<'a> {
             ValueData::Pointer(pointer) => {
                 if pointer.is_null() {
                     return Ok(0);
+                }
+                if let Some(address) = Self::opaque_integer_pointer_address(pointer) {
+                    return Ok(address);
                 }
                 if matches!(inner.unqualified(), CType::Function(..)) {
                     return Err(Diagnostic::ub(
@@ -6998,42 +7112,102 @@ impl<'a> Interpreter<'a> {
             }));
         }
         let Some(encoded) = self.decoded_pointers.get(&address) else {
+            if self
+                .opaque_integer_pointer_addresses
+                .borrow()
+                .contains(&address)
+                && let Ok(byte_offset) = usize::try_from(address)
+            {
+                return Ok(StoredValue::Scalar(TypedValue {
+                    ty: ty.clone(),
+                    data: ValueData::Pointer(PointerValue {
+                        object: None,
+                        base_offset: 1,
+                        offset: 0,
+                        member_path: Vec::new(),
+                        designated_root_ty: None,
+                        byte_offset_override: Some(byte_offset),
+                        arithmetic_domain_start: None,
+                    }),
+                    restrict_source: None,
+                    indeterminate: false,
+                    missing_return: false,
+                }));
+            }
             return Ok(StoredValue::Scalar(TypedValue::object_representation(
                 ty.clone(),
                 bytes.to_vec(),
             )));
         };
-        let value = match (ty.unqualified(), encoded) {
-            (CType::Pointer(inner), EncodedPointer::Object(pointer))
-                if !matches!(inner.unqualified(), CType::Function(..)) =>
-            {
-                TypedValue {
-                    ty: ty.clone(),
-                    data: ValueData::Pointer(pointer.clone()),
-                    restrict_source: None,
-                    indeterminate: false,
-                    missing_return: false,
-                }
-            }
-            (CType::Pointer(inner), EncodedPointer::Function(name))
-                if matches!(inner.unqualified(), CType::Function(..)) =>
-            {
-                TypedValue {
-                    ty: ty.clone(),
-                    data: ValueData::Function(name.clone()),
-                    restrict_source: None,
-                    indeterminate: false,
-                    missing_return: false,
-                }
-            }
-            _ => {
-                return Ok(StoredValue::Scalar(TypedValue::object_representation(
-                    ty.clone(),
-                    bytes.to_vec(),
-                )));
-            }
+        let CType::Pointer(inner) = ty.unqualified() else {
+            unreachable!("pointer bytes require a pointer type");
         };
-        Ok(StoredValue::Scalar(value))
+        let data = if matches!(inner.unqualified(), CType::Function(..)) {
+            encoded.iter().find_map(|candidate| match candidate {
+                EncodedPointer::Function(name) => Some(ValueData::Function(name.clone())),
+                EncodedPointer::Object { .. } => None,
+            })
+        } else {
+            self.best_decoded_object_pointer(encoded, inner)
+                .map(ValueData::Pointer)
+        };
+        let Some(data) = data else {
+            return Ok(StoredValue::Scalar(TypedValue::object_representation(
+                ty.clone(),
+                bytes.to_vec(),
+            )));
+        };
+        Ok(StoredValue::Scalar(TypedValue {
+            ty: ty.clone(),
+            data,
+            restrict_source: None,
+            indeterminate: false,
+            missing_return: false,
+        }))
+    }
+
+    fn best_decoded_object_pointer(
+        &self,
+        candidates: &[EncodedPointer],
+        target_inner: &CType,
+    ) -> Option<PointerValue> {
+        candidates
+            .iter()
+            .filter_map(|candidate| {
+                let EncodedPointer::Object {
+                    pointer,
+                    pointee_ty,
+                } = candidate
+                else {
+                    return None;
+                };
+                let type_score = match pointee_ty {
+                    Some(source_inner)
+                        if self.cross_unit_tagged_type_compatible(
+                            source_inner.unqualified(),
+                            target_inner.unqualified(),
+                        ) =>
+                    {
+                        2
+                    }
+                    Some(_) => return None,
+                    None => 0,
+                };
+                let union_round_trip = pointer
+                    .designated_root_ty
+                    .as_ref()
+                    .filter(|root| matches!(root.unqualified(), CType::Union(_, _)))
+                    .and_then(|root| self.storage_path_type(root, &pointer.member_path))
+                    .is_some_and(|member_ty| {
+                        self.cross_unit_tagged_type_compatible(
+                            member_ty.unqualified(),
+                            target_inner.unqualified(),
+                        )
+                    });
+                Some((type_score + usize::from(union_round_trip), pointer))
+            })
+            .max_by_key(|(score, _)| *score)
+            .map(|(_, pointer)| pointer.clone())
     }
 
     fn known_bytes(&self, bytes: &[ByteCell], span: Span) -> Result<Vec<u8>, Diagnostic> {
@@ -7103,11 +7277,20 @@ impl<'a> Interpreter<'a> {
                 for member in &record.members {
                     let member_size = if member.bit_width.is_some() {
                         member.bit_storage_size
+                    } else if matches!(member.ty.unqualified(), CType::Array(_, 0)) {
+                        0
                     } else {
-                        self.type_size_of(&member.ty).unwrap()
+                        self.type_size_of(&member.ty).ok_or_else(|| {
+                            Diagnostic::error(
+                                format!("{} does not have an object representation", member.ty),
+                                span,
+                            )
+                        })?
                     };
                     let end = member.offset + member_size;
-                    let member_value = if member.bit_width.is_some() {
+                    let member_value = if matches!(member.ty.unqualified(), CType::Array(_, 0)) {
+                        StoredValue::Array(Vec::new())
+                    } else if member.bit_width.is_some() {
                         self.deserialize_bit_field(member, &bytes[member.offset..end], span)?
                     } else {
                         self.deserialize_stored_value(&member.ty, &bytes[member.offset..end], span)?
@@ -7481,6 +7664,7 @@ impl<'a> Interpreter<'a> {
         lvalue.member_path.clear();
         lvalue.designated_root_ty = Some(lvalue.ty.clone());
         lvalue.byte_offset_override = Some(start);
+        lvalue.arithmetic_domain_start = Some(start);
         Ok(())
     }
 
@@ -8059,12 +8243,10 @@ impl<'a> Interpreter<'a> {
         } else if then_ty.is_arithmetic() && else_ty.is_arithmetic() {
             self.usual_arithmetic_type(&then_ty, &else_ty, span)
         } else if then_ty.is_pointer()
-            && else_ty.is_integer()
             && self.is_null_pointer_constant(else_expr, frame, objects)?
         {
             Ok(then_ty)
         } else if else_ty.is_pointer()
-            && then_ty.is_integer()
             && self.is_null_pointer_constant(then_expr, frame, objects)?
         {
             Ok(else_ty)
@@ -8150,6 +8332,7 @@ impl<'a> Interpreter<'a> {
         }
         if target.is_pointer()
             && value.ty.is_pointer()
+            && !self.is_null_pointer_constant(expr, frame, objects)?
             && !self.pointer_assignment_compatible(target, &value.ty)
         {
             return Err(Diagnostic::error(
@@ -8179,7 +8362,7 @@ impl<'a> Interpreter<'a> {
         let ValueData::Pointer(pointer) = &mut value.data else {
             return value;
         };
-        if pointer.is_null() || pointer.designated_root_ty.is_some() {
+        if pointer.is_null() {
             return value;
         }
         let Some(object_id) = pointer.object else {
@@ -8197,7 +8380,48 @@ impl<'a> Interpreter<'a> {
         ) {
             return value;
         }
+        if let Some(root) = pointer.designated_root_ty.as_ref() {
+            if self.cross_unit_tagged_type_compatible(root, target_inner) {
+                if !pointer.member_path.is_empty()
+                    && self.path_is_initial_member_chain(root, &pointer.member_path)
+                    && let (Some(byte), Some(domain_start), Some(element_size)) = (
+                        pointer.byte_offset_override,
+                        pointer.arithmetic_domain_start,
+                        self.type_size_of(target_inner),
+                    )
+                    && let Some(relative) = byte.checked_sub(domain_start)
+                    && relative % element_size == 0
+                {
+                    pointer.base_offset = 0;
+                    pointer.offset = (relative / element_size) as isize;
+                    pointer.member_path.clear();
+                }
+                return value;
+            }
+            if self
+                .storage_path_type(root, &pointer.member_path)
+                .is_some_and(|path_ty| {
+                    self.cross_unit_tagged_type_compatible(&path_ty, target_inner)
+                        || matches!(path_ty.unqualified(), CType::Array(inner, 0)
+                                if self.cross_unit_tagged_type_compatible(inner, target_inner))
+                })
+            {
+                return value;
+            }
+        }
+        let byte_offset = pointer
+            .byte_offset_override
+            .or_else(|| {
+                let root = pointer.designated_root_ty.as_ref()?;
+                self.pointer_byte_offset_from_root_type(pointer, root)
+            })
+            .or_else(|| self.pointer_byte_offset(pointer, target_inner, objects));
+        pointer.base_offset = 0;
+        pointer.offset = 0;
+        pointer.member_path.clear();
         pointer.designated_root_ty = Some((**target_inner).clone());
+        pointer.byte_offset_override = byte_offset;
+        pointer.arithmetic_domain_start = byte_offset;
         value
     }
 
@@ -8342,7 +8566,16 @@ impl<'a> Interpreter<'a> {
                     seen_records,
                 ),
             (CType::Enum(lhs_id, lhs_tag), CType::Enum(rhs_id, rhs_tag)) => {
-                lhs_id == rhs_id || (lhs_tag.is_some() && lhs_tag == rhs_tag)
+                if lhs_id == rhs_id {
+                    true
+                } else if lhs_tag != rhs_tag {
+                    false
+                } else {
+                    let lhs = self.program.enums.get(lhs_id);
+                    let rhs = self.program.enums.get(rhs_id);
+                    lhs.zip(rhs)
+                        .is_some_and(|(lhs, rhs)| lhs.complete == rhs.complete || lhs_tag.is_some())
+                }
             }
             _ => lhs == rhs,
         }
@@ -8673,6 +8906,9 @@ impl<'a> Interpreter<'a> {
         frame: &Frame,
         objects: &ObjectFrames,
     ) -> Result<(), Diagnostic> {
+        if !self.run_options.capture_visualization {
+            return Ok(());
+        }
         let Some(function) = self.current_functions.last() else {
             return Ok(());
         };
@@ -8720,6 +8956,9 @@ impl<'a> Interpreter<'a> {
         kind: &str,
         skipped_span: Option<Span>,
     ) -> Result<(), Diagnostic> {
+        if !self.run_options.capture_visualization {
+            return Ok(());
+        }
         let Some(function) = self.current_functions.last() else {
             return Ok(());
         };
@@ -8789,6 +9028,8 @@ impl<'a> Interpreter<'a> {
         let saved_encoded_object_pointers = self.encoded_object_pointers.clone();
         let saved_encoded_function_pointers = self.encoded_function_pointers.clone();
         let saved_decoded_pointers = self.decoded_pointers.clone();
+        let saved_opaque_integer_pointer_addresses =
+            self.opaque_integer_pointer_addresses.borrow().clone();
 
         let mut eval_frame = frame.clone();
         let mut eval_objects = objects.clone();
@@ -8857,6 +9098,8 @@ impl<'a> Interpreter<'a> {
         self.encoded_object_pointers = saved_encoded_object_pointers;
         self.encoded_function_pointers = saved_encoded_function_pointers;
         self.decoded_pointers = saved_decoded_pointers;
+        *self.opaque_integer_pointer_addresses.borrow_mut() =
+            saved_opaque_integer_pointer_addresses;
 
         result
     }
@@ -8911,17 +9154,14 @@ impl<'a> Interpreter<'a> {
         text: &str,
         span: Span,
     ) -> Result<ProgramValueLiteral, Diagnostic> {
-        if self.is_floating_literal(text) {
-            self.parse_floating_literal(text, span)?;
-            return Ok(ProgramValueLiteral {
-                kind: "floating".to_owned(),
-                has_suffix: matches!(text.chars().last(), Some('f' | 'F' | 'l' | 'L')),
-            });
-        }
-        let (_, _, has_suffix) = self.parse_integer_literal(text, span)?;
+        let literal = parse_number_literal(text.to_owned(), span)?;
         Ok(ProgramValueLiteral {
-            kind: "integer".to_owned(),
-            has_suffix,
+            kind: match literal.value {
+                NumberValue::Integer(_) => "integer",
+                NumberValue::Floating(_) => "floating",
+            }
+            .to_owned(),
+            has_suffix: literal.has_suffix,
         })
     }
 
@@ -10114,9 +10354,15 @@ impl<'a> Interpreter<'a> {
             Statement::Labeled { statement, .. } => {
                 return self.enter_statement_at_label(statement, label, frame, objects);
             }
-            Statement::Switch { body, .. } if self.block_contains_label(body, label) => self
-                .enter_block_at_label(body, label, frame, objects)?
-                .unwrap_or(Flow::Continue),
+            Statement::Switch { body, .. } if self.block_contains_label(body, label) => {
+                self.active_switch_dispatch_depth += 1;
+                let result = self.enter_block_at_label(body, label, frame, objects);
+                self.active_switch_dispatch_depth -= 1;
+                match result? {
+                    Some(Flow::LoopBreak) | Some(Flow::Continue) | None => Flow::Continue,
+                    Some(flow) => flow,
+                }
+            }
             Statement::UserLabeled {
                 label: stmt_label,
                 statement,
@@ -11078,6 +11324,10 @@ impl<'a> Interpreter<'a> {
                     if let Some(object) = self.lookup_object_mut(objects, lvalue.object) {
                         object.address_taken = true;
                     }
+                    let designated_root_ty = lvalue
+                        .designated_root_ty
+                        .clone()
+                        .or_else(|| lvalue.member_path.is_empty().then(|| lvalue.ty.clone()));
                     Ok(TypedValue {
                         ty: CType::pointer_to(inner_ty),
                         data: ValueData::Pointer(PointerValue {
@@ -11085,8 +11335,9 @@ impl<'a> Interpreter<'a> {
                             base_offset: lvalue.base_offset,
                             offset: lvalue.offset,
                             member_path: lvalue.member_path,
-                            designated_root_ty: lvalue.designated_root_ty,
+                            designated_root_ty,
                             byte_offset_override: lvalue.byte_offset_override,
+                            arithmetic_domain_start: lvalue.arithmetic_domain_start,
                         }),
                         restrict_source: lvalue.restrict_source,
                         indeterminate: false,
@@ -11113,10 +11364,11 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<ValueCategory, Diagnostic> {
+        let expr_key = expr as *const Expr as usize;
         match expr {
-            Expr::Number(text, span) => Ok(ValueCategory::RValue(
-                self.eval_number_literal(text, *span)?,
-            )),
+            Expr::Number(literal, _) => {
+                Ok(ValueCategory::RValue(self.eval_number_literal(literal)))
+            }
             Expr::CharLiteral(value, _) => Ok(ValueCategory::RValue(TypedValue::integer(
                 CType::Int,
                 *value as i128,
@@ -11145,6 +11397,7 @@ impl<'a> Interpreter<'a> {
                     member_path: pointer.member_path,
                     designated_root_ty: pointer.designated_root_ty,
                     byte_offset_override: pointer.byte_offset_override,
+                    arithmetic_domain_start: pointer.arithmetic_domain_start,
                     bit_field_width: None,
                     restrict_source: None,
                 }))
@@ -11161,6 +11414,7 @@ impl<'a> Interpreter<'a> {
                     member_path: pointer.member_path,
                     designated_root_ty: pointer.designated_root_ty,
                     byte_offset_override: pointer.byte_offset_override,
+                    arithmetic_domain_start: pointer.arithmetic_domain_start,
                     bit_field_width: None,
                     restrict_source: None,
                 }))
@@ -11171,107 +11425,7 @@ impl<'a> Interpreter<'a> {
             Expr::Utf32StringLiteral(text, span) => {
                 self.eval_unicode_string_literal(text, false, *span, objects)
             }
-            Expr::Variable(name, span) => {
-                if let Some(object) = frame.bindings.get(name).copied() {
-                    let ty = self.lookup_object(objects, object).unwrap().ty.clone();
-                    Ok(ValueCategory::LValue(LValue {
-                        object,
-                        ty,
-                        base_offset: 0,
-                        offset: 0,
-                        member_path: Vec::new(),
-                        designated_root_ty: None,
-                        byte_offset_override: None,
-                        bit_field_width: None,
-                        restrict_source: None,
-                    }))
-                } else if let Some(decl) = frame.object_decls.get(name) {
-                    let Some(object) = self.lookup_global_binding(name, span.file) else {
-                        return Err(self.missing_definition_use_diag(name, *span));
-                    };
-                    Ok(ValueCategory::LValue(LValue {
-                        object,
-                        ty: decl.ty.clone(),
-                        base_offset: 0,
-                        offset: 0,
-                        member_path: Vec::new(),
-                        designated_root_ty: None,
-                        byte_offset_override: None,
-                        bit_field_width: None,
-                        restrict_source: None,
-                    }))
-                } else if let Some(function_decl) = frame.function_decls.get(name) {
-                    if let Some(function) = self.lookup_function(name, span.file) {
-                        Ok(ValueCategory::RValue(TypedValue {
-                            ty: self.function_declaration_type(function_decl),
-                            data: ValueData::Function(function_symbol(function)),
-                            restrict_source: None,
-                            indeterminate: false,
-                            missing_return: false,
-                        }))
-                    } else if Self::is_host_library_function(name) {
-                        Ok(ValueCategory::RValue(TypedValue {
-                            ty: self.function_declaration_type(function_decl),
-                            data: ValueData::Function(name.clone()),
-                            restrict_source: None,
-                            indeterminate: false,
-                            missing_return: false,
-                        }))
-                    } else {
-                        Err(self.missing_definition_use_diag(name, *span))
-                    }
-                } else if let Some(object) = self.lookup_global_binding(name, span.file) {
-                    let ty = self.lookup_object(objects, object).unwrap().ty.clone();
-                    Ok(ValueCategory::LValue(LValue {
-                        object,
-                        ty,
-                        base_offset: 0,
-                        offset: 0,
-                        member_path: Vec::new(),
-                        designated_root_ty: None,
-                        byte_offset_override: None,
-                        bit_field_width: None,
-                        restrict_source: None,
-                    }))
-                } else if let Some(function) = self.lookup_function(name, span.file) {
-                    Ok(ValueCategory::RValue(
-                        self.function_designator_value(function),
-                    ))
-                } else if let Some(function_decl) =
-                    self.lookup_function_declaration(name, span.file)
-                {
-                    if Self::is_host_library_function(name) {
-                        Ok(ValueCategory::RValue(TypedValue {
-                            ty: self.function_declaration_type(function_decl),
-                            data: ValueData::Function(name.clone()),
-                            restrict_source: None,
-                            indeterminate: false,
-                            missing_return: false,
-                        }))
-                    } else {
-                        Err(self.missing_definition_use_diag(name, *span))
-                    }
-                } else if self.lookup_global_declaration(name, span.file).is_some() {
-                    Err(self.missing_definition_use_diag(name, *span))
-                } else if self.builtin_function_type(name).is_some() {
-                    Ok(ValueCategory::RValue(TypedValue {
-                        ty: self
-                            .builtin_function_type(name)
-                            .expect("builtin type was checked"),
-                        data: ValueData::Function(name.clone()),
-                        restrict_source: None,
-                        indeterminate: false,
-                        missing_return: false,
-                    }))
-                } else if let Some(value) = self.program.enum_constants.get(name) {
-                    Ok(ValueCategory::RValue(TypedValue::int(*value)))
-                } else {
-                    Err(Diagnostic::error(
-                        format!("use of undeclared identifier {}", name),
-                        *span,
-                    ))
-                }
-            }
+            Expr::Variable(name, span) => self.eval_variable(name, *span, expr_key, frame, objects),
             Expr::Unary { op, expr, span } => self.eval_unary(*op, expr, *span, frame, objects),
             Expr::Postfix { op, expr, span } => self.eval_postfix(*op, expr, *span, frame, objects),
             Expr::Binary { op, lhs, rhs, span } => {
@@ -11487,6 +11641,152 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    fn eval_variable(
+        &mut self,
+        name: &str,
+        span: Span,
+        expr_key: usize,
+        frame: &Frame,
+        objects: &ObjectFrames,
+    ) -> Result<ValueCategory, Diagnostic> {
+        if let Some(cached) = self.variable_cache.get(&expr_key) {
+            let valid = match cached.frame_id {
+                None => true,
+                Some(frame_id) if frame_id == frame.id => match &cached.value {
+                    ValueCategory::LValue(lvalue) => self
+                        .lookup_object(objects, lvalue.object)
+                        .is_some_and(|object| object.alive),
+                    ValueCategory::RValue(_) => false,
+                },
+                Some(_) => false,
+            };
+            if valid {
+                return Ok(cached.value.clone());
+            }
+        }
+
+        let (value, frame_local) = if let Some(object) = frame.bindings.get(name).copied() {
+            let ty = self.lookup_object(objects, object).unwrap().ty.clone();
+            (
+                ValueCategory::LValue(LValue {
+                    object,
+                    ty,
+                    base_offset: 0,
+                    offset: 0,
+                    member_path: Vec::new(),
+                    designated_root_ty: None,
+                    byte_offset_override: None,
+                    arithmetic_domain_start: None,
+                    bit_field_width: None,
+                    restrict_source: None,
+                }),
+                true,
+            )
+        } else if let Some(decl) = frame.object_decls.get(name) {
+            let Some(object) = self.lookup_global_binding(name, span.file) else {
+                return Err(self.missing_definition_use_diag(name, span));
+            };
+            (
+                ValueCategory::LValue(LValue {
+                    object,
+                    ty: decl.ty.clone(),
+                    base_offset: 0,
+                    offset: 0,
+                    member_path: Vec::new(),
+                    designated_root_ty: None,
+                    byte_offset_override: None,
+                    arithmetic_domain_start: None,
+                    bit_field_width: None,
+                    restrict_source: None,
+                }),
+                false,
+            )
+        } else if let Some(function_decl) = frame.function_decls.get(name) {
+            let data = if let Some(function) = self.lookup_function(name, span.file) {
+                ValueData::Function(function_symbol(function))
+            } else if Self::is_host_library_function(name) {
+                ValueData::Function(name.to_owned())
+            } else {
+                return Err(self.missing_definition_use_diag(name, span));
+            };
+            (
+                ValueCategory::RValue(TypedValue {
+                    ty: self.function_declaration_type(function_decl),
+                    data,
+                    restrict_source: None,
+                    indeterminate: false,
+                    missing_return: false,
+                }),
+                false,
+            )
+        } else if let Some(object) = self.lookup_global_binding(name, span.file) {
+            let ty = self.lookup_object(objects, object).unwrap().ty.clone();
+            (
+                ValueCategory::LValue(LValue {
+                    object,
+                    ty,
+                    base_offset: 0,
+                    offset: 0,
+                    member_path: Vec::new(),
+                    designated_root_ty: None,
+                    byte_offset_override: None,
+                    arithmetic_domain_start: None,
+                    bit_field_width: None,
+                    restrict_source: None,
+                }),
+                false,
+            )
+        } else if let Some(function) = self.lookup_function(name, span.file) {
+            (
+                ValueCategory::RValue(self.function_designator_value(function)),
+                false,
+            )
+        } else if let Some(function_decl) = self.lookup_function_declaration(name, span.file) {
+            if !Self::is_host_library_function(name) {
+                return Err(self.missing_definition_use_diag(name, span));
+            }
+            (
+                ValueCategory::RValue(TypedValue {
+                    ty: self.function_declaration_type(function_decl),
+                    data: ValueData::Function(name.to_owned()),
+                    restrict_source: None,
+                    indeterminate: false,
+                    missing_return: false,
+                }),
+                false,
+            )
+        } else if self.lookup_global_declaration(name, span.file).is_some() {
+            return Err(self.missing_definition_use_diag(name, span));
+        } else if let Some(ty) = self.builtin_function_type(name) {
+            (
+                ValueCategory::RValue(TypedValue {
+                    ty,
+                    data: ValueData::Function(name.to_owned()),
+                    restrict_source: None,
+                    indeterminate: false,
+                    missing_return: false,
+                }),
+                false,
+            )
+        } else if let Some(value) = self.program.enum_constants.get(name) {
+            (ValueCategory::RValue(TypedValue::int(*value)), false)
+        } else {
+            return Err(Diagnostic::error(
+                format!("use of undeclared identifier {name}"),
+                span,
+            ));
+        };
+
+        self.variable_cache.insert(
+            expr_key,
+            VariableCacheEntry {
+                frame_id: frame_local.then_some(frame.id),
+                value: value.clone(),
+            },
+        );
+        Ok(value)
+    }
+
     fn eval_unary(
         &mut self,
         op: UnaryOp,
@@ -11560,6 +11860,7 @@ impl<'a> Interpreter<'a> {
                                 member_path: lvalue.member_path.clone(),
                                 designated_root_ty: lvalue.designated_root_ty.clone(),
                                 byte_offset_override: lvalue.byte_offset_override,
+                                arithmetic_domain_start: lvalue.arithmetic_domain_start,
                             }),
                             restrict_source: lvalue.restrict_source.clone(),
                             indeterminate: false,
@@ -11702,7 +12003,56 @@ impl<'a> Interpreter<'a> {
                 Some("6.5.3.2"),
             ));
         }
-        let byte_offset_override = if let Some(start) = pointer.byte_offset_override {
+        let target_is_record = matches!(ty.unqualified(), CType::Struct(_, _) | CType::Union(_, _));
+        let root_matches_target = self
+            .pointer_root_type(&pointer, objects)
+            .is_some_and(|root| match root.unqualified() {
+                CType::Array(inner, _) => self.cross_unit_tagged_type_compatible(inner, &ty),
+                _ => self.cross_unit_tagged_type_compatible(root, &ty),
+            });
+        let leaf_matches_target = self
+            .pointer_root_type(&pointer, objects)
+            .and_then(|root| self.storage_path_type(root, &pointer.member_path))
+            .is_some_and(|leaf| self.cross_unit_tagged_type_compatible(&leaf, &ty));
+        let rebase_to_containing_record = target_is_record
+            && !root_matches_target
+            && !leaf_matches_target
+            && self.pointer_targets_initial_member_chain(&pointer, &ty, objects);
+        let byte_offset_override = if rebase_to_containing_record {
+            Some(
+                self.pointer_byte_offset(&pointer, &ty, objects)
+                    .ok_or_else(|| {
+                        Diagnostic::ub(
+                            "pointer does not point into a live supported object",
+                            span,
+                            Some("6.5.3.2"),
+                        )
+                    })?,
+            )
+        } else if object_state.storage_duration == StorageDuration::Dynamic {
+            let start = self
+                .pointer_byte_offset(&pointer, &ty, objects)
+                .ok_or_else(|| {
+                    Diagnostic::ub(
+                        "pointer does not point into a live supported object",
+                        span,
+                        Some("6.5.3.2"),
+                    )
+                })?;
+            if start >= object_state.byte_size {
+                return Err(Diagnostic::ub(
+                    "pointer is not valid to dereference",
+                    span,
+                    Some("6.5.3.2"),
+                ));
+            }
+            // Dereferencing a pointer only produces an lvalue; it does not read or
+            // write the complete pointed-to type. Raw allocated storage can therefore
+            // designate a member that fits even when another member makes the enclosing
+            // union larger than the allocation. The eventual lvalue access performs the
+            // full byte-range check.
+            Some(start)
+        } else if let Some(start) = pointer.byte_offset_override {
             let size = self.type_size_of(&ty).ok_or_else(|| {
                 Diagnostic::ub(
                     "pointer does not point into a live supported object",
@@ -11740,21 +12090,45 @@ impl<'a> Interpreter<'a> {
             }
             None
         };
-        let member_path = if matches!(ty.unqualified(), CType::Struct(_, _) | CType::Union(_, _))
+        let member_path = if target_is_record
+            && (root_matches_target || rebase_to_containing_record)
             && self.pointer_targets_initial_member_chain(&pointer, &ty, objects)
         {
             Vec::new()
         } else {
             pointer.member_path.clone()
         };
+        let designated_root_ty = if rebase_to_containing_record {
+            Some(ty.clone())
+        } else if object_state.storage_duration == StorageDuration::Dynamic {
+            pointer
+                .designated_root_ty
+                .clone()
+                .or_else(|| Some(ty.clone()))
+        } else {
+            pointer.designated_root_ty.clone()
+        };
         Ok(ValueCategory::LValue(LValue {
             object,
             ty,
-            base_offset: pointer.base_offset,
-            offset: pointer.offset,
+            base_offset: if rebase_to_containing_record {
+                0
+            } else {
+                pointer.base_offset
+            },
+            offset: if rebase_to_containing_record {
+                0
+            } else {
+                pointer.offset
+            },
             member_path,
-            designated_root_ty: pointer.designated_root_ty.clone(),
+            designated_root_ty,
             byte_offset_override,
+            arithmetic_domain_start: if rebase_to_containing_record {
+                byte_offset_override
+            } else {
+                pointer.arithmetic_domain_start
+            },
             bit_field_width: None,
             restrict_source: value.restrict_source,
         }))
@@ -11813,6 +12187,7 @@ impl<'a> Interpreter<'a> {
                     member_path: lvalue.member_path,
                     designated_root_ty: lvalue.designated_root_ty,
                     byte_offset_override: lvalue.byte_offset_override,
+                    arithmetic_domain_start: lvalue.arithmetic_domain_start,
                 };
                 let pointer =
                     self.checked_pointer_offset(pointer, index, &element_ty, objects, span)?;
@@ -11894,6 +12269,7 @@ impl<'a> Interpreter<'a> {
                         member_path: lvalue.member_path,
                         designated_root_ty: lvalue.designated_root_ty,
                         byte_offset_override: lvalue.byte_offset_override,
+                        arithmetic_domain_start: lvalue.arithmetic_domain_start,
                     },
                     index,
                     &element_ty,
@@ -12069,21 +12445,26 @@ impl<'a> Interpreter<'a> {
     ) -> Result<ValueCategory, Diagnostic> {
         if lhs.ty.is_pointer() || rhs.ty.is_pointer() {
             if lhs.ty.is_pointer() && rhs.ty.is_pointer() {
-                let CType::Pointer(lhs_inner) = lhs.ty.unqualified() else {
-                    unreachable!();
+                let common_ty = if self.is_null_pointer_constant(lhs_expr, frame, objects)? {
+                    rhs.ty.clone()
+                } else if self.is_null_pointer_constant(rhs_expr, frame, objects)? {
+                    lhs.ty.clone()
+                } else {
+                    let CType::Pointer(lhs_inner) = lhs.ty.unqualified() else {
+                        unreachable!();
+                    };
+                    let CType::Pointer(rhs_inner) = rhs.ty.unqualified() else {
+                        unreachable!();
+                    };
+                    self.composite_pointer_target_type(lhs_inner, rhs_inner)
+                        .map(CType::pointer_to)
+                        .ok_or_else(|| {
+                            Diagnostic::error(
+                                "equality comparison requires compatible pointer operand types",
+                                span,
+                            )
+                        })?
                 };
-                let CType::Pointer(rhs_inner) = rhs.ty.unqualified() else {
-                    unreachable!();
-                };
-                let common_ty = self
-                    .composite_pointer_target_type(lhs_inner, rhs_inner)
-                    .map(CType::pointer_to)
-                    .ok_or_else(|| {
-                        Diagnostic::error(
-                            "equality comparison requires compatible pointer operand types",
-                            span,
-                        )
-                    })?;
                 lhs = self.convert_value(lhs, &common_ty, span)?;
                 rhs = self.convert_value(rhs, &common_ty, span)?;
             }
@@ -12214,6 +12595,8 @@ impl<'a> Interpreter<'a> {
                     (lvalue.byte_offset_override, member_byte_offset)
                 {
                     lvalue.byte_offset_override = current.checked_add(extra);
+                    lvalue.base_offset = 0;
+                    lvalue.offset = 0;
                 }
                 lvalue.bit_field_width = bit_field_width;
                 self.normalize_lvalue_base_offset(&mut lvalue, objects);
@@ -12274,6 +12657,13 @@ impl<'a> Interpreter<'a> {
                     "call through a null function pointer",
                     span,
                     Some("6.5.2.2"),
+                ));
+            }
+            ValueData::Pointer(_) => {
+                return Err(Diagnostic::ub(
+                    "call through an opaque implementation-defined function pointer",
+                    span,
+                    Some("6.3.2.3p5"),
                 ));
             }
             _ => return Err(Diagnostic::error("unsupported call target", span)),
@@ -12365,7 +12755,10 @@ impl<'a> Interpreter<'a> {
             let called_type = callee_value.ty.element_type().unwrap_or(&callee_value.ty);
             if has_prototype && !self.cross_unit_tagged_type_compatible(called_type, &actual_type) {
                 return Err(Diagnostic::ub(
-                    "call through a function pointer whose type is incompatible with the function definition",
+                    format!(
+                        "call through function pointer of type {} is incompatible with definition of {} with type {}",
+                        called_type, function_name, actual_type
+                    ),
                     span,
                     Some("6.5.2.2p9"),
                 ));
@@ -12534,6 +12927,7 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: Some(actual_ty.clone()),
             byte_offset_override: None,
+            arithmetic_domain_start: None,
             bit_field_width: None,
             restrict_source: None,
         }))
@@ -13166,7 +13560,11 @@ impl<'a> Interpreter<'a> {
                 Some(standard),
             ));
         }
-        self.ensure_writable_object(pointer.object.expect("checked above"), span, objects)
+        let size = self
+            .type_size_of(&pointee)
+            .ok_or_else(|| Diagnostic::error("printf %n destination type has no size", span))?;
+        let (object_id, start, _) = self.byte_region_from_pointer(&pointer, size, span, objects)?;
+        self.ensure_library_writable_region(object_id, start, size, span, objects)
     }
 
     fn validate_printf_conversion_arg(
@@ -13561,6 +13959,9 @@ impl<'a> Interpreter<'a> {
                 args[0].span(),
             ));
         }
+        let destination = evaluated[0].as_pointer(args[0].span())?;
+        let _ =
+            self.ensure_library_array_destination(&destination, 1, 1, args[0].span(), objects)?;
         self.check_printf_like_call("sprintf", 1, args, evaluated, span, objects)
     }
 
@@ -13598,7 +13999,155 @@ impl<'a> Interpreter<'a> {
                 args[1].span(),
             ));
         }
+        let bound =
+            self.checked_usize_from_unsigned_long(&evaluated[1], args[1].span(), "snprintf size")?;
+        if dest_pointer.is_null() {
+            if bound != 0 {
+                return Err(Diagnostic::ub(
+                    "snprintf requires a valid destination pointer when n is nonzero",
+                    args[0].span(),
+                    Some("7.21.6.5"),
+                ));
+            }
+        } else {
+            let _ = self.ensure_library_array_destination(
+                &dest_pointer,
+                bound,
+                1,
+                args[0].span(),
+                objects,
+            )?;
+        }
         self.check_printf_like_call("snprintf", 2, args, evaluated, span, objects)
+    }
+
+    fn check_vsprintf_call(
+        &mut self,
+        args: &[Expr],
+        evaluated: &[TypedValue],
+        span: Span,
+        objects: &mut ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        if args.len() != 3 || evaluated.len() != 3 {
+            return Err(Diagnostic::error(
+                "vsprintf requires destination, format, and va_list arguments",
+                span,
+            ));
+        }
+        self.reject_missing_return_value(&evaluated[0], args[0].span())?;
+        self.reject_indeterminate_library_value(&evaluated[0], args[0].span(), "vsprintf")?;
+        if !self.pointer_assignment_compatible(&self.char_ptr_type(), &evaluated[0].ty) {
+            return Err(Diagnostic::error(
+                "vsprintf requires a char * destination",
+                args[0].span(),
+            ));
+        }
+        let destination = evaluated[0].as_pointer(args[0].span())?;
+        let _ =
+            self.ensure_library_array_destination(&destination, 1, 1, args[0].span(), objects)?;
+        self.check_vprintf_like_call("vsprintf", 1, 2, args, evaluated, span, objects)
+    }
+
+    fn check_vsnprintf_call(
+        &mut self,
+        args: &[Expr],
+        evaluated: &[TypedValue],
+        span: Span,
+        objects: &mut ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        if args.len() != 4 || evaluated.len() != 4 {
+            return Err(Diagnostic::error(
+                "vsnprintf requires destination, size, format, and va_list arguments",
+                span,
+            ));
+        }
+        self.reject_missing_return_value(&evaluated[0], args[0].span())?;
+        self.reject_missing_return_value(&evaluated[1], args[1].span())?;
+        self.reject_indeterminate_library_value(&evaluated[0], args[0].span(), "vsnprintf")?;
+        self.reject_indeterminate_library_value(&evaluated[1], args[1].span(), "vsnprintf")?;
+        let destination = evaluated[0].as_pointer(args[0].span())?;
+        if !destination.is_null()
+            && !self.pointer_assignment_compatible(&self.char_ptr_type(), &evaluated[0].ty)
+        {
+            return Err(Diagnostic::error(
+                "vsnprintf requires a char * destination or a null pointer when n is 0",
+                args[0].span(),
+            ));
+        }
+        if evaluated[1].ty != CType::UnsignedLong {
+            return Err(Diagnostic::error(
+                "vsnprintf size argument must have type unsigned long",
+                args[1].span(),
+            ));
+        }
+        let bound =
+            self.checked_usize_from_unsigned_long(&evaluated[1], args[1].span(), "vsnprintf size")?;
+        if destination.is_null() {
+            if bound != 0 {
+                return Err(Diagnostic::ub(
+                    "vsnprintf requires a valid destination pointer when n is nonzero",
+                    args[0].span(),
+                    Some("7.21.6.12"),
+                ));
+            }
+        } else {
+            let _ = self.ensure_library_array_destination(
+                &destination,
+                bound,
+                1,
+                args[0].span(),
+                objects,
+            )?;
+        }
+        self.check_vprintf_like_call("vsnprintf", 2, 3, args, evaluated, span, objects)
+    }
+
+    fn check_bounded_wide_printf_destination(
+        &mut self,
+        function_name: &'static str,
+        args: &[Expr],
+        evaluated: &[TypedValue],
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        self.reject_missing_return_value(&evaluated[0], args[0].span())?;
+        self.reject_missing_return_value(&evaluated[1], args[1].span())?;
+        self.reject_indeterminate_library_value(&evaluated[0], args[0].span(), function_name)?;
+        self.reject_indeterminate_library_value(&evaluated[1], args[1].span(), function_name)?;
+        if !self.pointer_assignment_compatible(&self.wchar_ptr_type(), &evaluated[0].ty) {
+            return Err(Diagnostic::error(
+                format!("{function_name} requires a wchar_t * destination"),
+                args[0].span(),
+            ));
+        }
+        if evaluated[1].ty != CType::UnsignedLong {
+            return Err(Diagnostic::error(
+                format!("{function_name} size argument must have type unsigned long"),
+                args[1].span(),
+            ));
+        }
+        let bound = self.checked_usize_from_unsigned_long(
+            &evaluated[1],
+            args[1].span(),
+            &format!("{function_name} size"),
+        )?;
+        let total = bound
+            .checked_mul(self.wide_char_byte_width())
+            .ok_or_else(|| {
+                Diagnostic::error(
+                    format!("{function_name} destination size is out of supported range"),
+                    span,
+                )
+            })?;
+        let destination = evaluated[0].as_pointer(args[0].span())?;
+        let _ = self.ensure_library_array_destination(
+            &destination,
+            total,
+            self.wide_char_byte_width(),
+            args[0].span(),
+            objects,
+        )?;
+        Ok(())
     }
 
     fn check_vprintf_like_call(
@@ -14232,6 +14781,7 @@ impl<'a> Interpreter<'a> {
         args: &[Expr],
         evaluated: &[TypedValue],
         span: Span,
+        objects: &ObjectFrames,
     ) -> Result<(), Diagnostic> {
         self.require_exact_call_args("fgetws", args, evaluated, 3, span)?;
         self.reject_missing_return_value(&evaluated[0], args[0].span())?;
@@ -14250,6 +14800,28 @@ impl<'a> Interpreter<'a> {
                 args[1].span(),
             ));
         }
+        let count = evaluated[1].to_int()?;
+        if count <= 0 {
+            return Err(Diagnostic::ub(
+                "fgetws count must be positive",
+                args[1].span(),
+                Some("7.29.3.2"),
+            ));
+        }
+        let total = usize::try_from(count)
+            .ok()
+            .and_then(|count| count.checked_mul(self.wide_char_byte_width()))
+            .ok_or_else(|| {
+                Diagnostic::error("fgetws destination size is out of supported range", span)
+            })?;
+        let destination = evaluated[0].as_pointer(args[0].span())?;
+        let _ = self.ensure_library_array_destination(
+            &destination,
+            total,
+            self.wide_char_byte_width(),
+            args[0].span(),
+            objects,
+        )?;
         self.check_stream_call("fgetws", &args[2..], &evaluated[2..], span, "7.24.3.2")
     }
 
@@ -14314,8 +14886,178 @@ impl<'a> Interpreter<'a> {
                 args[1].span(),
             ));
         }
+        let maxsize = self.checked_usize_from_unsigned_long(
+            &evaluated[1],
+            args[1].span(),
+            "wcsftime maxsize",
+        )?;
+        let total = maxsize
+            .checked_mul(self.wide_char_byte_width())
+            .ok_or_else(|| Diagnostic::error("wcsftime size is out of supported range", span))?;
+        let destination = evaluated[0].as_pointer(args[0].span())?;
+        let _ = self.ensure_library_array_destination(
+            &destination,
+            total,
+            self.wide_char_byte_width(),
+            args[0].span(),
+            objects,
+        )?;
         self.check_wide_string_arg("wcsftime", &evaluated[2], args[2].span(), objects)?;
+        let format = self.read_wide_string_units(
+            evaluated[2].as_pointer(args[2].span())?,
+            args[2].span(),
+            objects,
+        )?;
+        let format = format
+            .into_iter()
+            .map(|unit| unit as u32)
+            .collect::<Vec<_>>();
+        self.validate_strftime_conversion_specifiers("wcsftime", &format, args[2].span())?;
         let _ = self.check_tm_pointer_input("wcsftime", &evaluated[3], args[3].span(), objects)?;
+        Ok(())
+    }
+
+    fn check_wcstok_call(
+        &mut self,
+        args: &[Expr],
+        evaluated: &[TypedValue],
+        span: Span,
+        objects: &mut ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        self.require_exact_call_args("wcstok", args, evaluated, 3, span)?;
+        for (expr, value) in args.iter().zip(evaluated) {
+            self.reject_missing_return_value(value, expr.span())?;
+            self.reject_indeterminate_library_value(value, expr.span(), "wcstok")?;
+        }
+        let source = evaluated[0].as_pointer(args[0].span())?;
+        if !source.is_null()
+            && !self.pointer_assignment_compatible(&self.wchar_ptr_type(), &evaluated[0].ty)
+        {
+            return Err(Diagnostic::error(
+                "wcstok requires a wchar_t * source or null",
+                args[0].span(),
+            ));
+        }
+        self.check_wide_string_arg("wcstok", &evaluated[1], args[1].span(), objects)?;
+        if !self.pointer_assignment_compatible(
+            &CType::pointer_to(self.wchar_ptr_type()),
+            &evaluated[2].ty,
+        ) {
+            return Err(Diagnostic::error(
+                "wcstok requires a wchar_t ** state pointer",
+                args[2].span(),
+            ));
+        }
+        let state_pointer = evaluated[2].as_pointer(args[2].span())?;
+        let pointer_size = self.type_size_of(&self.wchar_ptr_type()).unwrap_or(8);
+        let (state_object, state_start, _) =
+            self.byte_region_from_pointer(&state_pointer, pointer_size, args[2].span(), objects)?;
+        self.ensure_library_writable_region(
+            state_object,
+            state_start,
+            pointer_size,
+            args[2].span(),
+            objects,
+        )?;
+
+        let active_source = if source.is_null() {
+            let state_lvalue = self.pointer_lvalue(
+                "wcstok",
+                &state_pointer,
+                &self.wchar_ptr_type(),
+                args[2].span(),
+                "7.29.4.5.7",
+            )?;
+            let saved = self
+                .load_lvalue(state_lvalue, args[2].span(), objects)?
+                .as_pointer(args[2].span())?;
+            let version = self
+                .lookup_object(objects, state_object)
+                .expect("validated wcstok state object")
+                .modification_count;
+            let valid = self
+                .wcstok_state_provenance
+                .get(&(state_object, state_start))
+                .is_some_and(|(saved_version, expected)| {
+                    *saved_version == version && *expected == saved
+                });
+            if !valid {
+                return Err(Diagnostic::ub(
+                    "wcstok null source requires an unmodified state value stored by a previous call for the same wide string",
+                    args[0].span(),
+                    Some("7.29.4.5.7"),
+                ));
+            }
+            saved
+        } else {
+            source
+        };
+        if !active_source.is_null() {
+            let units =
+                self.read_wide_string_units(active_source.clone(), args[0].span(), objects)?;
+            let size = (units.len() + 1)
+                .checked_mul(self.wide_char_byte_width())
+                .ok_or_else(|| Diagnostic::error("wcstok source size is out of range", span))?;
+            let _ = self.ensure_library_array_destination(
+                &active_source,
+                size,
+                self.wide_char_byte_width(),
+                args[0].span(),
+                objects,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_strftime_conversion_specifiers(
+        &self,
+        function_name: &str,
+        format: &[u32],
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let mut index = 0;
+        while index < format.len() {
+            if format[index] != u32::from(b'%') {
+                index += 1;
+                continue;
+            }
+            index += 1;
+            let Some(&next) = format.get(index) else {
+                return Err(Diagnostic::ub(
+                    format!("{function_name} format ends with an incomplete conversion specifier"),
+                    span,
+                    Some("7.27.3.5"),
+                ));
+            };
+            let modifier = char::from_u32(next).filter(|ch| matches!(ch, 'E' | 'O'));
+            if modifier.is_some() {
+                index += 1;
+            }
+            let Some(specifier) = format.get(index).and_then(|&unit| char::from_u32(unit)) else {
+                return Err(Diagnostic::ub(
+                    format!("{function_name} format contains an invalid conversion specifier"),
+                    span,
+                    Some("7.27.3.5"),
+                ));
+            };
+            let valid = match modifier {
+                Some('E') => matches!(specifier, 'c' | 'C' | 'x' | 'X' | 'y' | 'Y'),
+                Some('O') => matches!(
+                    specifier,
+                    'd' | 'e' | 'H' | 'I' | 'm' | 'M' | 'S' | 'u' | 'U' | 'V' | 'w' | 'W' | 'y'
+                ),
+                Some(_) => unreachable!(),
+                None => "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%".contains(specifier),
+            };
+            if !valid {
+                return Err(Diagnostic::ub(
+                    format!("{function_name} format contains an invalid conversion specifier"),
+                    span,
+                    Some("7.27.3.5"),
+                ));
+            }
+            index += 1;
+        }
         Ok(())
     }
 
@@ -14412,8 +15154,8 @@ impl<'a> Interpreter<'a> {
                 span,
             )
         })?;
-        let (object_id, _, _) = self.byte_region_from_pointer(&pointer, size, span, objects)?;
-        self.ensure_writable_object(object_id, span, objects)
+        let (object_id, start, _) = self.byte_region_from_pointer(&pointer, size, span, objects)?;
+        self.ensure_library_writable_region(object_id, start, size, span, objects)
     }
 
     fn check_math_string_arg(
@@ -14948,43 +15690,59 @@ impl<'a> Interpreter<'a> {
         Ok(Some(bytes))
     }
 
-    fn scan_token_to_signed_bytes(&self, token: &[u8], base: c_int) -> Option<(i128, usize)> {
+    fn scan_token_to_signed_bytes(&self, token: &[u8], base: c_int) -> Option<(i128, usize, bool)> {
         let mut bytes = token.to_vec();
         bytes.push(0);
         let mut end = std::ptr::null_mut();
+        let previous_errno = unsafe { *host_errno_ptr() };
+        Self::set_host_errno(0);
         let value = unsafe { strtoll(bytes.as_ptr().cast::<c_char>(), &mut end, base) };
+        let overflow = unsafe { *host_errno_ptr() } == libc::ERANGE;
+        Self::set_host_errno(previous_errno);
         let consumed = if end.is_null() {
             0
         } else {
             unsafe { end.offset_from(bytes.as_ptr().cast::<c_char>()) as usize }
         };
-        (consumed != 0).then_some((value as i128, consumed))
+        (consumed != 0).then_some((value as i128, consumed, overflow))
     }
 
-    fn scan_token_to_unsigned_bytes(&self, token: &[u8], base: c_int) -> Option<(i128, usize)> {
+    fn scan_token_to_unsigned_bytes(
+        &self,
+        token: &[u8],
+        base: c_int,
+    ) -> Option<(i128, usize, bool)> {
         let mut bytes = token.to_vec();
         bytes.push(0);
         let mut end = std::ptr::null_mut();
+        let previous_errno = unsafe { *host_errno_ptr() };
+        Self::set_host_errno(0);
         let value = unsafe { strtoull(bytes.as_ptr().cast::<c_char>(), &mut end, base) };
+        let overflow = unsafe { *host_errno_ptr() } == libc::ERANGE;
+        Self::set_host_errno(previous_errno);
         let consumed = if end.is_null() {
             0
         } else {
             unsafe { end.offset_from(bytes.as_ptr().cast::<c_char>()) as usize }
         };
-        (consumed != 0).then_some((value as i128, consumed))
+        (consumed != 0).then_some((value as i128, consumed, overflow))
     }
 
-    fn scan_token_to_float_bytes(&self, token: &[u8]) -> Option<(f64, usize)> {
+    fn scan_token_to_float_bytes(&self, token: &[u8]) -> Option<(f64, usize, bool)> {
         let mut bytes = token.to_vec();
         bytes.push(0);
         let mut end = std::ptr::null_mut();
+        let previous_errno = unsafe { *host_errno_ptr() };
+        Self::set_host_errno(0);
         let value = unsafe { strtod(bytes.as_ptr().cast::<c_char>(), &mut end) };
+        let overflow = unsafe { *host_errno_ptr() } == libc::ERANGE && value.is_infinite();
+        Self::set_host_errno(previous_errno);
         let consumed = if end.is_null() {
             0
         } else {
             unsafe { end.offset_from(bytes.as_ptr().cast::<c_char>()) as usize }
         };
-        (consumed != 0).then_some((value, consumed))
+        (consumed != 0).then_some((value, consumed, overflow))
     }
 
     fn scan_read_multibyte_char(
@@ -15153,13 +15911,26 @@ impl<'a> Interpreter<'a> {
                     Some("7.24.2.2"),
                 )
             })?;
-        usize::try_from(limit.max(0)).map_err(|_| {
+        let capacity = usize::try_from(limit.max(0)).map_err(|_| {
             Diagnostic::ub(
                 "scanf destination capacity is out of supported range",
                 span,
                 Some("7.24.2.2"),
             )
-        })
+        })?;
+        if capacity == 0 {
+            return Err(Diagnostic::ub(
+                "scanf destination does not designate an element of a writable array or object",
+                span,
+                Some("7.24.2.2"),
+            ));
+        }
+        let size = self
+            .type_size_of(element_ty)
+            .ok_or_else(|| Diagnostic::error("scanf destination element type has no size", span))?;
+        let (object_id, start, _) = self.byte_region_from_pointer(pointer, size, span, objects)?;
+        self.ensure_library_writable_region(object_id, start, size, span, objects)?;
+        Ok(capacity)
     }
 
     fn write_scan_bytes(
@@ -15183,47 +15954,63 @@ impl<'a> Interpreter<'a> {
         self.overlay_known_bytes_into_object(object_id, start, &rendered, span, objects)
     }
 
-    fn scan_token_to_signed(&self, token: &[libc::wchar_t], base: c_int) -> Option<(i128, usize)> {
+    fn scan_token_to_signed(
+        &self,
+        token: &[libc::wchar_t],
+        base: c_int,
+    ) -> Option<(i128, usize, bool)> {
         let mut units = token.to_vec();
         units.push(0);
         let mut end = std::ptr::null_mut();
+        let previous_errno = unsafe { *host_errno_ptr() };
+        Self::set_host_errno(0);
         let value = unsafe { wcstoll(units.as_ptr(), &mut end, base) };
+        let overflow = unsafe { *host_errno_ptr() } == libc::ERANGE;
+        Self::set_host_errno(previous_errno);
         let consumed = if end.is_null() {
             0
         } else {
             unsafe { end.offset_from(units.as_ptr()) as usize }
         };
-        (consumed != 0).then_some((value as i128, consumed))
+        (consumed != 0).then_some((value as i128, consumed, overflow))
     }
 
     fn scan_token_to_unsigned(
         &self,
         token: &[libc::wchar_t],
         base: c_int,
-    ) -> Option<(i128, usize)> {
+    ) -> Option<(i128, usize, bool)> {
         let mut units = token.to_vec();
         units.push(0);
         let mut end = std::ptr::null_mut();
+        let previous_errno = unsafe { *host_errno_ptr() };
+        Self::set_host_errno(0);
         let value = unsafe { wcstoull(units.as_ptr(), &mut end, base) };
+        let overflow = unsafe { *host_errno_ptr() } == libc::ERANGE;
+        Self::set_host_errno(previous_errno);
         let consumed = if end.is_null() {
             0
         } else {
             unsafe { end.offset_from(units.as_ptr()) as usize }
         };
-        (consumed != 0).then_some((value as i128, consumed))
+        (consumed != 0).then_some((value as i128, consumed, overflow))
     }
 
-    fn scan_token_to_float(&self, token: &[libc::wchar_t]) -> Option<(f64, usize)> {
+    fn scan_token_to_float(&self, token: &[libc::wchar_t]) -> Option<(f64, usize, bool)> {
         let mut units = token.to_vec();
         units.push(0);
         let mut end = std::ptr::null_mut();
+        let previous_errno = unsafe { *host_errno_ptr() };
+        Self::set_host_errno(0);
         let value = unsafe { wcstod(units.as_ptr(), &mut end) };
+        let overflow = unsafe { *host_errno_ptr() } == libc::ERANGE && value.is_infinite();
+        Self::set_host_errno(previous_errno);
         let consumed = if end.is_null() {
             0
         } else {
             unsafe { end.offset_from(units.as_ptr()) as usize }
         };
-        (consumed != 0).then_some((value, consumed))
+        (consumed != 0).then_some((value, consumed, overflow))
     }
 
     fn wide_scan_collect_token(
@@ -15290,6 +16077,18 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<(), Diagnostic> {
         let pointee = self.scanf_integer_pointee_type(conv, span)?;
+        let (minimum, maximum) = pointee
+            .integer_bounds()
+            .expect("scanf integer destination has integer bounds");
+        if !(minimum..=maximum).contains(&value) {
+            return Err(Diagnostic::ub(
+                format!(
+                    "{function_name} conversion result is not representable in the receiving object"
+                ),
+                span,
+                Some(Self::scanf_pointer_input_standard(function_name)),
+            ));
+        }
         let pointer = self.wide_scan_output_pointer(
             function_name,
             dest,
@@ -15310,6 +16109,15 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<(), Diagnostic> {
         let pointee = self.scanf_float_pointee_type(conv, span)?;
+        if pointee == CType::Float && value.is_finite() && (value as f32).is_infinite() {
+            return Err(Diagnostic::ub(
+                format!(
+                    "{function_name} conversion result is not representable in the receiving object"
+                ),
+                span,
+                Some(Self::scanf_pointer_input_standard(function_name)),
+            ));
+        }
         let pointer = self.wide_scan_output_pointer(
             function_name,
             dest,
@@ -15403,10 +16211,13 @@ impl<'a> Interpreter<'a> {
         if address == 0 {
             return Some(Self::null_pointer());
         }
-        match self.decoded_pointers.get(&address) {
-            Some(EncodedPointer::Object(pointer)) => Some(pointer.clone()),
-            _ => None,
-        }
+        self.decoded_pointers
+            .get(&address)?
+            .iter()
+            .find_map(|candidate| match candidate {
+                EncodedPointer::Object { pointer, .. } => Some(pointer.clone()),
+                EncodedPointer::Function(_) => None,
+            })
     }
 
     fn pointer_value_from_integer(
@@ -15430,14 +16241,17 @@ impl<'a> Interpreter<'a> {
             CType::Pointer(inner) if matches!(inner.unqualified(), CType::Function(..))
         );
         if let Some(encoded) = self.decoded_pointers.get(&address) {
-            let data = match encoded {
-                EncodedPointer::Object(pointer) if !target_is_function => {
-                    Some(ValueData::Pointer(pointer.clone()))
-                }
-                EncodedPointer::Function(name) if target_is_function => {
-                    Some(ValueData::Function(name.clone()))
-                }
-                _ => None,
+            let data = if target_is_function {
+                encoded.iter().find_map(|candidate| match candidate {
+                    EncodedPointer::Function(name) => Some(ValueData::Function(name.clone())),
+                    EncodedPointer::Object { .. } => None,
+                })
+            } else {
+                let CType::Pointer(target_inner) = target.unqualified() else {
+                    unreachable!("integer conversion target is a pointer")
+                };
+                self.best_decoded_object_pointer(encoded, target_inner)
+                    .map(ValueData::Pointer)
             };
             if let Some(data) = data {
                 return TypedValue {
@@ -15471,6 +16285,7 @@ impl<'a> Interpreter<'a> {
                             member_path: Vec::new(),
                             designated_root_ty: None,
                             byte_offset_override: Some((address - base) as usize),
+                            arithmetic_domain_start: None,
                         }),
                         restrict_source: None,
                         indeterminate,
@@ -15478,6 +16293,27 @@ impl<'a> Interpreter<'a> {
                     };
                 }
             }
+        }
+        if let Ok(byte_offset) = usize::try_from(address) {
+            let pointer = PointerValue {
+                object: None,
+                base_offset: 1,
+                offset: 0,
+                member_path: Vec::new(),
+                designated_root_ty: None,
+                byte_offset_override: Some(byte_offset),
+                arithmetic_domain_start: None,
+            };
+            self.opaque_integer_pointer_addresses
+                .borrow_mut()
+                .insert(address);
+            return TypedValue {
+                ty: target.clone(),
+                data: ValueData::Pointer(pointer),
+                restrict_source: None,
+                indeterminate,
+                missing_return: false,
+            };
         }
 
         TypedValue::object_representation(
@@ -15488,6 +16324,16 @@ impl<'a> Interpreter<'a> {
                 .map(ByteCell::Known)
                 .collect(),
         )
+    }
+
+    fn opaque_integer_pointer_address(pointer: &PointerValue) -> Option<u64> {
+        (pointer.object.is_none()
+            && pointer.base_offset == 1
+            && pointer.offset == 0
+            && pointer.member_path.is_empty())
+        .then(|| pointer.byte_offset_override)
+        .flatten()
+        .and_then(|address| u64::try_from(address).ok())
     }
 
     fn scanf_pointer_input_standard(function_name: &str) -> &'static str {
@@ -15665,29 +16511,44 @@ impl<'a> Interpreter<'a> {
                     });
                 }
                 let parsed = match conv.spec {
-                    'd' => self
-                        .scan_token_to_signed(&token, 10)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    'i' => self
-                        .scan_token_to_signed(&token, 0)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    'o' => self
-                        .scan_token_to_unsigned(&token, 8)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    'u' => self
-                        .scan_token_to_unsigned(&token, 10)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    'x' | 'X' => self
-                        .scan_token_to_unsigned(&token, 16)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    'p' => self
-                        .scan_token_to_unsigned(&token, 16)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    _ => self.scan_token_to_float(&token).map(|(value, consumed)| {
-                        (TypedValue::floating(CType::Double, value), consumed)
-                    }),
+                    'd' => {
+                        self.scan_token_to_signed(&token, 10)
+                            .map(|(value, consumed, overflow)| {
+                                (TypedValue::int(value), consumed, overflow)
+                            })
+                    }
+                    'i' => {
+                        self.scan_token_to_signed(&token, 0)
+                            .map(|(value, consumed, overflow)| {
+                                (TypedValue::int(value), consumed, overflow)
+                            })
+                    }
+                    'o' => {
+                        self.scan_token_to_unsigned(&token, 8)
+                            .map(|(value, consumed, overflow)| {
+                                (TypedValue::int(value), consumed, overflow)
+                            })
+                    }
+                    'u' => self.scan_token_to_unsigned(&token, 10).map(
+                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
+                    ),
+                    'x' | 'X' => self.scan_token_to_unsigned(&token, 16).map(
+                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
+                    ),
+                    'p' => self.scan_token_to_unsigned(&token, 16).map(
+                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
+                    ),
+                    _ => self
+                        .scan_token_to_float(&token)
+                        .map(|(value, consumed, overflow)| {
+                            (
+                                TypedValue::floating(CType::Double, value),
+                                consumed,
+                                overflow,
+                            )
+                        }),
                 };
-                let Some((parsed, consumed)) = parsed else {
+                let Some((parsed, consumed, overflow)) = parsed else {
                     for &unit in token.iter().rev() {
                         self.wide_scan_unread(source, unit);
                     }
@@ -15697,6 +16558,15 @@ impl<'a> Interpreter<'a> {
                     self.wide_scan_unread(source, unit);
                 }
                 if let Some(dest) = dest {
+                    if overflow {
+                        return Err(Diagnostic::ub(
+                            format!(
+                                "{function_name} conversion result is not representable in the receiving object"
+                            ),
+                            dest_span,
+                            Some("7.29.2.1"),
+                        ));
+                    }
                     match conv.spec {
                         'd' | 'i' | 'o' | 'u' | 'x' | 'X' => {
                             self.store_scan_integer(
@@ -15935,7 +16805,7 @@ impl<'a> Interpreter<'a> {
     }
 
     fn check_malloc_call(
-        &self,
+        &mut self,
         args: &[Expr],
         evaluated: &[TypedValue],
         span: Span,
@@ -15955,9 +16825,10 @@ impl<'a> Interpreter<'a> {
                 args[0].span(),
             ));
         }
-        let _ = usize::try_from(size.to_int()?).map_err(|_| {
+        let size = usize::try_from(size.to_int()?).map_err(|_| {
             Diagnostic::error("malloc size is out of supported range", args[0].span())
         })?;
+        self.pending_heap_call = Some(PendingHeapCall::Malloc(size));
         Ok(())
     }
 
@@ -15986,6 +16857,30 @@ impl<'a> Interpreter<'a> {
                     args[index].span(),
                 ));
             }
+        }
+        let alignment = self.checked_usize_from_unsigned_long(
+            &evaluated[0],
+            args[0].span(),
+            "aligned_alloc alignment",
+        )?;
+        let size = self.checked_usize_from_unsigned_long(
+            &evaluated[1],
+            args[1].span(),
+            "aligned_alloc size",
+        )?;
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(Diagnostic::ub(
+                "aligned_alloc alignment is not a supported valid alignment",
+                args[0].span(),
+                Some("7.22.3.1"),
+            ));
+        }
+        if size % alignment != 0 {
+            return Err(Diagnostic::ub(
+                "aligned_alloc size is not an integral multiple of its alignment",
+                args[1].span(),
+                Some("7.22.3.1"),
+            ));
         }
         Ok(())
     }
@@ -16154,6 +17049,13 @@ impl<'a> Interpreter<'a> {
         }
         let nmemb = self.checked_usize_from_unsigned_long(nmemb, nmemb_span, "element count")?;
         let size = self.checked_usize_from_unsigned_long(size, size_span, "element size")?;
+        if size == 0 {
+            return Err(Diagnostic::ub(
+                format!("{function_name} element size must be positive"),
+                size_span,
+                Some("7.22.5"),
+            ));
+        }
         let total = nmemb.checked_mul(size).ok_or_else(|| {
             Diagnostic::error(
                 format!("{function_name} total byte count is out of supported range"),
@@ -16186,20 +17088,33 @@ impl<'a> Interpreter<'a> {
                 args[0].span(),
             ));
         }
-        let (_, _, total) = self.check_sort_search_common(
+        let (nmemb, size, total) = self.check_sort_search_common(
             "qsort",
             &evaluated[1],
             &evaluated[2],
             args[1].span(),
             args[2].span(),
         )?;
-        let _ = self.comparator_function_symbol("qsort", &evaluated[3], args[3].span())?;
+        let function_symbol =
+            self.comparator_function_symbol("qsort", &evaluated[3], args[3].span())?;
         let base = evaluated[0].as_pointer(args[0].span())?;
-        if total != 0 {
-            let (object_id, _, _) =
-                self.byte_region_from_pointer(&base, total, args[0].span(), objects)?;
-            self.ensure_writable_object(object_id, args[0].span(), objects)?;
-        }
+        let (object_id, start, _) =
+            self.ensure_library_array_destination(&base, total, size, args[0].span(), objects)?;
+        let signs = self.check_comparator_total_order(
+            "qsort",
+            &function_symbol,
+            object_id,
+            start,
+            total,
+            &base,
+            nmemb,
+            size,
+            span,
+            objects,
+        )?;
+        let mut order = (0..nmemb).collect::<Vec<_>>();
+        order.sort_by_key(|&index| (0..nmemb).filter(|&other| signs[other][index] < 0).count());
+        self.pending_qsort_order = Some(order);
         Ok(())
     }
 
@@ -16232,22 +17147,129 @@ impl<'a> Interpreter<'a> {
                 args[1].span(),
             ));
         }
-        let (_, size, total) = self.check_sort_search_common(
+        let (nmemb, size, total) = self.check_sort_search_common(
             "bsearch",
             &evaluated[2],
             &evaluated[3],
             args[2].span(),
             args[3].span(),
         )?;
-        let _ = self.comparator_function_symbol("bsearch", &evaluated[4], args[4].span())?;
-        if size != 0 {
-            let key = evaluated[0].as_pointer(args[0].span())?;
-            let _ = self.byte_region_from_pointer(&key, size, args[0].span(), objects)?;
-        }
+        let function_symbol =
+            self.comparator_function_symbol("bsearch", &evaluated[4], args[4].span())?;
+        let key = evaluated[0].as_pointer(args[0].span())?;
+        let (key_object, key_start, _) =
+            self.library_array_region(&key, size, size, args[0].span(), objects)?;
         let base = evaluated[1].as_pointer(args[1].span())?;
-        if total != 0 {
-            let _ = self.byte_region_from_pointer(&base, total, args[1].span(), objects)?;
+        let (base_object, base_start, _) =
+            self.library_array_region(&base, total, size, args[1].span(), objects)?;
+        let homogeneous_elements = evaluated[0]
+            .ty
+            .element_type()
+            .zip(evaluated[1].ty.element_type())
+            .is_some_and(|(key_ty, element_ty)| {
+                key_ty.unqualified() == element_ty.unqualified()
+                    && self.type_size_of(element_ty) == Some(size)
+            });
+        if homogeneous_elements {
+            for index in 0..nmemb.saturating_sub(1) {
+                let left = self.pointer_with_byte_offset(&base, index * size, span, objects)?;
+                let left_start = base_start + index * size;
+                let first = self.bsearch_compare_call(
+                    &function_symbol,
+                    &left,
+                    base_object,
+                    left_start,
+                    &base,
+                    base_object,
+                    base_start,
+                    total,
+                    size,
+                    index + 1,
+                    span,
+                    objects,
+                )?;
+                let second = self.bsearch_compare_call(
+                    &function_symbol,
+                    &left,
+                    base_object,
+                    left_start,
+                    &base,
+                    base_object,
+                    base_start,
+                    total,
+                    size,
+                    index + 1,
+                    span,
+                    objects,
+                )?;
+                if first.signum() != second.signum() {
+                    return Err(Diagnostic::ub(
+                        "bsearch comparison function returned inconsistent results for the same adjacent array elements",
+                        span,
+                        Some("7.22.5.1"),
+                    ));
+                }
+                if first > 0 {
+                    return Err(Diagnostic::ub(
+                        "bsearch array is not in ascending order according to its comparison function",
+                        args[1].span(),
+                        Some("7.22.5.1"),
+                    ));
+                }
+            }
         }
+        let mut previous = None;
+        let mut found = None;
+        for index in 0..nmemb {
+            let first = self.bsearch_compare_call(
+                &function_symbol,
+                &key,
+                key_object,
+                key_start,
+                &base,
+                base_object,
+                base_start,
+                total,
+                size,
+                index,
+                span,
+                objects,
+            )?;
+            let second = self.bsearch_compare_call(
+                &function_symbol,
+                &key,
+                key_object,
+                key_start,
+                &base,
+                base_object,
+                base_start,
+                total,
+                size,
+                index,
+                span,
+                objects,
+            )?;
+            let sign = first.signum() as i8;
+            if sign != second.signum() as i8 {
+                return Err(Diagnostic::ub(
+                    "bsearch comparison function returned inconsistent results for the same key and array element",
+                    span,
+                    Some("7.22.5.1"),
+                ));
+            }
+            if previous.is_some_and(|previous| previous < sign) {
+                return Err(Diagnostic::ub(
+                    "bsearch array is not ordered consistently with its comparison function",
+                    args[1].span(),
+                    Some("7.22.5.1"),
+                ));
+            }
+            if sign == 0 && found.is_none() {
+                found = Some(index);
+            }
+            previous = Some(sign);
+        }
+        self.pending_bsearch_result = Some(found);
         Ok(())
     }
 
@@ -16331,13 +17353,13 @@ impl<'a> Interpreter<'a> {
             ));
         }
         if !out.is_null() {
-            let (object_id, _, _) = self.byte_region_from_pointer(
+            let _ = self.ensure_library_array_destination(
                 &out,
+                self.wide_char_byte_width(),
                 self.wide_char_byte_width(),
                 args[0].span(),
                 objects,
             )?;
-            self.ensure_writable_object(object_id, args[0].span(), objects)?;
         }
         let limit = self.checked_usize_from_unsigned_long(
             &evaluated[2],
@@ -16356,7 +17378,7 @@ impl<'a> Interpreter<'a> {
         args: &[Expr],
         evaluated: &[TypedValue],
         span: Span,
-        _objects: &ObjectFrames,
+        objects: &ObjectFrames,
     ) -> Result<(), Diagnostic> {
         if args.len() != 2 || evaluated.len() != 2 {
             return Err(Diagnostic::error(
@@ -16376,6 +17398,15 @@ impl<'a> Interpreter<'a> {
                 "wctomb requires a char * destination or null",
                 args[0].span(),
             ));
+        }
+        if !dest.is_null() {
+            let _ = self.ensure_library_array_destination(
+                &dest,
+                host_mb_cur_max().max(1),
+                1,
+                args[0].span(),
+                objects,
+            )?;
         }
         let _ = self.wchar_scalar_to_host(&evaluated[1], args[1].span(), "wctomb")?;
         Ok(())
@@ -16426,18 +17457,22 @@ impl<'a> Interpreter<'a> {
         )?;
         let source = evaluated[1].as_pointer(args[1].span())?;
         let source_bytes = self.read_c_string_bytes(source.clone(), args[1].span(), objects)?;
-        if !dest.is_null() && limit != 0 {
-            let total = limit
-                .checked_mul(self.wide_char_byte_width())
-                .ok_or_else(|| {
-                    Diagnostic::error(
-                        "mbstowcs destination size is out of supported range",
-                        args[2].span(),
-                    )
-                })?;
-            let (object_id, dest_start, _) =
-                self.byte_region_from_pointer(&dest, total, args[0].span(), objects)?;
-            self.ensure_writable_object(object_id, args[0].span(), objects)?;
+        let total = limit
+            .checked_mul(self.wide_char_byte_width())
+            .ok_or_else(|| {
+                Diagnostic::error(
+                    "mbstowcs destination size is out of supported range",
+                    args[2].span(),
+                )
+            })?;
+        let (object_id, dest_start, _) = self.ensure_library_array_destination(
+            &dest,
+            total,
+            self.wide_char_byte_width(),
+            args[0].span(),
+            objects,
+        )?;
+        if limit != 0 {
             let source_access = source_bytes.len() + 1;
             let (src_object_id, src_start, _) =
                 self.byte_region_from_pointer(&source, source_access, args[1].span(), objects)?;
@@ -16504,10 +17539,9 @@ impl<'a> Interpreter<'a> {
         )?;
         let source = evaluated[1].as_pointer(args[1].span())?;
         let source_units = self.read_wide_string_units(source.clone(), args[1].span(), objects)?;
-        if !dest.is_null() && limit != 0 {
-            let (object_id, dest_start, _) =
-                self.byte_region_from_pointer(&dest, limit, args[0].span(), objects)?;
-            self.ensure_writable_object(object_id, args[0].span(), objects)?;
+        let (object_id, dest_start, _) =
+            self.ensure_library_array_destination(&dest, limit, 1, args[0].span(), objects)?;
+        if limit != 0 {
             let source_access = (source_units.len() + 1)
                 .checked_mul(self.wide_char_byte_width())
                 .ok_or_else(|| {
@@ -16553,6 +17587,7 @@ impl<'a> Interpreter<'a> {
         self.reject_indeterminate_library_value(&evaluated[0], args[0].span(), "mbsinit")?;
         let pointer = evaluated[0].as_pointer(args[0].span())?;
         if pointer.is_null() {
+            self.pending_heap_call = Some(PendingHeapCall::Free(None));
             return Ok(());
         }
         let expected = self.host_function_parameter_type("mbsinit", span.file, 0, span)?;
@@ -16562,12 +17597,7 @@ impl<'a> Interpreter<'a> {
                 args[0].span(),
             ));
         }
-        let _ = self.byte_region_from_pointer(
-            &pointer,
-            self.host_mbstate_size(),
-            args[0].span(),
-            objects,
-        )?;
+        self.check_mbstate_for_current_locale("mbsinit", &pointer, false, args[0].span(), objects)?;
         Ok(())
     }
 
@@ -16608,8 +17638,8 @@ impl<'a> Interpreter<'a> {
             args[1].span(),
             "mbrlen byte count",
         )?;
-        if !source.is_null() && n != 0 {
-            let _ = self.byte_region_from_pointer(&source, n, args[0].span(), objects)?;
+        if !source.is_null() {
+            let _ = self.library_array_region(&source, n, 1, args[0].span(), objects)?;
         }
         let state = evaluated[2].as_pointer(args[2].span())?;
         if !state.is_null() {
@@ -16620,14 +17650,8 @@ impl<'a> Interpreter<'a> {
                     args[2].span(),
                 ));
             }
-            let (object_id, _, _) = self.byte_region_from_pointer(
-                &state,
-                self.host_mbstate_size(),
-                args[2].span(),
-                objects,
-            )?;
-            self.ensure_writable_object(object_id, args[2].span(), objects)?;
         }
+        self.check_mbstate_for_current_locale("mbrlen", &state, true, args[2].span(), objects)?;
         Ok(())
     }
 
@@ -16677,17 +17701,17 @@ impl<'a> Interpreter<'a> {
             args[2].span(),
             "mbrtowc byte count",
         )?;
-        if !source.is_null() && n != 0 {
-            let _ = self.byte_region_from_pointer(&source, n, args[1].span(), objects)?;
+        if !source.is_null() {
+            let _ = self.library_array_region(&source, n, 1, args[1].span(), objects)?;
         }
         if !out.is_null() {
-            let (object_id, _, _) = self.byte_region_from_pointer(
+            let _ = self.ensure_library_array_destination(
                 &out,
+                self.wide_char_byte_width(),
                 self.wide_char_byte_width(),
                 args[0].span(),
                 objects,
             )?;
-            self.ensure_writable_object(object_id, args[0].span(), objects)?;
         }
         let state = evaluated[3].as_pointer(args[3].span())?;
         if !state.is_null() {
@@ -16698,14 +17722,8 @@ impl<'a> Interpreter<'a> {
                     args[3].span(),
                 ));
             }
-            let (object_id, _, _) = self.byte_region_from_pointer(
-                &state,
-                self.host_mbstate_size(),
-                args[3].span(),
-                objects,
-            )?;
-            self.ensure_writable_object(object_id, args[3].span(), objects)?;
         }
+        self.check_mbstate_for_current_locale("mbrtowc", &state, true, args[3].span(), objects)?;
         Ok(())
     }
 
@@ -16738,9 +17756,8 @@ impl<'a> Interpreter<'a> {
         let _ = self.wchar_scalar_to_host(&evaluated[1], args[1].span(), "wcrtomb")?;
         if !dest.is_null() {
             let bytes = host_mb_cur_max().max(1);
-            let (object_id, _, _) =
-                self.byte_region_from_pointer(&dest, bytes, args[0].span(), objects)?;
-            self.ensure_writable_object(object_id, args[0].span(), objects)?;
+            let _ =
+                self.ensure_library_array_destination(&dest, bytes, 1, args[0].span(), objects)?;
         }
         let state = evaluated[2].as_pointer(args[2].span())?;
         if !state.is_null() {
@@ -16751,14 +17768,8 @@ impl<'a> Interpreter<'a> {
                     args[2].span(),
                 ));
             }
-            let (object_id, _, _) = self.byte_region_from_pointer(
-                &state,
-                self.host_mbstate_size(),
-                args[2].span(),
-                objects,
-            )?;
-            self.ensure_writable_object(object_id, args[2].span(), objects)?;
         }
+        self.check_mbstate_for_current_locale("wcrtomb", &state, true, args[2].span(), objects)?;
         Ok(())
     }
 
@@ -16793,9 +17804,8 @@ impl<'a> Interpreter<'a> {
             let size = self
                 .type_size_of(output_ty)
                 .expect("complete character type");
-            let (object, _, _) =
-                self.byte_region_from_pointer(&out, size, args[0].span(), objects)?;
-            self.ensure_writable_object(object, args[0].span(), objects)?;
+            let _ =
+                self.ensure_library_array_destination(&out, size, size, args[0].span(), objects)?;
         }
         let source = evaluated[1].as_pointer(args[1].span())?;
         if !source.is_null()
@@ -16817,8 +17827,8 @@ impl<'a> Interpreter<'a> {
             args[2].span(),
             "multibyte byte count",
         )?;
-        if !source.is_null() && n != 0 {
-            let _ = self.byte_region_from_pointer(&source, n, args[1].span(), objects)?;
+        if !source.is_null() {
+            let _ = self.library_array_region(&source, n, 1, args[1].span(), objects)?;
         }
         let state = evaluated[3].as_pointer(args[3].span())?;
         if !state.is_null() {
@@ -16829,14 +17839,14 @@ impl<'a> Interpreter<'a> {
                     args[3].span(),
                 ));
             }
-            let (object, _, _) = self.byte_region_from_pointer(
-                &state,
-                self.host_mbstate_size(),
-                args[3].span(),
-                objects,
-            )?;
-            self.ensure_writable_object(object, args[3].span(), objects)?;
         }
+        self.check_mbstate_for_current_locale(
+            function_name,
+            &state,
+            true,
+            args[3].span(),
+            objects,
+        )?;
         Ok(())
     }
 
@@ -16876,13 +17886,13 @@ impl<'a> Interpreter<'a> {
             ));
         }
         if !dest.is_null() {
-            let (object, _, _) = self.byte_region_from_pointer(
+            let _ = self.ensure_library_array_destination(
                 &dest,
                 host_mb_cur_max().max(1),
+                1,
                 args[0].span(),
                 objects,
             )?;
-            self.ensure_writable_object(object, args[0].span(), objects)?;
         }
         let state = evaluated[2].as_pointer(args[2].span())?;
         if !state.is_null() {
@@ -16893,14 +17903,14 @@ impl<'a> Interpreter<'a> {
                     args[2].span(),
                 ));
             }
-            let (object, _, _) = self.byte_region_from_pointer(
-                &state,
-                self.host_mbstate_size(),
-                args[2].span(),
-                objects,
-            )?;
-            self.ensure_writable_object(object, args[2].span(), objects)?;
         }
+        self.check_mbstate_for_current_locale(
+            function_name,
+            &state,
+            true,
+            args[2].span(),
+            objects,
+        )?;
         Ok(())
     }
 
@@ -16931,6 +17941,13 @@ impl<'a> Interpreter<'a> {
                 format!("{function_name} requires a wchar_t ** end-pointer argument"),
                 args[1].span(),
             ));
+        }
+        let end_pointer = evaluated[1].as_pointer(args[1].span())?;
+        if !end_pointer.is_null() {
+            let size = self.type_size_of(&self.wchar_ptr_type()).unwrap_or(8);
+            let (object_id, start, _) =
+                self.byte_region_from_pointer(&end_pointer, size, args[1].span(), objects)?;
+            self.ensure_library_writable_region(object_id, start, size, args[1].span(), objects)?;
         }
         if expects_base {
             self.reject_missing_return_value(&evaluated[2], args[2].span())?;
@@ -16997,7 +18014,42 @@ impl<'a> Interpreter<'a> {
             args[2].span(),
             "mbsrtowcs element count",
         )?;
+        let total = len
+            .checked_mul(self.wide_char_byte_width())
+            .ok_or_else(|| {
+                Diagnostic::error(
+                    "mbsrtowcs destination size is out of supported range",
+                    args[2].span(),
+                )
+            })?;
+        let dest_region = if dest.is_null() {
+            None
+        } else {
+            Some(self.ensure_library_array_destination(
+                &dest,
+                total,
+                self.wide_char_byte_width(),
+                args[0].span(),
+                objects,
+            )?)
+        };
         let srcpp = evaluated[1].as_pointer(args[1].span())?;
+        let pointer_size = self
+            .type_size_of(
+                srcpp_ty
+                    .element_type()
+                    .expect("source pointer-to-pointer parameter"),
+            )
+            .unwrap_or(8);
+        let (srcpp_object, srcpp_start, _) =
+            self.byte_region_from_pointer(&srcpp, pointer_size, args[1].span(), objects)?;
+        self.ensure_library_writable_region(
+            srcpp_object,
+            srcpp_start,
+            pointer_size,
+            args[1].span(),
+            objects,
+        )?;
         let src_lvalue = self.pointer_lvalue(
             "mbsrtowcs",
             &srcpp,
@@ -17010,18 +18062,7 @@ impl<'a> Interpreter<'a> {
         if !current_ptr.is_null() {
             let source_bytes =
                 self.read_c_string_bytes(current_ptr.clone(), args[1].span(), objects)?;
-            if !dest.is_null() && len != 0 {
-                let total = len
-                    .checked_mul(self.wide_char_byte_width())
-                    .ok_or_else(|| {
-                        Diagnostic::error(
-                            "mbsrtowcs destination size is out of supported range",
-                            args[2].span(),
-                        )
-                    })?;
-                let (object_id, dest_start, _) =
-                    self.byte_region_from_pointer(&dest, total, args[0].span(), objects)?;
-                self.ensure_writable_object(object_id, args[0].span(), objects)?;
+            if let Some((object_id, dest_start, _)) = dest_region {
                 let source_access = source_bytes.len() + 1;
                 let (src_object_id, src_start, _) = self.byte_region_from_pointer(
                     &current_ptr,
@@ -17054,14 +18095,8 @@ impl<'a> Interpreter<'a> {
                     args[3].span(),
                 ));
             }
-            let (object_id, _, _) = self.byte_region_from_pointer(
-                &state,
-                self.host_mbstate_size(),
-                args[3].span(),
-                objects,
-            )?;
-            self.ensure_writable_object(object_id, args[3].span(), objects)?;
         }
+        self.check_mbstate_for_current_locale("mbsrtowcs", &state, true, args[3].span(), objects)?;
         Ok(())
     }
 
@@ -17109,7 +18144,28 @@ impl<'a> Interpreter<'a> {
             args[2].span(),
             "wcsrtombs byte count",
         )?;
+        let dest_region = if dest.is_null() {
+            None
+        } else {
+            Some(self.ensure_library_array_destination(&dest, len, 1, args[0].span(), objects)?)
+        };
         let srcpp = evaluated[1].as_pointer(args[1].span())?;
+        let pointer_size = self
+            .type_size_of(
+                srcpp_ty
+                    .element_type()
+                    .expect("source pointer-to-pointer parameter"),
+            )
+            .unwrap_or(8);
+        let (srcpp_object, srcpp_start, _) =
+            self.byte_region_from_pointer(&srcpp, pointer_size, args[1].span(), objects)?;
+        self.ensure_library_writable_region(
+            srcpp_object,
+            srcpp_start,
+            pointer_size,
+            args[1].span(),
+            objects,
+        )?;
         let src_lvalue = self.pointer_lvalue(
             "wcsrtombs",
             &srcpp,
@@ -17122,10 +18178,7 @@ impl<'a> Interpreter<'a> {
         if !current_ptr.is_null() {
             let source_units =
                 self.read_wide_string_units(current_ptr.clone(), args[1].span(), objects)?;
-            if !dest.is_null() && len != 0 {
-                let (object_id, dest_start, _) =
-                    self.byte_region_from_pointer(&dest, len, args[0].span(), objects)?;
-                self.ensure_writable_object(object_id, args[0].span(), objects)?;
+            if let Some((object_id, dest_start, _)) = dest_region {
                 let source_access = (source_units.len() + 1)
                     .checked_mul(self.wide_char_byte_width())
                     .ok_or_else(|| {
@@ -17165,14 +18218,8 @@ impl<'a> Interpreter<'a> {
                     args[3].span(),
                 ));
             }
-            let (object_id, _, _) = self.byte_region_from_pointer(
-                &state,
-                self.host_mbstate_size(),
-                args[3].span(),
-                objects,
-            )?;
-            self.ensure_writable_object(object_id, args[3].span(), objects)?;
         }
+        self.check_mbstate_for_current_locale("wcsrtombs", &state, true, args[3].span(), objects)?;
         Ok(())
     }
 
@@ -17213,7 +18260,13 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| Diagnostic::error("wcscpy copy size is out of supported range", span))?;
         let (dest_object, dest_start, _) =
             self.byte_region_from_pointer(&dest, copy_size, args[0].span(), objects)?;
-        self.ensure_writable_object(dest_object, args[0].span(), objects)?;
+        self.ensure_library_writable_region(
+            dest_object,
+            dest_start,
+            copy_size,
+            args[0].span(),
+            objects,
+        )?;
         let (src_object, src_start, _) =
             self.byte_region_from_pointer(&src, copy_size, args[1].span(), objects)?;
         if self.ranges_overlap(dest_object, dest_start, src_object, src_start, copy_size) {
@@ -17268,20 +18321,11 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| Diagnostic::error("wcsncpy size is out of supported range", span))?;
         let dest = evaluated[0].as_pointer(args[0].span())?;
         let src = evaluated[1].as_pointer(args[1].span())?;
+        let width = self.wide_char_byte_width();
         let (dest_object, dest_start, _) =
-            self.byte_region_from_pointer(&dest, total, args[0].span(), objects)?;
+            self.ensure_library_array_destination(&dest, total, width, args[0].span(), objects)?;
         let (src_object, src_start, _) =
-            self.byte_region_from_pointer(&src, total, args[1].span(), objects)?;
-        if total == 0 {
-            return Ok(());
-        }
-        self.ensure_library_writable_region(
-            dest_object,
-            dest_start,
-            total,
-            args[0].span(),
-            objects,
-        )?;
+            self.library_array_region(&src, total, width, args[1].span(), objects)?;
         if self.ranges_overlap(dest_object, dest_start, src_object, src_start, total) {
             return Err(Diagnostic::ub(
                 "wcsncpy source and destination regions overlap",
@@ -17334,20 +18378,11 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| Diagnostic::error("wmemcpy size is out of supported range", span))?;
         let dest = evaluated[0].as_pointer(args[0].span())?;
         let src = evaluated[1].as_pointer(args[1].span())?;
+        let width = self.wide_char_byte_width();
         let (dest_object, dest_start, _) =
-            self.byte_region_from_pointer(&dest, total, args[0].span(), objects)?;
+            self.ensure_library_array_destination(&dest, total, width, args[0].span(), objects)?;
         let (src_object, src_start, _) =
-            self.byte_region_from_pointer(&src, total, args[1].span(), objects)?;
-        if total == 0 {
-            return Ok(());
-        }
-        self.ensure_library_writable_region(
-            dest_object,
-            dest_start,
-            total,
-            args[0].span(),
-            objects,
-        )?;
+            self.library_array_region(&src, total, width, args[1].span(), objects)?;
         if self.ranges_overlap(dest_object, dest_start, src_object, src_start, total) {
             return Err(Diagnostic::ub(
                 "wmemcpy source and destination regions overlap",
@@ -17400,19 +18435,10 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| Diagnostic::error("wmemmove size is out of supported range", span))?;
         let dest = evaluated[0].as_pointer(args[0].span())?;
         let src = evaluated[1].as_pointer(args[1].span())?;
-        let (dest_object, dest_start, _) =
-            self.byte_region_from_pointer(&dest, total, args[0].span(), objects)?;
-        let _ = self.byte_region_from_pointer(&src, total, args[1].span(), objects)?;
-        if total == 0 {
-            return Ok(());
-        }
-        self.ensure_library_writable_region(
-            dest_object,
-            dest_start,
-            total,
-            args[0].span(),
-            objects,
-        )?;
+        let width = self.wide_char_byte_width();
+        let _ =
+            self.ensure_library_array_destination(&dest, total, width, args[0].span(), objects)?;
+        let _ = self.library_array_region(&src, total, width, args[1].span(), objects)?;
         Ok(())
     }
 
@@ -17452,9 +18478,13 @@ impl<'a> Interpreter<'a> {
         let total = (dest_units.len() + src_units.len() + 1)
             .checked_mul(self.wide_char_byte_width())
             .ok_or_else(|| Diagnostic::error("wcscat size is out of supported range", span))?;
-        let (dest_object, dest_start, _) =
-            self.byte_region_from_pointer(&dest, total, args[0].span(), objects)?;
-        self.ensure_writable_object(dest_object, args[0].span(), objects)?;
+        let (dest_object, dest_start, _) = self.ensure_library_array_destination(
+            &dest,
+            total,
+            self.wide_char_byte_width(),
+            args[0].span(),
+            objects,
+        )?;
         let src_access = (src_units.len() + 1)
             .checked_mul(self.wide_char_byte_width())
             .ok_or_else(|| {
@@ -17518,6 +18548,16 @@ impl<'a> Interpreter<'a> {
             self.checked_usize_from_unsigned_long(&evaluated[2], args[2].span(), "wcsncat count")?;
         let dest = evaluated[0].as_pointer(args[0].span())?;
         let src = evaluated[1].as_pointer(args[1].span())?;
+        let bounded_source_size = count
+            .checked_mul(self.wide_char_byte_width())
+            .ok_or_else(|| Diagnostic::error("wcsncat source size is out of range", span))?;
+        let _ = self.library_array_region(
+            &src,
+            bounded_source_size,
+            self.wide_char_byte_width(),
+            args[1].span(),
+            objects,
+        )?;
         let dest_units = self.read_wide_string_units(dest.clone(), args[0].span(), objects)?;
         let src_buffer =
             self.read_bounded_wide_source(src.clone(), count, args[1].span(), objects)?;
@@ -17529,7 +18569,13 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| Diagnostic::error("wcsncat size is out of supported range", span))?;
         let (dest_object, dest_start, _) =
             self.byte_region_from_pointer(&dest, total, args[0].span(), objects)?;
-        self.ensure_writable_object(dest_object, args[0].span(), objects)?;
+        self.ensure_library_writable_region(
+            dest_object,
+            dest_start,
+            total,
+            args[0].span(),
+            objects,
+        )?;
         let src_access = src_access_units
             .checked_mul(self.wide_char_byte_width())
             .ok_or_else(|| {
@@ -17596,9 +18642,13 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| Diagnostic::error("wcsxfrm size is out of supported range", span))?;
         let dest = evaluated[0].as_pointer(args[0].span())?;
         let src = evaluated[1].as_pointer(args[1].span())?;
-        let (dest_object, dest_start, _) =
-            self.byte_region_from_pointer(&dest, total, args[0].span(), objects)?;
-        self.ensure_writable_object(dest_object, args[0].span(), objects)?;
+        let (dest_object, dest_start, _) = self.ensure_library_array_destination(
+            &dest,
+            total,
+            self.wide_char_byte_width(),
+            args[0].span(),
+            objects,
+        )?;
         let src_units = self.read_wide_string_units(src.clone(), args[1].span(), objects)?;
         let src_access = (src_units.len() + 1)
             .checked_mul(self.wide_char_byte_width())
@@ -17711,7 +18761,13 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| Diagnostic::error("wide memory access is out of range", span))?;
         for index in 0..2 {
             let pointer = evaluated[index].as_pointer(args[index].span())?;
-            let _ = self.byte_region_from_pointer(&pointer, total, args[index].span(), objects)?;
+            let _ = self.library_array_region(
+                &pointer,
+                total,
+                self.wide_char_byte_width(),
+                args[index].span(),
+                objects,
+            )?;
         }
         Ok(())
     }
@@ -17824,6 +18880,7 @@ impl<'a> Interpreter<'a> {
                 args[1].span(),
             ));
         }
+        let _ = self.validated_wctype_descriptor(evaluated[1].to_int()?, args[1].span())?;
         Ok(())
     }
 
@@ -17850,6 +18907,7 @@ impl<'a> Interpreter<'a> {
                 args[1].span(),
             ));
         }
+        let _ = self.validated_wctrans_descriptor(evaluated[1].to_int()?, args[1].span())?;
         Ok(())
     }
 
@@ -18002,6 +19060,13 @@ impl<'a> Interpreter<'a> {
                 format!("{function_name} requires a char ** end-pointer argument"),
                 args[1].span(),
             ));
+        }
+        let end_pointer = evaluated[1].as_pointer(args[1].span())?;
+        if !end_pointer.is_null() {
+            let size = self.type_size_of(&self.char_ptr_type()).unwrap_or(8);
+            let (object_id, start, _) =
+                self.byte_region_from_pointer(&end_pointer, size, args[1].span(), objects)?;
+            self.ensure_library_writable_region(object_id, start, size, args[1].span(), objects)?;
         }
         if expects_base {
             self.reject_missing_return_value(&evaluated[2], args[2].span())?;
@@ -18208,6 +19273,7 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &ObjectFrames,
     ) -> Result<CType, Diagnostic> {
+        self.reject_nonvolatile_library_pointer_access(function_name, value, span, objects)?;
         let tm_ty = self.tm_type_for_call(span)?;
         let pointer = value.as_pointer(span)?;
         if pointer.is_null() {
@@ -18258,6 +19324,7 @@ impl<'a> Interpreter<'a> {
                 Some("7.23"),
             ));
         }
+        self.reject_nonvolatile_library_pointer_access(function_name, value, span, objects)?;
         let expected = if writable {
             CType::pointer_to(CType::Long)
         } else {
@@ -18276,9 +19343,9 @@ impl<'a> Interpreter<'a> {
                 span,
             ));
         }
-        let (object_id, _, _) = self.byte_region_from_pointer(&pointer, 8, span, objects)?;
+        let (object_id, start, _) = self.byte_region_from_pointer(&pointer, 8, span, objects)?;
         if writable {
-            self.ensure_writable_object(object_id, span, objects)?;
+            self.ensure_library_writable_region(object_id, start, 8, span, objects)?;
         }
         Ok(())
     }
@@ -18294,13 +19361,10 @@ impl<'a> Interpreter<'a> {
         let tm_ty =
             self.check_tm_pointer_input("mktime", &evaluated[0], args[0].span(), objects)?;
         let pointer = evaluated[0].as_pointer(args[0].span())?;
-        let (object_id, _, _) = self.byte_region_from_pointer(
-            &pointer,
-            self.type_size_of(&tm_ty).unwrap(),
-            args[0].span(),
-            objects,
-        )?;
-        self.ensure_writable_object(object_id, args[0].span(), objects)
+        let size = self.type_size_of(&tm_ty).unwrap();
+        let (object_id, start, _) =
+            self.byte_region_from_pointer(&pointer, size, args[0].span(), objects)?;
+        self.ensure_library_writable_region(object_id, start, size, args[0].span(), objects)
     }
 
     fn check_time_call(
@@ -18356,9 +19420,9 @@ impl<'a> Interpreter<'a> {
         let size = self
             .type_size_of(&pointee)
             .ok_or_else(|| Diagnostic::error("struct timespec is incomplete", args[0].span()))?;
-        let (object, _, _) =
+        let (object, start, _) =
             self.byte_region_from_pointer(&pointer, size, args[0].span(), objects)?;
-        self.ensure_writable_object(object, args[0].span(), objects)?;
+        self.ensure_library_writable_region(object, start, size, args[0].span(), objects)?;
         self.reject_missing_return_value(&evaluated[1], args[1].span())?;
         self.reject_indeterminate_library_value(&evaluated[1], args[1].span(), "timespec_get")?;
         if evaluated[1].ty != CType::Int {
@@ -18375,10 +19439,28 @@ impl<'a> Interpreter<'a> {
         args: &[Expr],
         evaluated: &[TypedValue],
         _span: Span,
-        objects: &ObjectFrames,
+        objects: &mut ObjectFrames,
     ) -> Result<(), Diagnostic> {
         self.check_math_common_args("asctime", args, evaluated)?;
         let _ = self.check_tm_pointer_input("asctime", &evaluated[0], args[0].span(), objects)?;
+        let tm =
+            self.load_host_tm_from_pointer("asctime", &evaluated[0], args[0].span(), objects)?;
+        let year = i64::from(tm.tm_year) + 1900;
+        let valid = (0..=60).contains(&tm.tm_sec)
+            && (0..=59).contains(&tm.tm_min)
+            && (0..=23).contains(&tm.tm_hour)
+            && (1..=31).contains(&tm.tm_mday)
+            && (0..=11).contains(&tm.tm_mon)
+            && (1000..=9999).contains(&year)
+            && (0..=6).contains(&tm.tm_wday)
+            && (0..=365).contains(&tm.tm_yday);
+        if !valid {
+            return Err(Diagnostic::ub(
+                "asctime requires struct tm members in their normal ranges and a year from 1000 through 9999",
+                args[0].span(),
+                Some("7.27.3.1"),
+            ));
+        }
         Ok(())
     }
 
@@ -18432,13 +19514,23 @@ impl<'a> Interpreter<'a> {
         let maxsize = usize::try_from(evaluated[1].to_int()?).map_err(|_| {
             Diagnostic::error("strftime maxsize is out of supported range", args[1].span())
         })?;
-        let dest = evaluated[0].as_pointer(args[0].span())?;
-        if maxsize != 0 {
-            let (object_id, _, _) =
-                self.byte_region_from_pointer(&dest, maxsize, args[0].span(), objects)?;
-            self.ensure_writable_object(object_id, args[0].span(), objects)?;
+        if !self.pointer_assignment_compatible(&self.char_ptr_type(), &evaluated[0].ty) {
+            return Err(Diagnostic::error(
+                "strftime requires a char * destination",
+                args[0].span(),
+            ));
         }
+        let dest = evaluated[0].as_pointer(args[0].span())?;
+        let _ =
+            self.ensure_library_array_destination(&dest, maxsize, 1, args[0].span(), objects)?;
         self.check_math_string_arg("strftime", &evaluated[2], args[2].span(), objects)?;
+        let format = self.read_c_string_bytes(
+            evaluated[2].as_pointer(args[2].span())?,
+            args[2].span(),
+            objects,
+        )?;
+        let format = format.into_iter().map(u32::from).collect::<Vec<_>>();
+        self.validate_strftime_conversion_specifiers("strftime", &format, args[2].span())?;
         let _ = self.check_tm_pointer_input("strftime", &evaluated[3], args[3].span(), objects)?;
         Ok(())
     }
@@ -18501,7 +19593,7 @@ impl<'a> Interpreter<'a> {
         }
         let (object_id, start, _) =
             self.byte_region_from_pointer(&pointer, 2, args[0].span(), objects)?;
-        self.ensure_writable_region(object_id, start, 2, args[0].span(), objects)?;
+        self.ensure_library_writable_region(object_id, start, 2, args[0].span(), objects)?;
         self.check_fenv_mask_value("fegetexceptflag", &evaluated[1], args[1].span())
     }
 
@@ -18519,6 +19611,12 @@ impl<'a> Interpreter<'a> {
             ));
         }
         self.check_math_common_args("fesetexceptflag", args, evaluated)?;
+        self.reject_nonvolatile_library_pointer_access(
+            "fesetexceptflag",
+            &evaluated[0],
+            args[0].span(),
+            objects,
+        )?;
         let pointer = evaluated[0].as_pointer(args[0].span())?;
         if pointer.is_null() {
             return Err(Diagnostic::ub(
@@ -18527,8 +19625,28 @@ impl<'a> Interpreter<'a> {
                 Some("7.6.2.4"),
             ));
         }
-        let _ = self.byte_region_from_pointer(&pointer, 2, args[0].span(), objects)?;
-        self.check_fenv_mask_value("fesetexceptflag", &evaluated[1], args[1].span())
+        let (object_id, start, _) =
+            self.byte_region_from_pointer(&pointer, 2, args[0].span(), objects)?;
+        self.check_fenv_mask_value("fesetexceptflag", &evaluated[1], args[1].span())?;
+        let requested_mask = evaluated[1].to_int()?;
+        let current_version = self
+            .lookup_object(objects, object_id)
+            .expect("validated fexcept_t object")
+            .modification_count;
+        let valid = self
+            .fexcept_provenance
+            .get(&(object_id, start))
+            .is_some_and(|&(version, saved_mask)| {
+                version == current_version && requested_mask & !saved_mask == 0
+            });
+        if !valid {
+            return Err(Diagnostic::ub(
+                "fesetexceptflag requires an unmodified fexcept_t value produced by fegetexceptflag for all requested exceptions",
+                args[0].span(),
+                Some("7.6.2.4"),
+            ));
+        }
+        Ok(())
     }
 
     fn check_fesetround_call(
@@ -18570,6 +19688,12 @@ impl<'a> Interpreter<'a> {
             ));
         }
         self.check_math_common_args(function_name, args, evaluated)?;
+        self.reject_nonvolatile_library_pointer_access(
+            function_name,
+            &evaluated[0],
+            args[0].span(),
+            objects,
+        )?;
         let pointer = evaluated[0].as_pointer(args[0].span())?;
         if pointer.is_null() {
             return Err(Diagnostic::ub(
@@ -18578,9 +19702,9 @@ impl<'a> Interpreter<'a> {
                 Some("7.6.4"),
             ));
         }
-        let (object_id, _, _) =
+        let (object_id, start, _) =
             self.byte_region_from_pointer(&pointer, 16, args[0].span(), objects)?;
-        self.ensure_writable_object(object_id, args[0].span(), objects)
+        self.ensure_library_writable_region(object_id, start, 16, args[0].span(), objects)
     }
 
     fn check_fenv_env_input_call(
@@ -18598,11 +19722,38 @@ impl<'a> Interpreter<'a> {
             ));
         }
         self.check_math_common_args(function_name, args, evaluated)?;
+        self.reject_nonvolatile_library_pointer_access(
+            function_name,
+            &evaluated[0],
+            args[0].span(),
+            objects,
+        )?;
         let pointer = evaluated[0].as_pointer(args[0].span())?;
         if pointer.is_null() {
+            return Err(Diagnostic::ub(
+                format!("{function_name} requires FE_DFL_ENV or a saved fenv_t object"),
+                args[0].span(),
+                Some("7.6.4"),
+            ));
+        }
+        let (object_id, start, _) =
+            self.byte_region_from_pointer(&pointer, 16, args[0].span(), objects)?;
+        if self.fe_dfl_env_binding == Some(object_id) && start == 0 {
             return Ok(());
         }
-        let _ = self.byte_region_from_pointer(&pointer, 16, args[0].span(), objects)?;
+        let current_version = self
+            .lookup_object(objects, object_id)
+            .expect("validated fenv_t object")
+            .modification_count;
+        if self.fenv_provenance.get(&(object_id, start)).copied() != Some(current_version) {
+            return Err(Diagnostic::ub(
+                format!(
+                    "{function_name} requires an unmodified fenv_t object produced by fegetenv or feholdexcept"
+                ),
+                args[0].span(),
+                Some("7.6.4"),
+            ));
+        }
         Ok(())
     }
 
@@ -18630,13 +19781,12 @@ impl<'a> Interpreter<'a> {
         }
         let pointer = value.as_pointer(args[0].span())?;
         if pointer.is_null() {
+            self.pending_heap_call = Some(PendingHeapCall::Free(None));
             return Ok(());
         }
-        if pointer.base_offset != 0
-            || pointer.offset != 0
-            || !pointer.member_path.is_empty()
-            || pointer.object.is_none()
-        {
+        let points_to_allocation_start = pointer.byte_offset_override == Some(0)
+            || (pointer.base_offset == 0 && pointer.offset == 0 && pointer.member_path.is_empty());
+        if !points_to_allocation_start || pointer.object.is_none() {
             return Err(Diagnostic::ub(
                 "free requires a pointer value returned by malloc or a null pointer",
                 args[0].span(),
@@ -18665,6 +19815,7 @@ impl<'a> Interpreter<'a> {
                 Some("7.20.3.2"),
             ));
         }
+        self.pending_heap_call = Some(PendingHeapCall::Free(Some(object_id)));
         Ok(())
     }
 
@@ -18727,9 +19878,9 @@ impl<'a> Interpreter<'a> {
         let dest_pointer = dest.as_pointer(args[0].span())?;
         let src_pointer = src.as_pointer(args[1].span())?;
         let (dest_object_id, dest_start, _) =
-            self.byte_region_from_pointer(&dest_pointer, size, args[0].span(), objects)?;
+            self.ensure_library_array_destination(&dest_pointer, size, 1, args[0].span(), objects)?;
         let (src_object_id, src_start, _) =
-            self.byte_region_from_pointer(&src_pointer, size, args[1].span(), objects)?;
+            self.library_array_region(&src_pointer, size, 1, args[1].span(), objects)?;
         if size != 0
             && dest_object_id == src_object_id
             && dest_start < src_start.saturating_add(size)
@@ -18741,10 +19892,7 @@ impl<'a> Interpreter<'a> {
                 Some("7.21.2.1"),
             ));
         }
-        if size == 0 {
-            return Ok(());
-        }
-        self.ensure_writable_region(dest_object_id, dest_start, size, args[0].span(), objects)
+        Ok(())
     }
 
     fn void_ptr_type(&self) -> CType {
@@ -18818,6 +19966,7 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
         })
     }
 
@@ -18927,6 +20076,7 @@ impl<'a> Interpreter<'a> {
                 member_path: Vec::new(),
                 designated_root_ty: None,
                 byte_offset_override: None,
+                arithmetic_domain_start: None,
             },
         );
 
@@ -18963,11 +20113,9 @@ impl<'a> Interpreter<'a> {
         if pointer.is_null() {
             return Ok(None);
         }
-        if pointer.base_offset != 0
-            || pointer.offset != 0
-            || !pointer.member_path.is_empty()
-            || pointer.object.is_none()
-        {
+        let points_to_allocation_start = pointer.byte_offset_override == Some(0)
+            || (pointer.base_offset == 0 && pointer.offset == 0 && pointer.member_path.is_empty());
+        if !points_to_allocation_start || pointer.object.is_none() {
             return Err(self.stream_pointer_diag(function_name, span, standard));
         }
         let object = pointer.object.expect("checked above");
@@ -19417,6 +20565,7 @@ impl<'a> Interpreter<'a> {
                 member_path: Vec::new(),
                 designated_root_ty: None,
                 byte_offset_override: None,
+                arithmetic_domain_start: None,
             });
         }
         let object = self.allocate_object(
@@ -19441,6 +20590,7 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
         })
     }
 
@@ -19464,11 +20614,12 @@ impl<'a> Interpreter<'a> {
         frame: &Frame,
         objects: &mut ObjectFrames,
     ) -> Result<(), Diagnostic> {
+        self.pending_heap_call = None;
         let result = match function_name {
             "remove" => self.check_remove_call(args, evaluated, span, objects),
             "rename" => self.check_rename_call(args, evaluated, span, objects),
             "tmpfile" => self.check_tmpfile_call(args, evaluated, span),
-            "tmpnam" => self.check_tmpnam_call(args, evaluated, span),
+            "tmpnam" => self.check_tmpnam_call(args, evaluated, span, objects),
             "fclose" => self.check_fclose_call(args, evaluated, span),
             "fflush" => self.check_fflush_call(args, evaluated, span),
             "fopen" => self.check_fopen_call(args, evaluated, span, objects),
@@ -19527,12 +20678,8 @@ impl<'a> Interpreter<'a> {
                 self.check_c_string_arg("sscanf", &evaluated[0], args[0].span(), objects)?;
                 self.check_scanf_like_call("sscanf", 1, args, evaluated, span, objects)
             }
-            "vsnprintf" => {
-                self.check_vprintf_like_call("vsnprintf", 2, 3, args, evaluated, span, objects)
-            }
-            "vsprintf" => {
-                self.check_vprintf_like_call("vsprintf", 1, 2, args, evaluated, span, objects)
-            }
+            "vsnprintf" => self.check_vsnprintf_call(args, evaluated, span, objects),
+            "vsprintf" => self.check_vsprintf_call(args, evaluated, span, objects),
             "vsscanf" => {
                 if args.len() < 3 || evaluated.len() < 3 {
                     return Err(Diagnostic::error(
@@ -19547,9 +20694,9 @@ impl<'a> Interpreter<'a> {
             "ungetc" => self.check_ungetc_call(args, evaluated, span),
             "fread" => self.check_fread_call(args, evaluated, span, objects),
             "fwrite" => self.check_fwrite_call(args, evaluated, span, objects),
-            "fgetpos" => self.check_fgetpos_call(args, evaluated, span),
+            "fgetpos" => self.check_fgetpos_call(args, evaluated, span, objects),
             "fseek" => self.check_fseek_call(args, evaluated, span),
-            "fsetpos" => self.check_fsetpos_call(args, evaluated, span),
+            "fsetpos" => self.check_fsetpos_call(args, evaluated, span, objects),
             "ftell" => self.check_ftell_like_call("ftell", args, evaluated, span, "7.19.9.3"),
             "rewind" => self.check_clearerr_like_call("rewind", args, evaluated, span, "7.19.9.5"),
             "clearerr" => {
@@ -19624,22 +20771,9 @@ impl<'a> Interpreter<'a> {
                         span,
                     ));
                 }
-                self.reject_missing_return_value(&evaluated[0], args[0].span())?;
-                self.reject_missing_return_value(&evaluated[1], args[1].span())?;
-                self.reject_indeterminate_library_value(&evaluated[0], args[0].span(), "swprintf")?;
-                self.reject_indeterminate_library_value(&evaluated[1], args[1].span(), "swprintf")?;
-                if !self.pointer_assignment_compatible(&self.wchar_ptr_type(), &evaluated[0].ty) {
-                    return Err(Diagnostic::error(
-                        "swprintf requires a wchar_t * destination",
-                        args[0].span(),
-                    ));
-                }
-                if evaluated[1].ty != CType::UnsignedLong {
-                    return Err(Diagnostic::error(
-                        "swprintf size argument must have type unsigned long",
-                        args[1].span(),
-                    ));
-                }
+                self.check_bounded_wide_printf_destination(
+                    "swprintf", args, evaluated, span, objects,
+                )?;
                 self.check_wprintf_like_call("swprintf", 2, args, evaluated, span, objects)
             }
             "swscanf" => {
@@ -19673,30 +20807,13 @@ impl<'a> Interpreter<'a> {
                         span,
                     ));
                 }
-                self.reject_missing_return_value(&evaluated[0], args[0].span())?;
-                self.reject_missing_return_value(&evaluated[1], args[1].span())?;
-                self.reject_indeterminate_library_value(
-                    &evaluated[0],
-                    args[0].span(),
+                self.check_bounded_wide_printf_destination(
                     "vswprintf",
+                    args,
+                    evaluated,
+                    span,
+                    objects,
                 )?;
-                self.reject_indeterminate_library_value(
-                    &evaluated[1],
-                    args[1].span(),
-                    "vswprintf",
-                )?;
-                if !self.pointer_assignment_compatible(&self.wchar_ptr_type(), &evaluated[0].ty) {
-                    return Err(Diagnostic::error(
-                        "vswprintf requires a wchar_t * destination",
-                        args[0].span(),
-                    ));
-                }
-                if evaluated[1].ty != CType::UnsignedLong {
-                    return Err(Diagnostic::error(
-                        "vswprintf size argument must have type unsigned long",
-                        args[1].span(),
-                    ));
-                }
                 self.check_vwprintf_like_call("vswprintf", 2, 3, args, evaluated, span, objects)
             }
             "vswscanf" => {
@@ -19718,7 +20835,7 @@ impl<'a> Interpreter<'a> {
             "wprintf" => self.check_wprintf_like_call("wprintf", 0, args, evaluated, span, objects),
             "wscanf" => self.check_wscanf_like_call("wscanf", 0, args, evaluated, span, objects),
             "fgetwc" => self.check_fgetc_like_call("fgetwc", args, evaluated, span, "7.24.3.1"),
-            "fgetws" => self.check_fgetws_call(args, evaluated, span),
+            "fgetws" => self.check_fgetws_call(args, evaluated, span, objects),
             "fputwc" => self.check_fputwc_like_call("fputwc", args, evaluated, span, "7.24.3.7"),
             "fputws" => self.check_fputws_call(args, evaluated, span, objects),
             "fwide" => self.check_fwide_call(args, evaluated, span),
@@ -19813,7 +20930,13 @@ impl<'a> Interpreter<'a> {
                     .checked_mul(self.wide_char_byte_width())
                     .ok_or_else(|| Diagnostic::error("wmemchr size is out of range", span))?;
                 let pointer = evaluated[0].as_pointer(args[0].span())?;
-                let _ = self.byte_region_from_pointer(&pointer, total, args[0].span(), objects)?;
+                let _ = self.library_array_region(
+                    &pointer,
+                    total,
+                    self.wide_char_byte_width(),
+                    args[0].span(),
+                    objects,
+                )?;
                 Ok(())
             }
             "wmemcmp" => self.check_wide_string_n_call("wmemcmp", args, evaluated, span, objects),
@@ -19848,40 +20971,25 @@ impl<'a> Interpreter<'a> {
                         args[2].span(),
                     ));
                 }
+                let count = self.checked_usize_from_unsigned_long(
+                    &evaluated[2],
+                    args[2].span(),
+                    "wmemset count",
+                )?;
+                let total = count
+                    .checked_mul(self.wide_char_byte_width())
+                    .ok_or_else(|| Diagnostic::error("wmemset size is out of range", span))?;
+                let destination = evaluated[0].as_pointer(args[0].span())?;
+                let _ = self.ensure_library_array_destination(
+                    &destination,
+                    total,
+                    self.wide_char_byte_width(),
+                    args[0].span(),
+                    objects,
+                )?;
                 Ok(())
             }
-            "wcstok" => {
-                if args.len() != 3 || evaluated.len() != 3 {
-                    return Err(Diagnostic::error(
-                        "wcstok requires exactly three arguments",
-                        span,
-                    ));
-                }
-                self.reject_missing_return_value(&evaluated[0], args[0].span())?;
-                self.reject_indeterminate_library_value(&evaluated[0], args[0].span(), "wcstok")?;
-                let source = evaluated[0].as_pointer(args[0].span())?;
-                if !source.is_null()
-                    && !self.pointer_assignment_compatible(&self.wchar_ptr_type(), &evaluated[0].ty)
-                {
-                    return Err(Diagnostic::error(
-                        "wcstok requires a wchar_t * source or null",
-                        args[0].span(),
-                    ));
-                }
-                self.check_wide_string_arg("wcstok", &evaluated[1], args[1].span(), objects)?;
-                self.reject_missing_return_value(&evaluated[2], args[2].span())?;
-                self.reject_indeterminate_library_value(&evaluated[2], args[2].span(), "wcstok")?;
-                if !self.pointer_assignment_compatible(
-                    &CType::pointer_to(self.wchar_ptr_type()),
-                    &evaluated[2].ty,
-                ) {
-                    return Err(Diagnostic::error(
-                        "wcstok requires a wchar_t ** state pointer",
-                        args[2].span(),
-                    ));
-                }
-                Ok(())
-            }
+            "wcstok" => self.check_wcstok_call(args, evaluated, span, objects),
             "wcsftime" => self.check_wcsftime_call(args, evaluated, span, objects),
             "strtof" | "strtod" | "strtold" | "strtol" | "strtoul" | "strtoll" | "strtoull" => {
                 self.check_strto_call(function_name, args, evaluated, span, objects)
@@ -20333,11 +21441,11 @@ impl<'a> Interpreter<'a> {
                 };
                 Ok(TypedValue::integer(CType::Long, result))
             }
-            "malloc" => self.eval_malloc_call(evaluated, span, objects),
+            "malloc" => self.eval_malloc_call(span, objects),
             "aligned_alloc" => self.eval_aligned_alloc_call(evaluated, span, objects),
-            "calloc" => self.eval_calloc_call(evaluated, span, objects),
-            "realloc" => self.eval_realloc_call(evaluated, args, span, objects),
-            "free" => self.eval_free_call(evaluated, args, span, objects),
+            "calloc" => self.eval_calloc_call(span, objects),
+            "realloc" => self.eval_realloc_call(span, objects),
+            "free" => self.eval_free_call(span, objects),
             "abort" => self.eval_abort_call(span),
             "atexit" => self.eval_atexit_call(evaluated, span),
             "at_quick_exit" => self.eval_at_quick_exit_call(evaluated, span),
@@ -20548,6 +21656,7 @@ impl<'a> Interpreter<'a> {
             member_path: pointer.member_path.clone(),
             designated_root_ty: pointer.designated_root_ty.clone(),
             byte_offset_override: pointer.byte_offset_override,
+            arithmetic_domain_start: pointer.arithmetic_domain_start,
             bit_field_width: None,
             restrict_source: None,
         })
@@ -20609,7 +21718,11 @@ impl<'a> Interpreter<'a> {
         let value = &evaluated[0];
         self.reject_missing_return_value(value, args[0].span())?;
         self.reject_indeterminate_library_value(value, args[0].span(), "setjmp")?;
-        let _ = self.setjmp_buffer_pointer("setjmp", value, args[0].span())?;
+        let pointer = self.setjmp_buffer_pointer("setjmp", value, args[0].span())?;
+        let size = self.type_size_of(&CType::UnsignedLong).unwrap_or(8);
+        let (object_id, start, _) =
+            self.library_array_region(&pointer, size, size, args[0].span(), objects)?;
+        self.ensure_library_writable_region(object_id, start, size, args[0].span(), objects)?;
         let Some(frame_id) = self.current_frame_id() else {
             return Err(Diagnostic::error(
                 "internal error: setjmp requires an active function invocation",
@@ -20657,6 +21770,9 @@ impl<'a> Interpreter<'a> {
         self.reject_indeterminate_library_value(&evaluated[0], args[0].span(), "longjmp")?;
         self.reject_indeterminate_library_value(&evaluated[1], args[1].span(), "longjmp")?;
         let pointer = self.setjmp_buffer_pointer("longjmp", &evaluated[0], args[0].span())?;
+        let size = self.type_size_of(&CType::UnsignedLong).unwrap_or(8);
+        let (object_id, start, _) =
+            self.library_array_region(&pointer, size, size, args[0].span(), objects)?;
         if evaluated[1].ty != CType::Int {
             return Err(Diagnostic::error(
                 "longjmp requires an int second argument",
@@ -20670,6 +21786,20 @@ impl<'a> Interpreter<'a> {
             objects,
             "7.13.2.1",
         )?;
+        let saved_bytes = self
+            .setjmp_provenance
+            .get(&(object_id, start))
+            .filter(|(saved_handle, _)| *saved_handle == handle)
+            .map(|(_, bytes)| bytes.clone());
+        let current_bytes =
+            self.array_region_snapshot(object_id, start, size, args[0].span(), objects)?;
+        if saved_bytes.as_deref() != Some(current_bytes.as_slice()) {
+            return Err(Diagnostic::ub(
+                "longjmp requires an unmodified jmp_buf value produced by setjmp in the same object",
+                args[0].span(),
+                Some("7.13.2.1"),
+            ));
+        }
         let env = self.setjmp_envs.get(&handle).ok_or_else(|| {
             Diagnostic::ub(
                 "longjmp was called with an invalid or uninitialized jmp_buf",
@@ -20733,12 +21863,18 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        let env = self.capture_setjmp_environment(&frame, objects, &context)?;
         let handle = self.next_setjmp_handle;
         self.next_setjmp_handle += 1;
+        self.write_unsigned_long_at_pointer("setjmp", &pointer, handle, span, objects, "7.13.1.1")?;
+        let env = self.capture_setjmp_environment(&frame, objects, &context)?;
         self.setjmp_envs.insert(handle, env);
         self.live_setjmp_frames.insert(frame_id);
-        self.write_unsigned_long_at_pointer("setjmp", &pointer, handle, span, objects, "7.13.1.1")?;
+        let size = self.type_size_of(&CType::UnsignedLong).unwrap_or(8);
+        let (object_id, start, _) =
+            self.library_array_region(&pointer, size, size, span, objects)?;
+        let bytes = self.array_region_snapshot(object_id, start, size, span, objects)?;
+        self.setjmp_provenance
+            .insert((object_id, start), (handle, bytes));
         Ok(TypedValue::int(0))
     }
 
@@ -21105,6 +22241,7 @@ impl<'a> Interpreter<'a> {
             member_path: pointer.member_path.clone(),
             designated_root_ty: pointer.designated_root_ty.clone(),
             byte_offset_override: pointer.byte_offset_override,
+            arithmetic_domain_start: pointer.arithmetic_domain_start,
             bit_field_width: None,
             restrict_source: None,
         })
@@ -22058,6 +23195,66 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
+    /// Validate a pointer argument that the library specification describes as
+    /// an array.  C11 7.1.4 still requires such pointer arguments to have valid
+    /// values when the requested element count is zero.
+    fn library_array_region(
+        &self,
+        pointer: &PointerValue,
+        access_size: usize,
+        element_size: usize,
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<(ObjectId, usize, usize), Diagnostic> {
+        let validation_size = if access_size == 0 {
+            element_size.max(1)
+        } else {
+            access_size
+        };
+        let region = self.byte_region_from_pointer(pointer, validation_size, span, objects)?;
+        if access_size != 0 {
+            let object = self
+                .lookup_object(objects, region.0)
+                .expect("validated library array object exists");
+            if self.qualified_subobject_overlaps(
+                &object.ty,
+                0,
+                region.1,
+                access_size,
+                TrackedQualifier::Volatile,
+            ) {
+                return Err(Diagnostic::ub(
+                    "library function would access a volatile-qualified object or subobject through a non-volatile pointer",
+                    span,
+                    Some("6.7.3"),
+                ));
+            }
+        }
+        Ok(region)
+    }
+
+    fn ensure_library_array_destination(
+        &self,
+        pointer: &PointerValue,
+        access_size: usize,
+        element_size: usize,
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<(ObjectId, usize, usize), Diagnostic> {
+        let (object_id, start, object_size) =
+            self.library_array_region(pointer, access_size, element_size, span, objects)?;
+        let validation_size = if access_size == 0 {
+            element_size.max(1)
+        } else {
+            access_size
+        };
+        self.ensure_writable_region(object_id, start, validation_size, span, objects)?;
+        if access_size != 0 {
+            self.ensure_library_writable_region(object_id, start, access_size, span, objects)?;
+        }
+        Ok((object_id, start, object_size))
+    }
+
     fn qualified_subobject_overlaps(
         &self,
         ty: &CType,
@@ -22429,6 +23626,7 @@ impl<'a> Interpreter<'a> {
         args: &[Expr],
         evaluated: &[TypedValue],
         span: Span,
+        objects: &ObjectFrames,
     ) -> Result<(), Diagnostic> {
         if args.len() != 1 || evaluated.len() != 1 {
             return Err(Diagnostic::error(
@@ -22446,6 +23644,16 @@ impl<'a> Interpreter<'a> {
                 "tmpnam requires a char * argument or a null pointer",
                 args[0].span(),
             ));
+        }
+        let pointer = value.as_pointer(args[0].span())?;
+        if !pointer.is_null() {
+            let _ = self.ensure_library_array_destination(
+                &pointer,
+                HOST_L_TMPNAM,
+                1,
+                args[0].span(),
+                objects,
+            )?;
         }
         Ok(())
     }
@@ -22753,20 +23961,30 @@ impl<'a> Interpreter<'a> {
         }
         let size =
             self.checked_usize_from_unsigned_long(&evaluated[3], args[3].span(), "setvbuf size")?;
-        if !pointer.is_null() && mode != libc::_IONBF && size != 0 {
-            self.reject_nonvolatile_library_pointer_access(
-                "setvbuf",
-                &evaluated[1],
-                args[1].span(),
-                objects,
-            )?;
+        if !pointer.is_null() && mode != libc::_IONBF {
+            let validation_size = size.max(1);
             let (object_id, start, _) = self.byte_region_from_pointer_allow_reserved(
                 &pointer,
-                size,
+                validation_size,
                 args[1].span(),
                 objects,
             )?;
-            self.ensure_library_writable_region(object_id, start, size, args[1].span(), objects)?;
+            self.ensure_writable_region(
+                object_id,
+                start,
+                validation_size,
+                args[1].span(),
+                objects,
+            )?;
+            if size != 0 {
+                self.ensure_library_writable_region(
+                    object_id,
+                    start,
+                    size,
+                    args[1].span(),
+                    objects,
+                )?;
+            }
         }
         Ok(())
     }
@@ -22859,6 +24077,23 @@ impl<'a> Interpreter<'a> {
                 args[1].span(),
             ));
         }
+        let count = evaluated[1].to_int()?;
+        if count <= 0 {
+            return Err(Diagnostic::ub(
+                "fgets count must be positive",
+                args[1].span(),
+                Some("7.21.7.2"),
+            ));
+        }
+        let count = usize::try_from(count).map_err(|_| {
+            Diagnostic::error(
+                "fgets destination size is out of supported range",
+                args[1].span(),
+            )
+        })?;
+        let destination = evaluated[0].as_pointer(args[0].span())?;
+        let _ =
+            self.ensure_library_array_destination(&destination, count, 1, args[0].span(), objects)?;
         self.check_stream_call("fgets", &args[2..], &evaluated[2..], span, "7.19.7.2")
     }
 
@@ -22889,6 +24124,9 @@ impl<'a> Interpreter<'a> {
             args[0].span(),
             objects,
         )?;
+        let destination = evaluated[0].as_pointer(args[0].span())?;
+        let _ =
+            self.ensure_library_array_destination(&destination, 1, 1, args[0].span(), objects)?;
         Ok(())
     }
 
@@ -22929,6 +24167,22 @@ impl<'a> Interpreter<'a> {
                 args[1].span().merge(args[2].span()),
             ));
         }
+        let size = self.checked_usize_from_unsigned_long(
+            &evaluated[1],
+            args[1].span(),
+            "fread element size",
+        )?;
+        let count = self.checked_usize_from_unsigned_long(
+            &evaluated[2],
+            args[2].span(),
+            "fread element count",
+        )?;
+        let total = size.checked_mul(count).ok_or_else(|| {
+            Diagnostic::error("fread total byte count is out of supported range", span)
+        })?;
+        let destination = evaluated[0].as_pointer(args[0].span())?;
+        let _ =
+            self.ensure_library_array_destination(&destination, total, 1, args[0].span(), objects)?;
         self.check_stream_call("fread", &args[3..], &evaluated[3..], span, "7.19.8.1")
     }
 
@@ -22969,6 +24223,21 @@ impl<'a> Interpreter<'a> {
                 args[1].span().merge(args[2].span()),
             ));
         }
+        let size = self.checked_usize_from_unsigned_long(
+            &evaluated[1],
+            args[1].span(),
+            "fwrite element size",
+        )?;
+        let count = self.checked_usize_from_unsigned_long(
+            &evaluated[2],
+            args[2].span(),
+            "fwrite element count",
+        )?;
+        let total = size.checked_mul(count).ok_or_else(|| {
+            Diagnostic::error("fwrite total byte count is out of supported range", span)
+        })?;
+        let source = evaluated[0].as_pointer(args[0].span())?;
+        let _ = self.library_array_region(&source, total, 1, args[0].span(), objects)?;
         self.check_stream_call("fwrite", &args[3..], &evaluated[3..], span, "7.19.8.2")
     }
 
@@ -22995,6 +24264,33 @@ impl<'a> Interpreter<'a> {
                 span,
             ));
         }
+        let origin = evaluated[2].to_int()? as c_int;
+        if !matches!(origin, libc::SEEK_SET | libc::SEEK_CUR | libc::SEEK_END) {
+            return Err(Diagnostic::ub(
+                "fseek origin must be SEEK_SET, SEEK_CUR, or SEEK_END",
+                args[2].span(),
+                Some("7.21.9.2"),
+            ));
+        }
+        let stream_object = self
+            .stream_object_from_value(&evaluated[0], args[0].span(), "fseek", "7.21.9.2")?
+            .expect("checked stream pointer");
+        let stream = self
+            .host_streams
+            .get(&stream_object)
+            .expect("checked stream object");
+        let offset = evaluated[1].to_int()?;
+        if !stream.mode.binary
+            && offset != 0
+            && (origin != libc::SEEK_SET
+                || !self.ftell_provenance.contains(&(stream.backing, offset)))
+        {
+            return Err(Diagnostic::ub(
+                "fseek on a text stream requires a zero offset or an offset returned by ftell for the same file with SEEK_SET",
+                args[1].span().merge(args[2].span()),
+                Some("7.21.9.2"),
+            ));
+        }
         Ok(())
     }
 
@@ -23003,6 +24299,7 @@ impl<'a> Interpreter<'a> {
         args: &[Expr],
         evaluated: &[TypedValue],
         span: Span,
+        objects: &ObjectFrames,
     ) -> Result<(), Diagnostic> {
         if args.len() != 2 || evaluated.len() != 2 {
             return Err(Diagnostic::error(
@@ -23013,6 +24310,48 @@ impl<'a> Interpreter<'a> {
         self.check_stream_call("fsetpos", &args[..1], &evaluated[..1], span, "7.19.9.4")?;
         self.reject_missing_return_value(&evaluated[1], args[1].span())?;
         self.reject_indeterminate_library_value(&evaluated[1], args[1].span(), "fsetpos")?;
+        let expected = CType::pointer_to(CType::qualified(
+            CType::Long,
+            crate::types::TypeQualifiers {
+                is_const: true,
+                is_restrict: false,
+                is_volatile: false,
+            },
+        ));
+        if !self.pointer_assignment_compatible(&expected, &evaluated[1].ty) {
+            return Err(Diagnostic::error(
+                "fsetpos requires a const fpos_t * position pointer",
+                args[1].span(),
+            ));
+        }
+        self.reject_nonvolatile_library_pointer_access(
+            "fsetpos",
+            &evaluated[1],
+            args[1].span(),
+            objects,
+        )?;
+        let pointer = evaluated[1].as_pointer(args[1].span())?;
+        let (object_id, start, _) =
+            self.byte_region_from_pointer(&pointer, 8, args[1].span(), objects)?;
+        let version = self
+            .lookup_object(objects, object_id)
+            .expect("validated fpos_t object")
+            .modification_count;
+        let stream_object = self
+            .stream_object_from_value(&evaluated[0], args[0].span(), "fsetpos", "7.21.9.3")?
+            .expect("checked stream pointer");
+        let backing = self
+            .host_streams
+            .get(&stream_object)
+            .expect("checked stream object")
+            .backing;
+        if self.fpos_provenance.get(&(object_id, start)).copied() != Some((version, backing)) {
+            return Err(Diagnostic::ub(
+                "fsetpos requires an unmodified fpos_t value produced by fgetpos for a stream associated with the same file",
+                args[1].span(),
+                Some("7.21.9.3"),
+            ));
+        }
         Ok(())
     }
 
@@ -23021,6 +24360,7 @@ impl<'a> Interpreter<'a> {
         args: &[Expr],
         evaluated: &[TypedValue],
         span: Span,
+        objects: &ObjectFrames,
     ) -> Result<(), Diagnostic> {
         if args.len() != 2 || evaluated.len() != 2 {
             return Err(Diagnostic::error(
@@ -23031,6 +24371,16 @@ impl<'a> Interpreter<'a> {
         self.check_stream_call("fgetpos", &args[..1], &evaluated[..1], span, "7.19.9.1")?;
         self.reject_missing_return_value(&evaluated[1], args[1].span())?;
         self.reject_indeterminate_library_value(&evaluated[1], args[1].span(), "fgetpos")?;
+        if !self.pointer_assignment_compatible(&CType::pointer_to(CType::Long), &evaluated[1].ty) {
+            return Err(Diagnostic::error(
+                "fgetpos requires an fpos_t * output pointer",
+                args[1].span(),
+            ));
+        }
+        let pointer = evaluated[1].as_pointer(args[1].span())?;
+        let (object_id, start, _) =
+            self.byte_region_from_pointer(&pointer, 8, args[1].span(), objects)?;
+        self.ensure_library_writable_region(object_id, start, 8, args[1].span(), objects)?;
         Ok(())
     }
 
@@ -23119,7 +24469,7 @@ impl<'a> Interpreter<'a> {
     }
 
     fn check_calloc_call(
-        &self,
+        &mut self,
         args: &[Expr],
         evaluated: &[TypedValue],
         span: Span,
@@ -23130,7 +24480,8 @@ impl<'a> Interpreter<'a> {
                 span,
             ));
         }
-        for (expr, value) in args.iter().zip(evaluated) {
+        let mut sizes = [0usize; 2];
+        for (index, (expr, value)) in args.iter().zip(evaluated).enumerate() {
             self.reject_missing_return_value(value, expr.span())?;
             self.reject_indeterminate_library_value(value, expr.span(), "calloc")?;
             if value.ty != CType::UnsignedLong {
@@ -23139,8 +24490,10 @@ impl<'a> Interpreter<'a> {
                     expr.span(),
                 ));
             }
-            let _ = self.checked_usize_from_unsigned_long(value, expr.span(), "calloc size")?;
+            sizes[index] =
+                self.checked_usize_from_unsigned_long(value, expr.span(), "calloc size")?;
         }
+        self.pending_heap_call = Some(PendingHeapCall::Calloc(sizes[0].checked_mul(sizes[1])));
         Ok(())
     }
 
@@ -23176,9 +24529,10 @@ impl<'a> Interpreter<'a> {
             ));
         }
         let pointer = ptr_value.as_pointer(args[0].span())?;
-        let _ = self.validate_heap_allocation_pointer(&pointer, args[0].span(), objects)?;
-        let _ =
+        let object = self.validate_heap_allocation_pointer(&pointer, args[0].span(), objects)?;
+        let size =
             self.checked_usize_from_unsigned_long(size_value, args[1].span(), "realloc size")?;
+        self.pending_heap_call = Some(PendingHeapCall::Realloc { object, size });
         Ok(())
     }
 
@@ -23228,13 +24582,9 @@ impl<'a> Interpreter<'a> {
             self.checked_usize_from_unsigned_long(count, args[2].span(), "memmove byte count")?;
         let dest_pointer = dest.as_pointer(args[0].span())?;
         let src_pointer = src.as_pointer(args[1].span())?;
-        let (dest_object_id, dest_start, _) =
-            self.byte_region_from_pointer(&dest_pointer, size, args[0].span(), objects)?;
-        let _ = self.byte_region_from_pointer(&src_pointer, size, args[1].span(), objects)?;
-        if size == 0 {
-            return Ok(());
-        }
-        self.ensure_writable_region(dest_object_id, dest_start, size, args[0].span(), objects)?;
+        let _ =
+            self.ensure_library_array_destination(&dest_pointer, size, 1, args[0].span(), objects)?;
+        let _ = self.library_array_region(&src_pointer, size, 1, args[1].span(), objects)?;
         Ok(())
     }
 
@@ -23282,12 +24632,8 @@ impl<'a> Interpreter<'a> {
         let size =
             self.checked_usize_from_unsigned_long(count, args[2].span(), "memset byte count")?;
         let dest_pointer = dest.as_pointer(args[0].span())?;
-        let (dest_object_id, dest_start, _) =
-            self.byte_region_from_pointer(&dest_pointer, size, args[0].span(), objects)?;
-        if size == 0 {
-            return Ok(());
-        }
-        self.ensure_writable_region(dest_object_id, dest_start, size, args[0].span(), objects)?;
+        let _ =
+            self.ensure_library_array_destination(&dest_pointer, size, 1, args[0].span(), objects)?;
         Ok(())
     }
 
@@ -23335,7 +24681,7 @@ impl<'a> Interpreter<'a> {
         let size =
             self.checked_usize_from_unsigned_long(count, args[2].span(), "memchr byte count")?;
         let pointer = value.as_pointer(args[0].span())?;
-        let _ = self.byte_region_from_pointer(&pointer, size, args[0].span(), objects)?;
+        let _ = self.library_array_region(&pointer, size, 1, args[0].span(), objects)?;
         Ok(())
     }
 
@@ -23385,8 +24731,8 @@ impl<'a> Interpreter<'a> {
             self.checked_usize_from_unsigned_long(count, args[2].span(), "memcmp byte count")?;
         let lhs_pointer = lhs.as_pointer(args[0].span())?;
         let rhs_pointer = rhs.as_pointer(args[1].span())?;
-        let _ = self.byte_region_from_pointer(&lhs_pointer, size, args[0].span(), objects)?;
-        let _ = self.byte_region_from_pointer(&rhs_pointer, size, args[1].span(), objects)?;
+        let _ = self.library_array_region(&lhs_pointer, size, 1, args[0].span(), objects)?;
+        let _ = self.library_array_region(&rhs_pointer, size, 1, args[1].span(), objects)?;
         Ok(())
     }
 
@@ -23565,7 +24911,13 @@ impl<'a> Interpreter<'a> {
                 Some("7.21.2.3"),
             ));
         }
-        self.ensure_writable_object(dest_object_id, args[0].span(), objects)?;
+        self.ensure_library_writable_region(
+            dest_object_id,
+            dest_start,
+            copy_size,
+            args[0].span(),
+            objects,
+        )?;
         Ok(())
     }
 
@@ -23626,7 +24978,13 @@ impl<'a> Interpreter<'a> {
                 Some("7.21.3.1"),
             ));
         }
-        self.ensure_writable_object(dest_object_id, args[0].span(), objects)?;
+        self.ensure_library_writable_region(
+            dest_object_id,
+            dest_start,
+            total,
+            args[0].span(),
+            objects,
+        )?;
         Ok(())
     }
 
@@ -23675,7 +25033,8 @@ impl<'a> Interpreter<'a> {
         let dest_pointer = dest.as_pointer(args[0].span())?;
         let src_pointer = src.as_pointer(args[1].span())?;
         let (dest_object_id, dest_start, _) =
-            self.byte_region_from_pointer(&dest_pointer, size, args[0].span(), objects)?;
+            self.ensure_library_array_destination(&dest_pointer, size, 1, args[0].span(), objects)?;
+        let _ = self.library_array_region(&src_pointer, size, 1, args[1].span(), objects)?;
         let (src_object_id, src_start, _) = self.byte_region_from_pointer_bounded_string(
             &src_pointer,
             size,
@@ -23689,7 +25048,6 @@ impl<'a> Interpreter<'a> {
                 Some("7.21.2.4"),
             ));
         }
-        self.ensure_writable_object(dest_object_id, args[0].span(), objects)?;
         Ok(())
     }
 
@@ -23737,6 +25095,7 @@ impl<'a> Interpreter<'a> {
             self.checked_usize_from_unsigned_long(count, args[2].span(), "strncat byte count")?;
         let dest_pointer = dest.as_pointer(args[0].span())?;
         let src_pointer = src.as_pointer(args[1].span())?;
+        let _ = self.library_array_region(&src_pointer, size, 1, args[1].span(), objects)?;
         let dest_bytes = self.read_c_string_bytes(dest_pointer.clone(), args[0].span(), objects)?;
         let (src_object_id, src_start, _) = self.byte_region_from_pointer_bounded_string(
             &src_pointer,
@@ -23766,7 +25125,13 @@ impl<'a> Interpreter<'a> {
                 Some("7.21.3.2"),
             ));
         }
-        self.ensure_writable_object(dest_object_id, args[0].span(), objects)?;
+        self.ensure_library_writable_region(
+            dest_object_id,
+            dest_start,
+            total,
+            args[0].span(),
+            objects,
+        )?;
         Ok(())
     }
 
@@ -23815,7 +25180,7 @@ impl<'a> Interpreter<'a> {
         let dest_pointer = dest.as_pointer(args[0].span())?;
         let src_pointer = src.as_pointer(args[1].span())?;
         let (dest_object_id, dest_start, _) =
-            self.byte_region_from_pointer(&dest_pointer, size, args[0].span(), objects)?;
+            self.ensure_library_array_destination(&dest_pointer, size, 1, args[0].span(), objects)?;
         let src_bytes = self.read_c_string_bytes(src_pointer.clone(), args[1].span(), objects)?;
         let (src_object_id, src_start, _) = self.byte_region_from_pointer(
             &src_pointer,
@@ -23837,7 +25202,6 @@ impl<'a> Interpreter<'a> {
                 Some("7.21.4.5"),
             ));
         }
-        self.ensure_writable_object(dest_object_id, args[0].span(), objects)?;
         Ok(())
     }
 
@@ -24115,6 +25479,13 @@ impl<'a> Interpreter<'a> {
             if let Some(state) = self.strtok_state.clone() {
                 let source_bytes =
                     self.read_c_string_bytes(state.clone(), args[0].span(), objects)?;
+                let _ = self.ensure_library_array_destination(
+                    &state,
+                    source_bytes.len() + 1,
+                    1,
+                    args[0].span(),
+                    objects,
+                )?;
                 self.check_strtok_restrict_overlap(
                     &state,
                     &source_bytes,
@@ -24124,10 +25495,23 @@ impl<'a> Interpreter<'a> {
                     args,
                     objects,
                 )?;
+            } else if !self.strtok_started {
+                return Err(Diagnostic::ub(
+                    "strtok first argument is null without a preceding call that supplied a string",
+                    args[0].span(),
+                    Some("7.24.5.8"),
+                ));
             }
         } else {
             let source_bytes =
                 self.read_c_string_bytes(source_pointer.clone(), args[0].span(), objects)?;
+            let _ = self.ensure_library_array_destination(
+                &source_pointer,
+                source_bytes.len() + 1,
+                1,
+                args[0].span(),
+                objects,
+            )?;
             self.check_strtok_restrict_overlap(
                 &source_pointer,
                 &source_bytes,
@@ -24278,7 +25662,6 @@ impl<'a> Interpreter<'a> {
         size: usize,
         span: Span,
         zeroed: bool,
-        host_ptr: *mut c_void,
     ) -> Result<ObjectId, Diagnostic> {
         self.next_encoded_pointer =
             align_address(self.next_encoded_pointer, HOST_LONG_DOUBLE_ALIGN as u64);
@@ -24301,8 +25684,14 @@ impl<'a> Interpreter<'a> {
             state.value = value;
             state.initialized = zeroed;
             state.address_taken = true;
+            state.raw_indeterminate_bytes =
+                Some((state.modification_count, usize::from(!zeroed) * size));
         }
-        self.host_allocations.insert(object, host_ptr);
+        self.dynamic_allocations.insert(object);
+        self.dynamic_bytes_allocated = self
+            .dynamic_bytes_allocated
+            .checked_add(size)
+            .expect("validated dynamic allocation total");
         Ok(object)
     }
 
@@ -24315,6 +25704,10 @@ impl<'a> Interpreter<'a> {
             .first_mut()
             .and_then(|frame| frame.remove(&object_id));
         if let Some(mut removed) = removed {
+            self.dynamic_bytes_allocated = self
+                .dynamic_bytes_allocated
+                .checked_sub(removed.byte_size)
+                .expect("retired allocation was included in the dynamic byte total");
             self.note_stream_buffer_lifetime_end(&[object_id]);
             removed.alive = false;
             removed.value = StoredValue::Indeterminate;
@@ -24326,6 +25719,53 @@ impl<'a> Interpreter<'a> {
             "dynamic allocation object was not present in storage",
             Span::new(FileId(0), 0, 0),
         ))
+    }
+
+    fn byte_ranges_overlap(
+        lhs_start: usize,
+        lhs_size: usize,
+        rhs_start: usize,
+        rhs_size: usize,
+    ) -> bool {
+        lhs_size != 0
+            && rhs_size != 0
+            && lhs_start < rhs_start.saturating_add(rhs_size)
+            && rhs_start < lhs_start.saturating_add(lhs_size)
+    }
+
+    fn replace_pointer_slots_for_write(
+        object: &mut ObjectState,
+        start: usize,
+        size: usize,
+        replacement: Option<StoredPointerValue>,
+    ) {
+        object.pointer_slots.retain(|&(slot_start, slot_size), _| {
+            !Self::byte_ranges_overlap(start, size, slot_start, slot_size)
+        });
+        if let Some(replacement) = replacement {
+            object.pointer_slots.insert((start, size), replacement);
+        }
+    }
+
+    fn copied_pointer_slots(
+        source: &ObjectState,
+        source_start: usize,
+        destination_start: usize,
+        size: usize,
+    ) -> Vec<((usize, usize), StoredPointerValue)> {
+        let source_end = source_start.saturating_add(size);
+        source
+            .pointer_slots
+            .iter()
+            .filter_map(|(&(slot_start, slot_size), value)| {
+                let slot_end = slot_start.checked_add(slot_size)?;
+                if slot_start < source_start || slot_end > source_end {
+                    return None;
+                }
+                let destination_slot = destination_start.checked_add(slot_start - source_start)?;
+                Some(((destination_slot, slot_size), value.clone()))
+            })
+            .collect()
     }
 
     fn overlay_known_bytes_into_object(
@@ -24367,6 +25807,7 @@ impl<'a> Interpreter<'a> {
             object.initialized = initialized;
             object.indeterminate_reason = None;
             object.modification_count = object.modification_count.saturating_add(1);
+            Self::replace_pointer_slots_for_write(object, start, bytes.len(), None);
             return Ok(());
         }
         let mut all_bytes = self.serialize_stored_value(&snapshot.ty, &snapshot.value, span)?;
@@ -24386,6 +25827,7 @@ impl<'a> Interpreter<'a> {
         object.initialized = initialized;
         object.indeterminate_reason = None;
         object.modification_count = object.modification_count.saturating_add(1);
+        Self::replace_pointer_slots_for_write(object, start, bytes.len(), None);
         Ok(())
     }
 
@@ -24423,6 +25865,7 @@ impl<'a> Interpreter<'a> {
             object.initialized = initialized;
             object.indeterminate_reason = None;
             object.modification_count = object.modification_count.saturating_add(1);
+            Self::replace_pointer_slots_for_write(object, start, bytes.len(), None);
             return Ok(());
         }
         let mut all_bytes = self.serialize_stored_value(&snapshot.ty, &snapshot.value, span)?;
@@ -24442,6 +25885,7 @@ impl<'a> Interpreter<'a> {
         object.initialized = initialized;
         object.indeterminate_reason = None;
         object.modification_count = object.modification_count.saturating_add(1);
+        Self::replace_pointer_slots_for_write(object, start, bytes.len(), None);
         Ok(())
     }
 
@@ -24453,6 +25897,7 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
     ) -> Result<Vec<u8>, Diagnostic> {
         if limit == 0 {
+            let _ = self.library_array_region(pointer, 0, 1, span, objects)?;
             return Ok(vec![0]);
         }
         let mut bytes = self.read_bounded_c_string_source(pointer.clone(), limit, span, objects)?;
@@ -24535,6 +25980,10 @@ impl<'a> Interpreter<'a> {
                 )
             })?;
             if unit == 0 {
+                let access_size = (units.len() + 1).checked_mul(stride).ok_or_else(|| {
+                    Diagnostic::ub("wide string access is out of range", span, Some("7.1.4"))
+                })?;
+                let _ = self.library_array_region(&pointer, access_size, stride, span, objects)?;
                 return Ok(units);
             }
             units.push(unit);
@@ -24555,6 +26004,8 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
     ) -> Result<Vec<libc::wchar_t>, Diagnostic> {
         if limit == 0 {
+            let _ =
+                self.library_array_region(&pointer, 0, self.wide_char_byte_width(), span, objects)?;
             return Ok(Vec::new());
         }
         let start = self
@@ -24589,6 +26040,10 @@ impl<'a> Interpreter<'a> {
             units.push(unit);
             offset += stride;
             if unit == 0 {
+                let access_size = units.len().checked_mul(stride).ok_or_else(|| {
+                    Diagnostic::ub("wide string access is out of range", span, Some("7.1.4"))
+                })?;
+                let _ = self.library_array_region(&pointer, access_size, stride, span, objects)?;
                 return Ok(units);
             }
         }
@@ -24602,6 +26057,10 @@ impl<'a> Interpreter<'a> {
                 Some("7.1.4"),
             ));
         }
+        let access_size = limit.checked_mul(stride).ok_or_else(|| {
+            Diagnostic::ub("wide string access is out of range", span, Some("7.1.4"))
+        })?;
+        let _ = self.library_array_region(&pointer, access_size, stride, span, objects)?;
         Ok(units)
     }
 
@@ -24613,6 +26072,8 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
     ) -> Result<Vec<libc::wchar_t>, Diagnostic> {
         if count == 0 {
+            let _ =
+                self.library_array_region(&pointer, 0, self.wide_char_byte_width(), span, objects)?;
             return Ok(Vec::new());
         }
         let stride = self.wide_char_byte_width();
@@ -24623,6 +26084,7 @@ impl<'a> Interpreter<'a> {
                 Some("7.1.4"),
             )
         })?;
+        let _ = self.library_array_region(&pointer, total, stride, span, objects)?;
         let (_, start, all_bytes) = self.pointer_object_bytes(&pointer, span, objects)?;
         let end = start.checked_add(total).ok_or_else(|| {
             Diagnostic::ub(
@@ -24685,6 +26147,73 @@ impl<'a> Interpreter<'a> {
         std::mem::size_of::<HostMbState>()
     }
 
+    fn check_mbstate_for_current_locale(
+        &mut self,
+        function_name: &str,
+        pointer: &PointerValue,
+        writable: bool,
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        if pointer.is_null() {
+            if self
+                .internal_mbstate_generations
+                .get(function_name)
+                .is_some_and(|&generation| generation != self.locale_generation)
+            {
+                return Err(Diagnostic::ub(
+                    format!(
+                        "{function_name} uses an internal conversion state retained across an LC_CTYPE locale change"
+                    ),
+                    span,
+                    Some("7.29.6"),
+                ));
+            }
+            self.internal_mbstate_generations
+                .insert(function_name.to_owned(), self.locale_generation);
+            return Ok(());
+        }
+
+        let size = self.host_mbstate_size();
+        let (object_id, start, _) =
+            self.library_array_region(pointer, size, size, span, objects)?;
+        if writable {
+            self.ensure_library_writable_region(object_id, start, size, span, objects)?;
+        }
+        let version = self
+            .lookup_object(objects, object_id)
+            .expect("validated mbstate_t object")
+            .modification_count;
+        match self.mbstate_provenance.get(&(object_id, start)).copied() {
+            Some((saved_version, generation))
+                if saved_version == version && generation == self.locale_generation => {}
+            Some((saved_version, _)) if saved_version == version => {
+                return Err(Diagnostic::ub(
+                    format!(
+                        "{function_name} uses a conversion state retained across an LC_CTYPE locale change"
+                    ),
+                    span,
+                    Some("7.29.6"),
+                ));
+            }
+            _ => {
+                let bytes = self.read_pointer_bytes(pointer, size, span, objects)?;
+                if bytes.iter().any(|&byte| byte != 0) {
+                    return Err(Diagnostic::ub(
+                        format!(
+                            "{function_name} uses an mbstate_t value that is neither initial nor produced by a tracked conversion"
+                        ),
+                        span,
+                        Some("7.29.6"),
+                    ));
+                }
+            }
+        }
+        self.mbstate_provenance
+            .insert((object_id, start), (version, self.locale_generation));
+        Ok(())
+    }
+
     fn read_mbstate_value(
         &mut self,
         pointer: &PointerValue,
@@ -24719,7 +26248,14 @@ impl<'a> Interpreter<'a> {
         let (object_id, start, _) =
             self.byte_region_from_pointer(pointer, self.host_mbstate_size(), span, objects)?;
         self.ensure_writable_object(object_id, span, objects)?;
-        self.overlay_known_bytes_into_object(object_id, start, bytes, span, objects)
+        self.overlay_known_bytes_into_object(object_id, start, bytes, span, objects)?;
+        let version = self
+            .lookup_object(objects, object_id)
+            .expect("mbstate_t output object exists")
+            .modification_count;
+        self.mbstate_provenance
+            .insert((object_id, start), (version, self.locale_generation));
+        Ok(())
     }
 
     fn comparator_function_symbol(
@@ -26251,31 +27787,36 @@ impl<'a> Interpreter<'a> {
                     });
                 }
                 let parsed = match conv.spec {
-                    'd' => self
-                        .scan_token_to_signed_bytes(&token, 10)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    'i' => self
-                        .scan_token_to_signed_bytes(&token, 0)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    'o' => self
-                        .scan_token_to_unsigned_bytes(&token, 8)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    'u' => self
-                        .scan_token_to_unsigned_bytes(&token, 10)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    'x' | 'X' => self
-                        .scan_token_to_unsigned_bytes(&token, 16)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    'p' => self
-                        .scan_token_to_unsigned_bytes(&token, 16)
-                        .map(|(value, consumed)| (TypedValue::int(value), consumed)),
-                    _ => self
-                        .scan_token_to_float_bytes(&token)
-                        .map(|(value, consumed)| {
-                            (TypedValue::floating(CType::Double, value), consumed)
-                        }),
+                    'd' => self.scan_token_to_signed_bytes(&token, 10).map(
+                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
+                    ),
+                    'i' => self.scan_token_to_signed_bytes(&token, 0).map(
+                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
+                    ),
+                    'o' => self.scan_token_to_unsigned_bytes(&token, 8).map(
+                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
+                    ),
+                    'u' => self.scan_token_to_unsigned_bytes(&token, 10).map(
+                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
+                    ),
+                    'x' | 'X' => self.scan_token_to_unsigned_bytes(&token, 16).map(
+                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
+                    ),
+                    'p' => self.scan_token_to_unsigned_bytes(&token, 16).map(
+                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
+                    ),
+                    _ => {
+                        self.scan_token_to_float_bytes(&token)
+                            .map(|(value, consumed, overflow)| {
+                                (
+                                    TypedValue::floating(CType::Double, value),
+                                    consumed,
+                                    overflow,
+                                )
+                            })
+                    }
                 };
-                let Some((parsed, consumed)) = parsed else {
+                let Some((parsed, consumed, overflow)) = parsed else {
                     for &byte in token.iter().rev() {
                         self.scan_unread(source, byte);
                     }
@@ -26285,6 +27826,15 @@ impl<'a> Interpreter<'a> {
                     self.scan_unread(source, byte);
                 }
                 if let Some(dest) = dest {
+                    if overflow {
+                        return Err(Diagnostic::ub(
+                            format!(
+                                "{function_name} conversion result is not representable in the receiving object"
+                            ),
+                            dest_span,
+                            Some("7.21.6.2"),
+                        ));
+                    }
                     match conv.spec {
                         'd' | 'i' | 'o' | 'u' | 'x' | 'X' => {
                             self.store_scan_integer(
@@ -26965,6 +28515,7 @@ impl<'a> Interpreter<'a> {
                 member_path: Vec::new(),
                 designated_root_ty: None,
                 byte_offset_override: None,
+                arithmetic_domain_start: None,
             },
         ))
     }
@@ -27099,6 +28650,7 @@ impl<'a> Interpreter<'a> {
                 member_path: Vec::new(),
                 designated_root_ty: None,
                 byte_offset_override: None,
+                arithmetic_domain_start: None,
             },
         ))
     }
@@ -27169,6 +28721,7 @@ impl<'a> Interpreter<'a> {
                 member_path: Vec::new(),
                 designated_root_ty: None,
                 byte_offset_override: None,
+                arithmetic_domain_start: None,
             },
         ))
     }
@@ -27579,6 +29132,12 @@ impl<'a> Interpreter<'a> {
             .expect("checked by caller");
         let result =
             self.tell_stream(stream_object, args[0].span(), "ftell", "7.19.9.3")? as c_long;
+        let backing = self
+            .host_streams
+            .get(&stream_object)
+            .expect("checked stream object")
+            .backing;
+        self.ftell_provenance.insert((backing, result as i128));
         Ok(TypedValue::integer(CType::Long, result as i128))
     }
 
@@ -27624,6 +29183,7 @@ impl<'a> Interpreter<'a> {
             member_path: pointer.member_path.clone(),
             designated_root_ty: pointer.designated_root_ty.clone(),
             byte_offset_override: pointer.byte_offset_override,
+            arithmetic_domain_start: pointer.arithmetic_domain_start,
             bit_field_width: None,
             restrict_source: None,
         };
@@ -27633,6 +29193,21 @@ impl<'a> Interpreter<'a> {
             TypedValue::integer(CType::Long, pos as i128),
             args[1].span(),
         )?;
+        if pos >= 0 {
+            let (object_id, start, _) =
+                self.byte_region_from_pointer(&pointer, 8, args[1].span(), objects)?;
+            let version = self
+                .lookup_object(objects, object_id)
+                .expect("fpos_t output object exists")
+                .modification_count;
+            let backing = self
+                .host_streams
+                .get(&stream_object)
+                .expect("checked stream object")
+                .backing;
+            self.fpos_provenance
+                .insert((object_id, start), (version, backing));
+        }
         Ok(TypedValue::int(if pos < 0 { -1 } else { 0 }))
     }
 
@@ -27657,6 +29232,7 @@ impl<'a> Interpreter<'a> {
             member_path: pos_pointer.member_path.clone(),
             designated_root_ty: pos_pointer.designated_root_ty.clone(),
             byte_offset_override: pos_pointer.byte_offset_override,
+            arithmetic_domain_start: pos_pointer.arithmetic_domain_start,
             bit_field_width: None,
             restrict_source: None,
         };
@@ -27865,6 +29441,7 @@ impl<'a> Interpreter<'a> {
                 member_path: Vec::new(),
                 designated_root_ty: None,
                 byte_offset_override: None,
+                arithmetic_domain_start: None,
             },
         ))
     }
@@ -28581,15 +30158,14 @@ impl<'a> Interpreter<'a> {
             start += 1;
         }
         if start == units.len() {
+            let saved = Self::null_pointer();
             self.store_lvalue(
                 objects,
                 &state_lvalue,
-                self.pointer_value_with_type(
-                    CType::pointer_to(self.wchar_type()),
-                    Self::null_pointer(),
-                ),
+                self.pointer_value_with_type(CType::pointer_to(self.wchar_type()), saved.clone()),
                 args[2].span(),
             )?;
+            self.record_wcstok_state(&state_pointer, saved, args[2].span(), objects)?;
             return Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()));
         }
         let mut end = start;
@@ -28619,21 +30195,43 @@ impl<'a> Interpreter<'a> {
             self.store_lvalue(
                 objects,
                 &state_lvalue,
-                self.pointer_value_with_type(CType::pointer_to(self.wchar_type()), next_pointer),
-                args[2].span(),
-            )?;
-        } else {
-            self.store_lvalue(
-                objects,
-                &state_lvalue,
                 self.pointer_value_with_type(
                     CType::pointer_to(self.wchar_type()),
-                    Self::null_pointer(),
+                    next_pointer.clone(),
                 ),
                 args[2].span(),
             )?;
+            self.record_wcstok_state(&state_pointer, next_pointer, args[2].span(), objects)?;
+        } else {
+            let saved = Self::null_pointer();
+            self.store_lvalue(
+                objects,
+                &state_lvalue,
+                self.pointer_value_with_type(CType::pointer_to(self.wchar_type()), saved.clone()),
+                args[2].span(),
+            )?;
+            self.record_wcstok_state(&state_pointer, saved, args[2].span(), objects)?;
         }
         Ok(self.pointer_value_with_type(return_ty, result_pointer))
+    }
+
+    fn record_wcstok_state(
+        &mut self,
+        state_pointer: &PointerValue,
+        saved: PointerValue,
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        let pointer_size = self.type_size_of(&self.wchar_ptr_type()).unwrap_or(8);
+        let (object_id, start, _) =
+            self.byte_region_from_pointer(state_pointer, pointer_size, span, objects)?;
+        let version = self
+            .lookup_object(objects, object_id)
+            .expect("wcstok state object exists")
+            .modification_count;
+        self.wcstok_state_provenance
+            .insert((object_id, start), (version, saved));
+        Ok(())
     }
 
     fn eval_div_call(
@@ -28947,6 +30545,183 @@ impl<'a> Interpreter<'a> {
         Ok(cmp)
     }
 
+    fn check_comparator_total_order(
+        &mut self,
+        function_name: &str,
+        function_symbol: &str,
+        base_object: ObjectId,
+        base_start: usize,
+        total: usize,
+        base_pointer: &PointerValue,
+        nmemb: usize,
+        size: usize,
+        span: Span,
+        objects: &mut ObjectFrames,
+    ) -> Result<Vec<Vec<i8>>, Diagnostic> {
+        let mut signs = vec![vec![0i8; nmemb]; nmemb];
+        for lhs in 0..nmemb {
+            for rhs in 0..nmemb {
+                let first = self.qsort_compare_call(
+                    function_symbol,
+                    base_object,
+                    base_start,
+                    total,
+                    base_pointer,
+                    size,
+                    lhs,
+                    rhs,
+                    span,
+                    objects,
+                )?;
+                let second = self.qsort_compare_call(
+                    function_symbol,
+                    base_object,
+                    base_start,
+                    total,
+                    base_pointer,
+                    size,
+                    lhs,
+                    rhs,
+                    span,
+                    objects,
+                )?;
+                let first = first.signum() as i8;
+                let second = second.signum() as i8;
+                if first != second {
+                    return Err(Diagnostic::ub(
+                        format!(
+                            "{function_name} comparison function returned inconsistent results for the same objects"
+                        ),
+                        span,
+                        Some("7.22.5"),
+                    ));
+                }
+                signs[lhs][rhs] = first;
+            }
+        }
+
+        for lhs in 0..nmemb {
+            if signs[lhs][lhs] != 0 {
+                return Err(Diagnostic::ub(
+                    format!(
+                        "{function_name} comparison function does not compare an object equal to itself"
+                    ),
+                    span,
+                    Some("7.22.5"),
+                ));
+            }
+            for rhs in 0..nmemb {
+                if signs[lhs][rhs] != -signs[rhs][lhs] {
+                    return Err(Diagnostic::ub(
+                        format!(
+                            "{function_name} comparison function does not define a consistent ordering"
+                        ),
+                        span,
+                        Some("7.22.5"),
+                    ));
+                }
+                if signs[lhs][rhs] == 0
+                    && (0..nmemb).any(|other| {
+                        signs[lhs][other] != signs[rhs][other]
+                            || signs[other][lhs] != signs[other][rhs]
+                    })
+                {
+                    return Err(Diagnostic::ub(
+                        format!(
+                            "{function_name} comparison function has a non-transitive equivalence relation"
+                        ),
+                        span,
+                        Some("7.22.5"),
+                    ));
+                }
+            }
+        }
+
+        let mut representatives = Vec::new();
+        for index in 0..nmemb {
+            if !representatives
+                .iter()
+                .any(|&representative| signs[index][representative] == 0)
+            {
+                representatives.push(index);
+            }
+        }
+        let mut less_counts = representatives
+            .iter()
+            .map(|&lhs| {
+                representatives
+                    .iter()
+                    .filter(|&&rhs| signs[lhs][rhs] < 0)
+                    .count()
+            })
+            .collect::<Vec<_>>();
+        less_counts.sort_unstable();
+        if less_counts != (0..representatives.len()).collect::<Vec<_>>() {
+            return Err(Diagnostic::ub(
+                format!(
+                    "{function_name} comparison function defines a cyclic, non-transitive ordering"
+                ),
+                span,
+                Some("7.22.5"),
+            ));
+        }
+        Ok(signs)
+    }
+
+    fn bsearch_compare_call(
+        &mut self,
+        function_symbol: &str,
+        key_pointer: &PointerValue,
+        key_object: ObjectId,
+        key_start: usize,
+        base_pointer: &PointerValue,
+        base_object: ObjectId,
+        base_start: usize,
+        total: usize,
+        size: usize,
+        index: usize,
+        span: Span,
+        objects: &mut ObjectFrames,
+    ) -> Result<i128, Diagnostic> {
+        let key_before = self.array_region_snapshot(key_object, key_start, size, span, objects)?;
+        let base_before =
+            self.array_region_snapshot(base_object, base_start, total, span, objects)?;
+        let function = self
+            .lookup_function_symbol(function_symbol)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::error(
+                    format!("comparison function {function_symbol} is not defined"),
+                    span,
+                )
+            })?;
+        let element_pointer =
+            self.pointer_with_byte_offset(base_pointer, index * size, span, objects)?;
+        let result = self.call_function(
+            function.as_ref(),
+            self.function_may_setjmp_symbol(function_symbol),
+            vec![
+                self.pointer_value_with_type(self.const_void_ptr_type(), key_pointer.clone()),
+                self.pointer_value_with_type(self.const_void_ptr_type(), element_pointer),
+            ],
+            span,
+            objects,
+        )?;
+        self.reject_missing_return_value(&result, span)?;
+        let cmp = result.to_int()?;
+        let key_after = self.array_region_snapshot(key_object, key_start, size, span, objects)?;
+        let base_after =
+            self.array_region_snapshot(base_object, base_start, total, span, objects)?;
+        if key_before != key_after || base_before != base_after {
+            return Err(Diagnostic::ub(
+                "bsearch comparison function modified the key or array being searched",
+                span,
+                Some("7.22.5.1"),
+            ));
+        }
+        Ok(cmp)
+    }
+
     fn swap_qsort_elements(
         &mut self,
         object_id: ObjectId,
@@ -29009,34 +30784,31 @@ impl<'a> Interpreter<'a> {
             args[1].span(),
             args[2].span(),
         )?;
+        let order = self.pending_qsort_order.take().ok_or_else(|| {
+            Diagnostic::error("qsort comparison precondition plan is unavailable", span)
+        })?;
         if nmemb < 2 || size == 0 || total == 0 {
             return Ok(TypedValue::void());
         }
-        let function_symbol =
-            self.comparator_function_symbol("qsort", &evaluated[3], args[3].span())?;
         let (object_id, start, _) =
             self.byte_region_from_pointer(&base_pointer, total, args[0].span(), objects)?;
-        for i in 1..nmemb {
-            let mut j = i;
-            while j > 0 {
-                let cmp = self.qsort_compare_call(
-                    &function_symbol,
-                    object_id,
-                    start,
-                    total,
-                    &base_pointer,
-                    size,
-                    j - 1,
-                    j,
-                    span,
-                    objects,
-                )?;
-                if cmp <= 0 {
-                    break;
-                }
-                self.swap_qsort_elements(object_id, start, size, j - 1, j, span, objects)?;
-                j -= 1;
-            }
+        let mut current = (0..nmemb).collect::<Vec<_>>();
+        for target in 0..nmemb {
+            let desired = order[target];
+            let current_position = current
+                .iter()
+                .position(|&original| original == desired)
+                .expect("qsort plan contains every element");
+            self.swap_qsort_elements(
+                object_id,
+                start,
+                size,
+                target,
+                current_position,
+                span,
+                objects,
+            )?;
+            current.swap(target, current_position);
         }
         Ok(TypedValue::void())
     }
@@ -29049,7 +30821,6 @@ impl<'a> Interpreter<'a> {
         _frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        let key_pointer = evaluated[0].as_pointer(args[0].span())?;
         let base_pointer = evaluated[1].as_pointer(args[1].span())?;
         let (nmemb, size, total) = self.check_sort_search_common(
             "bsearch",
@@ -29059,52 +30830,19 @@ impl<'a> Interpreter<'a> {
             args[3].span(),
         )?;
         let return_ty = self.host_function_return_type("bsearch", span.file, span)?;
+        let found = self.pending_bsearch_result.take().ok_or_else(|| {
+            Diagnostic::error(
+                "bsearch comparison precondition result is unavailable",
+                span,
+            )
+        })?;
         if nmemb == 0 || size == 0 || total == 0 {
             return Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()));
         }
-        let function_symbol =
-            self.comparator_function_symbol("bsearch", &evaluated[4], args[4].span())?;
-        let (object_id, start, _) =
-            self.byte_region_from_pointer(&base_pointer, total, args[1].span(), objects)?;
-        let function = self
-            .lookup_function_symbol(&function_symbol)
-            .cloned()
-            .ok_or_else(|| {
-                Diagnostic::error(
-                    format!("comparison function {function_symbol} is not defined"),
-                    span,
-                )
-            })?;
-        for index in 0..nmemb {
-            let before = self.array_region_snapshot(object_id, start, total, span, objects)?;
+        if let Some(index) = found {
             let element_pointer =
                 self.pointer_with_byte_offset(&base_pointer, index * size, span, objects)?;
-            let result = self.call_function(
-                function.as_ref(),
-                self.function_may_setjmp_symbol(&function_symbol),
-                vec![
-                    self.pointer_value_with_type(self.const_void_ptr_type(), key_pointer.clone()),
-                    self.pointer_value_with_type(
-                        self.const_void_ptr_type(),
-                        element_pointer.clone(),
-                    ),
-                ],
-                span,
-                objects,
-            )?;
-            self.reject_missing_return_value(&result, span)?;
-            let cmp = result.to_int()?;
-            let after = self.array_region_snapshot(object_id, start, total, span, objects)?;
-            if before != after {
-                return Err(Diagnostic::ub(
-                    "comparison function modified the array being searched or sorted",
-                    span,
-                    Some("7.20.5"),
-                ));
-            }
-            if cmp == 0 {
-                return Ok(self.pointer_value_with_type(return_ty, element_pointer));
-            }
+            return Ok(self.pointer_value_with_type(return_ty, element_pointer));
         }
         Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()))
     }
@@ -29823,15 +31561,17 @@ impl<'a> Interpreter<'a> {
                 unsafe { host_src.offset_from(source_bytes.as_ptr().cast::<c_char>()) as usize };
             self.pointer_with_byte_offset(&current_ptr, offset, args[1].span(), objects)?
         };
-        self.store_lvalue(
-            objects,
-            &src_lvalue,
-            self.pointer_value_with_type(
-                srcpp_ty.element_type().expect("pointer parameter").clone(),
-                new_source,
-            ),
-            args[1].span(),
-        )?;
+        if !dest.is_null() {
+            self.store_lvalue(
+                objects,
+                &src_lvalue,
+                self.pointer_value_with_type(
+                    srcpp_ty.element_type().expect("pointer parameter").clone(),
+                    new_source,
+                ),
+                args[1].span(),
+            )?;
+        }
         Ok(TypedValue::integer(CType::UnsignedLong, result as i128))
     }
 
@@ -29933,15 +31673,17 @@ impl<'a> Interpreter<'a> {
                 objects,
             )?
         };
-        self.store_lvalue(
-            objects,
-            &src_lvalue,
-            self.pointer_value_with_type(
-                srcpp_ty.element_type().expect("pointer parameter").clone(),
-                new_source,
-            ),
-            args[1].span(),
-        )?;
+        if !dest.is_null() {
+            self.store_lvalue(
+                objects,
+                &src_lvalue,
+                self.pointer_value_with_type(
+                    srcpp_ty.element_type().expect("pointer parameter").clone(),
+                    new_source,
+                ),
+                args[1].span(),
+            )?;
+        }
         Ok(TypedValue::integer(CType::UnsignedLong, result as i128))
     }
 
@@ -30183,26 +31925,26 @@ impl<'a> Interpreter<'a> {
             self.invalidate_object_bindings(objects, &bindings);
             self.localeconv_bindings.clear();
         }
-        self.locale_generation = self.locale_generation.saturating_add(1);
-        self.wctrans_descriptors.clear();
-        self.wctype_descriptors.clear();
-        let locale_ptr = if evaluated[1].as_pointer(args[1].span())?.is_null() {
-            std::ptr::null()
+        let category = evaluated[0].to_int()? as c_int;
+        let locale_is_null = evaluated[1].as_pointer(args[1].span())?.is_null();
+        let tracks_ctype = !locale_is_null && matches!(category, 0 | 2);
+        let result_ptr = if locale_is_null {
+            unsafe { setlocale(category, std::ptr::null()) }
         } else {
             let locale = self.c_string_argument(&evaluated[1], args[1].span(), objects)?;
-            unsafe { setlocale(evaluated[0].to_int()? as c_int, locale.as_ptr()) }
-        };
-        let result_ptr = if evaluated[1].as_pointer(args[1].span())?.is_null() {
-            unsafe { setlocale(evaluated[0].to_int()? as c_int, std::ptr::null()) }
-        } else {
-            locale_ptr
+            unsafe { setlocale(category, locale.as_ptr()) }
         };
         let return_ty = self.host_function_return_type("setlocale", span.file, span)?;
         if result_ptr.is_null() {
             return Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()));
         }
-        let pointer =
-            self.intern_readonly_c_bytes(unsafe { CStr::from_ptr(result_ptr) }.to_bytes());
+        let result_bytes = unsafe { CStr::from_ptr(result_ptr) }.to_bytes().to_vec();
+        if tracks_ctype {
+            self.locale_generation = self.locale_generation.saturating_add(1);
+            self.wctrans_descriptors.clear();
+            self.wctype_descriptors.clear();
+        }
+        let pointer = self.intern_readonly_c_bytes(&result_bytes);
         self.setlocale_binding = pointer.object;
         Ok(self.pointer_value_with_type(return_ty, pointer))
     }
@@ -30351,6 +32093,7 @@ impl<'a> Interpreter<'a> {
                 member_path: Vec::new(),
                 designated_root_ty: None,
                 byte_offset_override: None,
+                arithmetic_domain_start: None,
             },
         ))
     }
@@ -30768,6 +32511,7 @@ impl<'a> Interpreter<'a> {
                 member_path: Vec::new(),
                 designated_root_ty: None,
                 byte_offset_override: None,
+                arithmetic_domain_start: None,
             },
         ))
     }
@@ -30808,6 +32552,17 @@ impl<'a> Interpreter<'a> {
                 args[0].span(),
                 objects,
             )?;
+        } else if maxsize != 0 {
+            let dest_pointer = evaluated[0].as_pointer(args[0].span())?;
+            let (object_id, start, _) =
+                self.byte_region_from_pointer(&dest_pointer, maxsize, args[0].span(), objects)?;
+            self.overlay_byte_cells_into_object(
+                object_id,
+                start,
+                &vec![ByteCell::Indeterminate; maxsize],
+                args[0].span(),
+                objects,
+            )?;
         }
         Ok(TypedValue::integer(CType::UnsignedLong, written as i128))
     }
@@ -30837,6 +32592,25 @@ impl<'a> Interpreter<'a> {
                 args[0].span(),
                 objects,
             )?;
+        } else if maxsize != 0 {
+            let dest_pointer = evaluated[0].as_pointer(args[0].span())?;
+            let total = maxsize
+                .checked_mul(self.wide_char_byte_width())
+                .ok_or_else(|| {
+                    Diagnostic::error(
+                        "wcsftime destination size is out of supported range",
+                        args[1].span(),
+                    )
+                })?;
+            let (object_id, start, _) =
+                self.byte_region_from_pointer(&dest_pointer, total, args[0].span(), objects)?;
+            self.overlay_byte_cells_into_object(
+                object_id,
+                start,
+                &vec![ByteCell::Indeterminate; total],
+                args[0].span(),
+                objects,
+            )?;
         }
         Ok(TypedValue::integer(CType::UnsignedLong, written as i128))
     }
@@ -30860,6 +32634,14 @@ impl<'a> Interpreter<'a> {
             args[0].span(),
             objects,
         )?;
+        if result == 0 {
+            let version = self
+                .lookup_object(objects, object_id)
+                .expect("fexcept_t output object exists")
+                .modification_count;
+            self.fexcept_provenance
+                .insert((object_id, start), (version, evaluated[1].to_int()?));
+        }
         Ok(TypedValue::int(result as i128))
     }
 
@@ -30906,6 +32688,13 @@ impl<'a> Interpreter<'a> {
             args[0].span(),
             objects,
         )?;
+        if result == 0 {
+            let version = self
+                .lookup_object(objects, object_id)
+                .expect("fenv_t output object exists")
+                .modification_count;
+            self.fenv_provenance.insert((object_id, start), version);
+        }
         Ok(TypedValue::int(result as i128))
     }
 
@@ -30917,27 +32706,19 @@ impl<'a> Interpreter<'a> {
         _span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        let result = if evaluated[0].as_pointer(args[0].span())?.is_null() {
-            match function_name {
-                "fesetenv" => unsafe { fesetenv(std::ptr::null()) },
-                "feupdateenv" => unsafe { feupdateenv(std::ptr::null()) },
-                _ => unreachable!("checked by caller"),
-            }
-        } else {
-            let bytes = self.read_pointer_bytes(
-                &evaluated[0].as_pointer(args[0].span())?,
-                16,
-                args[0].span(),
-                objects,
-            )?;
-            let mut opaque = [0u8; 16];
-            opaque.copy_from_slice(&bytes);
-            let env = HostFEnv { opaque };
-            match function_name {
-                "fesetenv" => unsafe { fesetenv(&env) },
-                "feupdateenv" => unsafe { feupdateenv(&env) },
-                _ => unreachable!("checked by caller"),
-            }
+        let bytes = self.read_pointer_bytes(
+            &evaluated[0].as_pointer(args[0].span())?,
+            16,
+            args[0].span(),
+            objects,
+        )?;
+        let mut opaque = [0u8; 16];
+        opaque.copy_from_slice(&bytes);
+        let env = HostFEnv { opaque };
+        let result = match function_name {
+            "fesetenv" => unsafe { fesetenv(&env) },
+            "feupdateenv" => unsafe { feupdateenv(&env) },
+            _ => unreachable!("checked by caller"),
         };
         Ok(TypedValue::int(result as i128))
     }
@@ -30997,28 +32778,29 @@ impl<'a> Interpreter<'a> {
                 member_path: Vec::new(),
                 designated_root_ty: None,
                 byte_offset_override: None,
+                arithmetic_domain_start: None,
             },
         ))
     }
 
     fn eval_malloc_call(
         &mut self,
-        evaluated: &[TypedValue],
         span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        let size = self.checked_usize_from_unsigned_long(&evaluated[0], span, "malloc size")?;
+        let Some(PendingHeapCall::Malloc(size)) = self.pending_heap_call.take() else {
+            return Err(Diagnostic::error(
+                "malloc precondition result was not available",
+                span,
+            ));
+        };
         if size == 0 {
             return Ok(self.void_pointer_value(Self::null_pointer()));
         }
         if !self.dynamic_allocation_fits(size, None, objects) {
             return Ok(self.void_pointer_value(Self::null_pointer()));
         }
-        let host_ptr = unsafe { libc::malloc(size) };
-        if host_ptr.is_null() {
-            return Ok(self.void_pointer_value(Self::null_pointer()));
-        }
-        let object = self.allocate_dynamic_raw_object(objects, size, span, false, host_ptr)?;
+        let object = self.allocate_dynamic_raw_object(objects, size, span, false)?;
         Ok(self.void_pointer_value(PointerValue {
             object: Some(object),
             base_offset: 0,
@@ -31026,6 +32808,7 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
         }))
     }
 
@@ -31047,17 +32830,7 @@ impl<'a> Interpreter<'a> {
         {
             return Ok(self.void_pointer_value(Self::null_pointer()));
         }
-        let host_ptr = unsafe {
-            if alignment <= HOST_LONG_DOUBLE_ALIGN {
-                libc::malloc(size)
-            } else {
-                libc::aligned_alloc(alignment, size)
-            }
-        };
-        if host_ptr.is_null() {
-            return Ok(self.void_pointer_value(Self::null_pointer()));
-        }
-        let object = self.allocate_dynamic_raw_object(objects, size, span, false, host_ptr)?;
+        let object = self.allocate_dynamic_raw_object(objects, size, span, false)?;
         self.ensure_object_alignment(
             object,
             &CType::array_of(CType::UnsignedChar, size),
@@ -31070,18 +32843,22 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
         }))
     }
 
     fn eval_calloc_call(
         &mut self,
-        evaluated: &[TypedValue],
         span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        let count = self.checked_usize_from_unsigned_long(&evaluated[0], span, "calloc count")?;
-        let size = self.checked_usize_from_unsigned_long(&evaluated[1], span, "calloc size")?;
-        let Some(total) = count.checked_mul(size) else {
+        let Some(PendingHeapCall::Calloc(total)) = self.pending_heap_call.take() else {
+            return Err(Diagnostic::error(
+                "calloc precondition result was not available",
+                span,
+            ));
+        };
+        let Some(total) = total else {
             return Ok(self.void_pointer_value(Self::null_pointer()));
         };
         if total == 0 {
@@ -31090,11 +32867,7 @@ impl<'a> Interpreter<'a> {
         if !self.dynamic_allocation_fits(total, None, objects) {
             return Ok(self.void_pointer_value(Self::null_pointer()));
         }
-        let host_ptr = unsafe { libc::calloc(count, size) };
-        if host_ptr.is_null() {
-            return Ok(self.void_pointer_value(Self::null_pointer()));
-        }
-        let object = self.allocate_dynamic_raw_object(objects, total, span, true, host_ptr)?;
+        let object = self.allocate_dynamic_raw_object(objects, total, span, true)?;
         Ok(self.void_pointer_value(PointerValue {
             object: Some(object),
             base_offset: 0,
@@ -31102,42 +32875,58 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
         }))
     }
 
     fn eval_realloc_call(
         &mut self,
-        evaluated: &[TypedValue],
-        args: &[Expr],
         span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        let pointer = evaluated[0].as_pointer(args[0].span())?;
-        let size =
-            self.checked_usize_from_unsigned_long(&evaluated[1], args[1].span(), "realloc size")?;
-        let Some(old_object_id) =
-            self.validate_heap_allocation_pointer(&pointer, args[0].span(), objects)?
+        let Some(PendingHeapCall::Realloc {
+            object: old_object,
+            size,
+        }) = self.pending_heap_call.take()
         else {
-            return self.eval_malloc_call(&evaluated[1..], span, objects);
+            return Err(Diagnostic::error(
+                "realloc precondition result was not available",
+                span,
+            ));
+        };
+        let Some(old_object_id) = old_object else {
+            if size == 0 || !self.dynamic_allocation_fits(size, None, objects) {
+                return Ok(self.void_pointer_value(Self::null_pointer()));
+            }
+            let object = self.allocate_dynamic_raw_object(objects, size, span, false)?;
+            return Ok(self.void_pointer_value(PointerValue {
+                object: Some(object),
+                base_offset: 0,
+                offset: 0,
+                member_path: Vec::new(),
+                designated_root_ty: None,
+                byte_offset_override: None,
+                arithmetic_domain_start: None,
+            }));
         };
         if size == 0 {
-            self.eval_free_call(&evaluated[..1], args, span, objects)?;
+            let _ = self.dynamic_allocations.remove(&old_object_id);
+            self.retire_dynamic_object(old_object_id, objects)?;
             return Ok(self.void_pointer_value(Self::null_pointer()));
         }
         if !self.dynamic_allocation_fits(size, Some(old_object_id), objects) {
             return Ok(self.void_pointer_value(Self::null_pointer()));
         }
-        let old_host_ptr = *self.host_allocations.get(&old_object_id).ok_or_else(|| {
-            Diagnostic::error("heap allocation is missing its host backing store", span)
-        })?;
-        let new_host_ptr = unsafe { libc::realloc(old_host_ptr, size) };
-        if new_host_ptr.is_null() {
-            return Ok(self.void_pointer_value(Self::null_pointer()));
+        if !self.dynamic_allocations.contains(&old_object_id) {
+            return Err(Diagnostic::error(
+                "heap allocation is missing its interpreter backing store",
+                span,
+            ));
         }
         let old_snapshot = self.lookup_object(objects, old_object_id).cloned().ok_or_else(|| {
             Diagnostic::ub(
                 "realloc requires a pointer value returned by malloc/calloc/realloc or a null pointer",
-                args[0].span(),
+                span,
                 Some("7.20.3.4"),
             )
         })?;
@@ -31145,12 +32934,17 @@ impl<'a> Interpreter<'a> {
         let copy_len = old_bytes.len().min(size);
         let mut new_bytes = vec![ByteCell::Indeterminate; size];
         self.overlay_bytes(&mut new_bytes, 0, &old_bytes[..copy_len]);
-        let object = self.allocate_dynamic_raw_object(objects, size, span, false, new_host_ptr)?;
+        let indeterminate_bytes = new_bytes
+            .iter()
+            .filter(|byte| matches!(byte, ByteCell::Indeterminate))
+            .count();
+        let object = self.allocate_dynamic_raw_object(objects, size, span, false)?;
         let new_value = StoredValue::ObjectRepresentation(new_bytes);
         let initialized = self.stored_value_is_determinate(&new_value);
         let preserved_effective_types = old_snapshot
             .effective_types
-            .into_iter()
+            .iter()
+            .cloned()
             .filter(|region| {
                 region
                     .start
@@ -31158,13 +32952,16 @@ impl<'a> Interpreter<'a> {
                     .is_some_and(|end| end <= copy_len)
             })
             .collect();
+        let preserved_pointer_slots = Self::copied_pointer_slots(&old_snapshot, 0, 0, copy_len);
         if let Some(state) = self.lookup_object_mut(objects, object) {
             state.value = new_value;
             state.initialized = initialized;
             state.indeterminate_reason = None;
             state.effective_types = preserved_effective_types;
+            state.pointer_slots.extend(preserved_pointer_slots);
+            state.raw_indeterminate_bytes = Some((state.modification_count, indeterminate_bytes));
         }
-        let _ = self.host_allocations.remove(&old_object_id);
+        let _ = self.dynamic_allocations.remove(&old_object_id);
         self.retire_dynamic_object(old_object_id, objects)?;
         Ok(self.void_pointer_value(PointerValue {
             object: Some(object),
@@ -31173,6 +32970,7 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
         }))
     }
 
@@ -31185,38 +32983,31 @@ impl<'a> Interpreter<'a> {
         if requested_size > MAX_DYNAMIC_ALLOCATION_BYTES {
             return false;
         }
-        let used = self
-            .host_allocations
-            .keys()
-            .copied()
-            .filter(|object| Some(*object) != replaced_object)
-            .try_fold(0usize, |total, object| {
-                total.checked_add(self.lookup_object(objects, object)?.byte_size)
-            });
-        used.is_some_and(|used| {
-            used.checked_add(requested_size)
-                .is_some_and(|total| total <= MAX_DYNAMIC_ALLOCATION_BYTES)
-        })
+        let replaced_size = replaced_object
+            .and_then(|object| self.lookup_object(objects, object))
+            .map(|object| object.byte_size)
+            .unwrap_or(0);
+        self.dynamic_bytes_allocated
+            .checked_sub(replaced_size)
+            .and_then(|used| used.checked_add(requested_size))
+            .is_some_and(|total| total <= MAX_DYNAMIC_ALLOCATION_BYTES)
     }
 
     fn eval_free_call(
         &mut self,
-        evaluated: &[TypedValue],
-        args: &[Expr],
-        _span: Span,
+        span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        let pointer = evaluated[0].as_pointer(args[0].span())?;
-        let Some(object_id) =
-            self.validate_heap_allocation_pointer(&pointer, args[0].span(), objects)?
-        else {
+        let Some(PendingHeapCall::Free(object)) = self.pending_heap_call.take() else {
+            return Err(Diagnostic::error(
+                "free precondition result was not available",
+                span,
+            ));
+        };
+        let Some(object_id) = object else {
             return Ok(TypedValue::void());
         };
-        if let Some(host_ptr) = self.host_allocations.remove(&object_id) {
-            unsafe {
-                libc::free(host_ptr);
-            }
-        }
+        let _ = self.dynamic_allocations.remove(&object_id);
         self.retire_dynamic_object(object_id, objects)?;
         Ok(TypedValue::void())
     }
@@ -31260,6 +33051,8 @@ impl<'a> Interpreter<'a> {
         let source_pointee = source_expr_ty.element_type();
         let copied_effective_types =
             self.copied_effective_type_regions(&src_snapshot, src_start, size, source_pointee);
+        let copied_pointer_slots =
+            Self::copied_pointer_slots(&src_snapshot, src_start, dest_start, size);
         let next_effective_types =
             self.lookup_object(objects, dest_object_id)
                 .and_then(|dest_object| {
@@ -31286,6 +33079,9 @@ impl<'a> Interpreter<'a> {
             next_effective_types,
         ) {
             dest_object.effective_types = next_effective_types;
+        }
+        if let Some(dest_object) = self.lookup_object_mut(objects, dest_object_id) {
+            dest_object.pointer_slots.extend(copied_pointer_slots);
         }
         Ok(dest)
     }
@@ -31329,6 +33125,8 @@ impl<'a> Interpreter<'a> {
         let source_pointee = source_expr_ty.element_type();
         let copied_effective_types =
             self.copied_effective_type_regions(&src_snapshot, src_start, size, source_pointee);
+        let copied_pointer_slots =
+            Self::copied_pointer_slots(&src_snapshot, src_start, dest_start, size);
         let next_effective_types =
             self.lookup_object(objects, dest_object_id)
                 .and_then(|dest_object| {
@@ -31355,6 +33153,9 @@ impl<'a> Interpreter<'a> {
             next_effective_types,
         ) {
             dest_object.effective_types = next_effective_types;
+        }
+        if let Some(dest_object) = self.lookup_object_mut(objects, dest_object_id) {
+            dest_object.pointer_slots.extend(copied_pointer_slots);
         }
         Ok(dest)
     }
@@ -31843,12 +33644,10 @@ impl<'a> Interpreter<'a> {
         let mut bytes = self.read_c_string_bytes(src_pointer, args[0].span(), objects)?;
         bytes.push(0);
         let return_ty = self.host_function_return_type("strdup", span.file, span)?;
-        let host_ptr = unsafe { libc::malloc(bytes.len()) };
-        if host_ptr.is_null() {
+        if !self.dynamic_allocation_fits(bytes.len(), None, objects) {
             return Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()));
         }
-        let object =
-            self.allocate_dynamic_raw_object(objects, bytes.len(), span, false, host_ptr)?;
+        let object = self.allocate_dynamic_raw_object(objects, bytes.len(), span, false)?;
         self.overlay_known_bytes_into_object(object, 0, &bytes, span, objects)?;
         Ok(self.pointer_value_with_type(
             return_ty,
@@ -31859,6 +33658,7 @@ impl<'a> Interpreter<'a> {
                 member_path: Vec::new(),
                 designated_root_ty: None,
                 byte_offset_override: None,
+                arithmetic_domain_start: None,
             },
         ))
     }
@@ -32034,6 +33834,9 @@ impl<'a> Interpreter<'a> {
             objects,
         )?;
         let first = evaluated[0].as_pointer(args[0].span())?;
+        if !first.is_null() {
+            self.strtok_started = true;
+        }
         let source_pointer = if first.is_null() {
             let Some(pointer) = self.strtok_state.clone() else {
                 return Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()));
@@ -32431,90 +34234,11 @@ impl<'a> Interpreter<'a> {
         self.eval_sizeof_type(&ty, span)
     }
 
-    fn eval_number_literal(&self, text: &str, span: Span) -> Result<TypedValue, Diagnostic> {
-        if self.is_floating_literal(text) {
-            let (ty, value) = self.parse_floating_literal(text, span)?;
-            Ok(TypedValue::floating(ty, value))
-        } else {
-            self.eval_integer_literal(text, span)
+    fn eval_number_literal(&self, literal: &NumberLiteral) -> TypedValue {
+        match literal.value {
+            NumberValue::Integer(value) => TypedValue::integer(literal.ty.clone(), value),
+            NumberValue::Floating(value) => TypedValue::floating(literal.ty.clone(), value),
         }
-    }
-
-    fn eval_integer_literal(&self, text: &str, span: Span) -> Result<TypedValue, Diagnostic> {
-        let (ty, value, _) = self.parse_integer_literal(text, span)?;
-        Ok(TypedValue::integer(ty, value))
-    }
-
-    fn number_literal_type(&self, text: &str, span: Span) -> Result<CType, Diagnostic> {
-        if self.is_floating_literal(text) {
-            self.parse_floating_literal(text, span).map(|(ty, _)| ty)
-        } else {
-            self.integer_literal_type(text, span)
-        }
-    }
-
-    fn integer_literal_type(&self, text: &str, span: Span) -> Result<CType, Diagnostic> {
-        self.parse_integer_literal(text, span).map(|(ty, _, _)| ty)
-    }
-
-    fn is_floating_literal(&self, text: &str) -> bool {
-        let body = text.trim_end_matches(|ch: char| matches!(ch, 'f' | 'F' | 'l' | 'L'));
-        if body.starts_with("0x") || body.starts_with("0X") {
-            body.contains('.') || body.contains('p') || body.contains('P')
-        } else {
-            body.contains('.') || body.contains('e') || body.contains('E')
-        }
-    }
-
-    fn parse_floating_literal(&self, text: &str, span: Span) -> Result<(CType, f64), Diagnostic> {
-        let (body, ty) = match text.chars().last() {
-            Some('f' | 'F') => (&text[..text.len() - 1], CType::Float),
-            Some('l' | 'L') => (&text[..text.len() - 1], CType::LongDouble),
-            _ => (text, CType::Double),
-        };
-        if (body.starts_with("0x") || body.starts_with("0X")) && !body.contains(['p', 'P']) {
-            return Err(Diagnostic::error(
-                "hexadecimal floating literal requires a binary exponent",
-                span,
-            ));
-        }
-        let c_string = CString::new(body).map_err(|_| {
-            Diagnostic::error("floating literal contains an interior NUL byte", span)
-        })?;
-        let mut end_ptr = std::ptr::null_mut();
-        let value = unsafe { strtod(c_string.as_ptr(), &mut end_ptr) };
-        if end_ptr != unsafe { c_string.as_ptr().add(body.len()) }.cast_mut() {
-            return Err(Diagnostic::error("invalid floating literal", span));
-        }
-        if !value.is_finite() {
-            return Err(Diagnostic::error(
-                "floating literal is out of supported range",
-                span,
-            ));
-        }
-        let converted = match ty {
-            CType::Float => {
-                let narrowed = value as f32;
-                if !narrowed.is_finite() {
-                    return Err(Diagnostic::error(
-                        "floating literal is out of range for float",
-                        span,
-                    ));
-                }
-                narrowed as f64
-            }
-            CType::Double | CType::LongDouble => value,
-            _ => unreachable!(),
-        };
-        Ok((ty, converted))
-    }
-
-    fn parse_integer_literal(
-        &self,
-        text: &str,
-        span: Span,
-    ) -> Result<(CType, i128, bool), Diagnostic> {
-        parse_integer_literal(text, span)
     }
 
     fn expr_type(
@@ -32524,7 +34248,7 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
     ) -> Result<CType, Diagnostic> {
         match expr {
-            Expr::Number(text, span) => self.number_literal_type(text, *span),
+            Expr::Number(literal, _) => Ok(literal.ty.clone()),
             Expr::CharLiteral(_, _) => Ok(CType::Int),
             Expr::WideCharLiteral(_, _) => Ok(self.wchar_type()),
             Expr::Utf16CharLiteral(_, _) => Ok(CType::UnsignedShort),
@@ -32664,10 +34388,8 @@ impl<'a> Interpreter<'a> {
                                 _ => false,
                             })
                         || (lhs_ty.is_pointer()
-                            && rhs_ty.is_integer()
                             && self.is_null_pointer_constant(rhs, frame, objects)?)
                         || (rhs_ty.is_pointer()
-                            && lhs_ty.is_integer()
                             && self.is_null_pointer_constant(lhs, frame, objects)?);
                     if compatible {
                         Ok(CType::Int)
@@ -32700,7 +34422,9 @@ impl<'a> Interpreter<'a> {
                         return Ok(CType::Int);
                     }
                     Err(Diagnostic::error(
-                        "relational operators require real operands or pointers to compatible object types",
+                        format!(
+                            "relational operators require real operands or pointers to compatible object types, but operands have types {lhs_ty} and {rhs_ty}"
+                        ),
                         lhs.span().merge(rhs.span()),
                     ))
                 }
@@ -32835,11 +34559,18 @@ impl<'a> Interpreter<'a> {
                 else_expr,
                 ..
             } => self.conditional_result_type(then_expr, else_expr, expr.span(), frame, objects),
-            Expr::Call { callee, span, .. } => {
+            Expr::Call {
+                callee,
+                declared_callee_type,
+                span,
+                ..
+            } => {
                 if matches!(callee.as_ref(), Expr::Variable(name, _) if name == "printf") {
                     return Ok(CType::Int);
                 }
-                let callee_ty = self.value_expr_type(callee, frame, objects)?;
+                let callee_ty = declared_callee_type
+                    .clone()
+                    .unwrap_or(self.value_expr_type(callee, frame, objects)?);
                 match callee_ty.unqualified() {
                     CType::Pointer(inner) => match inner.unqualified() {
                         CType::Function(return_type, _, _) => Ok((**return_type).clone()),
@@ -33007,7 +34738,13 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
         match expr {
-            Expr::Number(text, span) => self.eval_integer_literal(text, *span),
+            Expr::Number(literal, span) => match literal.value {
+                NumberValue::Integer(value) => Ok(TypedValue::integer(literal.ty.clone(), value)),
+                NumberValue::Floating(_) => Err(Diagnostic::error(
+                    "an integer constant expression cannot use a floating-point value",
+                    *span,
+                )),
+            },
             Expr::CharLiteral(value, _) => Ok(TypedValue::int(*value as i128)),
             Expr::Variable(name, span) => self
                 .program
@@ -33242,7 +34979,11 @@ impl<'a> Interpreter<'a> {
         let mut bytes = Vec::new();
         for byte in all_bytes.into_iter().skip(start) {
             match byte {
-                ByteCell::Known(0) => return Ok(bytes),
+                ByteCell::Known(0) => {
+                    let _ =
+                        self.library_array_region(&pointer, bytes.len() + 1, 1, span, objects)?;
+                    return Ok(bytes);
+                }
                 ByteCell::Known(byte) => bytes.push(byte),
                 ByteCell::Indeterminate => {
                     return Err(Diagnostic::ub(
@@ -33273,9 +35014,12 @@ impl<'a> Interpreter<'a> {
         let (object_id, start, all_bytes) = self.pointer_object_bytes(pointer, span, objects)?;
         let available = all_bytes.len().saturating_sub(start);
         let prefix_len = available.min(limit);
-        for byte in all_bytes.iter().skip(start).take(prefix_len) {
+        for (index, byte) in all_bytes.iter().skip(start).take(prefix_len).enumerate() {
             match byte {
-                ByteCell::Known(0) => return Ok((object_id, start, available)),
+                ByteCell::Known(0) => {
+                    let _ = self.library_array_region(pointer, index + 1, 1, span, objects)?;
+                    return Ok((object_id, start, available));
+                }
                 ByteCell::Known(_) => {}
                 ByteCell::Indeterminate => {
                     return Err(Diagnostic::ub(
@@ -33301,6 +35045,7 @@ impl<'a> Interpreter<'a> {
                 Some("7.1.4"),
             ));
         }
+        let _ = self.library_array_region(pointer, limit, 1, span, objects)?;
         Ok((object_id, start, available))
     }
 
@@ -33312,6 +35057,7 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
     ) -> Result<Vec<u8>, Diagnostic> {
         if limit == 0 {
+            let _ = self.library_array_region(&pointer, 0, 1, span, objects)?;
             return Ok(Vec::new());
         }
         let (_, start, all_bytes) = self.pointer_object_bytes(&pointer, span, objects)?;
@@ -33323,6 +35069,7 @@ impl<'a> Interpreter<'a> {
                 ByteCell::Known(byte) => {
                     result[index] = byte;
                     if byte == 0 {
+                        let _ = self.library_array_region(&pointer, index + 1, 1, span, objects)?;
                         return Ok(result);
                     }
                 }
@@ -33350,6 +35097,7 @@ impl<'a> Interpreter<'a> {
                 Some("7.1.4"),
             ));
         }
+        let _ = self.library_array_region(&pointer, limit, 1, span, objects)?;
         Ok(result)
     }
 
@@ -33401,8 +35149,10 @@ impl<'a> Interpreter<'a> {
                 ),
                 declaration_span: Span::new(crate::source::FileId(0), 0, 0),
                 modification_count: 1,
+                raw_indeterminate_bytes: None,
                 variably_modified: false,
                 effective_types: Vec::new(),
+                pointer_slots: HashMap::default(),
             },
         );
         self.object_type_registry.insert(id, array_ty);
@@ -33413,6 +35163,7 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
         }
     }
 
@@ -33464,6 +35215,7 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
         })
     }
 
@@ -33502,8 +35254,10 @@ impl<'a> Interpreter<'a> {
                 value,
                 declaration_span: Span::new(crate::source::FileId(0), 0, 0),
                 modification_count: 1,
+                raw_indeterminate_bytes: None,
                 variably_modified: false,
                 effective_types: Vec::new(),
+                pointer_slots: HashMap::default(),
             },
         );
         self.object_type_registry.insert(id, array_ty);
@@ -33514,6 +35268,7 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
         })
     }
 
@@ -33565,8 +35320,10 @@ impl<'a> Interpreter<'a> {
                 ),
                 declaration_span: span,
                 modification_count: 1,
+                raw_indeterminate_bytes: None,
                 variably_modified: false,
                 effective_types: Vec::new(),
+                pointer_slots: HashMap::default(),
             },
         );
         self.object_type_registry.insert(id, array_ty.clone());
@@ -33579,6 +35336,7 @@ impl<'a> Interpreter<'a> {
             member_path: Vec::new(),
             designated_root_ty: None,
             byte_offset_override: None,
+            arithmetic_domain_start: None,
             bit_field_width: None,
             restrict_source: None,
         }))
@@ -33603,8 +35361,14 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| Diagnostic::ub("pointer address overflow", span, Some("6.2.6.1p5-6")))?;
         self.encoded_object_pointers
             .insert(pointer.clone(), address);
-        self.decoded_pointers
-            .insert(address, EncodedPointer::Object(pointer.clone()));
+        let candidate = EncodedPointer::Object {
+            pointer: pointer.clone(),
+            pointee_ty: None,
+        };
+        let candidates = self.decoded_pointers.entry(address).or_default();
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
         Ok(())
     }
 
@@ -33814,6 +35578,22 @@ impl<'a> Interpreter<'a> {
             );
         }
         if region.start >= access_start && region_end <= access_end {
+            if let Some(element_ty) = region.coalesced_element_type.as_ref()
+                && let Some(element_size) = self.type_size_of(element_ty)
+                && element_size != 0
+                && region.size % element_size == 0
+                && (0..region.size / element_size).all(|index| {
+                    self.type_region_allows_effective_access(
+                        access_ty,
+                        access_start,
+                        region.start + index * element_size,
+                        element_size,
+                        element_ty,
+                    )
+                })
+            {
+                return true;
+            }
             return self.type_region_allows_effective_access(
                 access_ty,
                 access_start,
@@ -33821,6 +35601,40 @@ impl<'a> Interpreter<'a> {
                 region.size,
                 &region.ty,
             );
+        }
+        if let Some(element_ty) = region.coalesced_element_type.as_ref()
+            && let Some(element_size) = self.type_size_of(element_ty)
+            && element_size != 0
+            && region.size % element_size == 0
+        {
+            return (0..region.size / element_size)
+                .filter_map(|index| {
+                    let element_start = region.start + index * element_size;
+                    let element_end = element_start + element_size;
+                    (access_start < element_end && element_start < access_end)
+                        .then_some((element_start, element_end))
+                })
+                .all(|(element_start, element_end)| {
+                    if element_start >= access_start && element_end <= access_end {
+                        self.type_region_allows_effective_access(
+                            access_ty,
+                            access_start,
+                            element_start,
+                            element_size,
+                            element_ty,
+                        )
+                    } else if access_start >= element_start && access_end <= element_end {
+                        self.type_region_allows_effective_access(
+                            element_ty,
+                            element_start,
+                            access_start,
+                            access_size,
+                            access_ty,
+                        )
+                    } else {
+                        false
+                    }
+                });
         }
         false
     }
@@ -33831,6 +35645,8 @@ impl<'a> Interpreter<'a> {
         start: usize,
         size: usize,
         access_ty: &CType,
+        access_root_ty: &CType,
+        member_path: &[String],
         span: Span,
     ) -> Result<(), Diagnostic> {
         if object.storage_duration != StorageDuration::Dynamic
@@ -33843,6 +35659,12 @@ impl<'a> Interpreter<'a> {
             if start < region.start.saturating_add(region.size)
                 && region.start < start.saturating_add(size)
                 && !self.effective_region_allows_access(region, start, size, access_ty)
+                && !self.union_member_path_allows_effective_access(
+                    access_root_ty,
+                    member_path,
+                    &region.ty,
+                    access_ty,
+                )
             {
                 return Err(Diagnostic::ub(
                     format!(
@@ -33855,6 +35677,42 @@ impl<'a> Interpreter<'a> {
             }
         }
         Ok(())
+    }
+
+    fn union_member_path_allows_effective_access(
+        &self,
+        root_ty: &CType,
+        member_path: &[String],
+        stored_ty: &CType,
+        access_ty: &CType,
+    ) -> bool {
+        let mut current_ty = root_ty;
+        for member_name in member_path {
+            while let CType::Array(inner, _) = current_ty.unqualified() {
+                current_ty = inner;
+            }
+            let Some(record) = self.record_type(current_ty) else {
+                return false;
+            };
+            let Some(selected) = record
+                .members
+                .iter()
+                .find(|member| member.storage_name == *member_name)
+            else {
+                return false;
+            };
+            if record.kind == crate::types::RecordKind::Union
+                && self.compatible_object_layout_types(&selected.ty, access_ty)
+                && record
+                    .members
+                    .iter()
+                    .any(|member| self.compatible_object_layout_types(&member.ty, stored_ty))
+            {
+                return true;
+            }
+            current_ty = &selected.ty;
+        }
+        false
     }
 
     fn split_effective_region_around_write(
@@ -33891,6 +35749,7 @@ impl<'a> Interpreter<'a> {
                         start: region.start,
                         size: first * stride,
                         ty: CType::array_of((**inner).clone(), first),
+                        coalesced_element_type: region.coalesced_element_type.clone(),
                     });
                 }
                 for index in first..last {
@@ -33898,6 +35757,7 @@ impl<'a> Interpreter<'a> {
                         start: region.start + index * stride,
                         size: stride,
                         ty: (**inner).clone(),
+                        coalesced_element_type: None,
                     };
                     let child_end = child.start + child.size;
                     if !(write_start <= child.start && write_end >= child_end) {
@@ -33914,6 +35774,7 @@ impl<'a> Interpreter<'a> {
                         start: region.start + last * stride,
                         size: (*len - last) * stride,
                         ty: CType::array_of((**inner).clone(), *len - last),
+                        coalesced_element_type: region.coalesced_element_type.clone(),
                     });
                 }
             }
@@ -33931,6 +35792,7 @@ impl<'a> Interpreter<'a> {
                                 start: region.start.saturating_add(member.offset),
                                 size: member_size,
                                 ty: member.ty.clone(),
+                                coalesced_element_type: None,
                             },
                             write_start,
                             write_size,
@@ -33942,6 +35804,63 @@ impl<'a> Interpreter<'a> {
             CType::Union(_, _) => {}
             _ => {}
         }
+    }
+
+    fn coalesce_effective_type_regions(&self, regions: &mut Vec<EffectiveTypeRegion>) {
+        regions.sort_unstable_by_key(|region| region.start);
+        let mut coalesced: Vec<EffectiveTypeRegion> = Vec::with_capacity(regions.len());
+        for region in regions.drain(..) {
+            let Some(previous) = coalesced.last_mut() else {
+                coalesced.push(region);
+                continue;
+            };
+            if previous.start == region.start
+                && previous.size == region.size
+                && previous.ty == region.ty
+            {
+                continue;
+            }
+            let Some(previous_end) = previous.start.checked_add(previous.size) else {
+                coalesced.push(region);
+                continue;
+            };
+            if previous_end != region.start {
+                coalesced.push(region);
+                continue;
+            }
+            let previous_element = previous
+                .coalesced_element_type
+                .clone()
+                .unwrap_or_else(|| previous.ty.clone());
+            let region_element = region
+                .coalesced_element_type
+                .clone()
+                .unwrap_or_else(|| region.ty.clone());
+            if previous_element != region_element {
+                coalesced.push(region);
+                continue;
+            }
+            let Some(element_size) = self.type_size_of(&previous_element) else {
+                coalesced.push(region);
+                continue;
+            };
+            if element_size == 0
+                || previous.size % element_size != 0
+                || region.size % element_size != 0
+            {
+                coalesced.push(region);
+                continue;
+            }
+            let Some(size) = previous.size.checked_add(region.size) else {
+                coalesced.push(region);
+                continue;
+            };
+            let count = size / element_size;
+            previous.size = size;
+            previous.ty = CType::array_of(previous_element.clone(), count);
+            previous.coalesced_element_type = Some(previous_element);
+        }
+        *regions = coalesced;
     }
 
     fn dynamic_effective_types_after_store(
@@ -33972,8 +35891,10 @@ impl<'a> Interpreter<'a> {
                 start,
                 size,
                 ty: access_ty.unqualified().clone(),
+                coalesced_element_type: None,
             });
         }
+        self.coalesce_effective_type_regions(&mut updated);
         Some(updated)
     }
 
@@ -34091,7 +36012,14 @@ impl<'a> Interpreter<'a> {
         if source.storage_duration != StorageDuration::Dynamic {
             return self
                 .choose_copied_effective_type(&source.ty, 0, start, size, source_pointee)
-                .map(|ty| vec![EffectiveTypeRegion { start, size, ty }])
+                .map(|ty| {
+                    vec![EffectiveTypeRegion {
+                        start,
+                        size,
+                        ty,
+                        coalesced_element_type: None,
+                    }]
+                })
                 .unwrap_or_default();
         }
 
@@ -34125,7 +36053,12 @@ impl<'a> Interpreter<'a> {
                     size,
                     source_pointee,
                 ) {
-                    copied.push(EffectiveTypeRegion { start, size, ty });
+                    copied.push(EffectiveTypeRegion {
+                        start,
+                        size,
+                        ty,
+                        coalesced_element_type: None,
+                    });
                 }
             }
         }
@@ -34153,8 +36086,10 @@ impl<'a> Interpreter<'a> {
                 start: dest_start.checked_add(relative)?,
                 size: region.size,
                 ty: region.ty,
+                coalesced_element_type: region.coalesced_element_type,
             })
         }));
+        self.coalesce_effective_type_regions(&mut updated);
         Some(updated)
     }
 
@@ -34328,10 +36263,22 @@ impl<'a> Interpreter<'a> {
                 ));
             }
         }
-        if matches!(
-            target_inner.unqualified(),
-            CType::Struct(_, _) | CType::Union(_, _)
-        ) && !pointer.member_path.is_empty()
+        let points_into_dynamic_raw_storage = pointer
+            .object
+            .and_then(|object_id| self.lookup_object(objects, object_id))
+            .is_some_and(|object| {
+                object.storage_duration == StorageDuration::Dynamic
+                    && matches!(
+                        object.ty.unqualified(),
+                        CType::Array(inner, _) if inner.is_character()
+                    )
+            });
+        if !points_into_dynamic_raw_storage
+            && matches!(
+                target_inner.unqualified(),
+                CType::Struct(_, _) | CType::Union(_, _)
+            )
+            && !pointer.member_path.is_empty()
             && !self.pointer_targets_initial_member_chain(&pointer, target_inner, objects)
         {
             return Err(Diagnostic::ub(
@@ -34359,14 +36306,42 @@ impl<'a> Interpreter<'a> {
             return false;
         };
         match root_ty.unqualified() {
-            CType::Array(inner, _) if self.compatible_object_layout_types(inner, target) => {
-                self.path_is_initial_member_chain(inner, &pointer.member_path)
+            CType::Array(inner, _) => {
+                self.path_reaches_initial_container(inner, &pointer.member_path, target)
             }
-            _ if self.compatible_object_layout_types(root_ty, target) => {
-                self.path_is_initial_member_chain(root_ty, &pointer.member_path)
-            }
-            _ => false,
+            _ => self.path_reaches_initial_container(root_ty, &pointer.member_path, target),
         }
+    }
+
+    fn path_reaches_initial_container(
+        &self,
+        root: &CType,
+        path: &[String],
+        target: &CType,
+    ) -> bool {
+        let mut current = root.clone();
+        for index in 0..=path.len() {
+            if self.cross_unit_tagged_type_compatible(&current, target)
+                && self.path_is_initial_member_chain(&current, &path[index..])
+            {
+                return true;
+            }
+            let Some(name) = path.get(index) else {
+                break;
+            };
+            let Some(record) = self.record_type(&current) else {
+                return false;
+            };
+            let Some(member_index) = record
+                .members
+                .iter()
+                .position(|member| member.storage_name == *name)
+            else {
+                return false;
+            };
+            current = self.qualified_member_type(&current, &record.members[member_index]);
+        }
+        false
     }
 
     fn path_is_initial_member_chain(&self, ty: &CType, path: &[String]) -> bool {
@@ -34428,17 +36403,28 @@ impl<'a> Interpreter<'a> {
         }
         let root_ty = self.pointer_root_type(pointer, objects)?;
         let member_ty = self.storage_path_type(root_ty, &pointer.member_path)?;
-        let mut base_pointer = pointer.clone();
-        base_pointer.offset = 0;
-        base_pointer.byte_offset_override = None;
-        let member_start =
-            self.pointer_byte_offset_from_type(&base_pointer, &member_ty, root_ty)?;
-        let member_end = self
-            .type_size_of(&member_ty)
-            .and_then(|size| member_start.checked_add(size))
-            .unwrap_or(object_size)
-            .min(object_size);
-        (current_start <= member_end).then_some(member_end - current_start)
+        let object_remaining = object_size.checked_sub(current_start)?;
+        if matches!(member_ty.unqualified(), CType::Array(_, 0)) {
+            // A flexible array member behaves as the longest array that fits in the
+            // containing allocated object (C11 6.7.2.1p18).
+            return Some(object_remaining);
+        }
+        let member_size = self.type_size_of(&member_ty)?;
+        let element_ty = match member_ty.unqualified() {
+            CType::Array(inner, _) => &**inner,
+            _ => &member_ty,
+        };
+        let element_size = self.type_size_of(element_ty)?;
+        // A byte offset override already identifies the selected array element. Applying the
+        // logical element offset again would incorrectly consume bytes from its member.
+        let offset = if pointer.byte_offset_override.is_some() {
+            0
+        } else {
+            usize::try_from(pointer.offset).ok()?
+        };
+        let consumed = offset.checked_mul(element_size)?;
+        let member_remaining = member_size.checked_sub(consumed)?;
+        Some(member_remaining.min(object_remaining))
     }
 
     fn pointer_byte_offset_from_type(
@@ -34639,6 +36625,16 @@ impl<'a> Interpreter<'a> {
             let size = self.type_size_of(effective_ty)?;
             return Some((lvalue.object, start, size));
         }
+        if lvalue.base_offset == 0
+            && lvalue.offset == 0
+            && lvalue.member_path.is_empty()
+            && lvalue.designated_root_ty.is_none()
+        {
+            let object = self.lookup_object(objects, lvalue.object)?;
+            if self.compatible_object_layout_types(&object.ty, effective_ty) {
+                return Some((lvalue.object, 0, self.type_size_of(effective_ty)?));
+            }
+        }
         let default_root = self
             .lookup_object(objects, lvalue.object)
             .map(|object| &object.ty)?;
@@ -34650,6 +36646,7 @@ impl<'a> Interpreter<'a> {
             member_path: lvalue.member_path.clone(),
             designated_root_ty: lvalue.designated_root_ty.clone(),
             byte_offset_override: lvalue.byte_offset_override,
+            arithmetic_domain_start: lvalue.arithmetic_domain_start,
         };
         let start = self.pointer_byte_offset_from_type(&pointer, effective_ty, root_ty)?;
         let size = self.type_size_of(effective_ty)?;
@@ -35245,7 +37242,11 @@ impl<'a> Interpreter<'a> {
             };
             return Err(Diagnostic::ub(message, span, Some("6.2.6.1p5-6")));
         }
-        if value.indeterminate && !ty.is_character() && !all_bit_patterns_valid(ty) {
+        if value.indeterminate
+            && !ty.is_character()
+            && !matches!(ty.unqualified(), CType::Struct(_, _) | CType::Union(_, _))
+            && !all_bit_patterns_valid(ty)
+        {
             return Err(Diagnostic::ub(
                 format!(
                     "read of indeterminate {} with a potentially invalid object representation",
@@ -35438,6 +37439,8 @@ impl<'a> Interpreter<'a> {
                 access_start,
                 access_size,
                 &lvalue.ty,
+                lvalue.designated_root_ty.as_ref().unwrap_or(&object.ty),
+                &lvalue.member_path,
                 span,
             )?;
             let compact_raw_storage = object.byte_size >= COMPACT_OBJECT_REPRESENTATION_THRESHOLD
@@ -35451,7 +37454,25 @@ impl<'a> Interpreter<'a> {
             {
                 let effective_ty = lvalue.ty.clone();
                 self.record_restrict_access(&lvalue, &effective_ty, false, span, objects)?;
-                let loaded = self.load_raw_byte_lvalue(&lvalue, span, objects)?;
+                let mut loaded = self.load_raw_byte_lvalue(&lvalue, span, objects)?;
+                if let Some(width) = lvalue.bit_field_width {
+                    let bit_offset = self.lvalue_bit_field_offset(&lvalue, objects).unwrap_or(0);
+                    let mask = self.integer_mask(width as u32);
+                    let bits = ((loaded.to_int()? as u128) >> bit_offset) & mask;
+                    let value = if matches!(lvalue.ty.unqualified(), CType::Bool)
+                        || lvalue.ty.is_unsigned_integer()
+                    {
+                        bits as i128
+                    } else {
+                        let sign_bit = 1u128 << (width - 1);
+                        if bits & sign_bit != 0 {
+                            (bits as i128) - ((mask + 1) as i128)
+                        } else {
+                            bits as i128
+                        }
+                    };
+                    loaded = TypedValue::integer(lvalue.ty.clone(), value);
+                }
                 self.reject_potentially_invalid_object_representation(
                     &loaded,
                     &effective_ty,
@@ -35920,40 +37941,59 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        let object = self
-            .lookup_object(objects, lvalue.object)
-            .cloned()
-            .ok_or_else(|| {
-                Diagnostic::ub(
-                    "access through a pointer to an object whose lifetime has ended",
-                    span,
-                    Some("6.2.4"),
-                )
-            })?;
-        let (object_id, start, size) = self
+        let (_, start, size) = self
             .lvalue_byte_range(lvalue, &lvalue.ty, objects)
             .ok_or_else(|| {
                 Diagnostic::ub("pointer is not valid to dereference", span, Some("6.5.3.2"))
             })?;
-        let _ = object_id;
-        if matches!(object.value, StoredValue::Indeterminate) {
-            return Ok(TypedValue::indeterminate_for(Self::unqualified_value_type(
-                &lvalue.ty,
-            )));
-        }
-        let all_bytes = self.serialize_stored_value(&object.ty, &object.value, span)?;
         let end = start.checked_add(size).ok_or_else(|| {
             Diagnostic::ub("pointer is not valid to dereference", span, Some("6.5.3.2"))
         })?;
-        if end > all_bytes.len() {
+        let object = self.lookup_object(objects, lvalue.object).ok_or_else(|| {
+            Diagnostic::ub(
+                "access through a pointer to an object whose lifetime has ended",
+                span,
+                Some("6.2.4"),
+            )
+        })?;
+        if end > object.byte_size {
             return Err(Diagnostic::ub(
                 "pointer is not valid to dereference",
                 span,
                 Some("6.5.3.2"),
             ));
         }
+        if matches!(lvalue.ty.unqualified(), CType::Pointer(_))
+            && let Some(stored_pointer) = object.pointer_slots.get(&(start, size))
+        {
+            let data = match stored_pointer {
+                StoredPointerValue::Object(pointer) => ValueData::Pointer(pointer.clone()),
+                StoredPointerValue::Function(name) => ValueData::Function(name.clone()),
+            };
+            return Ok(TypedValue {
+                ty: Self::unqualified_value_type(&lvalue.ty),
+                data,
+                restrict_source: None,
+                indeterminate: false,
+                missing_return: false,
+            });
+        }
+        if matches!(object.value, StoredValue::Indeterminate) {
+            return Ok(TypedValue::indeterminate_for(Self::unqualified_value_type(
+                &lvalue.ty,
+            )));
+        }
+        if let StoredValue::ObjectRepresentation(bytes) = &object.value {
+            let stored = self.deserialize_stored_value(&lvalue.ty, &bytes[start..end], span)?;
+            let value = self.typed_value_from_stored(&lvalue.ty, &stored);
+            return Ok(self.specialize_dynamic_raw_storage_pointer(value, &lvalue.ty, objects));
+        }
+        let object_ty = object.ty.clone();
+        let object_value = object.value.clone();
+        let all_bytes = self.serialize_stored_value(&object_ty, &object_value, span)?;
         let stored = self.deserialize_stored_value(&lvalue.ty, &all_bytes[start..end], span)?;
-        Ok(self.typed_value_from_stored(&lvalue.ty, &stored))
+        let value = self.typed_value_from_stored(&lvalue.ty, &stored);
+        Ok(self.specialize_dynamic_raw_storage_pointer(value, &lvalue.ty, objects))
     }
 
     fn store_raw_byte_lvalue(
@@ -35972,6 +38012,15 @@ impl<'a> Interpreter<'a> {
             })?;
         self.record_write(access_region, span)?;
         let converted = self.convert_value(value, &lvalue.ty, span)?;
+        let stored_pointer = if matches!(lvalue.ty.unqualified(), CType::Pointer(_)) {
+            match &converted.data {
+                ValueData::Pointer(pointer) => Some(StoredPointerValue::Object(pointer.clone())),
+                ValueData::Function(name) => Some(StoredPointerValue::Function(name.clone())),
+                _ => None,
+            }
+        } else {
+            None
+        };
         self.ensure_writable_region(lvalue.object, access_start, access_size, span, objects)?;
         let (object_ty, volatile_object) = {
             let object = self.lookup_object(objects, lvalue.object).ok_or_else(|| {
@@ -36009,11 +38058,132 @@ impl<'a> Interpreter<'a> {
                     &lvalue.ty,
                 )
             });
-        let new_bytes = self.serialize_stored_value(
-            &lvalue.ty,
-            &self.stored_value_from_typed_value(converted, &lvalue.ty, span)?,
-            span,
-        )?;
+        let new_bytes = if let Some(width) = lvalue.bit_field_width {
+            let bit_offset = self.lvalue_bit_field_offset(lvalue, objects).unwrap_or(0);
+            let normalized =
+                self.normalize_bit_field_value(converted.to_int()?, &lvalue.ty, width) as u128;
+            let encoded = normalized << bit_offset;
+            let field_mask = self.integer_mask(width as u32) << bit_offset;
+            let (object_ty, object_size, object_value) = self
+                .lookup_object(objects, lvalue.object)
+                .map(|object| (object.ty.clone(), object.byte_size, object.value.clone()))
+                .ok_or_else(|| {
+                    Diagnostic::ub(
+                        "write through a pointer to an object whose lifetime has ended",
+                        span,
+                        Some("6.2.4"),
+                    )
+                })?;
+            let all_bytes = match &object_value {
+                StoredValue::Indeterminate => vec![ByteCell::Indeterminate; object_size],
+                StoredValue::ObjectRepresentation(bytes) => bytes.clone(),
+                stored => self.serialize_stored_value(&object_ty, stored, span)?,
+            };
+            let end = access_start.checked_add(access_size).ok_or_else(|| {
+                Diagnostic::ub("pointer is not valid to dereference", span, Some("6.5.3.2"))
+            })?;
+            let mut bytes = all_bytes
+                .get(access_start..end)
+                .ok_or_else(|| {
+                    Diagnostic::ub("pointer is not valid to dereference", span, Some("6.5.3.2"))
+                })?
+                .to_vec();
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                let mask = ((field_mask >> (index * 8)) & 0xff) as u8;
+                let bits = ((encoded >> (index * 8)) & 0xff) as u8;
+                *byte = match *byte {
+                    ByteCell::Known(existing) => {
+                        ByteCell::Known((existing & !mask) | (bits & mask))
+                    }
+                    ByteCell::Indeterminate if mask == 0xff => ByteCell::Known(bits),
+                    ByteCell::Indeterminate => ByteCell::Indeterminate,
+                };
+            }
+            bytes
+        } else {
+            self.serialize_stored_value(
+                &lvalue.ty,
+                &self.stored_value_from_typed_value(converted, &lvalue.ty, span)?,
+                span,
+            )?
+        };
+        {
+            let object = lookup_active_object_mut(objects, lvalue.object).ok_or_else(|| {
+                Diagnostic::ub(
+                    "write through a pointer to an object whose lifetime has ended",
+                    span,
+                    Some("6.2.4"),
+                )
+            })?;
+            if object.storage_duration == StorageDuration::Dynamic
+                && matches!(
+                    &object.value,
+                    StoredValue::Indeterminate | StoredValue::ObjectRepresentation(_)
+                )
+            {
+                if matches!(&object.value, StoredValue::Indeterminate) {
+                    object.value = StoredValue::ObjectRepresentation(vec![
+                        ByteCell::Indeterminate;
+                        object.byte_size
+                    ]);
+                }
+                let current_version = object.modification_count;
+                let mut indeterminate_bytes = object
+                    .raw_indeterminate_bytes
+                    .filter(|(version, _)| *version == current_version)
+                    .map(|(_, count)| count)
+                    .unwrap_or_else(|| match &object.value {
+                        StoredValue::ObjectRepresentation(bytes) => bytes
+                            .iter()
+                            .filter(|byte| matches!(byte, ByteCell::Indeterminate))
+                            .count(),
+                        _ => unreachable!(),
+                    });
+                let StoredValue::ObjectRepresentation(all_bytes) = &mut object.value else {
+                    unreachable!();
+                };
+                let end = access_start.checked_add(access_size).ok_or_else(|| {
+                    Diagnostic::ub("pointer is not valid to dereference", span, Some("6.5.3.2"))
+                })?;
+                let destination = all_bytes.get_mut(access_start..end).ok_or_else(|| {
+                    Diagnostic::ub("pointer is not valid to dereference", span, Some("6.5.3.2"))
+                })?;
+                if destination.len() != new_bytes.len() {
+                    return Err(Diagnostic::ub(
+                        "pointer is not valid to dereference",
+                        span,
+                        Some("6.5.3.2"),
+                    ));
+                }
+                for (destination, source) in destination.iter_mut().zip(&new_bytes) {
+                    match (*destination, *source) {
+                        (ByteCell::Indeterminate, ByteCell::Known(_)) => {
+                            indeterminate_bytes = indeterminate_bytes.saturating_sub(1);
+                        }
+                        (ByteCell::Known(_), ByteCell::Indeterminate) => {
+                            indeterminate_bytes = indeterminate_bytes.saturating_add(1);
+                        }
+                        _ => {}
+                    }
+                    *destination = *source;
+                }
+                object.initialized = indeterminate_bytes == 0;
+                object.indeterminate_reason = None;
+                object.modification_count = object.modification_count.saturating_add(1);
+                object.raw_indeterminate_bytes =
+                    Some((object.modification_count, indeterminate_bytes));
+                if let Some(next_effective_types) = next_effective_types {
+                    object.effective_types = next_effective_types;
+                }
+                Self::replace_pointer_slots_for_write(
+                    object,
+                    access_start,
+                    access_size,
+                    stored_pointer,
+                );
+                return Ok(());
+            }
+        }
         let mut all_bytes = {
             let object = lookup_active_object(objects, lvalue.object).ok_or_else(|| {
                 Diagnostic::ub(
@@ -36058,6 +38228,7 @@ impl<'a> Interpreter<'a> {
         if let Some(next_effective_types) = next_effective_types {
             object.effective_types = next_effective_types;
         }
+        Self::replace_pointer_slots_for_write(object, access_start, access_size, stored_pointer);
         Ok(())
     }
 
@@ -36215,16 +38386,18 @@ impl<'a> Interpreter<'a> {
                     (target.unqualified(), source_ty.unqualified())
                     && let ValueData::Pointer(pointer) = &mut data
                 {
-                    if ((target_inner.is_character()
+                    if (((target_inner.is_character()
+                        || matches!(target_inner.unqualified(), CType::Void))
                         && !self.compatible_object_layout_types(target_inner, source_inner))
                         || Self::corresponding_signed_unsigned_types(target_inner, source_inner))
                         && !pointer.is_null()
+                        && Self::opaque_integer_pointer_address(pointer).is_none()
                     {
                         let byte_offset = self
                             .pointer_byte_offset_from_root_type(pointer, source_inner)
                             .ok_or_else(|| {
                                 Diagnostic::error(
-                                    "cannot preserve the address while converting to a character pointer",
+                                    "cannot preserve the address while converting to a character or void pointer",
                                     span,
                                 )
                             })?;
@@ -36248,6 +38421,7 @@ impl<'a> Interpreter<'a> {
                         pointer.member_path.clear();
                         pointer.designated_root_ty = Some(domain);
                         pointer.byte_offset_override = Some(byte_offset);
+                        pointer.arithmetic_domain_start = Some(byte_offset);
                     }
                 }
                 Ok(TypedValue {
@@ -36367,8 +38541,10 @@ impl<'a> Interpreter<'a> {
                 value: initial_value,
                 declaration_span,
                 modification_count: 0,
+                raw_indeterminate_bytes: None,
                 variably_modified,
                 effective_types: Vec::new(),
+                pointer_slots: HashMap::default(),
             },
         );
         Ok(id)
@@ -36479,6 +38655,28 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
+        if lhs.ty == rhs.ty
+            && Self::is_promoted_integer_type(&lhs.ty)
+            && matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Rem
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitXor
+                    | BinaryOp::BitOr
+                    | BinaryOp::Less
+                    | BinaryOp::LessEqual
+                    | BinaryOp::Greater
+                    | BinaryOp::GreaterEqual
+            )
+        {
+            self.reject_missing_return_value(&lhs, span)?;
+            self.reject_missing_return_value(&rhs, span)?;
+            return self.compute_same_type_integer_binary_value(op, lhs, rhs, span);
+        }
         if matches!(op, BinaryOp::Add | BinaryOp::Sub)
             && (lhs.ty.is_pointer() || rhs.ty.is_pointer())
         {
@@ -36525,6 +38723,85 @@ impl<'a> Interpreter<'a> {
             | BinaryOp::LogicalAnd
             | BinaryOp::LogicalOr
             | BinaryOp::Comma => unreachable!(),
+        }
+    }
+
+    fn is_promoted_integer_type(ty: &CType) -> bool {
+        matches!(
+            ty.unqualified(),
+            CType::Int
+                | CType::UnsignedInt
+                | CType::Long
+                | CType::UnsignedLong
+                | CType::LongLong
+                | CType::UnsignedLongLong
+        )
+    }
+
+    fn compute_same_type_integer_binary_value(
+        &self,
+        op: BinaryOp,
+        lhs: TypedValue,
+        rhs: TypedValue,
+        span: Span,
+    ) -> Result<TypedValue, Diagnostic> {
+        let ty = lhs.ty.clone();
+        let lhs = lhs.to_int()?;
+        let rhs = rhs.to_int()?;
+        match op {
+            BinaryOp::Add => Ok(TypedValue::integer(
+                ty.clone(),
+                self.integer_add_for_type(lhs, rhs, &ty, span, "6.5.6")?,
+            )),
+            BinaryOp::Sub => Ok(TypedValue::integer(
+                ty.clone(),
+                self.integer_sub_for_type(lhs, rhs, &ty, span, "6.5.6")?,
+            )),
+            BinaryOp::Mul => Ok(TypedValue::integer(
+                ty.clone(),
+                self.integer_mul_for_type(lhs, rhs, &ty, span, "6.5.5")?,
+            )),
+            BinaryOp::Div => Ok(TypedValue::integer(
+                ty.clone(),
+                self.integer_div_for_type(lhs, rhs, &ty, span)?,
+            )),
+            BinaryOp::Rem => Ok(TypedValue::integer(
+                ty.clone(),
+                self.integer_rem_for_type(lhs, rhs, &ty, span)?,
+            )),
+            BinaryOp::BitAnd => Ok(TypedValue::integer(
+                ty.clone(),
+                self.integer_bitwise_for_type(lhs, rhs, &ty, |a, b| a & b)?,
+            )),
+            BinaryOp::BitXor => Ok(TypedValue::integer(
+                ty.clone(),
+                self.integer_bitwise_for_type(lhs, rhs, &ty, |a, b| a ^ b)?,
+            )),
+            BinaryOp::BitOr => Ok(TypedValue::integer(
+                ty.clone(),
+                self.integer_bitwise_for_type(lhs, rhs, &ty, |a, b| a | b)?,
+            )),
+            BinaryOp::Less => {
+                Ok(TypedValue::int(
+                    self.integer_compare_for_type(lhs, rhs, &ty, |a, b| a < b)? as i128,
+                ))
+            }
+            BinaryOp::LessEqual => {
+                Ok(TypedValue::int(
+                    self.integer_compare_for_type(lhs, rhs, &ty, |a, b| a <= b)? as i128,
+                ))
+            }
+            BinaryOp::Greater => {
+                Ok(TypedValue::int(
+                    self.integer_compare_for_type(lhs, rhs, &ty, |a, b| a > b)? as i128,
+                ))
+            }
+            BinaryOp::GreaterEqual => {
+                Ok(TypedValue::int(
+                    self.integer_compare_for_type(lhs, rhs, &ty, |a, b| a >= b)? as i128,
+                ))
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -36747,6 +39024,26 @@ impl<'a> Interpreter<'a> {
         if lhs.object.is_none() || lhs.object != rhs.object {
             return false;
         }
+        if pointee_ty.is_character()
+            && lhs
+                .object
+                .and_then(|object_id| self.lookup_object(objects, object_id))
+                .is_some_and(|object| {
+                    object.storage_duration == StorageDuration::Dynamic
+                        && matches!(
+                            object.ty.unqualified(),
+                            CType::Array(inner, _) if inner.is_character()
+                        )
+                        && self
+                            .pointer_byte_offset(lhs, pointee_ty, objects)
+                            .is_some_and(|offset| offset <= object.byte_size)
+                        && self
+                            .pointer_byte_offset(rhs, pointee_ty, objects)
+                            .is_some_and(|offset| offset <= object.byte_size)
+                })
+        {
+            return true;
+        }
         let (Some(lhs_root), Some(rhs_root)) = (
             self.pointer_root_type(lhs, objects),
             self.pointer_root_type(rhs, objects),
@@ -36759,6 +39056,11 @@ impl<'a> Interpreter<'a> {
         if let (Some(lhs_byte), Some(rhs_byte)) =
             (lhs.byte_offset_override, rhs.byte_offset_override)
         {
+            if let (Some(lhs_start), Some(rhs_start)) =
+                (lhs.arithmetic_domain_start, rhs.arithmetic_domain_start)
+            {
+                return lhs_start == rhs_start;
+            }
             let Some(element_size) = self.type_size_of(pointee_ty) else {
                 return false;
             };
@@ -36916,7 +39218,11 @@ impl<'a> Interpreter<'a> {
             (CType::Array(inner, len), _)
                 if self.compatible_object_layout_types(inner, pointee_ty) =>
             {
-                (*len as isize) - pointer.base_offset
+                if pointer.designated_root_ty.is_some() {
+                    *len as isize
+                } else {
+                    (*len as isize) - pointer.base_offset
+                }
             }
             (CType::Array(_, _), _) => {
                 self.subobject_pointer_limit_with_base(root_ty, pointer.base_offset, pointee_ty)?
@@ -37045,6 +39351,7 @@ impl<'a> Interpreter<'a> {
                         member_path: pointer.member_path,
                         designated_root_ty: pointer.designated_root_ty,
                         byte_offset_override: Some(new_byte),
+                        arithmetic_domain_start: pointer.arithmetic_domain_start,
                     });
                 }
             }
@@ -37077,8 +39384,11 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 _ if object_state.storage_duration == StorageDuration::Dynamic => {
-                    if new_byte % element_size == 0 && new_byte <= object_state.byte_size {
-                        base_offset = (new_byte / element_size) as isize;
+                    if new_byte <= object_state.byte_size {
+                        // The allocated object may be a suballocation within raw dynamic
+                        // storage, so its origin need not be an absolute multiple of its size.
+                        // The checked delta is already an integral number of elements.
+                        base_offset = 0;
                         offset = 0;
                         true
                     } else {
@@ -37114,6 +39424,7 @@ impl<'a> Interpreter<'a> {
                 member_path: pointer.member_path,
                 designated_root_ty: pointer.designated_root_ty,
                 byte_offset_override: Some(new_byte),
+                arithmetic_domain_start: pointer.arithmetic_domain_start,
             });
         }
         let limit = self
@@ -37167,6 +39478,7 @@ impl<'a> Interpreter<'a> {
             member_path: pointer.member_path,
             designated_root_ty: pointer.designated_root_ty,
             byte_offset_override,
+            arithmetic_domain_start: pointer.arithmetic_domain_start,
         })
     }
 
@@ -38155,6 +40467,13 @@ impl<'a> Interpreter<'a> {
                         .get(&id)
                         .is_some_and(|saved| version != *saved)
                 });
+            let changed_bytes_only_volatile = current_active
+                .as_ref()
+                .or(current_retired.as_ref())
+                .is_some_and(|current| {
+                    self.changed_bytes_are_all_volatile(snapshot, current, span)
+                        .unwrap_or(false)
+                });
 
             let mut restored = if let Some(current) = current_active {
                 let mut current = current;
@@ -38176,6 +40495,7 @@ impl<'a> Interpreter<'a> {
             if restored.storage_duration == StorageDuration::Automatic
                 && !restored.ty.is_volatile_qualified()
                 && changed
+                && !changed_bytes_only_volatile
             {
                 restored.value = self.indeterminate_stored_value(&restored.ty);
                 restored.initialized = false;
@@ -38192,6 +40512,35 @@ impl<'a> Interpreter<'a> {
         self.active_block_scopes.extend(env.block_scopes.clone());
         self.begin_full_expression();
         Ok(())
+    }
+
+    fn changed_bytes_are_all_volatile(
+        &mut self,
+        snapshot: &ObjectState,
+        current: &ObjectState,
+        span: Span,
+    ) -> Result<bool, Diagnostic> {
+        let before = self.serialize_stored_value(&snapshot.ty, &snapshot.value, span)?;
+        let after = self.serialize_stored_value(&current.ty, &current.value, span)?;
+        if before.len() != after.len() {
+            return Ok(false);
+        }
+        let changed = before
+            .iter()
+            .zip(&after)
+            .enumerate()
+            .filter_map(|(offset, (before, after))| (before != after).then_some(offset))
+            .collect::<Vec<_>>();
+        Ok(!changed.is_empty()
+            && changed.iter().all(|&offset| {
+                self.qualified_subobject_overlaps(
+                    &snapshot.ty,
+                    0,
+                    offset,
+                    1,
+                    TrackedQualifier::Volatile,
+                )
+            }))
     }
 
     fn eval_in_setjmp_context(
@@ -38387,7 +40736,7 @@ impl<'a> Interpreter<'a> {
     fn is_assignment_target(&self, region: AccessRegion) -> bool {
         self.assignment_targets
             .iter()
-            .any(|target| Self::access_region_contains(target.region, region))
+            .any(|target| Self::access_regions_overlap(target.region, region))
     }
 
     fn access_regions_overlap(lhs: AccessRegion, rhs: AccessRegion) -> bool {
@@ -38535,7 +40884,31 @@ impl<'a> Interpreter<'a> {
             return Ok(());
         };
         let current_source = lvalue.restrict_source.clone();
+        if current_source.is_none() && tracker.source_objects.is_empty() {
+            let entries = tracker.unrestricted_accesses.entry(object).or_default();
+            if let Some(entry) = entries.get_mut(&(start, size)) {
+                entry.saw_write |= is_write;
+            } else {
+                entries.insert(
+                    (start, size),
+                    RestrictAccess {
+                        source: None,
+                        start,
+                        size,
+                        saw_write: is_write,
+                        span,
+                    },
+                );
+            }
+            return Ok(());
+        }
+        if let Some(source) = current_source.as_ref() {
+            tracker.source_objects.insert(source.object);
+        }
         let entries = tracker.accesses.entry(object).or_default();
+        if let Some(unrestricted) = tracker.unrestricted_accesses.remove(&object) {
+            entries.extend(unrestricted.into_values());
+        }
         for entry in entries.iter() {
             let overlaps = start < entry.start.saturating_add(entry.size)
                 && entry.start < start.saturating_add(size);
@@ -38587,6 +40960,17 @@ impl<'a> Interpreter<'a> {
                 .is_some_and(|retired| retired.contains(&object)),
         };
         for tracker in &mut self.restrict_trackers {
+            for &retired in retired_ids {
+                tracker.accesses.remove(&retired);
+                tracker.unrestricted_accesses.remove(&retired);
+            }
+            let retired_source = retired_ids
+                .iter()
+                .copied()
+                .any(|retired| tracker.source_objects.remove(&retired));
+            if !retired_source {
+                continue;
+            }
             tracker.accesses.retain(|_, entries| {
                 entries.retain(|entry| {
                     entry
@@ -38612,18 +40996,6 @@ impl<'a> Interpreter<'a> {
             previous.line_number,
             previous.column
         ))
-    }
-}
-
-impl Drop for Interpreter<'_> {
-    fn drop(&mut self) {
-        for (_, allocation) in self.host_allocations.drain() {
-            if !allocation.is_null() {
-                unsafe {
-                    libc::free(allocation);
-                }
-            }
-        }
     }
 }
 
@@ -39761,9 +42133,9 @@ mod tests {
     }
 
     fn assert_user_code_library_diag(rendered: &str, expected: &str) {
-        assert!(rendered.contains("test.c"));
-        assert!(rendered.contains(expected));
-        assert!(!rendered.contains("__codex"));
+        assert!(rendered.contains("test.c"), "{rendered}");
+        assert!(rendered.contains(expected), "{rendered}");
+        assert!(!rendered.contains("__codex"), "{rendered}");
     }
 
     fn state_address(result: &RunResult, name: &str) -> u64 {
@@ -40046,6 +42418,23 @@ mod tests {
     }
 
     #[test]
+    fn void_pointer_null_constant_converts_to_function_pointer() {
+        let source = r#"
+            #include <stddef.h>
+
+            typedef int (*Callback)(void);
+            static int answer(void) { return 42; }
+            static const Callback callbacks[] = { answer, NULL };
+
+            int main(void) {
+                Callback selected = 0 ? NULL : callbacks[0];
+                return callbacks[1] != NULL || selected() != 42;
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+    }
+
+    #[test]
     fn non_constant_zero_is_not_a_null_pointer_constant_in_initializer() {
         let source = r#"
             int main(void) {
@@ -40107,6 +42496,20 @@ mod tests {
         let rendered = err.render();
         assert!(rendered.contains("static storage duration"));
         assert!(rendered.contains("compile-time constant"));
+    }
+
+    #[test]
+    fn static_pointer_initializer_accepts_address_of_array_element() {
+        let source = r#"
+            static int values[] = { 19, 23, 42 };
+            static int *answer = &values[2];
+
+            int main(void) {
+                return sizeof(values) / sizeof(values[0]) != 3 || *answer != 42;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
     }
 
     #[test]
@@ -40359,17 +42762,24 @@ mod tests {
                 return recurse(0);
             }
         "#;
-        // Rust's test harness uses a smaller worker stack than the native API and browser. Give
-        // this test a representative stack so it exercises the interpreter's guard, not the
-        // harness's unrelated limit.
-        let rendered = std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(move || run_source("test.c", source).unwrap_err().render())
-            .unwrap()
-            .join()
-            .unwrap();
-        assert!(rendered.contains("function call depth exceeded the interpreter limit"));
+        let rendered = run_source("test.c", source).unwrap_err().render();
+        assert!(rendered.contains("function call depth exceeded the interpreter limit of 64"));
         assert!(rendered.contains("check for recursion that does not reach its base case"));
+    }
+
+    #[test]
+    fn deep_finite_recursion_is_independent_of_the_host_build_profile() {
+        let source = r#"
+            int descend(int n) {
+                return n == 0 ? 0 : 1 + descend(n - 1);
+            }
+
+            int main(void) {
+                return descend(40) != 40;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
     }
 
     #[test]
@@ -40383,14 +42793,7 @@ mod tests {
                 return fibonacci(10) != 55;
             }
         "#;
-        // Rust's test harness uses a small worker stack. The native API and browser Wasm runtime
-        // have larger stacks, so exercise ordinary recursion on a representative host stack.
-        let result = std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(move || run_source("test.c", source).unwrap())
-            .unwrap()
-            .join()
-            .unwrap();
+        let result = run_source("test.c", source).unwrap();
         assert_eq!(result.exit_status, 0);
     }
 
@@ -40474,7 +42877,7 @@ mod tests {
         let err = run_source("test.c", invalid).unwrap_err();
         assert!(
             err.render()
-                .contains("incompatible with the function definition")
+                .contains("is incompatible with definition of identity")
         );
     }
 
@@ -41606,14 +44009,46 @@ mod tests {
     fn byte_copies_preserve_structure_padding() {
         let source = r#"
             #include <string.h>
+            #include <stdlib.h>
             struct Value { char character; int integer; };
+            union Number { long integer; double number; };
+            union Node {
+                struct {
+                    union Number first;
+                    unsigned char first_tag;
+                    unsigned char second_tag;
+                    int next;
+                    union Number second;
+                } key;
+                struct { union Number value; unsigned char tag; } value;
+            };
             int main(void) {
                 unsigned char input[sizeof(struct Value)] = {1, 2, 3, 4, 5, 6, 7, 8};
                 unsigned char output[sizeof(struct Value)] = {0};
                 struct Value value;
                 memcpy(&value, input, sizeof value);
                 memcpy(output, &value, sizeof value);
-                return memcmp(input, output, sizeof value) != 0;
+                if (memcmp(input, output, sizeof value) != 0) return 1;
+
+                struct Value initialized_by_members;
+                initialized_by_members.character = 9;
+                initialized_by_members.integer = 42;
+                struct Value copy = initialized_by_members;
+                if (copy.character != 9 || copy.integer != 42) return 2;
+
+                union Node *nodes = malloc(4 * sizeof *nodes);
+                for (int i = 0; i < 4; ++i) {
+                    nodes[i].key.first.integer = i + 10;
+                    nodes[i].key.first_tag = 1;
+                    nodes[i].key.second_tag = 2;
+                    nodes[i].key.next = 0;
+                    nodes[i].key.second.integer = i + 20;
+                }
+                nodes[1] = nodes[3];
+                int bad = nodes[1].key.first.integer != 13
+                    || nodes[1].key.second.integer != 23;
+                free(nodes);
+                return bad;
             }
         "#;
         let result = run_source("test.c", source).unwrap();
@@ -41972,18 +44407,25 @@ mod tests {
     fn comma_separated_declarations_work() {
         let source = r#"
             #include <stdio.h>
+            union Value { int integer; };
+            typedef union Value *ValuePointer;
             int g = 1, h = 2;
 
             int main(void) {
+                union Value values[2] = {{19}, {23}};
+                ValuePointer first, second;
+                first = values;
+                second = first + 1;
                 int a = 3, b = 4;
                 for (int i = 0, j = 1; i < 1; ++i) {
-                    printf("%d %d %d %d %d\n", g, h, a, b, j);
+                    printf("%d %d %d %d %d %d\n",
+                           g, h, a, b, j, first->integer + second->integer);
                 }
                 return 0;
             }
         "#;
         let result = run_source("test.c", source).unwrap();
-        assert_eq!(result.stdout, "1 2 3 4 1\n");
+        assert_eq!(result.stdout, "1 2 3 4 1 42\n");
     }
 
     #[test]
@@ -42829,18 +45271,52 @@ mod tests {
     fn taking_address_of_struct_member_and_writing_through_it_works() {
         let source = r#"
             #include <stdio.h>
+            #include <stdint.h>
+            #include <stdlib.h>
+            #include <string.h>
             struct Pair { int x; int y; };
+            struct Header { struct Header *next; int tag; };
+            struct Table { struct Header *next; int tag; int value; };
+            union Objects {
+                struct Header header;
+                struct Table table;
+                unsigned char largest_member[128];
+            };
+            struct WrappedObjects { int prefix; union Objects objects; };
 
             int main(void) {
                 struct Pair p;
                 int *px = &p.x;
                 *px = 9;
-                printf("%d\n", p.x);
+                struct Header *object = malloc(sizeof(struct Table));
+                object->next = 0;
+                object->tag = 7;
+                struct Table *table = &((union Objects *)object)->table;
+                table->value = 42;
+                struct Header *header = &((union Objects *)table)->header;
+                struct Header *saved;
+                memcpy(&saved, &object, sizeof saved);
+                uintptr_t object_address = (uintptr_t)object;
+                uintptr_t first_member_address = (uintptr_t)&object->next;
+                struct Header *loaded;
+                memcpy(&loaded, &saved, sizeof loaded);
+                struct Table *round_trip = &((union Objects *)loaded)->table;
+                struct WrappedObjects wrapped = {0};
+                struct Table *nested_table = &wrapped.objects.table;
+                union Objects *nested_owner = (union Objects *)nested_table;
+                nested_owner->header.tag = 11;
+                union Objects *allocation = malloc(sizeof *allocation);
+                struct Header *allocation_header = &allocation->header;
+                printf("%d %d %d %d %d\n", p.x, table->value, header->tag,
+                       object_address == first_member_address && round_trip->value == 42,
+                       wrapped.objects.header.tag);
+                free(object);
+                free(allocation_header);
                 return 0;
             }
         "#;
         let result = run_source("test.c", source).unwrap();
-        assert_eq!(result.stdout, "9\n");
+        assert_eq!(result.stdout, "9 42 7 1 11\n");
     }
 
     #[test]
@@ -43199,20 +45675,38 @@ mod tests {
     }
 
     #[test]
+    fn array_of_completed_typedef_record_has_complete_type() {
+        let source = r#"
+            typedef struct Db Db;
+            struct Db { int value; };
+            struct Connection { Db static_databases[2]; };
+
+            int main(void) {
+                struct Connection connection = {{{19}, {23}}};
+                return connection.static_databases[0].value
+                     + connection.static_databases[1].value != 42;
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+    }
+
+    #[test]
     fn union_active_member_access_and_sizeof_work() {
         let source = r#"
             #include <stdio.h>
-            union Value { int i; long l; };
+            union Value { int i; int j; long l; };
 
             int main(void) {
                 union Value v;
                 v.l = 9;
-                printf("%ld %lu\n", v.l, sizeof(union Value));
+                union Value overlap = { .i = 7 };
+                overlap.j = overlap.i;
+                printf("%ld %lu %d\n", v.l, sizeof(union Value), overlap.j);
                 return 0;
             }
         "#;
         let result = run_source("test.c", source).unwrap();
-        assert_eq!(result.stdout, "9 8\n");
+        assert_eq!(result.stdout, "9 8 7\n");
     }
 
     #[test]
@@ -43574,6 +46068,21 @@ mod tests {
     }
 
     #[test]
+    fn file_scope_incomplete_array_bounds_respect_brace_elision() {
+        let source = r#"
+            struct Pair { int x; int y; };
+            static const struct Pair pairs[] = { 1, 2, 3, 4 };
+
+            int main(void) {
+                return sizeof pairs != 2 * sizeof(struct Pair)
+                    || pairs[1].x != 3 || pairs[1].y != 4;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
     fn nested_array_member_in_array_of_structs_works() {
         let source = r#"
             #include <stdio.h>
@@ -43783,24 +46292,30 @@ mod tests {
     }
 
     #[test]
-    fn compatible_struct_pointers_work_across_translation_units() {
-        let dir = temp_test_dir("cross-tu-compatible-struct-pointer");
+    fn shared_header_record_member_types_work_across_translation_units() {
+        let dir = temp_test_dir("cross-tu-record-member-types");
         fs::create_dir_all(&dir).unwrap();
         let main_file = dir.join("main.c");
         let helper_file = dir.join("helper.c");
+        let header_file = dir.join("shared.h");
+        fs::write(
+            &header_file,
+            "typedef struct Node Node;\nstruct Node { Node *next; };\ntypedef enum { MODE_A, MODE_B } Mode;\ntypedef int (*Callback)(Mode mode);\nNode *choose(Node *node);\nNode *extend(Node *node);\nint invoke(Callback callback, Mode mode);\n",
+        )
+        .unwrap();
         fs::write(
             &main_file,
-            "#include <stdio.h>\nstruct S { int x; };\nint read_value(const struct S *p);\nint main(void) { struct S items[3] = {{1}, {2}, {3}}; printf(\"%d\\n\", read_value(&items[2])); return 0; }\n",
+            "#include \"shared.h\"\nint callback(Mode mode) { return mode + 40; }\nint main(void) { return choose(extend(0)) == 0 || invoke(callback, MODE_B) != 41; }\n",
         )
         .unwrap();
         fs::write(
             &helper_file,
-            "struct S { int x; };\nint read_value(const struct S *p) { return p->x; }\n",
+            "#include \"shared.h\"\nNode *choose(Node *node) { return node->next ? node->next : extend(node); }\nNode *extend(Node *node) { static Node fallback; return node == 0 ? &fallback : node; }\nint invoke(Callback callback, Mode mode) { return callback(mode); }\n",
         )
         .unwrap();
 
         let result = run_files([main_file.clone(), helper_file.clone()]).unwrap();
-        assert_eq!(result.stdout, "3\n");
+        assert_eq!(result.exit_status, 0);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -44426,6 +46941,23 @@ mod tests {
                 *p = 5;
                 printf("%d\n", x);
                 return 0;
+            }
+        "#;
+        let err = run_source("test.c", source).unwrap_err();
+        let rendered = err.render();
+        assert!(rendered.contains("restrict-qualified pointer bases"));
+        assert!(rendered.contains("6.7.3.1"));
+    }
+
+    #[test]
+    fn restrict_write_after_prior_unrestricted_read_is_ub() {
+        let source = r#"
+            int main(void) {
+                int x = 0;
+                int *restrict p = &x;
+                int before = x;
+                *p = 5;
+                return before;
             }
         "#;
         let err = run_source("test.c", source).unwrap_err();
@@ -45572,16 +48104,31 @@ mod tests {
         let source = r#"
             #include <stdio.h>
             #include <stdlib.h>
+            struct Pair { int x; int y; };
+            struct Raw {
+                int prefix;
+                union {
+                    long alignment;
+                    unsigned char bytes[sizeof(struct Pair)];
+                } payload;
+            };
             int main(void) {
                 int *p = (int *)malloc(2 * sizeof(int));
                 p[0] = 5;
                 p[1] = 7;
-                printf("%d %d\n", p[0], p[1]);
+                struct Raw *raw = malloc(sizeof *raw);
+                struct Pair *pair = (struct Pair *)raw->payload.bytes;
+                pair->x = 19;
+                pair->y = 23;
+                printf("%d %d %d\n", p[0], p[1], pair->x + pair->y);
+                free(NULL);
+                free(p);
+                free(raw);
                 return 0;
             }
         "#;
         let result = run_source("test.c", source).unwrap();
-        assert_eq!(result.stdout, "5 7\n");
+        assert_eq!(result.stdout, "5 7 42\n");
     }
 
     #[test]
@@ -45647,6 +48194,7 @@ mod tests {
     #[test]
     fn allocated_storage_effective_type_is_replaced_by_modifying_accesses() {
         let source = r#"
+            #include <stdio.h>
             #include <stdlib.h>
             #include <string.h>
             int main(void) {
@@ -45767,6 +48315,80 @@ mod tests {
         "#;
         let result = run_source("test.c", source).unwrap();
         assert_eq!(result.stdout, "2 3 4\n");
+    }
+
+    #[test]
+    fn malloc_backed_storage_can_be_rebased_after_passing_through_void_pointer() {
+        let source = r#"
+            #include <stdlib.h>
+
+            struct First { long value; };
+            struct Second { int left; int right; };
+
+            int main(void) {
+                void *storage = malloc(64);
+                struct First *first = storage;
+                void *erased = first;
+                struct Second *second = erased;
+                second->left = 19;
+                second->right = 23;
+                return second->left + second->right != 42;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn dynamic_array_pointer_arithmetic_is_relative_to_its_suballocation_origin() {
+        let source = r#"
+            #include <stdint.h>
+            #include <stdlib.h>
+            #include <string.h>
+
+            struct Item { long values[3]; };
+            struct Holder { struct Item *position; };
+            union StackSlot {
+                struct Item item;
+                unsigned char bytes[sizeof(struct Item)];
+            };
+
+            int main(void) {
+                char *storage = malloc(3 * sizeof(struct Item));
+                struct Item *items = (struct Item *)(storage + sizeof(struct Item));
+                struct Item *second = items + 1;
+                second->values[0] = 23;
+                (second - 1)->values[0] = 19;
+                struct Holder *holder = malloc(sizeof *holder);
+                struct Holder *copied = malloc(sizeof *copied);
+                holder->position = items;
+
+                struct Item *same_address_from_larger_array =
+                    ((struct Item *)storage) + 1;
+                uintptr_t encoded_collision =
+                    (uintptr_t)same_address_from_larger_array;
+
+                union StackSlot *stack = malloc(3 * sizeof *stack);
+                union StackSlot *level = stack + 2;
+                struct Item *initial_member = &stack[1].item;
+                union StackSlot *member_round_trip =
+                    (union StackSlot *)initial_member;
+
+                memcpy(copied, holder, sizeof *copied);
+                holder = realloc(holder, 2 * sizeof *holder);
+                char *begin = (char *)items;
+                char *end = (char *)(items + 2);
+                return items[0].values[0] + items[1].values[0] != 42
+                    || end - begin != 2 * sizeof(struct Item)
+                    || encoded_collision == 0
+                    || holder->position - items != 0
+                    || copied->position - items != 0
+                    || !(member_round_trip < level)
+                    || member_round_trip - stack != 1;
+            }
+        "#;
+        let result = run_source("test.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
     }
 
     #[test]
@@ -46793,6 +49415,19 @@ mod tests {
             int main(void) { return SELF(0)(6) != 6; }
         "#;
         assert_eq!(run_source("test.c", recursive).unwrap().exit_status, 0);
+
+        let self_referential_argument = r#"
+            #define GLOBAL(type, name) name
+            #define globalValue GLOBAL(int, globalValue)
+            int globalValue = 7;
+            int main(void) { return globalValue != 7; }
+        "#;
+        assert_eq!(
+            run_source("test.c", self_referential_argument)
+                .unwrap()
+                .exit_status,
+            0
+        );
     }
 
     #[test]
@@ -46924,6 +49559,7 @@ mod tests {
             stdin: String::new(),
             expression_eval: None,
             ub_detection_mode: UbDetectionMode::Standard,
+            capture_visualization: true,
             synthetic_address_base: 0x1000,
             execution_step_limit: None,
             execution_trace_following_limit: 256,
@@ -49384,18 +52020,23 @@ mod tests {
             #include <stdio.h>
             #include <setjmp.h>
 
-            jmp_buf env;
+            struct JumpContext {
+                jmp_buf env;
+                volatile int status;
+            };
 
             int main(void) {
-                if (setjmp(env) == 0) {
-                    longjmp(env, 0);
+                struct JumpContext context;
+                if (setjmp(context.env) == 0) {
+                    context.status = 7;
+                    longjmp(context.env, 0);
                 }
-                printf("ok\n");
+                printf("ok %d\n", context.status);
                 return 0;
             }
         "#;
         let result = run_source("test.c", source).unwrap();
-        assert_eq!(result.stdout, "ok\n");
+        assert_eq!(result.stdout, "ok 7\n");
     }
 
     #[test]
@@ -50410,27 +53051,26 @@ mod tests {
     }
 
     #[test]
-    fn zero_count_wide_writes_do_not_modify_or_require_writable_storage() {
-        let source = r#"
-            #include <setjmp.h>
-            #include <wchar.h>
-            jmp_buf environment;
-            int main(void) {
-                const wchar_t constant = 7;
-                wchar_t source = 9;
-                int value = 11;
-                if (setjmp(environment) == 0) {
-                    wmemcpy((wchar_t *)&constant, &source, 0);
-                    wmemmove((wchar_t *)&constant, &source, 0);
-                    wmemset((wchar_t *)&constant, 0, 0);
-                    wcsncpy((wchar_t *)&constant, &source, 0);
-                    longjmp(environment, 1);
-                }
-                return value != 11 || constant != 7;
-            }
-        "#;
-        let result = run_source("test.c", source).unwrap();
-        assert_eq!(result.exit_status, 0);
+    fn zero_count_wide_writes_still_require_modifiable_destinations() {
+        for call in [
+            "wmemcpy((wchar_t *)&constant, &source, 0)",
+            "wmemmove((wchar_t *)&constant, &source, 0)",
+            "wmemset((wchar_t *)&constant, 0, 0)",
+            "wcsncpy((wchar_t *)&constant, &source, 0)",
+        ] {
+            let source = format!(
+                r#"
+                    #include <wchar.h>
+                    int main(void) {{
+                        const wchar_t constant = 7;
+                        wchar_t source = 0;
+                        {call};
+                    }}
+                "#
+            );
+            let diagnostic = run_source("test.c", &source).unwrap_err().render();
+            assert_user_code_library_diag(&diagnostic, "const-qualified");
+        }
     }
 
     #[test]
@@ -50748,21 +53388,54 @@ mod tests {
                 uintptr_t member_address = (uintptr_t)&pair.second;
                 uintptr_t one_past_address = (uintptr_t)(array + 3);
                 uintptr_t function_address = (uintptr_t)function;
+                void *void_element = array + 1;
 
                 return (int *)scalar_address != &scalar
                     || (int *)element_address != &array[1]
                     || (int *)member_address != &pair.second
                     || (int *)one_past_address != array + 3
-                    || (int (*)(void))function_address != function;
+                    || (int (*)(void))function_address != function
+                    || (int *)void_element != &array[1];
             }
         "#;
         assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
 
-        let trap = "int main(void) { return (int *)1234 != 0; }";
+        let opaque = r#"
+            #include <stdint.h>
+            int main(void) {
+                int *p = (int *)1234;
+                void *opaque = (void *)5;
+                const char *bytes = (const char *)opaque;
+                return p == 0 || (uintptr_t)p != 1234 || p != (int *)1234
+                    || (uintptr_t)bytes != 5;
+            }
+        "#;
+        assert_eq!(run_source("test.c", opaque).unwrap().exit_status, 0);
+
+        let opaque_function = r#"
+            typedef void (*Callback)(void);
+            int main(void) {
+                Callback sentinel = (Callback)-1;
+                return sentinel == 0 || sentinel != (Callback)-1;
+            }
+        "#;
+        assert_eq!(
+            run_source("test.c", opaque_function).unwrap().exit_status,
+            0
+        );
+
+        let trap = "int main(void) { return *(int *)1234; }";
         let err = run_source("test.c", trap).unwrap_err();
         let rendered = err.render();
         assert!(rendered.contains("undefined behavior"));
-        assert!(rendered.contains("invalid object representation"));
+        assert!(rendered.contains("dereference"));
+
+        let function_trap = r#"
+            typedef void (*Callback)(void);
+            int main(void) { ((Callback)-1)(); }
+        "#;
+        let rendered = run_source("test.c", function_trap).unwrap_err().render();
+        assert!(rendered.contains("opaque implementation-defined function pointer"));
     }
 
     #[test]
@@ -50950,6 +53623,826 @@ int main(void) {
 }
 "#;
         assert_eq!(run_source("test.c", source).unwrap().exit_status, 7);
+    }
+
+    #[test]
+    fn aligned_alloc_rejects_invalid_c11_preconditions() {
+        for expression in ["aligned_alloc(3, 6)", "aligned_alloc(8, 12)"] {
+            let source = format!(
+                "#include <stdlib.h>\nint main(void) {{ (void){expression}; return 0; }}\n"
+            );
+            let rendered = run_source("test.c", &source).unwrap_err().render();
+            assert_user_code_library_diag(&rendered, "aligned_alloc");
+        }
+    }
+
+    #[test]
+    fn zero_count_library_arrays_still_require_valid_pointers() {
+        let cases = [
+            ("#include <string.h>", "memcpy((void *)0, (void *)0, 0)"),
+            ("#include <string.h>", "memmove((void *)0, (void *)0, 0)"),
+            ("#include <string.h>", "memset((void *)0, 0, 0)"),
+            ("#include <string.h>", "memchr((void *)0, 0, 0)"),
+            ("#include <string.h>", "memcmp((void *)0, (void *)0, 0)"),
+            ("#include <wchar.h>", "wmemset((wchar_t *)0, 0, 0)"),
+            ("#include <stdio.h>", "fread((void *)0, 0, 1, stdin)"),
+            ("#include <stdio.h>", "fwrite((void *)0, 0, 1, stdout)"),
+            ("#include <stdlib.h>", "mbstowcs((wchar_t *)0, \"\", 0)"),
+        ];
+        for (include, expression) in cases {
+            let source = format!("{include}\nint main(void) {{ {expression}; return 0; }}\n");
+            let rendered = run_source("test.c", &source).unwrap_err().render();
+            assert_user_code_library_diag(&rendered, "null pointer");
+        }
+
+        let source = r#"
+            #include <wchar.h>
+            int main(void) {
+                char byte = 0;
+                mbstate_t state = {0};
+                return (int)mbrlen(&byte + 1, 0, &state);
+            }
+        "#;
+        let rendered = run_source("test.c", source).unwrap_err().render();
+        assert_user_code_library_diag(&rendered, "exceeds");
+    }
+
+    #[test]
+    fn snprintf_retains_its_explicit_null_zero_size_exception() {
+        let source = r#"
+            #include <stdio.h>
+            int main(void) {
+                return snprintf((char *)0, 0, "%s", "okay") != 4;
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
+    }
+
+    #[test]
+    fn formatted_and_temporary_output_arrays_are_prechecked() {
+        let cases = [
+            (
+                "#include <wchar.h>",
+                "swprintf((wchar_t *)0, 0, L\"\")",
+                "null pointer",
+            ),
+            ("#include <stdio.h>", "tmpnam((char[1]){0})", "exceeds"),
+        ];
+        for (include, expression, expected) in cases {
+            let source = format!("{include}\nint main(void) {{ {expression}; return 0; }}\n");
+            let rendered = run_source("test.c", &source).unwrap_err().render();
+            assert_user_code_library_diag(&rendered, expected);
+        }
+    }
+
+    #[test]
+    fn scanf_rejects_unrepresentable_conversion_results() {
+        for source in [
+            r#"
+                #include <stdio.h>
+                int main(void) {
+                    signed char value;
+                    return sscanf("128", "%hhd", &value);
+                }
+            "#,
+            r#"
+                #include <wchar.h>
+                int main(void) {
+                    int value;
+                    return swscanf(L"2147483648", L"%d", &value);
+                }
+            "#,
+            r#"
+                #include <stdio.h>
+                int main(void) {
+                    long long value;
+                    return sscanf("999999999999999999999999999", "%lld", &value);
+                }
+            "#,
+        ] {
+            let rendered = run_source("test.c", source).unwrap_err().render();
+            assert_user_code_library_diag(&rendered, "not representable");
+        }
+    }
+
+    #[test]
+    fn saved_library_state_objects_require_valid_provenance() {
+        let cases = [
+            r#"
+                #include <fenv.h>
+                int main(void) {
+                    fenv_t environment = {0};
+                    return fesetenv(&environment);
+                }
+            "#,
+            r#"
+                #include <stdio.h>
+                int main(void) {
+                    FILE *first = tmpfile();
+                    FILE *second = tmpfile();
+                    fpos_t position;
+                    fgetpos(first, &position);
+                    return fsetpos(second, &position);
+                }
+            "#,
+            r#"
+                #include <setjmp.h>
+                #include <string.h>
+                int main(void) {
+                    jmp_buf original, copy;
+                    if (setjmp(original) == 0) {
+                        memcpy(&copy[0], &original[0], sizeof original);
+                        longjmp(copy, 1);
+                    }
+                    return 0;
+                }
+            "#,
+        ];
+        for source in cases {
+            let rendered = run_source("test.c", source).unwrap_err().render();
+            assert_user_code_library_diag(&rendered, "requires");
+        }
+    }
+
+    #[test]
+    fn locale_dependent_library_state_is_invalidated() {
+        let source = r#"
+            #include <locale.h>
+            #include <wchar.h>
+            int main(void) {
+                mbstate_t state = {0};
+                (void)mbrlen("A", 1, &state);
+                setlocale(LC_CTYPE, "C");
+                return (int)mbrlen("A", 1, &state);
+            }
+        "#;
+        let rendered = run_source("test.c", source).unwrap_err().render();
+        assert_user_code_library_diag(&rendered, "locale change");
+    }
+
+    #[test]
+    fn descriptor_and_format_preconditions_are_enforced() {
+        let cases = [
+            r#"
+                #include <wctype.h>
+                int main(void) { return iswctype(L'a', (wctype_t)1); }
+            "#,
+            r#"
+                #include <time.h>
+                int main(void) {
+                    char output[8];
+                    struct tm value = {0};
+                    return (int)strftime(output, sizeof output, "%Q", &value);
+                }
+            "#,
+            r#"
+                #include <time.h>
+                int main(void) {
+                    struct tm value = {0};
+                    value.tm_sec = 61;
+                    return asctime(&value) == 0;
+                }
+            "#,
+        ];
+        for source in cases {
+            let rendered = run_source("test.c", source).unwrap_err().render();
+            assert!(rendered.contains("undefined behavior"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn sort_and_search_comparator_preconditions_are_enforced() {
+        let cyclic = r#"
+            #include <stdlib.h>
+            int compare(const void *left, const void *right) {
+                int a = *(const int *)left;
+                int b = *(const int *)right;
+                if (a == b) return 0;
+                return (a + 1) % 3 == b ? -1 : 1;
+            }
+            int main(void) {
+                int values[3] = {0, 1, 2};
+                qsort(values, 3, sizeof values[0], compare);
+            }
+        "#;
+        let rendered = run_source("test.c", cyclic).unwrap_err().render();
+        assert_user_code_library_diag(&rendered, "cyclic");
+
+        let unsorted = r#"
+            #include <stdlib.h>
+            int compare(const void *left, const void *right) {
+                int a = *(const int *)left;
+                int b = *(const int *)right;
+                return (a > b) - (a < b);
+            }
+            int main(void) {
+                int key = 3;
+                int values[3] = {1, 3, 2};
+                return bsearch(&key, values, 3, sizeof values[0], compare) == 0;
+            }
+        "#;
+        let rendered = run_source("test.c", unsorted).unwrap_err().render();
+        assert_user_code_library_diag(&rendered, "bsearch array");
+    }
+
+    fn sqlite_varint_source() -> &'static str {
+        // Extracted from SQLite src/util.c. SQLITE_NOINLINE is only an optimizer
+        // annotation in SQLite, so it is intentionally omitted here.
+        r#"
+            #include <assert.h>
+            #include <stdint.h>
+
+            typedef unsigned char u8;
+            typedef uint32_t u32;
+            typedef uint64_t u64;
+
+            static int putVarint64(unsigned char *p, u64 v){
+              int i, j, n;
+              u8 buf[10];
+              if( v & (((u64)0xff000000)<<32) ){
+                p[8] = (u8)v;
+                v >>= 8;
+                for(i=7; i>=0; i--){
+                  p[i] = (u8)((v & 0x7f) | 0x80);
+                  v >>= 7;
+                }
+                return 9;
+              }
+              n = 0;
+              do{
+                buf[n++] = (u8)((v & 0x7f) | 0x80);
+                v >>= 7;
+              }while( v!=0 );
+              buf[0] &= 0x7f;
+              assert( n<=9 );
+              for(i=0, j=n-1; j>=0; j--, i++){
+                p[i] = buf[j];
+              }
+              return n;
+            }
+
+            int sqlite3PutVarint(unsigned char *p, u64 v){
+              if( v<=0x7f ){
+                p[0] = v&0x7f;
+                return 1;
+              }
+              if( v<=0x3fff ){
+                p[0] = ((v>>7)&0x7f)|0x80;
+                p[1] = v&0x7f;
+                return 2;
+              }
+              return putVarint64(p,v);
+            }
+
+            #define SLOT_2_0     0x001fc07f
+            #define SLOT_4_2_0   0xf01fc07f
+
+            u8 sqlite3GetVarint(const unsigned char *p, u64 *v){
+              u32 a,b,s;
+
+              if( ((signed char*)p)[0]>=0 ){
+                *v = *p;
+                return 1;
+              }
+              if( ((signed char*)p)[1]>=0 ){
+                *v = ((u32)(p[0]&0x7f)<<7) | p[1];
+                return 2;
+              }
+              assert( SLOT_2_0 == ((0x7f<<14) | (0x7f)) );
+              assert( SLOT_4_2_0 == ((0xfU<<28) | (0x7f<<14) | (0x7f)) );
+
+              a = ((u32)p[0])<<14;
+              b = p[1];
+              p += 2;
+              a |= *p;
+              if (!(a&0x80)){
+                a &= SLOT_2_0;
+                b &= 0x7f;
+                b = b<<7;
+                a |= b;
+                *v = a;
+                return 3;
+              }
+
+              a &= SLOT_2_0;
+              p++;
+              b = b<<14;
+              b |= *p;
+              if (!(b&0x80)){
+                b &= SLOT_2_0;
+                a = a<<7;
+                a |= b;
+                *v = a;
+                return 4;
+              }
+
+              b &= SLOT_2_0;
+              s = a;
+              p++;
+              a = a<<14;
+              a |= *p;
+              if (!(a&0x80)){
+                b = b<<7;
+                a |= b;
+                s = s>>18;
+                *v = ((u64)s)<<32 | a;
+                return 5;
+              }
+
+              s = s<<7;
+              s |= b;
+              p++;
+              b = b<<14;
+              b |= *p;
+              if (!(b&0x80)){
+                a &= SLOT_2_0;
+                a = a<<7;
+                a |= b;
+                s = s>>18;
+                *v = ((u64)s)<<32 | a;
+                return 6;
+              }
+
+              p++;
+              a = a<<14;
+              a |= *p;
+              if (!(a&0x80)){
+                a &= SLOT_4_2_0;
+                b &= SLOT_2_0;
+                b = b<<7;
+                a |= b;
+                s = s>>11;
+                *v = ((u64)s)<<32 | a;
+                return 7;
+              }
+
+              a &= SLOT_2_0;
+              p++;
+              b = b<<14;
+              b |= *p;
+              if (!(b&0x80)){
+                b &= SLOT_4_2_0;
+                a = a<<7;
+                a |= b;
+                s = s>>4;
+                *v = ((u64)s)<<32 | a;
+                return 8;
+              }
+
+              p++;
+              a = a<<15;
+              a |= *p;
+              b &= SLOT_2_0;
+              b = b<<8;
+              a |= b;
+              s = s<<4;
+              b = p[-4];
+              b &= 0x7f;
+              b = b>>3;
+              s |= b;
+              *v = ((u64)s)<<32 | a;
+              return 9;
+            }
+
+            static int check(u64 input){
+              unsigned char encoded[9] = {0};
+              u64 decoded = 0;
+              int written = sqlite3PutVarint(encoded, input);
+              int read = sqlite3GetVarint(encoded, &decoded);
+              return written==read && decoded==input;
+            }
+
+            int main(void){
+              const u64 boundaries[] = {
+                0, 1, 0x7f, 0x80, 0x3fff, 0x4000,
+                0x1fffff, 0x200000, 0xfffffff, 0x10000000,
+                0x7ffffffffULL, 0x800000000ULL,
+                0x3ffffffffffULL, 0x40000000000ULL,
+                0x1ffffffffffffULL, 0x2000000000000ULL,
+                0xffffffffffffffULL, 0x100000000000000ULL,
+                0x7fffffffffffffffULL, 0x8000000000000000ULL,
+                0xffffffffffffffffULL
+              };
+              unsigned long i;
+              for(i=0; i<sizeof(boundaries)/sizeof(boundaries[0]); i++){
+                if( !check(boundaries[i]) ) return 1;
+              }
+              u64 value = 0x243f6a8885a308d3ULL;
+              for(i=0; i<512; i++){
+                value = value * 6364136223846793005ULL + 1442695040888963407ULL;
+                if( !check(value) ) return 2;
+              }
+              return 0;
+            }
+        "#
+    }
+
+    #[test]
+    fn sqlite_varint_subroutines_match_boundary_and_generated_values() {
+        let source = sqlite_varint_source();
+        let result = run_source("sqlite-varint.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn sqlite_atoi64_subroutine_matches_decimal_boundaries() {
+        // Extracted from SQLite src/util.c. The sqlite3Isspace lookup macro and
+        // testcase instrumentation are replaced with equivalent small helpers.
+        let source = r#"
+            #include <assert.h>
+            #include <stdint.h>
+
+            typedef unsigned char u8;
+            typedef int64_t i64;
+            typedef uint64_t u64;
+
+            #define SQLITE_UTF8 1
+            #define SQLITE_UTF16LE 2
+            #define SQLITE_UTF16BE 3
+            #define LARGEST_INT64 ((i64)0x7fffffffffffffffLL)
+            #define SMALLEST_INT64 (-LARGEST_INT64-1)
+
+            static int sqlite3Isspace(char c){
+              return c==' ' || c=='\t' || c=='\n' || c=='\v' || c=='\f' || c=='\r';
+            }
+
+            static int compare2pow63(const char *zNum, int incr){
+              int c = 0;
+              int i;
+              const char *pow63 = "922337203685477580";
+              for(i=0; c==0 && i<18; i++){
+                c = (zNum[i*incr]-pow63[i])*10;
+              }
+              if( c==0 ) c = zNum[18*incr] - '8';
+              return c;
+            }
+
+            int sqlite3Atoi64(const char *zNum, i64 *pNum, int length, u8 enc){
+              int incr;
+              u64 u = 0;
+              int neg = 0;
+              int i, j;
+              unsigned int c = 0;
+              int nonNum = 0;
+              int rc;
+              const char *zStart;
+              const char *zEnd = zNum + length;
+              assert( enc==SQLITE_UTF8 || enc==SQLITE_UTF16LE || enc==SQLITE_UTF16BE );
+              if( enc==SQLITE_UTF8 ){
+                incr = 1;
+              }else{
+                incr = 2;
+                length &= ~1;
+                assert( SQLITE_UTF16LE==2 && SQLITE_UTF16BE==3 );
+                for(i=3-enc; i<length && zNum[i]==0; i+=2){}
+                nonNum = i<length;
+                zEnd = &zNum[i^1];
+                zNum += (enc&1);
+              }
+              while( zNum<zEnd && sqlite3Isspace(*zNum) ) zNum+=incr;
+              if( zNum<zEnd ){
+                if( *zNum=='-' ){
+                  neg = 1;
+                  zNum+=incr;
+                }else if( *zNum=='+' ){
+                  zNum+=incr;
+                }
+              }
+              zStart = zNum;
+              while( zNum<zEnd && zNum[0]=='0' ){ zNum+=incr; }
+              for(i=0; &zNum[i]<zEnd && (c=(unsigned)zNum[i]-'0')<=9; i+=incr){
+                u = u*10 + c;
+              }
+              if( u>LARGEST_INT64 ){
+                *pNum = neg ? SMALLEST_INT64 : LARGEST_INT64;
+              }else if( neg ){
+                *pNum = -(i64)u;
+              }else{
+                *pNum = (i64)u;
+              }
+              rc = 0;
+              if( i==0 && zStart==zNum ){
+                rc = -1;
+              }else if( nonNum ){
+                rc = 1;
+              }else if( &zNum[i]<zEnd ){
+                int jj = i;
+                do{
+                  if( !sqlite3Isspace(zNum[jj]) ){
+                    rc = 1;
+                    break;
+                  }
+                  jj += incr;
+                }while( &zNum[jj]<zEnd );
+              }
+              if( i<19*incr ){
+                assert( u<=LARGEST_INT64 );
+                return rc;
+              }else{
+                j = i>19*incr ? 1 : compare2pow63(zNum, incr);
+                if( j<0 ){
+                  assert( u<=LARGEST_INT64 );
+                  return rc;
+                }else{
+                  *pNum = neg ? SMALLEST_INT64 : LARGEST_INT64;
+                  if( j>0 ) return 2;
+                  assert( u-1==LARGEST_INT64 );
+                  return neg ? rc : 3;
+                }
+              }
+            }
+
+            static int check(const char *text, int length, u8 encoding,
+                             int expectedRc, i64 expectedValue){
+              i64 value = 123;
+              int rc = sqlite3Atoi64(text, &value, length, encoding);
+              return rc==expectedRc && value==expectedValue;
+            }
+
+            int main(void){
+              static const char minText[] = "-9223372036854775808";
+              static const char maxText[] = "9223372036854775807";
+              static const char positiveEdge[] = "9223372036854775808";
+              static const char negativeOverflow[] = "-9223372036854775809";
+              static const char unsignedMax[] = "18446744073709551615";
+              static const char longZeros[] = "00000000000000000000000000000000000042";
+              static const char utf16le[] = {'4',0,'2',0};
+              /* SQLite forms zNum[length+1] before shifting the big-endian
+              ** pointer by one byte, so retain its usual padding byte. */
+              static const char utf16be[5] = {0,'4',0,'2',0};
+
+              if( !check("", 0, SQLITE_UTF8, -1, 0) ) return 1;
+              if( !check("  +42 ", 6, SQLITE_UTF8, 0, 42) ) return 2;
+              if( !check(minText, sizeof(minText)-1, SQLITE_UTF8, 0, SMALLEST_INT64) ) return 3;
+              if( !check(maxText, sizeof(maxText)-1, SQLITE_UTF8, 0, LARGEST_INT64) ) return 4;
+              if( !check(positiveEdge, sizeof(positiveEdge)-1, SQLITE_UTF8, 3, LARGEST_INT64) ) return 5;
+              if( !check(negativeOverflow, sizeof(negativeOverflow)-1, SQLITE_UTF8, 2, SMALLEST_INT64) ) return 6;
+              if( !check(unsignedMax, sizeof(unsignedMax)-1, SQLITE_UTF8, 2, LARGEST_INT64) ) return 7;
+              if( !check("123abc", 6, SQLITE_UTF8, 1, 123) ) return 8;
+              if( !check("abc", 3, SQLITE_UTF8, -1, 0) ) return 9;
+              if( !check(longZeros, sizeof(longZeros)-1, SQLITE_UTF8, 0, 42) ) return 10;
+              if( !check(utf16le, sizeof(utf16le), SQLITE_UTF16LE, 0, 42) ) return 11;
+              if( !check(utf16be, 4, SQLITE_UTF16BE, 0, 42) ) return 12;
+              return 0;
+            }
+        "#;
+        let result = run_source("sqlite-atoi64.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn sqlite_utf8_and_hash_subroutines_match_edge_cases() {
+        // Extracted from SQLite src/utf.c and src/hash.c. The SQLite typedefs
+        // and EBCDIC build switch are reduced to their portable C11 forms.
+        let source = r#"
+            #include <stdint.h>
+
+            typedef unsigned char u8;
+            typedef uint32_t u32;
+
+            static const unsigned char sqlite3Utf8Trans1[] = {
+              0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+              0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+              0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+              0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+              0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+              0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+              0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+              0x00, 0x01, 0x02, 0x03, 0x00, 0x01, 0x00, 0x00,
+            };
+
+            u32 sqlite3Utf8Read(const unsigned char **pz){
+              unsigned int c;
+              c = *((*pz)++);
+              if( c>=0xc0 ){
+                c = sqlite3Utf8Trans1[c-0xc0];
+                while( (*(*pz) & 0xc0)==0x80 ){
+                  c = (c<<6) + (0x3f & *((*pz)++));
+                }
+                if( c<0x80
+                    || (c&0xFFFFF800)==0xD800
+                    || (c&0xFFFFFFFE)==0xFFFE ){  c = 0xFFFD; }
+              }
+              return c;
+            }
+
+            static unsigned int strHash(const char *z){
+              unsigned int h = 0;
+              while( z[0] ){
+                h += 0xdf & (unsigned char)*(z++);
+                h *= 0x9e3779b1;
+              }
+              return h;
+            }
+
+            static int checkUtf8(const unsigned char *input, u32 expected,
+                                 unsigned long expectedBytes){
+              const unsigned char *next = input;
+              u32 value = sqlite3Utf8Read(&next);
+              return value==expected && (unsigned long)(next-input)==expectedBytes;
+            }
+
+            int main(void){
+              static const unsigned char ascii[] = {'A',0};
+              static const unsigned char cent[] = {0xc2,0xa2,0};
+              static const unsigned char euro[] = {0xe2,0x82,0xac,0};
+              static const unsigned char grin[] = {0xf0,0x9f,0x98,0x80,0};
+              static const unsigned char overlong[] = {0xc0,0x80,0};
+              static const unsigned char surrogate[] = {0xed,0xa0,0x80,0};
+              static const unsigned char noncharacter[] = {0xef,0xbf,0xbe,0};
+              static const unsigned char continuation[] = {0x80,0};
+
+              if( !checkUtf8(ascii, 0x41, 1) ) return 1;
+              if( !checkUtf8(cent, 0xa2, 2) ) return 2;
+              if( !checkUtf8(euro, 0x20ac, 3) ) return 3;
+              if( !checkUtf8(grin, 0x1f600, 4) ) return 4;
+              if( !checkUtf8(overlong, 0xfffd, 2) ) return 5;
+              if( !checkUtf8(surrogate, 0xfffd, 3) ) return 6;
+              if( !checkUtf8(noncharacter, 0xfffd, 3) ) return 7;
+              if( !checkUtf8(continuation, 0x80, 1) ) return 8;
+
+              if( strHash("SQLite") != strHash("sqlite") ) return 9;
+              if( strHash("SQLite") == strHash("sqlite3") ) return 10;
+              if( strHash("") != 0 ) return 11;
+              return 0;
+            }
+        "#;
+        let result = run_source("sqlite-utf8-hash.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn sqlite_small_integer_and_dequote_subroutines_match_edge_cases() {
+        // Extracted from SQLite src/util.c. Character-table macros and compiler
+        // overflow builtins use the equivalent portable branches below.
+        let source = r#"
+            #include <stdint.h>
+            #include <string.h>
+
+            typedef unsigned char u8;
+            typedef uint32_t u32;
+            typedef int64_t i64;
+
+            #define LARGEST_INT64 ((i64)0x7fffffffffffffffLL)
+            #define SMALLEST_INT64 (-LARGEST_INT64-1)
+
+            static int sqlite3Isxdigit(int c){
+              return (c>='0' && c<='9') || (c>='a' && c<='f') || (c>='A' && c<='F');
+            }
+            static int sqlite3Isdigit(int c){ return c>='0' && c<='9'; }
+            static int sqlite3Isquote(int c){ return c=='\'' || c=='"' || c=='`' || c=='['; }
+
+            u8 sqlite3HexToInt(int h){
+              h += 9*(1&(h>>6));
+              return (u8)(h & 0xf);
+            }
+
+            int sqlite3GetInt32(const char *zNum, int *pValue){
+              i64 v = 0;
+              int i, c;
+              int neg = 0;
+              if( zNum[0]=='-' ){
+                neg = 1;
+                zNum++;
+              }else if( zNum[0]=='+' ){
+                zNum++;
+              }else if( zNum[0]=='0'
+                    && (zNum[1]=='x' || zNum[1]=='X')
+                    && sqlite3Isxdigit(zNum[2])
+              ){
+                u32 u = 0;
+                zNum += 2;
+                while( zNum[0]=='0' ) zNum++;
+                for(i=0; i<8 && sqlite3Isxdigit(zNum[i]); i++){
+                  u = u*16 + sqlite3HexToInt(zNum[i]);
+                }
+                if( (u&0x80000000)==0 && sqlite3Isxdigit(zNum[i])==0 ){
+                  memcpy(pValue, &u, 4);
+                  return 1;
+                }else{
+                  return 0;
+                }
+              }
+              if( !sqlite3Isdigit(zNum[0]) ) return 0;
+              while( zNum[0]=='0' ) zNum++;
+              for(i=0; i<11 && (c = zNum[i] - '0')>=0 && c<=9; i++){
+                v = v*10 + c;
+              }
+              if( i>10 ) return 0;
+              if( v-neg>2147483647 ) return 0;
+              if( neg ) v = -v;
+              *pValue = (int)v;
+              return 1;
+            }
+
+            int sqlite3AddInt64(i64 *pA, i64 iB){
+              i64 iA = *pA;
+              if( iB>=0 ){
+                if( iA>0 && LARGEST_INT64 - iA < iB ) return 1;
+              }else{
+                if( iA<0 && -(iA + LARGEST_INT64) > iB + 1 ) return 1;
+              }
+              *pA += iB;
+              return 0;
+            }
+
+            int sqlite3SubInt64(i64 *pA, i64 iB){
+              if( iB==SMALLEST_INT64 ){
+                if( (*pA)>=0 ) return 1;
+                *pA -= iB;
+                return 0;
+              }else{
+                return sqlite3AddInt64(pA, -iB);
+              }
+            }
+
+            int sqlite3MulInt64(i64 *pA, i64 iB){
+              i64 iA = *pA;
+              if( iB>0 ){
+                if( iA>LARGEST_INT64/iB ) return 1;
+                if( iA<SMALLEST_INT64/iB ) return 1;
+              }else if( iB<0 ){
+                if( iA>0 ){
+                  if( iB<SMALLEST_INT64/iA ) return 1;
+                }else if( iA<0 ){
+                  if( iB==SMALLEST_INT64 ) return 1;
+                  if( iA==SMALLEST_INT64 ) return 1;
+                  if( -iA>LARGEST_INT64/-iB ) return 1;
+                }
+              }
+              *pA = iA*iB;
+              return 0;
+            }
+
+            int sqlite3AbsInt32(int x){
+              if( x>=0 ) return x;
+              if( x==(int)0x80000000 ) return 0x7fffffff;
+              return -x;
+            }
+
+            void sqlite3Dequote(char *z){
+              char quote;
+              int i, j;
+              if( z==0 ) return;
+              quote = z[0];
+              if( !sqlite3Isquote(quote) ) return;
+              if( quote=='[' ) quote = ']';
+              for(i=1, j=0;; i++){
+                if( z[i]==quote ){
+                  if( z[i+1]==quote ){
+                    z[j++] = quote;
+                    i++;
+                  }else{
+                    break;
+                  }
+                }else{
+                  z[j++] = z[i];
+                }
+              }
+              z[j] = 0;
+            }
+
+            static int checkInt(const char *text, int expectedOk, int expectedValue){
+              int value = 99;
+              int ok = sqlite3GetInt32(text, &value);
+              return ok==expectedOk && (!ok || value==expectedValue);
+            }
+
+            int main(void){
+              i64 value;
+              char quoted[] = "\"a\"\"b\"";
+              char bracketed[] = "[a-b]";
+
+              if( !checkInt("2147483647", 1, 2147483647) ) return 1;
+              if( !checkInt("-2147483648", 1, (int)0x80000000) ) return 2;
+              if( !checkInt("2147483648", 0, 0) ) return 3;
+              if( !checkInt("-2147483649", 0, 0) ) return 4;
+              if( !checkInt("123tail", 1, 123) ) return 5;
+              if( !checkInt("0x7fffffff", 1, 2147483647) ) return 6;
+              if( !checkInt("0x80000000", 0, 0) ) return 7;
+              if( !checkInt("0x0000000000002a", 1, 42) ) return 8;
+
+              value = LARGEST_INT64;
+              if( sqlite3AddInt64(&value, 1)!=1 || value!=LARGEST_INT64 ) return 9;
+              value = SMALLEST_INT64;
+              if( sqlite3AddInt64(&value, -1)!=1 || value!=SMALLEST_INT64 ) return 10;
+              value = -1;
+              if( sqlite3SubInt64(&value, SMALLEST_INT64)!=0 || value!=LARGEST_INT64 ) return 11;
+              value = 3037000500LL;
+              if( sqlite3MulInt64(&value, 3037000500LL)!=1 || value!=3037000500LL ) return 12;
+              value = -7;
+              if( sqlite3MulInt64(&value, -6)!=0 || value!=42 ) return 13;
+              if( sqlite3AbsInt32((int)0x80000000)!=0x7fffffff ) return 14;
+
+              sqlite3Dequote(quoted);
+              sqlite3Dequote(bracketed);
+              if( strcmp(quoted, "a\"b")!=0 ) return 15;
+              if( strcmp(bracketed, "a-b")!=0 ) return 16;
+              return 0;
+            }
+        "#;
+        let result = run_source("sqlite-small-util.c", source).unwrap();
+        assert_eq!(result.exit_status, 0);
     }
 
     fn temp_test_dir(label: &str) -> PathBuf {

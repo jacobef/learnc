@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::number::NumberLiteral;
 use crate::source::Span;
 use crate::token::StringLiteralValue;
 use crate::types::{CType, EnumType, RecordType};
@@ -223,7 +224,7 @@ pub enum ForInit {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    Number(String, Span),
+    Number(NumberLiteral, Span),
     CharLiteral(i64, Span),
     WideCharLiteral(i64, Span),
     Utf16CharLiteral(u16, Span),

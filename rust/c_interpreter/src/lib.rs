@@ -3,6 +3,7 @@ mod diag;
 mod integer;
 mod interpreter;
 mod lexer;
+mod number;
 mod parser;
 mod preprocess;
 mod source;
@@ -68,12 +69,18 @@ struct RunOptions {
     pub stdin: String,
     pub expression_eval: Option<RunExpressionEvalRequest>,
     pub ub_detection_mode: UbDetectionMode,
+    pub capture_visualization: bool,
     pub synthetic_address_base: u64,
     pub execution_step_limit: Option<usize>,
     pub execution_trace_following_limit: usize,
 }
 
 type VirtualSource = (PathBuf, String);
+
+// The recursive evaluator gets the same stack budget in debug and release native builds. The Wasm
+// build script reserves the same amount of linear memory for its stack.
+#[cfg(not(target_os = "wasi"))]
+const INTERPRETER_STACK_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 struct SourceDisplay {
@@ -130,6 +137,7 @@ impl Default for RunOptions {
             stdin: String::new(),
             expression_eval: None,
             ub_detection_mode: UbDetectionMode::Standard,
+            capture_visualization: true,
             synthetic_address_base: 0x1000,
             execution_step_limit: None,
             execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
@@ -256,30 +264,7 @@ where
     }
     let translation_unit =
         merge_translation_units(units).map_err(|diag| diag.with_sources(&sources))?;
-    let ProgramOutput {
-        stdout,
-        stderr,
-        exit_status,
-        state,
-        trace,
-        main_close,
-        blocked,
-        execution_limit,
-        expression: _,
-    } = Interpreter::new(&sources, translation_unit, options)
-        .run()
-        .map_err(|diag| diag.with_sources(&sources))?;
-    Ok(RunResult {
-        stdout,
-        stderr,
-        exit_status,
-        state,
-        trace,
-        main_close,
-        blocked,
-        execution_limit,
-        expression: None,
-    })
+    run_translation_unit(&mut sources, translation_unit, options)
 }
 
 fn cboxes_decode_file_bundle(bytes: &[u8]) -> Result<Vec<VirtualSource>, String> {
@@ -470,6 +455,7 @@ fn cboxes_run_virtual_sources_without_expression(
                 stdin: options.stdin.clone(),
                 expression_eval: None,
                 ub_detection_mode: options.ub_detection_mode,
+                capture_visualization: options.capture_visualization,
                 synthetic_address_base: options.synthetic_address_base,
                 execution_step_limit: options.execution_step_limit,
                 execution_trace_following_limit: options.execution_trace_following_limit,
@@ -515,6 +501,52 @@ pub unsafe extern "C" fn cboxes_run_source(
     stdin_ptr: *const u8,
     stdin_len: usize,
     synthetic_address_base: u32,
+) -> *mut u8 {
+    unsafe {
+        cboxes_run_source_configured(
+            ptr,
+            len,
+            stdin_ptr,
+            stdin_len,
+            synthetic_address_base,
+            true,
+            Some(CBOXES_BROWSER_EXECUTION_STEP_LIMIT),
+        )
+    }
+}
+
+/// Runs a single source file without producing website visualization data or
+/// imposing the browser step limit. The returned JSON uses the same ownership
+/// and error-reporting contract as `cboxes_run_source`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cboxes_run_source_without_visualization(
+    ptr: *const u8,
+    len: usize,
+    stdin_ptr: *const u8,
+    stdin_len: usize,
+    synthetic_address_base: u32,
+) -> *mut u8 {
+    unsafe {
+        cboxes_run_source_configured(
+            ptr,
+            len,
+            stdin_ptr,
+            stdin_len,
+            synthetic_address_base,
+            false,
+            None,
+        )
+    }
+}
+
+unsafe fn cboxes_run_source_configured(
+    ptr: *const u8,
+    len: usize,
+    stdin_ptr: *const u8,
+    stdin_len: usize,
+    synthetic_address_base: u32,
+    capture_visualization: bool,
+    execution_step_limit: Option<usize>,
 ) -> *mut u8 {
     let input = if len == 0 {
         ""
@@ -576,8 +608,9 @@ pub unsafe extern "C" fn cboxes_run_source(
                 stdin: stdin.to_owned(),
                 expression_eval: None,
                 ub_detection_mode: UbDetectionMode::Standard,
+                capture_visualization,
                 synthetic_address_base: synthetic_address_base.into(),
-                execution_step_limit: Some(CBOXES_BROWSER_EXECUTION_STEP_LIMIT),
+                execution_step_limit,
                 execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
             },
         )
@@ -650,6 +683,7 @@ pub unsafe extern "C" fn cboxes_run_files(
         stdin: stdin.to_owned(),
         expression_eval: None,
         ub_detection_mode: UbDetectionMode::Standard,
+        capture_visualization: true,
         synthetic_address_base: synthetic_address_base.into(),
         execution_step_limit: Some(execution_step_limit.max(1) as usize),
         execution_trace_following_limit: execution_trace_following_limit.max(1) as usize,
@@ -770,6 +804,7 @@ pub unsafe extern "C" fn cboxes_eval_expression(
                     event_index,
                 }),
                 ub_detection_mode: UbDetectionMode::Standard,
+                capture_visualization: true,
                 synthetic_address_base: synthetic_address_base.into(),
                 execution_step_limit: Some(CBOXES_BROWSER_EXECUTION_STEP_LIMIT),
                 execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
@@ -877,6 +912,7 @@ pub unsafe extern "C" fn cboxes_eval_expression_files(
             event_index,
         }),
         ub_detection_mode: UbDetectionMode::Standard,
+        capture_visualization: true,
         synthetic_address_base: synthetic_address_base.into(),
         execution_step_limit: Some(execution_step_limit.max(1) as usize),
         execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
@@ -1621,10 +1657,36 @@ fn run_translation_unit(
     } else {
         None
     };
-    let mut interpreter = Interpreter::new(sources, translation_unit, options);
-    if let Some(request) = expression_eval {
-        interpreter.set_cboxes_expression_eval(request);
-    }
+
+    #[cfg(not(target_os = "wasi"))]
+    let execution = std::thread::scope(|scope| {
+        let diagnostic_span = fallback_span(&translation_unit);
+        let execution_sources: &SourceManager = sources;
+        let handle = std::thread::Builder::new()
+            .name("cboxes-interpreter".to_owned())
+            .stack_size(INTERPRETER_STACK_BYTES)
+            .spawn_scoped(scope, move || {
+                execute_translation_unit(
+                    execution_sources,
+                    translation_unit,
+                    options,
+                    expression_eval,
+                )
+            })
+            .map_err(|error| {
+                Diagnostic::error(
+                    format!("failed to create the cBoxes interpreter thread: {error}"),
+                    diagnostic_span,
+                )
+            })?;
+        match handle.join() {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    });
+    #[cfg(target_os = "wasi")]
+    let execution = execute_translation_unit(sources, translation_unit, options, expression_eval);
+
     let ProgramOutput {
         stdout,
         stderr,
@@ -1635,9 +1697,7 @@ fn run_translation_unit(
         blocked,
         execution_limit,
         expression,
-    } = interpreter
-        .run()
-        .map_err(|diag| diag.with_sources(sources))?;
+    } = execution.map_err(|diag| diag.with_sources(sources))?;
     Ok(RunResult {
         stdout,
         stderr,
@@ -1649,6 +1709,19 @@ fn run_translation_unit(
         execution_limit,
         expression,
     })
+}
+
+fn execute_translation_unit(
+    sources: &SourceManager,
+    translation_unit: TranslationUnit,
+    options: &RunOptions,
+    expression_eval: Option<ProgramExpressionEvalRequest>,
+) -> Result<ProgramOutput, Diagnostic> {
+    let mut interpreter = Interpreter::new(sources, translation_unit, options);
+    if let Some(request) = expression_eval {
+        interpreter.set_cboxes_expression_eval(request);
+    }
+    interpreter.run()
 }
 
 fn parse_translation_unit(
@@ -3133,7 +3206,7 @@ fn remap_expr(
     enum_map: &std::collections::HashMap<usize, usize>,
 ) -> Expr {
     match expr {
-        Expr::Number(text, span) => Expr::Number(text, span),
+        Expr::Number(literal, span) => Expr::Number(literal, span),
         Expr::CharLiteral(value, span) => Expr::CharLiteral(value, span),
         Expr::WideCharLiteral(value, span) => Expr::WideCharLiteral(value, span),
         Expr::Utf16CharLiteral(value, span) => Expr::Utf16CharLiteral(value, span),
@@ -3749,6 +3822,30 @@ fn combine_spans(lhs: Span, rhs: Span) -> Span {
 #[cfg(test)]
 mod browser_api_tests {
     use super::*;
+
+    #[test]
+    fn no_visualization_entry_point_runs_without_browser_limits_or_trace_data() {
+        let source = b"int main(void) { unsigned long sum = 0; for (int i = 0; i < 12000; ++i) sum += i; return sum != 71994000; }\n";
+        let result_ptr = unsafe {
+            cboxes_run_source_without_visualization(
+                source.as_ptr(),
+                source.len(),
+                std::ptr::null(),
+                0,
+                0x1000,
+            )
+        };
+        let result_len = cboxes_last_result_len();
+        let json = unsafe { std::slice::from_raw_parts(result_ptr, result_len) }.to_vec();
+        unsafe { cboxes_free(result_ptr, result_len) };
+        let json = String::from_utf8(json).unwrap();
+
+        assert!(json.contains("\"ok\":true"), "{json}");
+        assert!(json.contains("\"exitStatus\":0"), "{json}");
+        assert!(json.contains("\"state\":[]"), "{json}");
+        assert!(json.contains("\"trace\":[]"), "{json}");
+        assert!(json.contains("\"executionLimit\":null"), "{json}");
+    }
 
     #[test]
     fn browser_diagnostics_preserve_the_full_source_range() {

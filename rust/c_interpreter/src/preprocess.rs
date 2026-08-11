@@ -1067,10 +1067,12 @@ impl Preprocessor {
                         }
                         let mut expanded_args = Vec::with_capacity(raw_args.len());
                         for arg in raw_args.iter().take(params.len()) {
+                            let mut argument_active = active.clone();
+                            argument_active.remove(name);
                             expanded_args.push(self.expand_macros_in_line(
                                 arg,
                                 macros,
-                                &mut HashSet::new(),
+                                &mut argument_active,
                                 mode,
                                 file_id,
                                 presumed_line,
@@ -1092,10 +1094,12 @@ impl Preprocessor {
                                 .iter()
                                 .skip(params.len())
                                 .map(|arg| {
+                                    let mut argument_active = active.clone();
+                                    argument_active.remove(name);
                                     self.expand_macros_in_line(
                                         arg,
                                         macros,
-                                        &mut HashSet::new(),
+                                        &mut argument_active,
                                         mode,
                                         file_id,
                                         presumed_line,

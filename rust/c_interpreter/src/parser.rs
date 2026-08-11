@@ -6,7 +6,7 @@ use crate::ast::{
     Parameter, PostfixOp, Statement, StorageClass, SwitchLabel, TranslationUnit, UnaryOp,
 };
 use crate::diag::Diagnostic;
-use crate::integer::parse_integer_literal;
+use crate::number::{NumberValue, parse_number_literal};
 use crate::source::{SourceManager, Span};
 use crate::token::{Keyword, StringLiteralValue, Token, TokenKind};
 use crate::types::{
@@ -288,6 +288,7 @@ impl<'a> Parser<'a> {
             return Ok(ExternalDecl::Globals(self.finish_declarator_list(
                 name,
                 ty,
+                specs.base_type.clone(),
                 vla_bounds,
                 base_span,
                 specs.storage_class,
@@ -357,6 +358,7 @@ impl<'a> Parser<'a> {
             return Ok(ExternalDecl::Globals(self.finish_declarator_list(
                 name,
                 ty,
+                specs.base_type.clone(),
                 vla_bounds,
                 base_span,
                 specs.storage_class,
@@ -820,9 +822,9 @@ impl<'a> Parser<'a> {
         }
 
         let mut items = Vec::new();
+        let declaration_base = specs.base_type.clone();
         let (first_name, first_ty, first_vla_bounds, _, first_span, first_function_params) =
-            self.parse_declarator(specs.base_type, DeclContext::BlockScope)?;
-        let redecl_base = self.base_type_for_redeclaration(&first_ty);
+            self.parse_declarator(declaration_base.clone(), DeclContext::BlockScope)?;
         let (first_init, first_predeclared) = if self.eat(TokenKind::Equal) {
             let predeclared = first_function_params.is_none()
                 && specs.storage_class != Some(ParsedStorageClass::Typedef);
@@ -856,7 +858,7 @@ impl<'a> Parser<'a> {
 
         while self.eat(TokenKind::Comma) {
             let (name, ty, vla_bounds, _, span, function_params) =
-                self.parse_declarator(redecl_base.clone(), DeclContext::BlockScope)?;
+                self.parse_declarator(declaration_base.clone(), DeclContext::BlockScope)?;
             let (init, predeclared) = if self.eat(TokenKind::Equal) {
                 let predeclared = function_params.is_none()
                     && specs.storage_class != Some(ParsedStorageClass::Typedef);
@@ -916,8 +918,9 @@ impl<'a> Parser<'a> {
             }
             return Ok(Vec::new());
         }
+        let declaration_base = specs.base_type.clone();
         let (name, ty, vla_bounds, _, span, function_params) =
-            self.parse_declarator(specs.base_type, DeclContext::BlockScope)?;
+            self.parse_declarator(declaration_base.clone(), DeclContext::BlockScope)?;
         if function_params.is_some() && specs.storage_class != Some(ParsedStorageClass::Typedef) {
             return Err(Diagnostic::error(
                 "function declaration is not allowed in this declaration context",
@@ -927,6 +930,7 @@ impl<'a> Parser<'a> {
         self.finish_declarator_list(
             name,
             ty,
+            declaration_base,
             vla_bounds,
             span,
             specs.storage_class,
@@ -940,6 +944,7 @@ impl<'a> Parser<'a> {
         &mut self,
         first_name: String,
         first_ty: CType,
+        declaration_base: CType,
         first_vla_bounds: Vec<Option<Expr>>,
         first_span: Span,
         storage_class: Option<ParsedStorageClass>,
@@ -984,7 +989,7 @@ impl<'a> Parser<'a> {
         )?;
         while self.eat(TokenKind::Comma) {
             let (name, ty, vla_bounds, _, span, function_params) =
-                self.parse_declarator(self.base_type_for_redeclaration(&first_ty), context)?;
+                self.parse_declarator(declaration_base.clone(), context)?;
             if function_params.is_some() && storage_class != Some(ParsedStorageClass::Typedef) {
                 return Err(Diagnostic::error(
                     "function declaration is not allowed in this declaration context",
@@ -1129,6 +1134,17 @@ impl<'a> Parser<'a> {
         span: Span,
         context: DeclContext,
     ) -> Result<(), Diagnostic> {
+        let ty = if context == DeclContext::FileScope {
+            init.as_ref().map_or_else(
+                || ty.clone(),
+                |initializer| self.complete_file_scope_array_bound(&ty, initializer),
+            )
+        } else {
+            ty
+        };
+        if symbol_predeclared && let Some(entry) = self.current_scope_mut().get_mut(&name) {
+            entry.ordinary_ty = Some(ty.clone());
+        }
         self.validate_restrict_usage(&ty, span)?;
         if alignment.is_some() && storage_class == Some(ParsedStorageClass::Typedef) {
             return Err(Diagnostic::error(
@@ -1235,6 +1251,113 @@ impl<'a> Parser<'a> {
         }
         declarations.push(declaration);
         Ok(())
+    }
+
+    fn complete_file_scope_array_bound(&self, ty: &CType, initializer: &Initializer) -> CType {
+        let CType::Array(inner, 0) = ty.unqualified() else {
+            return ty.clone();
+        };
+        let len = match initializer {
+            Initializer::Expr(Expr::StringLiteral(text, _)) if inner.is_character() => {
+                text.narrow_len() + 1
+            }
+            Initializer::Expr(Expr::WideStringLiteral(text, _))
+                if *inner.unqualified() == CType::Int =>
+            {
+                text.utf32_units().len() + 1
+            }
+            Initializer::Expr(Expr::Utf16StringLiteral(text, _))
+                if *inner.unqualified() == CType::UnsignedShort =>
+            {
+                text.utf16_units().len() + 1
+            }
+            Initializer::Expr(Expr::Utf32StringLiteral(text, _))
+                if *inner.unqualified() == CType::UnsignedInt =>
+            {
+                text.utf32_units().len() + 1
+            }
+            Initializer::List { items, .. } => {
+                let scalar_slots = self.initializer_scalar_slots(inner).unwrap_or(1).max(1);
+                let inner_is_aggregate = matches!(
+                    inner.unqualified(),
+                    CType::Array(_, _) | CType::Struct(_, _) | CType::Union(_, _)
+                );
+                let mut next_index = 0usize;
+                let mut scalar_offset = 0usize;
+                let mut max_len = 0usize;
+                for item in items {
+                    if let Some(index) = item.designators.iter().find_map(|designator| {
+                        if let Designator::Index(index, _) = designator {
+                            Some(*index)
+                        } else {
+                            None
+                        }
+                    }) {
+                        next_index = index;
+                        scalar_offset = 0;
+                    }
+                    let consumes_whole_element = !inner_is_aggregate
+                        || !item.designators.is_empty()
+                        || matches!(
+                            item.initializer,
+                            Initializer::List { .. }
+                                | Initializer::Expr(Expr::CompoundLiteral { .. })
+                                | Initializer::Expr(Expr::StringLiteral(..))
+                                | Initializer::Expr(Expr::WideStringLiteral(..))
+                                | Initializer::Expr(Expr::Utf16StringLiteral(..))
+                                | Initializer::Expr(Expr::Utf32StringLiteral(..))
+                        );
+                    max_len = max_len.max(next_index.saturating_add(1));
+                    if consumes_whole_element {
+                        next_index = next_index.saturating_add(1);
+                        scalar_offset = 0;
+                    } else {
+                        scalar_offset += 1;
+                        if scalar_offset == scalar_slots {
+                            next_index = next_index.saturating_add(1);
+                            scalar_offset = 0;
+                        }
+                    }
+                }
+                max_len
+            }
+            _ => return ty.clone(),
+        };
+        CType::qualified(
+            CType::array_of((**inner).clone(), len),
+            ty.top_level_qualifiers(),
+        )
+    }
+
+    fn initializer_scalar_slots(&self, ty: &CType) -> Option<usize> {
+        match ty.unqualified() {
+            CType::Array(inner, len) if *len != 0 => {
+                self.initializer_scalar_slots(inner)?.checked_mul(*len)
+            }
+            CType::Struct(id, _) => {
+                self.records
+                    .get(id)?
+                    .members
+                    .iter()
+                    .try_fold(0usize, |total, member| {
+                        if member.bit_width == Some(0)
+                            || matches!(member.ty.unqualified(), CType::Array(_, 0))
+                        {
+                            Some(total)
+                        } else {
+                            total.checked_add(self.initializer_scalar_slots(&member.ty)?)
+                        }
+                    })
+            }
+            CType::Union(id, _) => self
+                .records
+                .get(id)?
+                .members
+                .iter()
+                .find(|member| member.bit_width != Some(0))
+                .and_then(|member| self.initializer_scalar_slots(&member.ty)),
+            _ => Some(1),
+        }
     }
 
     fn parse_initializer(&mut self) -> Result<Initializer, Diagnostic> {
@@ -1827,7 +1950,9 @@ impl<'a> Parser<'a> {
             let alignment = self.type_align_of(&parsed.ty).map_err(|_| {
                 Diagnostic::error("_Alignof requires a complete object type", start.merge(end))
             })?;
-            return Ok(Expr::Number(alignment.to_string(), start.merge(end)));
+            let span = start.merge(end);
+            return parse_number_literal(alignment.to_string(), span)
+                .map(|literal| Expr::Number(literal, span));
         }
         if self.at_keyword(Keyword::Sizeof) {
             let start = self.bump().span;
@@ -2103,7 +2228,8 @@ impl<'a> Parser<'a> {
     fn parse_primary(&mut self) -> Result<Expr, Diagnostic> {
         let token = self.bump().clone();
         match token.kind {
-            TokenKind::Number(text) => Ok(Expr::Number(text, token.span)),
+            TokenKind::Number(text) => parse_number_literal(text, token.span)
+                .map(|literal| Expr::Number(literal, token.span)),
             TokenKind::CharLiteral(value) => Ok(Expr::CharLiteral(value, token.span)),
             TokenKind::WideCharLiteral(value) => Ok(Expr::WideCharLiteral(value, token.span)),
             TokenKind::Utf16CharLiteral(value) => Ok(Expr::Utf16CharLiteral(value, token.span)),
@@ -2190,7 +2316,7 @@ impl<'a> Parser<'a> {
 
     fn enum_constant_expr(value: i128, span: Span) -> Expr {
         if value >= 0 {
-            return Expr::Number(value.to_string(), span);
+            return Self::generated_number_expr(value.to_string(), span);
         }
         let magnitude_before_last = value
             .checked_add(1)
@@ -2200,12 +2326,22 @@ impl<'a> Parser<'a> {
             op: BinaryOp::Sub,
             lhs: Box::new(Expr::Unary {
                 op: UnaryOp::Minus,
-                expr: Box::new(Expr::Number(magnitude_before_last.to_string(), span)),
+                expr: Box::new(Self::generated_number_expr(
+                    magnitude_before_last.to_string(),
+                    span,
+                )),
                 span,
             }),
-            rhs: Box::new(Expr::Number("1".to_owned(), span)),
+            rhs: Box::new(Self::generated_number_expr("1".to_owned(), span)),
             span,
         }
+    }
+
+    fn generated_number_expr(text: String, span: Span) -> Expr {
+        Expr::Number(
+            parse_number_literal(text, span).expect("generated number literal must be valid"),
+            span,
+        )
     }
 
     fn parse_string_literal_primary(
@@ -3654,7 +3790,7 @@ impl<'a> Parser<'a> {
                 });
             } else {
                 let (first_name, first_ty, first_vla_bounds, _, first_span, function_params) =
-                    self.parse_declarator(base, DeclContext::RecordMember)?;
+                    self.parse_declarator(base.clone(), DeclContext::RecordMember)?;
                 if function_params.is_some() || first_ty.is_function() {
                     if self.at(TokenKind::LBrace) && !members.is_empty() {
                         return Err(Diagnostic::error(
@@ -3691,10 +3827,8 @@ impl<'a> Parser<'a> {
                     declaration_span: Some(first_span),
                 });
                 while self.eat(TokenKind::Comma) {
-                    let (name, ty, vla_bounds, _, span, function_params) = self.parse_declarator(
-                        self.base_type_for_redeclaration(&first_ty),
-                        DeclContext::RecordMember,
-                    )?;
+                    let (name, ty, vla_bounds, _, span, function_params) =
+                        self.parse_declarator(base.clone(), DeclContext::RecordMember)?;
                     if function_params.is_some() || ty.is_function() {
                         return Err(Diagnostic::error(
                             "record members cannot have function type",
@@ -4202,23 +4336,16 @@ impl<'a> Parser<'a> {
 
     fn eval_typed_integer_constant_expr(&self, expr: &Expr) -> Result<ConstantInteger, Diagnostic> {
         match expr {
-            Expr::Number(text, span) => {
-                let hexadecimal = text.starts_with("0x") || text.starts_with("0X");
-                let floating = text.contains('.')
-                    || if hexadecimal {
-                        text.contains('p') || text.contains('P')
-                    } else {
-                        text.contains('e') || text.contains('E')
-                    };
-                if floating {
-                    return Err(Diagnostic::error(
-                        "an integer constant expression cannot use a floating-point value",
-                        *span,
-                    ));
-                }
-                let (ty, value, _) = parse_integer_literal(text, *span)?;
-                Ok(ConstantInteger { ty, value })
-            }
+            Expr::Number(literal, span) => match literal.value {
+                NumberValue::Integer(value) => Ok(ConstantInteger {
+                    ty: literal.ty.clone(),
+                    value,
+                }),
+                NumberValue::Floating(_) => Err(Diagnostic::error(
+                    "an integer constant expression cannot use a floating-point value",
+                    *span,
+                )),
+            },
             Expr::CharLiteral(value, _) => Ok(ConstantInteger {
                 ty: CType::Int,
                 value: *value as i128,
@@ -4594,7 +4721,13 @@ impl<'a> Parser<'a> {
 
     fn integer_constant_expr_type(&self, expr: &Expr) -> Result<CType, Diagnostic> {
         match expr {
-            Expr::Number(text, span) => parse_integer_literal(text, *span).map(|(ty, _, _)| ty),
+            Expr::Number(literal, span) => match literal.value {
+                NumberValue::Integer(_) => Ok(literal.ty.clone()),
+                NumberValue::Floating(_) => Err(Diagnostic::error(
+                    "an integer constant expression cannot use a floating-point value",
+                    *span,
+                )),
+            },
             Expr::CharLiteral(_, _) | Expr::Variable(_, _) => Ok(CType::Int),
             Expr::Unary { op, expr, span } => match op {
                 UnaryOp::Plus | UnaryOp::Minus | UnaryOp::BitNot => Ok(self
@@ -4790,15 +4923,22 @@ impl<'a> Parser<'a> {
 
     fn type_size_of(&self, ty: &CType) -> Result<usize, Diagnostic> {
         match ty.unqualified() {
+            CType::Array(inner, len) if *len != 0 => {
+                self.type_size_of(inner)?.checked_mul(*len).ok_or_else(|| {
+                    Diagnostic::error("type size is out of supported range", self.current_span())
+                })
+            }
             CType::Struct(id, _) | CType::Union(id, _) => self
                 .records
                 .get(id)
                 .filter(|record| record.complete)
                 .map(|record| record.size)
-                .ok_or_else(|| Diagnostic::error("type is incomplete", self.current_span())),
-            _ => ty
-                .size_of()
-                .ok_or_else(|| Diagnostic::error("type is incomplete", self.current_span())),
+                .ok_or_else(|| {
+                    Diagnostic::error(format!("type is incomplete: {ty}"), self.current_span())
+                }),
+            _ => ty.size_of().ok_or_else(|| {
+                Diagnostic::error(format!("type is incomplete: {ty}"), self.current_span())
+            }),
         }
     }
 
