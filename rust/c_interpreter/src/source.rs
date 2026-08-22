@@ -139,6 +139,31 @@ impl SourceManager {
         &self.file(span.file).text()[span.start..span.end]
     }
 
+    pub(crate) fn span_on_line(
+        &self,
+        file: FileId,
+        line_number: usize,
+        start_column: usize,
+        width: usize,
+    ) -> Span {
+        let source = self.file(file);
+        let line_index = line_number.saturating_sub(1);
+        let line_start = source
+            .line_starts
+            .get(line_index)
+            .copied()
+            .unwrap_or(source.text.len());
+        let line_end = source
+            .line_starts
+            .get(line_index.saturating_add(1))
+            .copied()
+            .unwrap_or(source.text.len())
+            .saturating_sub(1)
+            .max(line_start);
+        let start = line_start.saturating_add(start_column).min(line_end);
+        Span::new(file, start, start.saturating_add(width).min(line_end))
+    }
+
     pub fn snippet(&self, span: Span) -> Snippet {
         let file = self.file(span.file);
         let (line_number, column) = file.line_col(span.start);

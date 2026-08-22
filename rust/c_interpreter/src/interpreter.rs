@@ -49461,6 +49461,32 @@ mod tests {
     }
 
     #[test]
+    fn line_splicing_preserves_physical_line_numbers() {
+        let line_macro = "#define PLUS_ONE(value) ((value) + \\\n+1)\nint main(void) { return __LINE__ != 3; }\n";
+        assert_eq!(run_source("test.c", line_macro).unwrap().exit_status, 0);
+
+        let diagnostic = "#define PLUS_ONE(value) ((value) + \\\n+1)\nint main(void) {\n    int *pointer = 0;\n    return *pointer;\n}\n";
+        let rendered = run_source("test.c", diagnostic).unwrap_err().render();
+        assert!(rendered.contains("test.c:5:"), "{rendered}");
+
+        let preprocessing_diagnostic = "#define PLUS_ONE(value) ((value) + \\\n+1)\n  #ifdef\n#endif\nint main(void) { return 0; }\n";
+        let rendered = run_source("test.c", preprocessing_diagnostic)
+            .unwrap_err()
+            .render();
+        assert!(rendered.contains("test.c:3:3"), "{rendered}");
+    }
+
+    #[test]
+    fn variadic_macro_diagnostic_counts_the_required_variadic_argument() {
+        let source = "#define FIRST(required, ...) required\nint main(void) { return FIRST(1); }\n";
+        let rendered = run_source("test.c", source).unwrap_err().render();
+        assert!(
+            rendered.contains("expects 2+ argument(s), got 1"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn function_like_macro_invocations_can_span_multiple_physical_lines() {
         let source = r#"
             #include <stdio.h>

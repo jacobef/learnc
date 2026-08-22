@@ -191,7 +191,8 @@ impl Preprocessor {
         path: &Path,
         macros: &mut HashMap<String, MacroDefinition>,
     ) -> Result<ExpandedFile, Diagnostic> {
-        let text = self.normalize_source_text(sources.file(file_id).text(), file_id)?;
+        let (text, physical_line_map) =
+            self.normalize_source_text(sources.file(file_id).text(), file_id)?;
         let mut out = ExpandedFile::default();
         let mut conditionals = Vec::new();
         let mut presumed = PresumedLocation {
@@ -200,22 +201,14 @@ impl Preprocessor {
         };
 
         let lines = text.lines().collect::<Vec<_>>();
-        let mut line_starts = vec![0usize];
-        line_starts.extend(
-            text.match_indices('\n')
-                .map(|(newline, _)| newline.saturating_add(1)),
-        );
         let mut line_idx = 0usize;
         while line_idx < lines.len() {
-            let line_number = line_idx + 1;
+            let line_number = Self::physical_line_number(&physical_line_map, line_idx);
             let line = lines[line_idx];
             let trimmed = line.trim_start();
             let first_token = line.len().saturating_sub(trimmed.len());
-            let line_span = Span::new(
-                file_id,
-                line_starts[line_idx].saturating_add(first_token),
-                line_starts[line_idx].saturating_add(line.len()),
-            );
+            let line_span =
+                sources.span_on_line(file_id, line_number, first_token, line.len() - first_token);
             if let Some(rest) = trimmed.strip_prefix('#') {
                 self.handle_directive(
                     rest.trim_start(),
@@ -254,7 +247,14 @@ impl Preprocessor {
                     {
                         Ok(expanded) => {
                             for (offset, expanded_line) in expanded.split('\n').enumerate() {
-                                out.push_line(expanded_line, file_id, line_number + offset);
+                                out.push_line(
+                                    expanded_line,
+                                    file_id,
+                                    Self::physical_line_number(
+                                        &physical_line_map,
+                                        line_idx + offset,
+                                    ),
+                                );
                             }
                             break;
                         }
@@ -290,12 +290,28 @@ impl Preprocessor {
         Ok(out)
     }
 
+    fn physical_line_number(line_map: &[usize], normalized_line_index: usize) -> usize {
+        line_map
+            .get(normalized_line_index)
+            .copied()
+            .unwrap_or_else(|| {
+                line_map.last().copied().unwrap_or(1)
+                    + normalized_line_index
+                        .saturating_add(1)
+                        .saturating_sub(line_map.len())
+            })
+    }
+
     fn is_unterminated_macro_invocation(&self, diag: &Diagnostic) -> bool {
         diag.render()
             .starts_with("error: unterminated macro invocation")
     }
 
-    fn normalize_source_text(&self, text: &str, file_id: FileId) -> Result<String, Diagnostic> {
+    fn normalize_source_text(
+        &self,
+        text: &str,
+        file_id: FileId,
+    ) -> Result<(String, Vec<usize>), Diagnostic> {
         #[derive(Clone, Copy, PartialEq, Eq)]
         enum Mode {
             Normal,
@@ -319,10 +335,17 @@ impl Preprocessor {
         let mut out = String::with_capacity(text.len());
         let mut mode = Mode::Normal;
         let mut construct_start = None;
+        // Maps each line of the normalized text (1-based) to the physical line
+        // of the original file it came from. Line splices join two physical
+        // lines, so counting normalized lines alone would shift every later
+        // diagnostic to an earlier physical line.
+        let mut physical_line = 1usize;
+        let mut line_map = vec![1usize];
 
         while idx < bytes.len() {
             if let Some(consumed) = line_splice_length(bytes, idx) {
                 idx += consumed;
+                physical_line += 1;
                 continue;
             }
 
@@ -354,7 +377,10 @@ impl Preprocessor {
                     }
                     out.push(ch);
                     idx += 1;
-                    if ch == '"' {
+                    if ch == '\n' {
+                        physical_line += 1;
+                        line_map.push(physical_line);
+                    } else if ch == '"' {
                         construct_start = Some(idx - 1);
                         mode = Mode::String;
                     } else if ch == '\'' {
@@ -391,10 +417,14 @@ impl Preprocessor {
                         if idx < bytes.len() && bytes[idx] as char == '\n' {
                             out.push('\n');
                             idx += 1;
+                            physical_line += 1;
+                            line_map.push(physical_line);
                         }
                         mode = Mode::Normal;
                     } else if ch == '\n' {
                         out.push('\n');
+                        physical_line += 1;
+                        line_map.push(physical_line);
                         mode = Mode::Normal;
                     }
                 }
@@ -415,9 +445,13 @@ impl Preprocessor {
                         if idx < bytes.len() && bytes[idx] as char == '\n' {
                             out.push('\n');
                             idx += 1;
+                            physical_line += 1;
+                            line_map.push(physical_line);
                         }
                     } else if ch == '\n' {
                         out.push('\n');
+                        physical_line += 1;
+                        line_map.push(physical_line);
                     }
                 }
             }
@@ -431,7 +465,7 @@ impl Preprocessor {
             ));
         }
 
-        Ok(out)
+        Ok((out, line_map))
     }
 
     fn handle_directive(
@@ -1054,11 +1088,12 @@ impl Preprocessor {
                         if (!variadic && raw_args.len() != params.len())
                             || (variadic && raw_args.len() <= params.len())
                         {
+                            let minimum = params.len() + usize::from(variadic);
                             return Err(Diagnostic::error(
                                 format!(
                                     "macro {} expects {}{} argument(s), got {}",
                                     name,
-                                    params.len(),
+                                    minimum,
                                     if variadic { "+" } else { "" },
                                     raw_args.len()
                                 ),
