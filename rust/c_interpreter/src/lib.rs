@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ast::{
@@ -62,6 +63,8 @@ enum UbDetectionMode {
     Simple,
 }
 
+const DEFAULT_ALLOCATION_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 struct RunOptions {
     #[cfg(test)]
@@ -69,6 +72,8 @@ struct RunOptions {
     pub stdin: String,
     pub expression_eval: Option<RunExpressionEvalRequest>,
     pub ub_detection_mode: UbDetectionMode,
+    pub allocation_limit_bytes: Option<usize>,
+    pub optimizing_precomputations: bool,
     pub capture_visualization: bool,
     pub synthetic_address_base: u64,
     pub execution_step_limit: Option<usize>,
@@ -137,6 +142,8 @@ impl Default for RunOptions {
             stdin: String::new(),
             expression_eval: None,
             ub_detection_mode: UbDetectionMode::Standard,
+            allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
+            optimizing_precomputations: false,
             capture_visualization: true,
             synthetic_address_base: 0x1000,
             execution_step_limit: None,
@@ -455,6 +462,8 @@ fn cboxes_run_virtual_sources_without_expression(
                 stdin: options.stdin.clone(),
                 expression_eval: None,
                 ub_detection_mode: options.ub_detection_mode,
+                allocation_limit_bytes: options.allocation_limit_bytes,
+                optimizing_precomputations: options.optimizing_precomputations,
                 capture_visualization: options.capture_visualization,
                 synthetic_address_base: options.synthetic_address_base,
                 execution_step_limit: options.execution_step_limit,
@@ -608,6 +617,8 @@ unsafe fn cboxes_run_source_configured(
                 stdin: stdin.to_owned(),
                 expression_eval: None,
                 ub_detection_mode: UbDetectionMode::Standard,
+                allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
+                optimizing_precomputations: false,
                 capture_visualization,
                 synthetic_address_base: synthetic_address_base.into(),
                 execution_step_limit,
@@ -683,6 +694,8 @@ pub unsafe extern "C" fn cboxes_run_files(
         stdin: stdin.to_owned(),
         expression_eval: None,
         ub_detection_mode: UbDetectionMode::Standard,
+        allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
+        optimizing_precomputations: false,
         capture_visualization: true,
         synthetic_address_base: synthetic_address_base.into(),
         execution_step_limit: Some(execution_step_limit.max(1) as usize),
@@ -804,6 +817,8 @@ pub unsafe extern "C" fn cboxes_eval_expression(
                     event_index,
                 }),
                 ub_detection_mode: UbDetectionMode::Standard,
+                allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
+                optimizing_precomputations: false,
                 capture_visualization: true,
                 synthetic_address_base: synthetic_address_base.into(),
                 execution_step_limit: Some(CBOXES_BROWSER_EXECUTION_STEP_LIMIT),
@@ -912,6 +927,8 @@ pub unsafe extern "C" fn cboxes_eval_expression_files(
             event_index,
         }),
         ub_detection_mode: UbDetectionMode::Standard,
+        allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
+        optimizing_precomputations: false,
         capture_visualization: true,
         synthetic_address_base: synthetic_address_base.into(),
         execution_step_limit: Some(execution_step_limit.max(1) as usize),
@@ -3369,20 +3386,30 @@ fn remap_type(
         CType::Enum(id, tag) => CType::Enum(*enum_map.get(&id).unwrap_or(&id), tag),
         CType::Function(ret, params, is_variadic) => {
             let params = params
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|param| remap_type(param, record_map, enum_map))
                 .collect();
+            let ret = Arc::unwrap_or_clone(ret);
             if is_variadic {
-                CType::variadic_function(remap_type(*ret, record_map, enum_map), params)
+                CType::variadic_function(remap_type(ret, record_map, enum_map), params)
             } else {
-                CType::function(remap_type(*ret, record_map, enum_map), params)
+                CType::function(remap_type(ret, record_map, enum_map), params)
             }
         }
-        CType::Qualified(inner, qualifiers) => {
-            CType::qualified(remap_type(*inner, record_map, enum_map), qualifiers)
-        }
-        CType::Pointer(inner) => CType::pointer_to(remap_type(*inner, record_map, enum_map)),
-        CType::Array(inner, len) => CType::array_of(remap_type(*inner, record_map, enum_map), len),
+        CType::Qualified(inner, qualifiers) => CType::qualified(
+            remap_type(Arc::unwrap_or_clone(inner), record_map, enum_map),
+            qualifiers,
+        ),
+        CType::Pointer(inner) => CType::pointer_to(remap_type(
+            Arc::unwrap_or_clone(inner),
+            record_map,
+            enum_map,
+        )),
+        CType::Array(inner, len) => CType::array_of(
+            remap_type(Arc::unwrap_or_clone(inner), record_map, enum_map),
+            len,
+        ),
         other => other,
     }
 }
@@ -3586,7 +3613,7 @@ fn composite_type_inner(
                 {
                     return None;
                 }
-                return Some(CType::function(return_type, rhs_params.clone()));
+                return Some(CType::function(return_type, rhs_params.to_vec()));
             }
             if rhs_params.is_empty() && !rhs_variadic {
                 if *lhs_variadic
@@ -3594,13 +3621,13 @@ fn composite_type_inner(
                 {
                     return None;
                 }
-                return Some(CType::function(return_type, lhs_params.clone()));
+                return Some(CType::function(return_type, lhs_params.to_vec()));
             }
             if lhs_variadic != rhs_variadic || lhs_params.len() != rhs_params.len() {
                 return None;
             }
             let mut params = Vec::new();
-            for (lhs_param, rhs_param) in lhs_params.iter().zip(rhs_params) {
+            for (lhs_param, rhs_param) in lhs_params.iter().zip(rhs_params.iter()) {
                 params.push(composite_type_inner(
                     lhs_param.unqualified(),
                     rhs_param.unqualified(),
@@ -4930,5 +4957,54 @@ mod browser_api_tests {
         let result = run_source("program.c", source).unwrap();
 
         assert_eq!(result.stdout, "tutorial wrapper still works\n");
+    }
+
+    #[test]
+    #[ignore = "developer-only external performance harness"]
+    fn external_performance_harness() {
+        let files = std::env::var("CBOXES_PROFILE_FILES")
+            .expect("set CBOXES_PROFILE_FILES to colon-separated C source paths")
+            .split(':')
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let include_dirs = std::env::var("CBOXES_PROFILE_INCLUDE_DIRS")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        let execution_step_limit = std::env::var("CBOXES_PROFILE_STEP_LIMIT")
+            .ok()
+            .map(|limit| limit.parse().expect("step limit must be an integer"));
+        let allocation_limit_bytes = std::env::var("CBOXES_PROFILE_ALLOCATION_LIMIT_BYTES")
+            .ok()
+            .map(|limit| limit.parse().expect("allocation limit must be an integer"));
+        let optimizing_precomputations = std::env::var("CBOXES_PROFILE_PRECOMPUTE")
+            .map(|value| value != "0")
+            .unwrap_or(true);
+        let options = RunOptions {
+            include_dirs,
+            capture_visualization: false,
+            execution_step_limit,
+            allocation_limit_bytes,
+            optimizing_precomputations,
+            ..RunOptions::default()
+        };
+        let started = std::time::Instant::now();
+        let result = run_files_with_options(files, &options);
+        let elapsed = started.elapsed();
+        match result {
+            Ok(result) => eprintln!(
+                "CBOXES_PROFILE elapsed_us={} exit_status={} stdout_bytes={}",
+                elapsed.as_micros(),
+                result.exit_status,
+                result.stdout.len()
+            ),
+            Err(error) => eprintln!(
+                "CBOXES_PROFILE elapsed_us={} error={}",
+                elapsed.as_micros(),
+                error.render()
+            ),
+        }
     }
 }

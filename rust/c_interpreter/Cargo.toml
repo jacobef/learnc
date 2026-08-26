@@ -15,3 +15,10 @@ codegen-units = 1
 lto = "thin"
 opt-level = "z"
 strip = "symbols"
+
+# Native profiling and long-running analysis favor evaluator throughput. The tutorial Wasm build
+# deliberately continues to use the size-optimized `release` profile above.
+[profile.analysis]
+inherits = "release"
+lto = "fat"
+opt-level = 3

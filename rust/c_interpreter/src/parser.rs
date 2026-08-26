@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::ast::{
     BinaryOp, Block, BlockItem, Declaration, Designator, Expr, ExternalDeclaration, ForInit,
@@ -510,7 +511,7 @@ impl<'a> Parser<'a> {
     ) -> Result<FunctionDecl, Diagnostic> {
         let (return_type, params, is_variadic) = match ty.unqualified() {
             CType::Function(return_type, params, is_variadic) => {
-                ((**return_type).clone(), params.clone(), *is_variadic)
+                ((**return_type).clone(), params.to_vec(), *is_variadic)
             }
             _ => return Err(Diagnostic::error("expected function declarator", span)),
         };
@@ -3738,8 +3739,8 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(match kind {
-            RecordKind::Struct => CType::Struct(id, tag),
-            RecordKind::Union => CType::Union(id, tag),
+            RecordKind::Struct => CType::Struct(id, tag.map(Arc::from)),
+            RecordKind::Union => CType::Union(id, tag.map(Arc::from)),
         })
     }
 
@@ -4161,7 +4162,7 @@ impl<'a> Parser<'a> {
                 start,
             ));
         }
-        Ok(CType::Enum(id, tag))
+        Ok(CType::Enum(id, tag.map(Arc::from)))
     }
 
     fn validate_switch_labels(&self, body: &Block) -> Result<(), Diagnostic> {
@@ -5200,7 +5201,7 @@ impl<'a> Parser<'a> {
             }
             CType::Function(ret, params, _) => {
                 self.validate_restrict_usage(ret, span)?;
-                for param in params {
+                for param in params.iter() {
                     self.validate_restrict_usage(param, span)?;
                 }
                 Ok(())
@@ -5598,7 +5599,7 @@ fn declaration_types_compatible(lhs: &CType, rhs: &CType) -> bool {
             lhs_variadic == rhs_variadic
                 && lhs_params.len() == rhs_params.len()
                 && declaration_types_compatible(lhs_return, rhs_return)
-                && lhs_params.iter().zip(rhs_params).all(|(lhs, rhs)| {
+                && lhs_params.iter().zip(rhs_params.iter()).all(|(lhs, rhs)| {
                     declaration_types_compatible(lhs.unqualified(), rhs.unqualified())
                 })
         }

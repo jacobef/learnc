@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use crate::source::Span;
 
@@ -112,15 +112,15 @@ pub enum CType {
     Float,
     Double,
     LongDouble,
-    Complex(Box<CType>),
+    Complex(Arc<CType>),
     VaList,
-    Struct(usize, Option<String>),
-    Union(usize, Option<String>),
-    Enum(usize, Option<String>),
-    Function(Box<CType>, Vec<CType>, bool),
-    Qualified(Box<CType>, TypeQualifiers),
-    Pointer(Box<CType>),
-    Array(Box<CType>, usize),
+    Struct(usize, Option<Arc<str>>),
+    Union(usize, Option<Arc<str>>),
+    Enum(usize, Option<Arc<str>>),
+    Function(Arc<CType>, Arc<[CType]>, bool),
+    Qualified(Arc<CType>, TypeQualifiers),
+    Pointer(Arc<CType>),
+    Array(Arc<CType>, usize),
 }
 
 impl CType {
@@ -128,28 +128,28 @@ impl CType {
         if qualifiers.is_empty() {
             inner
         } else {
-            CType::Qualified(Box::new(inner), qualifiers)
+            CType::Qualified(Arc::new(inner), qualifiers)
         }
     }
 
     pub fn pointer_to(inner: CType) -> Self {
-        CType::Pointer(Box::new(inner))
+        CType::Pointer(Arc::new(inner))
     }
 
     pub fn function(return_type: CType, params: Vec<CType>) -> Self {
-        CType::Function(Box::new(return_type), params, false)
+        CType::Function(Arc::new(return_type), Arc::from(params), false)
     }
 
     pub fn variadic_function(return_type: CType, params: Vec<CType>) -> Self {
-        CType::Function(Box::new(return_type), params, true)
+        CType::Function(Arc::new(return_type), Arc::from(params), true)
     }
 
     pub fn complex_of(real: CType) -> Self {
-        CType::Complex(Box::new(real))
+        CType::Complex(Arc::new(real))
     }
 
     pub fn array_of(inner: CType, len: usize) -> Self {
-        CType::Array(Box::new(inner), len)
+        CType::Array(Arc::new(inner), len)
     }
 
     pub fn unqualified(&self) -> &CType {

@@ -32,12 +32,22 @@ const HOST_FP_SUBNORMAL: c_int = 5;
 const HOST_EOF: c_int = -1;
 const HOST_L_TMPNAM: usize = 32;
 const HOST_BUFSIZ: usize = 1024;
-const MAX_DYNAMIC_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
-const MAX_NON_DYNAMIC_OBJECT_BYTES: usize = 64 * 1024 * 1024;
 const COMPACT_OBJECT_REPRESENTATION_THRESHOLD: usize = 1024 * 1024;
 // The execution entry point provides a fixed-size evaluator stack in every build profile/target,
 // so this interpreted-C limit is independent of the host compiler's optimization choices.
 const MAX_FUNCTION_CALL_DEPTH: usize = 64;
+
+fn byte_limit_description(bytes: usize) -> String {
+    const MIB: usize = 1024 * 1024;
+    const KIB: usize = 1024;
+    if bytes >= MIB && bytes % MIB == 0 {
+        format!("{} MiB", bytes / MIB)
+    } else if bytes >= KIB && bytes % KIB == 0 {
+        format!("{} KiB", bytes / KIB)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
 
 // The runtime currently backs all real floating types with f64, so host long double calls
 // are marshalled through f64 even when the nominal C type is long double.
@@ -647,7 +657,9 @@ pub struct Interpreter<'a> {
     automatic_object_bindings: HashMap<(usize, Span), ObjectId>,
     compound_literal_bindings: HashMap<(usize, Span), ObjectId>,
     next_object: usize,
+    object_frame_indices: Vec<Option<usize>>,
     retired_objects: HashMap<ObjectId, ObjectState>,
+    live_non_dynamic_bytes: usize,
     expr_state: ExprState,
     assignment_targets: Vec<AssignmentTarget>,
     initializer_sequencing: Option<InitializerSequencing>,
@@ -661,6 +673,7 @@ pub struct Interpreter<'a> {
     dynamic_bytes_allocated: usize,
     virtual_filesystem: VirtualFileSystem,
     host_streams: HashMap<ObjectId, HostStream>,
+    configured_stream_buffers: usize,
     host_stdio_bindings: HashMap<String, ObjectId>,
     host_capture_streams: HashMap<CaptureStream, ObjectId>,
     errno_binding: Option<ObjectId>,
@@ -690,7 +703,7 @@ pub struct Interpreter<'a> {
     running_atexit: bool,
     quick_exit_handlers: Vec<String>,
     running_quick_exit: bool,
-    func_name_bindings: HashMap<String, ObjectId>,
+    func_name_bindings: HashMap<usize, ObjectId>,
     mbrtoc16_pending: HashMap<PointerValue, u16>,
     mbrtoc16_null_pending: Option<u16>,
     c16rtomb_pending: HashMap<PointerValue, u16>,
@@ -702,7 +715,7 @@ pub struct Interpreter<'a> {
     current_variadic_args: Vec<Vec<TypedValue>>,
     va_lists: HashMap<u64, VaListCursor>,
     next_va_list_handle: u64,
-    current_functions: Vec<CurrentFunctionContext>,
+    current_functions: Vec<Rc<FunctionDef>>,
     current_frame_ids: Vec<usize>,
     active_block_scopes: Vec<ActiveBlockScope>,
     next_frame_id: usize,
@@ -712,6 +725,8 @@ pub struct Interpreter<'a> {
     next_setjmp_handle: u64,
     active_setjmp_contexts: Vec<ActiveSetjmpContext>,
     expr_setjmp_cache: HashMap<usize, bool>,
+    switch_dispatch_cache: HashMap<(usize, CType), SwitchDispatch>,
+    type_contains_union_cache: HashMap<CType, bool>,
     variable_cache: HashMap<usize, VariableCacheEntry>,
     pending_longjmp_return: Option<PendingLongjmpReturn>,
     host_library_runtime_depth: usize,
@@ -743,11 +758,9 @@ struct VariableCacheEntry {
 }
 
 #[derive(Debug, Clone)]
-struct CurrentFunctionContext {
-    name: String,
-    body_span: Span,
-    is_variadic: bool,
-    last_named_parameter: Option<Parameter>,
+struct SwitchDispatch {
+    cases: Vec<(i128, Span)>,
+    default: Option<Span>,
 }
 
 #[derive(Clone, Copy)]
@@ -1566,52 +1579,6 @@ struct InitializerSequencing {
 }
 
 type ObjectFrames = Vec<HashMap<ObjectId, ObjectState>>;
-
-fn lookup_active_object(objects: &ObjectFrames, object_id: ObjectId) -> Option<&ObjectState> {
-    match objects.len() {
-        0 => None,
-        1 => objects[0].get(&object_id),
-        len => {
-            if let Some(object) = objects[len - 1].get(&object_id) {
-                return Some(object);
-            }
-            if let Some(object) = objects[0].get(&object_id) {
-                return Some(object);
-            }
-            for idx in (1..len - 1).rev() {
-                if let Some(object) = objects[idx].get(&object_id) {
-                    return Some(object);
-                }
-            }
-            None
-        }
-    }
-}
-
-fn lookup_active_object_mut(
-    objects: &mut ObjectFrames,
-    object_id: ObjectId,
-) -> Option<&mut ObjectState> {
-    match objects.split_last_mut() {
-        None => None,
-        Some((current_frame, rest)) => {
-            if let Some(object) = current_frame.get_mut(&object_id) {
-                return Some(object);
-            }
-            if let Some((global_frame, middle_frames)) = rest.split_first_mut() {
-                if let Some(object) = global_frame.get_mut(&object_id) {
-                    return Some(object);
-                }
-                for frame_objects in middle_frames.iter_mut().rev() {
-                    if let Some(object) = frame_objects.get_mut(&object_id) {
-                        return Some(object);
-                    }
-                }
-            }
-            None
-        }
-    }
-}
 type HostUnaryF64Fn = unsafe extern "C" fn(c_double) -> c_double;
 type HostUnaryF32Fn = unsafe extern "C" fn(c_float) -> c_float;
 type HostUnaryLongDoubleFn = unsafe extern "C" fn(HostLongDouble) -> HostLongDouble;
@@ -2434,7 +2401,9 @@ impl<'a> Interpreter<'a> {
             automatic_object_bindings: HashMap::default(),
             compound_literal_bindings: HashMap::default(),
             next_object: 0,
+            object_frame_indices: Vec::new(),
             retired_objects: HashMap::default(),
+            live_non_dynamic_bytes: 0,
             expr_state: ExprState::default(),
             assignment_targets: Vec::new(),
             initializer_sequencing: None,
@@ -2448,6 +2417,7 @@ impl<'a> Interpreter<'a> {
             dynamic_bytes_allocated: 0,
             virtual_filesystem: VirtualFileSystem::new(),
             host_streams: HashMap::default(),
+            configured_stream_buffers: 0,
             host_stdio_bindings: HashMap::default(),
             host_capture_streams: HashMap::default(),
             errno_binding: None,
@@ -2499,6 +2469,8 @@ impl<'a> Interpreter<'a> {
             next_setjmp_handle: 1,
             active_setjmp_contexts: Vec::new(),
             expr_setjmp_cache: HashMap::default(),
+            switch_dispatch_cache: HashMap::default(),
+            type_contains_union_cache: HashMap::default(),
             variable_cache: HashMap::default(),
             pending_longjmp_return: None,
             host_library_runtime_depth: 0,
@@ -2552,7 +2524,7 @@ impl<'a> Interpreter<'a> {
         let main_symbol = function_symbol(main.as_ref());
         let entry = catch_unwind(AssertUnwindSafe(|| {
             self.call_function(
-                main.as_ref(),
+                &main,
                 self.function_may_setjmp_symbol(&main_symbol),
                 main_args,
                 main.span,
@@ -4218,7 +4190,7 @@ impl<'a> Interpreter<'a> {
                     unreachable!();
                 };
                 if !params.is_empty() {
-                    let fixed = if params.as_slice() == [CType::Void] {
+                    let fixed = if params.as_ref() == [CType::Void] {
                         0
                     } else {
                         params.len()
@@ -4452,8 +4424,20 @@ impl<'a> Interpreter<'a> {
 
     fn invalidate_object_bindings(&mut self, objects: &mut ObjectFrames, ids: &[ObjectId]) {
         for &id in ids {
+            let ended_bytes = self
+                .lookup_object(objects, id)
+                .filter(|object| {
+                    object.alive && object.storage_duration != StorageDuration::Dynamic
+                })
+                .map_or(0, |object| object.byte_size);
             if let Some(object) = self.lookup_object_mut(objects, id) {
                 object.alive = false;
+            }
+            if self.run_options.allocation_limit_bytes.is_some() {
+                self.live_non_dynamic_bytes = self
+                    .live_non_dynamic_bytes
+                    .checked_sub(ended_bytes)
+                    .expect("invalidated object was included in the non-dynamic byte total");
             }
         }
     }
@@ -4677,6 +4661,11 @@ impl<'a> Interpreter<'a> {
         new_config: Option<StreamBufferConfig>,
     ) {
         if let Some(stream) = self.host_streams.get_mut(&stream_object) {
+            match (stream.buffer.is_some(), new_config.is_some()) {
+                (false, true) => self.configured_stream_buffers += 1,
+                (true, false) => self.configured_stream_buffers -= 1,
+                _ => {}
+            }
             stream.buffer = new_config;
         }
     }
@@ -4688,7 +4677,7 @@ impl<'a> Interpreter<'a> {
         size: usize,
         objects: &ObjectFrames,
     ) -> bool {
-        if size == 0 {
+        if size == 0 || self.configured_stream_buffers == 0 {
             return false;
         }
         let Some(end) = start.checked_add(size) else {
@@ -5087,6 +5076,10 @@ impl<'a> Interpreter<'a> {
                 self.object_base_addresses.remove(&object);
                 self.assign_object_base_address(object, &actual_ty);
             }
+            let previous_size = self
+                .lookup_object(objects, object)
+                .filter(|state| state.alive && state.storage_duration != StorageDuration::Dynamic)
+                .map_or(0, |state| state.byte_size);
             {
                 let object_state = self.lookup_object_mut(objects, object).unwrap();
                 object_state.ty = actual_ty.clone();
@@ -5095,6 +5088,9 @@ impl<'a> Interpreter<'a> {
                 object_state.byte_size = actual_size;
                 object_state.value = stored;
                 object_state.modification_count = object_state.modification_count.saturating_add(1);
+            }
+            if storage_duration != StorageDuration::Dynamic {
+                self.replace_live_non_dynamic_bytes(previous_size, actual_size);
             }
             self.object_type_registry.insert(object, actual_ty);
             return Ok(());
@@ -7670,7 +7666,7 @@ impl<'a> Interpreter<'a> {
 
     fn call_function(
         &mut self,
-        function: &FunctionDef,
+        function: &Rc<FunctionDef>,
         function_may_setjmp: bool,
         mut args: Vec<TypedValue>,
         call_span: Span,
@@ -7741,16 +7737,11 @@ impl<'a> Interpreter<'a> {
         objects.push(HashMap::default());
         self.restrict_trackers.push(RestrictTracker::default());
         self.current_variadic_args.push(variadic_args);
-        self.current_functions.push(CurrentFunctionContext {
-            name: function.name.clone(),
-            body_span: function.body.span,
-            is_variadic: function.is_variadic,
-            last_named_parameter: function.params.last().cloned(),
-        });
+        self.current_functions.push(function.clone());
 
         self.current_frame_ids.push(frame_id);
 
-        let func_key = function_symbol(function);
+        let func_key = Rc::as_ptr(function) as usize;
         let func_object = if let Some(object) = self.func_name_bindings.get(&func_key).copied() {
             object
         } else {
@@ -8036,9 +8027,9 @@ impl<'a> Interpreter<'a> {
                 let (resolved_ret, used) =
                     self.resolve_decl_type_impl(ret, vla_bounds, frame, objects)?;
                 let resolved = if *is_variadic {
-                    CType::variadic_function(resolved_ret, params.clone())
+                    CType::variadic_function(resolved_ret, params.to_vec())
                 } else {
-                    CType::function(resolved_ret, params.clone())
+                    CType::function(resolved_ret, params.to_vec())
                 };
                 Ok((resolved, used))
             }
@@ -8170,19 +8161,15 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn call_target_signature(
+    fn call_target_signature<'b>(
         &self,
-        ty: &CType,
+        ty: &'b CType,
         span: Span,
-    ) -> Result<(CType, Vec<CType>, bool), Diagnostic> {
+    ) -> Result<(&'b CType, &'b [CType], bool), Diagnostic> {
         match ty.unqualified() {
-            CType::Function(ret, params, is_variadic) => {
-                Ok(((**ret).clone(), params.clone(), *is_variadic))
-            }
+            CType::Function(ret, params, is_variadic) => Ok((ret, params, *is_variadic)),
             CType::Pointer(inner) => match inner.unqualified() {
-                CType::Function(ret, params, is_variadic) => {
-                    Ok(((**ret).clone(), params.clone(), *is_variadic))
-                }
+                CType::Function(ret, params, is_variadic) => Ok((ret, params, *is_variadic)),
                 _ => Err(Diagnostic::error("unsupported call target", span)),
             },
             _ => Err(Diagnostic::error("unsupported call target", span)),
@@ -8537,16 +8524,15 @@ impl<'a> Interpreter<'a> {
                         self.function_prototype_compatible_with_unspecified_parameters(lhs_params)
                     } else {
                         lhs_params.len() == rhs_params.len()
-                            && lhs_params
-                                .iter()
-                                .zip(rhs_params)
-                                .all(|(lhs_param, rhs_param)| {
+                            && lhs_params.iter().zip(rhs_params.iter()).all(
+                                |(lhs_param, rhs_param)| {
                                     self.cross_unit_tagged_type_compatible_inner(
                                         lhs_param.unqualified(),
                                         rhs_param.unqualified(),
                                         seen_records,
                                     )
-                                })
+                                },
+                            )
                     }
             }
             (CType::Struct(lhs_id, lhs_tag), CType::Struct(rhs_id, rhs_tag)) => self
@@ -8912,7 +8898,7 @@ impl<'a> Interpreter<'a> {
         let Some(function) = self.current_functions.last() else {
             return Ok(());
         };
-        if function.name != "main" || function.body_span != block.span {
+        if function.name != "main" || function.body.span != block.span {
             return Ok(());
         }
         self.cboxes_main_state = self.cboxes_frame_state(frame, objects, block.span)?;
@@ -9023,6 +9009,7 @@ impl<'a> Interpreter<'a> {
         let saved_next_object = self.next_object;
         let saved_next_encoded_pointer = self.next_encoded_pointer;
         let saved_retired_objects = self.retired_objects.clone();
+        let saved_live_non_dynamic_bytes = self.live_non_dynamic_bytes;
         let saved_object_type_registry = self.object_type_registry.clone();
         let saved_object_base_addresses = self.object_base_addresses.clone();
         let saved_encoded_object_pointers = self.encoded_object_pointers.clone();
@@ -9093,6 +9080,7 @@ impl<'a> Interpreter<'a> {
         self.next_object = saved_next_object;
         self.next_encoded_pointer = saved_next_encoded_pointer;
         self.retired_objects = saved_retired_objects;
+        self.live_non_dynamic_bytes = saved_live_non_dynamic_bytes;
         self.object_type_registry = saved_object_type_registry;
         self.object_base_addresses = saved_object_base_addresses;
         self.encoded_object_pointers = saved_encoded_object_pointers;
@@ -9180,7 +9168,7 @@ impl<'a> Interpreter<'a> {
         let Some(function) = self.current_functions.last() else {
             return Ok(());
         };
-        if function.name != "main" || function.body_span == block.span {
+        if function.name != "main" || function.body.span == block.span {
             return Ok(());
         }
         let close = block.span.end.saturating_sub(1).max(block.span.start);
@@ -10216,10 +10204,8 @@ impl<'a> Interpreter<'a> {
                 })
                 .collect::<Vec<_>>();
             for id in ids {
-                if let Some(mut object) = frame_objects.remove(&id) {
-                    object.alive = false;
-                    object.value = StoredValue::Indeterminate;
-                    self.retired_objects.insert(id, object);
+                if let Some(object) = frame_objects.remove(&id) {
+                    self.retire_automatic_object(id, object);
                     retired.push(id);
                 }
             }
@@ -10892,44 +10878,25 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<Flow, Diagnostic> {
-        let mut target = None;
-        let mut default = None;
-        let mut case_values = HashSet::default();
-        let mut labels = Vec::new();
-        Self::collect_switch_labels_from_block(body, &mut labels);
         let control_value = control.to_int()?;
-        for label in labels {
-            match label {
-                SwitchLabel::Case { expr, span } => {
-                    let case_value =
-                        self.eval_typed_integer_constant_expr(&expr, frame, objects)?;
-                    let case_value = self
-                        .convert_value(case_value, &control.ty, span)?
-                        .to_int()?;
-                    if !case_values.insert(case_value) {
-                        return Err(Diagnostic::error(
-                            format!(
-                                "duplicate case value {} after conversion to {}",
-                                case_value, control.ty
-                            ),
-                            span,
-                        ));
-                    }
-                    if case_value == control_value && target.is_none() {
-                        target = Some(span);
-                    }
-                }
-                SwitchLabel::Default { span } => {
-                    if default.replace(span).is_some() {
-                        return Err(Diagnostic::error(
-                            "multiple default labels in one switch",
-                            span,
-                        ));
-                    }
-                }
+        let target = if self.run_options.optimizing_precomputations {
+            let cache_key = (body as *const Block as usize, control.ty.clone());
+            if !self.switch_dispatch_cache.contains_key(&cache_key) {
+                let dispatch = self.build_switch_dispatch(body, &control.ty, frame, objects)?;
+                self.switch_dispatch_cache
+                    .insert(cache_key.clone(), dispatch);
             }
-        }
-        let Some(target) = target.or(default) else {
+            Self::switch_dispatch_target(
+                self.switch_dispatch_cache
+                    .get(&cache_key)
+                    .expect("switch dispatch was cached"),
+                control_value,
+            )
+        } else {
+            let dispatch = self.build_switch_dispatch(body, &control.ty, frame, objects)?;
+            Self::switch_dispatch_target(&dispatch, control_value)
+        };
+        let Some(target) = target else {
             return Ok(Flow::Continue);
         };
         self.active_switch_dispatch_depth += 1;
@@ -10941,7 +10908,58 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn collect_switch_labels_from_block(block: &Block, labels: &mut Vec<SwitchLabel>) {
+    fn build_switch_dispatch(
+        &mut self,
+        body: &Block,
+        control_ty: &CType,
+        frame: &mut Frame,
+        objects: &mut ObjectFrames,
+    ) -> Result<SwitchDispatch, Diagnostic> {
+        let mut default = None;
+        let mut case_values = HashSet::default();
+        let mut cases = Vec::new();
+        let mut labels = Vec::new();
+        Self::collect_switch_labels_from_block(body, &mut labels);
+        for label in labels {
+            match label {
+                SwitchLabel::Case { expr, span } => {
+                    let case_value = self.eval_typed_integer_constant_expr(expr, frame, objects)?;
+                    let case_value = self
+                        .convert_value(case_value, control_ty, *span)?
+                        .to_int()?;
+                    if !case_values.insert(case_value) {
+                        return Err(Diagnostic::error(
+                            format!(
+                                "duplicate case value {} after conversion to {}",
+                                case_value, control_ty
+                            ),
+                            *span,
+                        ));
+                    }
+                    cases.push((case_value, *span));
+                }
+                SwitchLabel::Default { span } => {
+                    if default.replace(*span).is_some() {
+                        return Err(Diagnostic::error(
+                            "multiple default labels in one switch",
+                            *span,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(SwitchDispatch { cases, default })
+    }
+
+    fn switch_dispatch_target(dispatch: &SwitchDispatch, control: i128) -> Option<Span> {
+        dispatch
+            .cases
+            .iter()
+            .find_map(|(value, span)| (*value == control).then_some(*span))
+            .or(dispatch.default)
+    }
+
+    fn collect_switch_labels_from_block<'b>(block: &'b Block, labels: &mut Vec<&'b SwitchLabel>) {
         for item in &block.items {
             if let BlockItem::Statement(statement) = item {
                 Self::collect_switch_labels_from_statement(statement, labels);
@@ -10949,7 +10967,10 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn collect_switch_labels_from_statement(statement: &Statement, labels: &mut Vec<SwitchLabel>) {
+    fn collect_switch_labels_from_statement<'b>(
+        statement: &'b Statement,
+        labels: &mut Vec<&'b SwitchLabel>,
+    ) {
         match statement {
             Statement::Block(block) => Self::collect_switch_labels_from_block(block, labels),
             Statement::DoWhile { body, .. }
@@ -10971,7 +10992,7 @@ impl<'a> Interpreter<'a> {
             Statement::Labeled {
                 label, statement, ..
             } => {
-                labels.push(label.clone());
+                labels.push(label);
                 Self::collect_switch_labels_from_statement(statement, labels);
             }
             Statement::Switch { .. }
@@ -12770,13 +12791,16 @@ impl<'a> Interpreter<'a> {
                     span,
                 )?;
             }
-            let value = self.call_function(
-                function.as_ref(),
+            let caller_assignment_targets = self.assignment_targets.clone();
+            let call_result = self.call_function(
+                &function,
                 self.function_may_setjmp_symbol(&function_name),
                 evaluated,
                 span,
                 objects,
-            )?;
+            );
+            self.assignment_targets = caller_assignment_targets;
+            let value = call_result?;
             return Ok(ValueCategory::RValue(value));
         }
 
@@ -12910,6 +12934,11 @@ impl<'a> Interpreter<'a> {
         };
         let initialized = self.stored_value_is_determinate(&stored);
         let actual_size = self.type_size_of(&actual_ty).unwrap_or(0);
+        let previous_size = self
+            .lookup_object(objects, object)
+            .filter(|state| state.alive && state.storage_duration != StorageDuration::Dynamic)
+            .map_or(0, |state| state.byte_size);
+        self.ensure_object_storage_limit(objects, storage, actual_size, Some(object), span)?;
         if let Some(state) = self.lookup_object_mut(objects, object) {
             state.ty = actual_ty.clone();
             state.initialized = initialized;
@@ -12917,6 +12946,9 @@ impl<'a> Interpreter<'a> {
             state.byte_size = actual_size;
             state.value = stored;
             state.modification_count = state.modification_count.saturating_add(1);
+        }
+        if storage != StorageDuration::Dynamic {
+            self.replace_live_non_dynamic_bytes(previous_size, actual_size);
         }
         self.object_type_registry.insert(object, actual_ty.clone());
         Ok(ValueCategory::LValue(LValue {
@@ -12967,8 +12999,8 @@ impl<'a> Interpreter<'a> {
             ));
         }
         let last_named = current_function
-            .last_named_parameter
-            .as_ref()
+            .params
+            .last()
             .ok_or_else(|| Diagnostic::error("va_start requires a named last parameter", span))?;
         if !matches!(&args[1], Expr::Variable(name, _) if Some(name) == last_named.name.as_ref()) {
             return Err(Diagnostic::error(
@@ -17000,7 +17032,7 @@ impl<'a> Interpreter<'a> {
         let (return_ty, params, is_variadic) =
             self.call_target_signature(&value.ty, args[0].span())?;
         if is_variadic
-            || return_ty != CType::Void
+            || *return_ty != CType::Void
             || !(params.is_empty() || (params.len() == 1 && params[0] == CType::Void))
         {
             return Err(Diagnostic::error(
@@ -23266,6 +23298,19 @@ impl<'a> Interpreter<'a> {
         if query_size == 0 {
             return false;
         }
+        let qualifiers = ty.top_level_qualifiers();
+        let has_tracked_qualifier = match qualifier {
+            TrackedQualifier::Const => qualifiers.is_const,
+            TrackedQualifier::Volatile => qualifiers.is_volatile,
+        };
+        if !has_tracked_qualifier
+            && !matches!(
+                ty.unqualified(),
+                CType::Array(..) | CType::Struct(..) | CType::Union(..)
+            )
+        {
+            return false;
+        }
         let Some(type_size) = self.type_size_of(ty) else {
             return false;
         };
@@ -23274,11 +23319,7 @@ impl<'a> Interpreter<'a> {
         if query_start >= type_end || base >= query_end {
             return false;
         }
-        let qualifiers = ty.top_level_qualifiers();
-        if match qualifier {
-            TrackedQualifier::Const => qualifiers.is_const,
-            TrackedQualifier::Volatile => qualifiers.is_volatile,
-        } {
+        if has_tracked_qualifier {
             return true;
         }
         match ty.unqualified() {
@@ -26266,7 +26307,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<String, Diagnostic> {
         let (return_ty, params, is_variadic) = self.call_target_signature(&value.ty, span)?;
         if is_variadic
-            || return_ty != CType::Int
+            || *return_ty != CType::Int
             || params.len() != 2
             || params[0] != self.const_void_ptr_type()
             || params[1] != self.const_void_ptr_type()
@@ -30320,7 +30361,7 @@ impl<'a> Interpreter<'a> {
                 })?;
             let result = catch_unwind(AssertUnwindSafe(|| {
                 self.call_function(
-                    function.as_ref(),
+                    &function,
                     self.function_may_setjmp_symbol(&symbol),
                     Vec::new(),
                     span,
@@ -30380,7 +30421,7 @@ impl<'a> Interpreter<'a> {
                 })?;
             let result = catch_unwind(AssertUnwindSafe(|| {
                 self.call_function(
-                    function.as_ref(),
+                    &function,
                     self.function_may_setjmp_symbol(&symbol),
                     Vec::new(),
                     span,
@@ -30523,7 +30564,7 @@ impl<'a> Interpreter<'a> {
         let rhs_pointer =
             self.pointer_with_byte_offset(base_pointer, rhs_index * size, span, objects)?;
         let result = self.call_function(
-            function.as_ref(),
+            &function,
             self.function_may_setjmp_symbol(function_symbol),
             vec![
                 self.pointer_value_with_type(self.const_void_ptr_type(), lhs_pointer),
@@ -30698,7 +30739,7 @@ impl<'a> Interpreter<'a> {
         let element_pointer =
             self.pointer_with_byte_offset(base_pointer, index * size, span, objects)?;
         let result = self.call_function(
-            function.as_ref(),
+            &function,
             self.function_may_setjmp_symbol(function_symbol),
             vec![
                 self.pointer_value_with_type(self.const_void_ptr_type(), key_pointer.clone()),
@@ -31878,9 +31919,7 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
         if let Some(previous) = self.getenv_binding.take() {
-            if let Some(object) = self.retired_objects.get_mut(&previous) {
-                object.alive = false;
-            }
+            self.end_live_retired_object_lifetime(previous);
         }
         let name = self.c_string_argument(&evaluated[0], args[0].span(), objects)?;
         let result_ptr = unsafe { libc::getenv(name.as_ptr()) };
@@ -32156,7 +32195,7 @@ impl<'a> Interpreter<'a> {
                         Diagnostic::error("signal handler does not name a supported function", span)
                     })?;
                 let _ = self.call_function(
-                    function.as_ref(),
+                    &function,
                     self.function_may_setjmp_symbol(&symbol),
                     vec![TypedValue::int(signal_number as i128)],
                     span,
@@ -32980,7 +33019,10 @@ impl<'a> Interpreter<'a> {
         replaced_object: Option<ObjectId>,
         objects: &ObjectFrames,
     ) -> bool {
-        if requested_size > MAX_DYNAMIC_ALLOCATION_BYTES {
+        let Some(allocation_limit) = self.run_options.allocation_limit_bytes else {
+            return true;
+        };
+        if requested_size > allocation_limit {
             return false;
         }
         let replaced_size = replaced_object
@@ -32990,7 +33032,7 @@ impl<'a> Interpreter<'a> {
         self.dynamic_bytes_allocated
             .checked_sub(replaced_size)
             .and_then(|used| used.checked_add(requested_size))
-            .is_some_and(|total| total <= MAX_DYNAMIC_ALLOCATION_BYTES)
+            .is_some_and(|total| total <= allocation_limit)
     }
 
     fn eval_free_call(
@@ -33617,9 +33659,7 @@ impl<'a> Interpreter<'a> {
         span: Span,
     ) -> Result<TypedValue, Diagnostic> {
         if let Some(previous) = self.strerror_binding.take() {
-            if let Some(object) = self.retired_objects.get_mut(&previous) {
-                object.alive = false;
-            }
+            self.end_live_retired_object_lifetime(previous);
         }
         let message_ptr = unsafe { libc::strerror(evaluated[0].to_int()? as c_int) };
         let bytes = if message_ptr.is_null() {
@@ -35113,14 +35153,51 @@ impl<'a> Interpreter<'a> {
         )
     }
 
+    fn allocate_object_id(&mut self, frame_index: Option<usize>) -> ObjectId {
+        let id = ObjectId(self.next_object);
+        self.next_object += 1;
+        debug_assert_eq!(self.object_frame_indices.len(), id.0);
+        self.object_frame_indices.push(frame_index);
+        id
+    }
+
+    fn insert_live_retired_object(&mut self, id: ObjectId, object: ObjectState) {
+        debug_assert!(object.alive);
+        debug_assert_ne!(object.storage_duration, StorageDuration::Dynamic);
+        if self.run_options.allocation_limit_bytes.is_some() {
+            self.live_non_dynamic_bytes = self
+                .live_non_dynamic_bytes
+                .checked_add(object.byte_size)
+                .expect("live non-dynamic object byte total overflowed");
+        }
+        let previous = self.retired_objects.insert(id, object);
+        debug_assert!(previous.is_none());
+    }
+
+    fn end_live_retired_object_lifetime(&mut self, id: ObjectId) {
+        let Some(object) = self.retired_objects.get_mut(&id) else {
+            return;
+        };
+        if !object.alive || object.storage_duration == StorageDuration::Dynamic {
+            return;
+        }
+        if self.run_options.allocation_limit_bytes.is_some() {
+            self.live_non_dynamic_bytes = self
+                .live_non_dynamic_bytes
+                .checked_sub(object.byte_size)
+                .expect("retired live object was included in the non-dynamic byte total");
+        }
+        object.alive = false;
+    }
+
     fn intern_readonly_c_bytes(&mut self, bytes: &[u8]) -> PointerValue {
         let mut c_bytes = bytes.to_vec();
         c_bytes.push(0);
-        let array_ty = CType::array_of(CType::Char, c_bytes.len());
-        let id = ObjectId(self.next_object);
-        self.next_object += 1;
+        let byte_size = c_bytes.len();
+        let array_ty = CType::array_of(CType::Char, byte_size);
+        let id = self.allocate_object_id(None);
         self.assign_object_base_address(id, &array_ty);
-        self.retired_objects.insert(
+        self.insert_live_retired_object(
             id,
             ObjectState {
                 ty: array_ty.clone(),
@@ -35175,7 +35252,8 @@ impl<'a> Interpreter<'a> {
     ) -> Result<PointerValue, Diagnostic> {
         let mut c_bytes = bytes.to_vec();
         c_bytes.push(0);
-        let array_ty = CType::array_of(CType::Char, c_bytes.len());
+        let byte_size = c_bytes.len();
+        let array_ty = CType::array_of(CType::Char, byte_size);
         let id = if let Some(id) = self.time_text_binding {
             id
         } else {
@@ -35190,6 +35268,17 @@ impl<'a> Interpreter<'a> {
             self.time_text_binding = Some(id);
             id
         };
+        self.ensure_object_storage_limit(
+            objects,
+            StorageDuration::Static,
+            byte_size,
+            Some(id),
+            span,
+        )?;
+        let previous_size = self
+            .lookup_object(objects, id)
+            .filter(|object| object.alive && object.storage_duration != StorageDuration::Dynamic)
+            .map_or(0, |object| object.byte_size);
         let object = self
             .lookup_object_mut(objects, id)
             .ok_or_else(|| Diagnostic::error("time text buffer is unavailable", span))?;
@@ -35197,7 +35286,7 @@ impl<'a> Interpreter<'a> {
         object.alive = true;
         object.readonly = false;
         object.initialized = true;
-        object.byte_size = c_bytes.len();
+        object.byte_size = byte_size;
         object.value = StoredValue::Array(
             c_bytes
                 .into_iter()
@@ -35207,6 +35296,7 @@ impl<'a> Interpreter<'a> {
                 .collect(),
         );
         object.modification_count = object.modification_count.saturating_add(1);
+        self.replace_live_non_dynamic_bytes(previous_size, byte_size);
         self.object_type_registry.insert(id, array_ty);
         Ok(PointerValue {
             object: Some(id),
@@ -35234,11 +35324,10 @@ impl<'a> Interpreter<'a> {
         units.push(0);
         let bytes = self.wide_units_to_byte_cells(&units, span)?;
         let array_ty = CType::array_of(self.wchar_type(), units.len());
-        let id = ObjectId(self.next_object);
-        self.next_object += 1;
+        let id = self.allocate_object_id(None);
         self.assign_object_base_address(id, &array_ty);
         let value = self.deserialize_stored_value(&array_ty, &bytes, span)?;
-        self.retired_objects.insert(
+        self.insert_live_retired_object(
             id,
             ObjectState {
                 ty: array_ty.clone(),
@@ -35291,10 +35380,9 @@ impl<'a> Interpreter<'a> {
         };
         units.push(0);
         let array_ty = CType::array_of(element_ty.clone(), units.len());
-        let id = ObjectId(self.next_object);
-        self.next_object += 1;
+        let id = self.allocate_object_id(None);
         self.assign_object_base_address(id, &array_ty);
-        self.retired_objects.insert(
+        self.insert_live_retired_object(
             id,
             ObjectState {
                 ty: array_ty.clone(),
@@ -35443,6 +35531,41 @@ impl<'a> Interpreter<'a> {
         }
 
         visit(self, ty, &mut HashSet::default())
+    }
+
+    fn type_contains_union(&mut self, ty: &CType) -> bool {
+        if self.run_options.optimizing_precomputations
+            && let Some(&cached) = self.type_contains_union_cache.get(ty)
+        {
+            return cached;
+        }
+        fn visit(interpreter: &Interpreter<'_>, ty: &CType, seen: &mut HashSet<usize>) -> bool {
+            match ty.unqualified() {
+                CType::Union(_, _) => true,
+                CType::Array(inner, _) => visit(interpreter, inner, seen),
+                CType::Struct(id, _) => {
+                    if !seen.insert(*id) {
+                        return false;
+                    }
+                    let contains_union =
+                        interpreter.program.records.get(id).is_some_and(|record| {
+                            record
+                                .members
+                                .iter()
+                                .any(|member| visit(interpreter, &member.ty, seen))
+                        });
+                    seen.remove(id);
+                    contains_union
+                }
+                _ => false,
+            }
+        }
+
+        let result = visit(self, ty, &mut HashSet::default());
+        if self.run_options.optimizing_precomputations {
+            self.type_contains_union_cache.insert(ty.clone(), result);
+        }
+        result
     }
 
     fn effective_type_alias_allowed(&self, access_ty: &CType, effective_ty: &CType) -> bool {
@@ -35807,7 +35930,12 @@ impl<'a> Interpreter<'a> {
     }
 
     fn coalesce_effective_type_regions(&self, regions: &mut Vec<EffectiveTypeRegion>) {
-        regions.sort_unstable_by_key(|region| region.start);
+        debug_assert!(
+            regions
+                .windows(2)
+                .all(|pair| pair[0].start <= pair[1].start),
+            "effective-type regions must remain sorted"
+        );
         let mut coalesced: Vec<EffectiveTypeRegion> = Vec::with_capacity(regions.len());
         for region in regions.drain(..) {
             let Some(previous) = coalesced.last_mut() else {
@@ -35830,17 +35958,14 @@ impl<'a> Interpreter<'a> {
             }
             let previous_element = previous
                 .coalesced_element_type
-                .clone()
-                .unwrap_or_else(|| previous.ty.clone());
-            let region_element = region
-                .coalesced_element_type
-                .clone()
-                .unwrap_or_else(|| region.ty.clone());
+                .as_ref()
+                .unwrap_or(&previous.ty);
+            let region_element = region.coalesced_element_type.as_ref().unwrap_or(&region.ty);
             if previous_element != region_element {
                 coalesced.push(region);
                 continue;
             }
-            let Some(element_size) = self.type_size_of(&previous_element) else {
+            let Some(element_size) = self.type_size_of(previous_element) else {
                 coalesced.push(region);
                 continue;
             };
@@ -35856,6 +35981,7 @@ impl<'a> Interpreter<'a> {
                 continue;
             };
             let count = size / element_size;
+            let previous_element = previous_element.clone();
             previous.size = size;
             previous.ty = CType::array_of(previous_element.clone(), count);
             previous.coalesced_element_type = Some(previous_element);
@@ -35873,7 +35999,7 @@ impl<'a> Interpreter<'a> {
         if object.storage_duration != StorageDuration::Dynamic || size == 0 {
             return None;
         }
-        let mut updated = Vec::new();
+        let mut updated = Vec::with_capacity(object.effective_types.len() + 1);
         for region in &object.effective_types {
             let overlaps = start < region.start.saturating_add(region.size)
                 && region.start < start.saturating_add(size);
@@ -35887,12 +36013,14 @@ impl<'a> Interpreter<'a> {
             }
         }
         if !access_ty.is_character() {
-            updated.push(EffectiveTypeRegion {
+            let new_region = EffectiveTypeRegion {
                 start,
                 size,
                 ty: access_ty.unqualified().clone(),
                 coalesced_element_type: None,
-            });
+            };
+            let insertion = updated.partition_point(|region| region.start <= start);
+            updated.insert(insertion, new_region);
         }
         self.coalesce_effective_type_regions(&mut updated);
         Some(updated)
@@ -36076,11 +36204,16 @@ impl<'a> Interpreter<'a> {
         if object.storage_duration != StorageDuration::Dynamic || size == 0 {
             return None;
         }
-        let mut updated = Vec::new();
+        let mut updated = Vec::with_capacity(
+            object
+                .effective_types
+                .len()
+                .saturating_add(source_regions.len()),
+        );
         for region in &object.effective_types {
             self.split_effective_region_around_write(region, dest_start, size, &mut updated);
         }
-        updated.extend(source_regions.into_iter().filter_map(|region| {
+        for region in source_regions.into_iter().filter_map(|region| {
             let relative = region.start.checked_sub(source_start)?;
             Some(EffectiveTypeRegion {
                 start: dest_start.checked_add(relative)?,
@@ -36088,7 +36221,10 @@ impl<'a> Interpreter<'a> {
                 ty: region.ty,
                 coalesced_element_type: region.coalesced_element_type,
             })
-        }));
+        }) {
+            let insertion = updated.partition_point(|existing| existing.start <= region.start);
+            updated.insert(insertion, region);
+        }
         self.coalesce_effective_type_regions(&mut updated);
         Some(updated)
     }
@@ -37443,13 +37579,11 @@ impl<'a> Interpreter<'a> {
                 &lvalue.member_path,
                 span,
             )?;
-            let compact_raw_storage = object.byte_size >= COMPACT_OBJECT_REPRESENTATION_THRESHOLD
-                && matches!(
-                    object.value,
-                    StoredValue::Indeterminate | StoredValue::ObjectRepresentation(_)
-                );
+            let byte_backed_storage = matches!(object.value, StoredValue::ObjectRepresentation(_))
+                || (object.byte_size >= COMPACT_OBJECT_REPRESENTATION_THRESHOLD
+                    && matches!(object.value, StoredValue::Indeterminate));
             if self.object_uses_raw_character_storage(object, &lvalue)
-                || compact_raw_storage
+                || byte_backed_storage
                 || (lvalue.byte_offset_override.is_some() && lvalue.bit_field_width.is_none())
             {
                 let effective_ty = lvalue.ty.clone();
@@ -37480,15 +37614,8 @@ impl<'a> Interpreter<'a> {
                 )?;
                 return Ok(loaded);
             }
-            let decoded_value = match &object.value {
-                StoredValue::ObjectRepresentation(bytes) => {
-                    Some(self.deserialize_stored_value(&object.ty, bytes, span)?)
-                }
-                _ => None,
-            };
-            let object_value = decoded_value.as_ref().unwrap_or(&object.value);
             let (base_stored, base_ty, tail_offset) =
-                self.resolve_lvalue_array_base(object_value, &object.ty, &lvalue, span)?;
+                self.resolve_lvalue_array_base(&object.value, &object.ty, &lvalue, span)?;
             let (base_stored, base_ty, tail_offset) = if !lvalue.member_path.is_empty()
                 && matches!(base_ty.unqualified(), CType::Array(_, _))
             {
@@ -37512,7 +37639,16 @@ impl<'a> Interpreter<'a> {
             )?;
             let (stored, effective_ty) =
                 if tail_offset == 0 && self.compatible_object_layout_types(&ty, &lvalue.ty) {
-                    (stored, ty)
+                    let effective_ty = if ty.unqualified() != lvalue.ty.unqualified()
+                        && self.cross_unit_tagged_type_compatible(
+                            ty.unqualified(),
+                            lvalue.ty.unqualified(),
+                        ) {
+                        lvalue.ty.clone()
+                    } else {
+                        ty
+                    };
+                    (stored, effective_ty)
                 } else {
                     self.apply_lvalue_offset_view(stored, &ty, tail_offset, span)?
                 };
@@ -37780,7 +37916,7 @@ impl<'a> Interpreter<'a> {
             target_volatile,
             alive,
             raw_character_storage,
-            compact_raw_storage,
+            byte_backed_storage,
         ) = {
             let object_state = self.lookup_object(objects, lvalue.object).ok_or_else(|| {
                 Diagnostic::ub(
@@ -37803,11 +37939,9 @@ impl<'a> Interpreter<'a> {
                 target_ty.is_volatile_qualified(),
                 object_state.alive,
                 self.object_uses_raw_character_storage(object_state, lvalue),
-                object_state.byte_size >= COMPACT_OBJECT_REPRESENTATION_THRESHOLD
-                    && matches!(
-                        object_state.value,
-                        StoredValue::Indeterminate | StoredValue::ObjectRepresentation(_)
-                    ),
+                matches!(object_state.value, StoredValue::ObjectRepresentation(_))
+                    || (object_state.byte_size >= COMPACT_OBJECT_REPRESENTATION_THRESHOLD
+                        && matches!(object_state.value, StoredValue::Indeterminate)),
             )
         };
         let (_, access_start, access_size) = self
@@ -37819,7 +37953,7 @@ impl<'a> Interpreter<'a> {
             return Err(self.stream_buffer_use_diag(span));
         }
         if raw_character_storage
-            || compact_raw_storage
+            || byte_backed_storage
             || (lvalue.byte_offset_override.is_some() && lvalue.bit_field_width.is_none())
         {
             return self.store_raw_byte_lvalue(objects, lvalue, value, span);
@@ -37873,45 +38007,32 @@ impl<'a> Interpreter<'a> {
             converted
         };
         let stored = self.stored_value_from_typed_value(converted, &lvalue.ty, span)?;
-        let decoded_value = self
-            .lookup_object(objects, lvalue.object)
-            .and_then(|object| match &object.value {
-                StoredValue::ObjectRepresentation(bytes) => {
-                    Some(self.deserialize_stored_value(&object.ty, bytes, span))
-                }
-                _ => None,
-            })
-            .transpose()?;
-        if let Some(decoded_value) = decoded_value {
-            let object = lookup_active_object_mut(objects, lvalue.object).ok_or_else(|| {
-                Diagnostic::ub(
-                    "write through a pointer to an object whose lifetime has ended",
-                    span,
-                    Some("6.2.4"),
-                )
-            })?;
-            object.value = decoded_value;
-        }
         {
-            let object = lookup_active_object_mut(objects, lvalue.object).ok_or_else(|| {
-                Diagnostic::ub(
-                    "write through a pointer to an object whose lifetime has ended",
-                    span,
-                    Some("6.2.4"),
-                )
-            })?;
+            let object = self
+                .lookup_active_object_mut(objects, lvalue.object)
+                .ok_or_else(|| {
+                    Diagnostic::ub(
+                        "write through a pointer to an object whose lifetime has ended",
+                        span,
+                        Some("6.2.4"),
+                    )
+                })?;
             let slot =
                 self.resolve_lvalue_storage_mut(&mut object.value, &object_ty, lvalue, span)?;
             *slot = stored;
         }
-        let object = lookup_active_object_mut(objects, lvalue.object).ok_or_else(|| {
-            Diagnostic::ub(
-                "write through a pointer to an object whose lifetime has ended",
-                span,
-                Some("6.2.4"),
-            )
-        })?;
-        self.refresh_all_union_bytes(&mut object.value, &object_ty, span)?;
+        let object = self
+            .lookup_active_object_mut(objects, lvalue.object)
+            .ok_or_else(|| {
+                Diagnostic::ub(
+                    "write through a pointer to an object whose lifetime has ended",
+                    span,
+                    Some("6.2.4"),
+                )
+            })?;
+        if self.type_contains_union(&object_ty) {
+            self.refresh_all_union_bytes(&mut object.value, &object_ty, span)?;
+        }
         object.initialized = self.stored_value_is_determinate(&object.value);
         object.indeterminate_reason = None;
         object.modification_count = object.modification_count.saturating_add(1);
@@ -38108,13 +38229,15 @@ impl<'a> Interpreter<'a> {
             )?
         };
         {
-            let object = lookup_active_object_mut(objects, lvalue.object).ok_or_else(|| {
-                Diagnostic::ub(
-                    "write through a pointer to an object whose lifetime has ended",
-                    span,
-                    Some("6.2.4"),
-                )
-            })?;
+            let object = self
+                .lookup_active_object_mut(objects, lvalue.object)
+                .ok_or_else(|| {
+                    Diagnostic::ub(
+                        "write through a pointer to an object whose lifetime has ended",
+                        span,
+                        Some("6.2.4"),
+                    )
+                })?;
             if object.storage_duration == StorageDuration::Dynamic
                 && matches!(
                     &object.value,
@@ -38185,13 +38308,15 @@ impl<'a> Interpreter<'a> {
             }
         }
         let mut all_bytes = {
-            let object = lookup_active_object(objects, lvalue.object).ok_or_else(|| {
-                Diagnostic::ub(
-                    "write through a pointer to an object whose lifetime has ended",
-                    span,
-                    Some("6.2.4"),
-                )
-            })?;
+            let object = self
+                .lookup_active_object(objects, lvalue.object)
+                .ok_or_else(|| {
+                    Diagnostic::ub(
+                        "write through a pointer to an object whose lifetime has ended",
+                        span,
+                        Some("6.2.4"),
+                    )
+                })?;
             self.serialize_stored_value(&object_ty, &object.value, span)?
         };
         let (_, start, size) = self
@@ -38214,13 +38339,15 @@ impl<'a> Interpreter<'a> {
             .iter()
             .all(|byte| matches!(byte, ByteCell::Known(_)));
         let new_value = StoredValue::ObjectRepresentation(all_bytes);
-        let object = lookup_active_object_mut(objects, lvalue.object).ok_or_else(|| {
-            Diagnostic::ub(
-                "write through a pointer to an object whose lifetime has ended",
-                span,
-                Some("6.2.4"),
-            )
-        })?;
+        let object = self
+            .lookup_active_object_mut(objects, lvalue.object)
+            .ok_or_else(|| {
+                Diagnostic::ub(
+                    "write through a pointer to an object whose lifetime has ended",
+                    span,
+                    Some("6.2.4"),
+                )
+            })?;
         object.value = new_value;
         object.initialized = initialized;
         object.indeterminate_reason = None;
@@ -38261,10 +38388,10 @@ impl<'a> Interpreter<'a> {
     ) -> Result<TypedValue, Diagnostic> {
         self.reject_missing_return_value(&value, span)?;
         self.reject_indeterminate_pointer_use(&value, span)?;
-        let source_ty = value.ty.clone();
         if &value.ty == target {
             return Ok(value);
         }
+        let source_ty = value.ty.clone();
         match () {
             _ if matches!(source_ty.unqualified(), CType::Array(_, _))
                 && matches!(target.unqualified(), CType::Array(_, _))
@@ -38506,8 +38633,15 @@ impl<'a> Interpreter<'a> {
             None,
             declaration_span,
         )?;
-        let id = ObjectId(self.next_object);
-        self.next_object += 1;
+        let target_frame_index = if matches!(
+            storage_duration,
+            StorageDuration::Static | StorageDuration::Dynamic
+        ) {
+            0
+        } else {
+            objects.len() - 1
+        };
+        let id = self.allocate_object_id(Some(target_frame_index));
         self.object_type_registry.insert(id, ty.clone());
         self.assign_object_base_address(id, &ty);
         let initial_value = if storage_duration == StorageDuration::Dynamic
@@ -38517,14 +38651,7 @@ impl<'a> Interpreter<'a> {
         } else {
             self.default_object_value(&ty)
         };
-        let target_frame = if matches!(
-            storage_duration,
-            StorageDuration::Static | StorageDuration::Dynamic
-        ) {
-            objects.first_mut().unwrap()
-        } else {
-            objects.last_mut().unwrap()
-        };
+        let target_frame = &mut objects[target_frame_index];
         target_frame.insert(
             id,
             ObjectState {
@@ -38547,7 +38674,38 @@ impl<'a> Interpreter<'a> {
                 pointer_slots: HashMap::default(),
             },
         );
+        if self.run_options.allocation_limit_bytes.is_some()
+            && storage_duration != StorageDuration::Dynamic
+        {
+            self.live_non_dynamic_bytes = self
+                .live_non_dynamic_bytes
+                .checked_add(byte_size)
+                .expect("live non-dynamic object byte total overflowed");
+        }
         Ok(id)
+    }
+
+    fn end_live_non_dynamic_bytes(&mut self, object: &ObjectState) {
+        if self.run_options.allocation_limit_bytes.is_some()
+            && object.alive
+            && object.storage_duration != StorageDuration::Dynamic
+        {
+            self.live_non_dynamic_bytes = self
+                .live_non_dynamic_bytes
+                .checked_sub(object.byte_size)
+                .expect("ended object was included in the non-dynamic byte total");
+        }
+    }
+
+    fn replace_live_non_dynamic_bytes(&mut self, previous_size: usize, new_size: usize) {
+        if self.run_options.allocation_limit_bytes.is_none() {
+            return;
+        }
+        self.live_non_dynamic_bytes = self
+            .live_non_dynamic_bytes
+            .checked_sub(previous_size)
+            .and_then(|total| total.checked_add(new_size))
+            .expect("replacement object byte total overflowed");
     }
 
     fn ensure_object_storage_limit(
@@ -38558,30 +38716,26 @@ impl<'a> Interpreter<'a> {
         replacing: Option<ObjectId>,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        let Some(allocation_limit) = self.run_options.allocation_limit_bytes else {
+            return Ok(());
+        };
         if storage_duration == StorageDuration::Dynamic {
             return Ok(());
         }
-        let active_bytes = objects
-            .iter()
-            .flat_map(|frame| frame.iter())
-            .chain(self.retired_objects.iter())
-            .filter(|(id, object)| {
-                Some(**id) != replacing
-                    && object.alive
-                    && object.storage_duration != StorageDuration::Dynamic
-            })
-            .try_fold(0usize, |total, (_, object)| {
-                total.checked_add(object.byte_size)
-            });
-        if byte_size > MAX_NON_DYNAMIC_OBJECT_BYTES
+        let replacing_bytes = replacing
+            .and_then(|id| self.lookup_object(objects, id))
+            .filter(|object| object.alive && object.storage_duration != StorageDuration::Dynamic)
+            .map_or(0, |object| object.byte_size);
+        let active_bytes = self.live_non_dynamic_bytes.checked_sub(replacing_bytes);
+        if byte_size > allocation_limit
             || active_bytes
                 .and_then(|total| total.checked_add(byte_size))
-                .is_none_or(|total| total > MAX_NON_DYNAMIC_OBJECT_BYTES)
+                .is_none_or(|total| total > allocation_limit)
         {
             return Err(Diagnostic::error(
                 format!(
-                    "object storage exceeds the {} MiB interpreter limit",
-                    MAX_NON_DYNAMIC_OBJECT_BYTES / (1024 * 1024)
+                    "object storage exceeds the {} interpreter limit",
+                    byte_limit_description(allocation_limit)
                 ),
                 span,
             ));
@@ -40143,26 +40297,13 @@ impl<'a> Interpreter<'a> {
         objects: &'b ObjectFrames,
         object_id: ObjectId,
     ) -> Option<&'b ObjectState> {
-        match objects.len() {
-            0 => self.retired_objects.get(&object_id),
-            1 => objects[0]
-                .get(&object_id)
-                .or_else(|| self.retired_objects.get(&object_id)),
-            len => {
-                if let Some(object) = objects[len - 1].get(&object_id) {
-                    return Some(object);
-                }
-                if let Some(object) = objects[0].get(&object_id) {
-                    return Some(object);
-                }
-                for idx in (1..len - 1).rev() {
-                    if let Some(object) = objects[idx].get(&object_id) {
-                        return Some(object);
-                    }
-                }
-                self.retired_objects.get(&object_id)
-            }
-        }
+        self.object_frame_indices
+            .get(object_id.0)
+            .copied()
+            .flatten()
+            .and_then(|frame_index| objects.get(frame_index))
+            .and_then(|frame| frame.get(&object_id))
+            .or_else(|| self.retired_objects.get(&object_id))
     }
 
     fn lookup_object_mut<'b>(
@@ -40170,25 +40311,44 @@ impl<'a> Interpreter<'a> {
         objects: &'b mut ObjectFrames,
         object_id: ObjectId,
     ) -> Option<&'b mut ObjectState> {
-        match objects.split_last_mut() {
-            None => self.retired_objects.get_mut(&object_id),
-            Some((current_frame, rest)) => {
-                if let Some(object) = current_frame.get_mut(&object_id) {
-                    return Some(object);
-                }
-                if let Some((global_frame, middle_frames)) = rest.split_first_mut() {
-                    if let Some(object) = global_frame.get_mut(&object_id) {
-                        return Some(object);
-                    }
-                    for frame_objects in middle_frames.iter_mut().rev() {
-                        if let Some(object) = frame_objects.get_mut(&object_id) {
-                            return Some(object);
-                        }
-                    }
-                }
-                self.retired_objects.get_mut(&object_id)
-            }
+        if let Some(frame_index) = self
+            .object_frame_indices
+            .get(object_id.0)
+            .copied()
+            .flatten()
+            && let Some(object) = objects
+                .get_mut(frame_index)
+                .and_then(|frame| frame.get_mut(&object_id))
+        {
+            return Some(object);
         }
+        self.retired_objects.get_mut(&object_id)
+    }
+
+    fn lookup_active_object<'b>(
+        &self,
+        objects: &'b ObjectFrames,
+        object_id: ObjectId,
+    ) -> Option<&'b ObjectState> {
+        self.object_frame_indices
+            .get(object_id.0)
+            .copied()
+            .flatten()
+            .and_then(|frame_index| objects.get(frame_index))
+            .and_then(|frame| frame.get(&object_id))
+    }
+
+    fn lookup_active_object_mut<'b>(
+        &self,
+        objects: &'b mut ObjectFrames,
+        object_id: ObjectId,
+    ) -> Option<&'b mut ObjectState> {
+        self.object_frame_indices
+            .get(object_id.0)
+            .copied()
+            .flatten()
+            .and_then(|frame_index| objects.get_mut(frame_index))
+            .and_then(|frame| frame.get_mut(&object_id))
     }
 
     fn retire_current_frame_objects(&mut self, objects: &mut ObjectFrames) {
@@ -40197,12 +40357,26 @@ impl<'a> Interpreter<'a> {
         };
         let retired_ids = frame_objects.keys().copied().collect::<Vec<_>>();
         self.note_stream_buffer_lifetime_end(&retired_ids);
-        for (id, mut object) in frame_objects.drain() {
-            object.alive = false;
-            object.value = StoredValue::Indeterminate;
-            self.retired_objects.insert(id, object);
+        for (id, object) in frame_objects.drain() {
+            self.retire_automatic_object(id, object);
         }
         self.forget_retired_restrict_sources(&retired_ids);
+    }
+
+    fn retire_automatic_object(&mut self, id: ObjectId, mut object: ObjectState) {
+        debug_assert_eq!(object.storage_duration, StorageDuration::Automatic);
+        self.end_live_non_dynamic_bytes(&object);
+        if !object.address_taken {
+            self.object_type_registry.remove(&id);
+            self.object_base_addresses.remove(&id);
+            return;
+        }
+        object.alive = false;
+        object.value = StoredValue::Indeterminate;
+        object.raw_indeterminate_bytes = None;
+        object.effective_types.clear();
+        object.pointer_slots.clear();
+        self.retired_objects.insert(id, object);
     }
 
     fn clear_block_scopes_for_frame(&mut self, frame_id: usize) {
@@ -40295,10 +40469,8 @@ impl<'a> Interpreter<'a> {
             .collect::<Vec<_>>();
         self.note_stream_buffer_lifetime_end(&new_ids);
         for &id in &new_ids {
-            if let Some(mut object) = frame_objects.remove(&id) {
-                object.alive = false;
-                object.value = StoredValue::Indeterminate;
-                self.retired_objects.insert(id, object);
+            if let Some(object) = frame_objects.remove(&id) {
+                self.retire_automatic_object(id, object);
             }
         }
         self.forget_retired_restrict_sources(&new_ids);
@@ -40440,6 +40612,7 @@ impl<'a> Interpreter<'a> {
         for id in current_ids {
             if !snapshot_ids.contains(&id) {
                 if let Some(mut object) = frame_objects.remove(&id) {
+                    self.end_live_non_dynamic_bytes(&object);
                     object.alive = false;
                     object.value = StoredValue::Indeterminate;
                     self.retired_objects.insert(id, object);
@@ -40475,6 +40648,11 @@ impl<'a> Interpreter<'a> {
                         .unwrap_or(false)
                 });
 
+            let previously_counted_size = current_active
+                .as_ref()
+                .or(current_retired.as_ref())
+                .filter(|state| state.alive && state.storage_duration != StorageDuration::Dynamic)
+                .map_or(0, |state| state.byte_size);
             let mut restored = if let Some(current) = current_active {
                 let mut current = current;
                 current.alive = true;
@@ -40504,6 +40682,13 @@ impl<'a> Interpreter<'a> {
                 );
             }
 
+            let restored_size =
+                if restored.alive && restored.storage_duration != StorageDuration::Dynamic {
+                    restored.byte_size
+                } else {
+                    0
+                };
+            self.replace_live_non_dynamic_bytes(previously_counted_size, restored_size);
             frame_objects.insert(id, restored);
         }
 
@@ -40656,7 +40841,6 @@ impl<'a> Interpreter<'a> {
 
     fn sequence_point(&mut self) {
         self.expr_state.accesses.clear();
-        self.assignment_targets.clear();
     }
 
     fn sequencing_snapshot(&self) -> SequencingSnapshot {
@@ -41636,7 +41820,7 @@ fn cboxes_collect_type_names(ty: &CType, names: &mut Vec<String>) {
         | CType::Complex(inner) => cboxes_collect_type_names(inner, names),
         CType::Function(return_type, params, _) => {
             cboxes_collect_type_names(return_type, names);
-            for param in params {
+            for param in params.iter() {
                 cboxes_collect_type_names(param, names);
             }
         }
@@ -43037,6 +43221,22 @@ mod tests {
         "#;
         let result = run_source("test.c", source).unwrap();
         assert_eq!(result.stdout, "1\n");
+    }
+
+    #[test]
+    fn assignment_target_survives_function_call_sequence_points() {
+        let source = r#"
+            static unsigned int rotate(unsigned int value, int amount) {
+                return (value >> amount) | (value << (32 - amount));
+            }
+
+            int main(void) {
+                unsigned int value = 0x12345678U;
+                value = rotate(value, 7) ^ rotate(value, 18) ^ (value >> 3);
+                return value != 0xe7fce6eeU;
+            }
+        "#;
+        assert_eq!(run_source("test.c", source).unwrap().exit_status, 0);
     }
 
     #[test]
@@ -44647,6 +44847,34 @@ mod tests {
             let result = run_source("test.c", source).unwrap();
             assert_eq!(result.exit_status, 0);
         }
+    }
+
+    #[test]
+    fn optimizing_precomputations_preserve_switch_and_union_behavior() {
+        let source = r#"
+            union value { int integer; unsigned char bytes[4]; };
+            struct state { union value value; int total; };
+
+            int main(void) {
+                struct state state = { { 0 }, 0 };
+                for (int i = 0; i < 8; ++i) {
+                    state.value.integer = i & 3;
+                    switch (state.value.integer) {
+                        case 0: state.total += 1; break;
+                        case 1: state.total += 2; break;
+                        case 2: state.total += 4; break;
+                        default: state.total += 8; break;
+                    }
+                }
+                return state.total != 30;
+            }
+        "#;
+        let options = RunOptions {
+            optimizing_precomputations: true,
+            ..RunOptions::default()
+        };
+        let result = run_source_with_options("test.c", source, &options).unwrap();
+        assert_eq!(result.exit_status, 0);
     }
 
     #[test]
@@ -46311,6 +46539,35 @@ mod tests {
         fs::write(
             &helper_file,
             "#include \"shared.h\"\nNode *choose(Node *node) { return node->next ? node->next : extend(node); }\nNode *extend(Node *node) { static Node fallback; return node == 0 ? &fallback : node; }\nint invoke(Callback callback, Mode mode) { return callback(mode); }\n",
+        )
+        .unwrap();
+
+        let result = run_files([main_file.clone(), helper_file.clone()]).unwrap();
+        assert_eq!(result.exit_status, 0);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn incomplete_record_pointer_member_uses_complete_cross_unit_type() {
+        let dir = temp_test_dir("cross-tu-incomplete-record-pointer-member");
+        fs::create_dir_all(&dir).unwrap();
+        let main_file = dir.join("main.c");
+        let helper_file = dir.join("helper.c");
+        let header_file = dir.join("shared.h");
+        fs::write(
+            &header_file,
+            "typedef struct Node Node;\ntypedef struct { Node **nodes; } Base;\ntypedef struct { Node *node; } Iterator;\nvoid initialize(Base *base);\nIterator make_iterator(void);\nchar *next(Base *base, Iterator *iterator);\n",
+        )
+        .unwrap();
+        fs::write(
+            &main_file,
+            "#include \"shared.h\"\nint main(void) { Base base = {0}; initialize(&base); Iterator iterator = make_iterator(); return next(&base, &iterator) == 0; }\n",
+        )
+        .unwrap();
+        fs::write(
+            &helper_file,
+            "#include <stdlib.h>\n#include \"shared.h\"\nstruct Node { int value; };\nvoid initialize(Base *base) { base->nodes = malloc(sizeof(*base->nodes)); base->nodes[0] = malloc(sizeof(*base->nodes[0])); }\nIterator make_iterator(void) { Iterator iterator; iterator.node = 0; return iterator; }\nchar *next(Base *base, Iterator *iterator) { iterator->node = base->nodes[0]; return (char *)(iterator->node + 1); }\n",
         )
         .unwrap();
 
@@ -49585,6 +49842,8 @@ mod tests {
             stdin: String::new(),
             expression_eval: None,
             ub_detection_mode: UbDetectionMode::Standard,
+            allocation_limit_bytes: Some(crate::DEFAULT_ALLOCATION_LIMIT_BYTES),
+            optimizing_precomputations: false,
             capture_visualization: true,
             synthetic_address_base: 0x1000,
             execution_step_limit: None,
@@ -50272,6 +50531,63 @@ mod tests {
             let err = run_source("test.c", source).unwrap_err();
             assert!(err.render().contains("interpreter limit"));
         }
+    }
+
+    #[test]
+    fn allocation_limit_is_adjustable_and_can_be_disabled() {
+        let limited = RunOptions {
+            allocation_limit_bytes: Some(1024),
+            ..RunOptions::default()
+        };
+        let static_source = "unsigned char bytes[1025]; int main(void) { return 0; }";
+        assert!(
+            run_source_with_options("test.c", static_source, &limited)
+                .unwrap_err()
+                .render()
+                .contains("interpreter limit")
+        );
+
+        let unlimited = RunOptions {
+            allocation_limit_bytes: None,
+            ..RunOptions::default()
+        };
+        let result = run_source_with_options("test.c", static_source, &unlimited).unwrap();
+        assert_eq!(result.exit_status, 0);
+
+        let heap_source = r#"
+            #include <stdlib.h>
+            int main(void) {
+                void *p = malloc(1025);
+                if (p == 0) return 1;
+                free(p);
+                return 0;
+            }
+        "#;
+        let result = run_source_with_options("test.c", heap_source, &limited).unwrap();
+        assert_eq!(result.exit_status, 1);
+        let result = run_source_with_options("test.c", heap_source, &unlimited).unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+
+    #[test]
+    fn non_dynamic_allocation_budget_is_released_at_scope_exit() {
+        let source = r#"
+            static void use_limit(void) {
+                unsigned char bytes[1024];
+                bytes[0] = 1;
+            }
+            int main(void) {
+                use_limit();
+                use_limit();
+                return 0;
+            }
+        "#;
+        let options = RunOptions {
+            allocation_limit_bytes: Some(1100),
+            ..RunOptions::default()
+        };
+        let result = run_source_with_options("test.c", source, &options).unwrap();
+        assert_eq!(result.exit_status, 0);
     }
 
     #[test]
