@@ -13,7 +13,7 @@ const fenv_t *__codex_fe_dfl_env(void);
 #define FE_INVALID 0x0001
 #define FE_OVERFLOW 0x0004
 #define FE_UNDERFLOW 0x0008
-#define FE_ALL_EXCEPT 0x009f
+#define FE_ALL_EXCEPT 0x001f
 
 #define FE_DOWNWARD 0x00800000
 #define FE_TONEAREST 0x00000000

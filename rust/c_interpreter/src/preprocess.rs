@@ -92,7 +92,17 @@ struct PresumedLocation {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExpansionMode {
     Normal,
+    Rescan,
     IfExpression,
+}
+
+impl ExpansionMode {
+    fn nested(self) -> Self {
+        match self {
+            Self::Normal | Self::Rescan => Self::Rescan,
+            Self::IfExpression => Self::IfExpression,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -209,7 +219,10 @@ impl Preprocessor {
             let first_token = line.len().saturating_sub(trimmed.len());
             let line_span =
                 sources.span_on_line(file_id, line_number, first_token, line.len() - first_token);
-            if let Some(rest) = trimmed.strip_prefix('#') {
+            if let Some(rest) = trimmed
+                .strip_prefix('#')
+                .or_else(|| trimmed.strip_prefix("%:"))
+            {
                 self.handle_directive(
                     rest.trim_start(),
                     sources,
@@ -246,6 +259,16 @@ impl Preprocessor {
                         .map_err(|diag| diag.replace_placeholder_span(line_span))
                     {
                         Ok(expanded) => {
+                            if end_line_idx + 1 < lines.len()
+                                && trailing_function_macro(&expanded, macros).is_some()
+                            {
+                                end_line_idx += 1;
+                                expanded_source.push('\n');
+                                expanded_source.push_str(lines[end_line_idx]);
+                                continue;
+                            }
+                            let expanded = canonicalize_digraphs_outside_literals(&expanded);
+                            let expanded = separate_macro_generated_comment_openers(&expanded);
                             for (offset, expanded_line) in expanded.split('\n').enumerate() {
                                 out.push_line(
                                     expanded_line,
@@ -259,7 +282,8 @@ impl Preprocessor {
                             break;
                         }
                         Err(diag)
-                            if self.is_unterminated_macro_invocation(&diag)
+                            if (self.is_unterminated_macro_invocation(&diag)
+                                || self.is_unterminated_pragma_operator(&diag))
                                 && end_line_idx + 1 < lines.len() =>
                         {
                             end_line_idx += 1;
@@ -307,6 +331,11 @@ impl Preprocessor {
             .starts_with("error: unterminated macro invocation")
     }
 
+    fn is_unterminated_pragma_operator(&self, diag: &Diagnostic) -> bool {
+        diag.render()
+            .starts_with("error: unterminated _Pragma operator")
+    }
+
     fn normalize_source_text(
         &self,
         text: &str,
@@ -329,7 +358,11 @@ impl Preprocessor {
         }
 
         let trigraphs = replace_trigraphs(text);
-        let translated = canonicalize_universal_characters(&trigraphs, file_id)?;
+        // Phase 2 line splicing precedes phase 3 preprocessing-token
+        // recognition.  In particular, a splice may join the digits of a
+        // universal character name, so UCNs cannot be canonicalized first.
+        let (spliced, spliced_line_map) = splice_source_lines(&trigraphs);
+        let translated = canonicalize_universal_characters(&spliced, file_id)?;
         let bytes = translated.as_bytes();
         let mut idx = 0usize;
         let mut out = String::with_capacity(text.len());
@@ -339,23 +372,13 @@ impl Preprocessor {
         // of the original file it came from. Line splices join two physical
         // lines, so counting normalized lines alone would shift every later
         // diagnostic to an earlier physical line.
-        let mut physical_line = 1usize;
-        let mut line_map = vec![1usize];
+
+        let mut source_line_index = 0usize;
+        let mut line_map = vec![spliced_line_map[0]];
 
         while idx < bytes.len() {
-            if let Some(consumed) = line_splice_length(bytes, idx) {
-                idx += consumed;
-                physical_line += 1;
-                continue;
-            }
-
             match mode {
                 Mode::Normal => {
-                    if let Some((replacement, consumed)) = digraph_at(bytes, idx) {
-                        out.push_str(replacement);
-                        idx += consumed;
-                        continue;
-                    }
                     let ch = bytes[idx] as char;
                     if ch == '/' && idx + 1 < bytes.len() {
                         match bytes[idx + 1] as char {
@@ -378,8 +401,8 @@ impl Preprocessor {
                     out.push(ch);
                     idx += 1;
                     if ch == '\n' {
-                        physical_line += 1;
-                        line_map.push(physical_line);
+                        source_line_index += 1;
+                        line_map.push(spliced_line_map[source_line_index]);
                     } else if ch == '"' {
                         construct_start = Some(idx - 1);
                         mode = Mode::String;
@@ -417,14 +440,14 @@ impl Preprocessor {
                         if idx < bytes.len() && bytes[idx] as char == '\n' {
                             out.push('\n');
                             idx += 1;
-                            physical_line += 1;
-                            line_map.push(physical_line);
+                            source_line_index += 1;
+                            line_map.push(spliced_line_map[source_line_index]);
                         }
                         mode = Mode::Normal;
                     } else if ch == '\n' {
                         out.push('\n');
-                        physical_line += 1;
-                        line_map.push(physical_line);
+                        source_line_index += 1;
+                        line_map.push(spliced_line_map[source_line_index]);
                         mode = Mode::Normal;
                     }
                 }
@@ -441,17 +464,12 @@ impl Preprocessor {
                     let ch = bytes[idx] as char;
                     idx += 1;
                     if ch == '\r' {
-                        out.push('\r');
                         if idx < bytes.len() && bytes[idx] as char == '\n' {
-                            out.push('\n');
                             idx += 1;
-                            physical_line += 1;
-                            line_map.push(physical_line);
+                            source_line_index += 1;
                         }
                     } else if ch == '\n' {
-                        out.push('\n');
-                        physical_line += 1;
-                        line_map.push(physical_line);
+                        source_line_index += 1;
                     }
                 }
             }
@@ -486,13 +504,17 @@ impl Preprocessor {
 
         match keyword {
             "ifdef" => {
-                let Some(name) = parse_identifier(rest) else {
-                    return Err(Diagnostic::error(
-                        "expected macro name after #ifdef",
-                        Self::span(file_id),
-                    ));
+                let condition = if active {
+                    let Some(name) = parse_identifier(rest) else {
+                        return Err(Diagnostic::error(
+                            "expected macro name after #ifdef",
+                            Self::span(file_id),
+                        ));
+                    };
+                    macros.contains_key(name)
+                } else {
+                    false
                 };
-                let condition = active && macros.contains_key(name);
                 conditionals.push(ConditionalFrame {
                     parent_active: active,
                     branch_taken: condition,
@@ -503,13 +525,17 @@ impl Preprocessor {
                 Ok(())
             }
             "ifndef" => {
-                let Some(name) = parse_identifier(rest) else {
-                    return Err(Diagnostic::error(
-                        "expected macro name after #ifndef",
-                        Self::span(file_id),
-                    ));
+                let condition = if active {
+                    let Some(name) = parse_identifier(rest) else {
+                        return Err(Diagnostic::error(
+                            "expected macro name after #ifndef",
+                            Self::span(file_id),
+                        ));
+                    };
+                    !macros.contains_key(name)
+                } else {
+                    false
                 };
-                let condition = active && !macros.contains_key(name);
                 conditionals.push(ConditionalFrame {
                     parent_active: active,
                     branch_taken: condition,
@@ -561,6 +587,12 @@ impl Preprocessor {
                 Ok(())
             }
             "else" => {
+                if active && !rest.trim().is_empty() {
+                    return Err(Diagnostic::error(
+                        "unexpected tokens after #else",
+                        Self::span(file_id),
+                    ));
+                }
                 let Some(frame) = conditionals.last_mut() else {
                     return Err(Diagnostic::error(
                         format!(
@@ -583,6 +615,12 @@ impl Preprocessor {
                 Ok(())
             }
             "endif" => {
+                if active && !rest.trim().is_empty() {
+                    return Err(Diagnostic::error(
+                        "unexpected tokens after #endif",
+                        Self::span(file_id),
+                    ));
+                }
                 if conditionals.pop().is_none() {
                     return Err(Diagnostic::error(
                         format!(
@@ -596,8 +634,19 @@ impl Preprocessor {
                 Ok(())
             }
             "" if active => Ok(()),
-            "pragma" if active => Ok(()),
-            "line" if active => self.handle_line(rest, line_number, presumed, file_id),
+            "pragma" if active => self.validate_pragma(rest, file_id),
+            "line" if active => {
+                let expanded = self.expand_macros_in_line(
+                    rest,
+                    macros,
+                    &mut HashSet::new(),
+                    ExpansionMode::Normal,
+                    file_id,
+                    Self::presumed_line_number(line_number, presumed.line_delta),
+                    &presumed.file_name,
+                )?;
+                self.handle_line(&expanded, line_number, presumed, file_id)
+            }
             "error" if active => Err(Diagnostic::error(
                 rest.trim().to_owned(),
                 Self::span(file_id),
@@ -614,22 +663,35 @@ impl Preprocessor {
             ),
             "define" if active => self.handle_define(rest, macros, file_id),
             "undef" if active => self.handle_undef(rest, macros, file_id),
-            _ if active => Err(Diagnostic::error(
-                format!(
-                    "unsupported preprocessing directive on line {} in {}",
-                    line_number,
-                    path.display()
-                ),
-                Self::span(file_id),
-            )),
+            _ if active => Ok(()),
             _ => Ok(()),
+        }
+    }
+
+    fn validate_pragma(&self, body: &str, file_id: FileId) -> Result<(), Diagnostic> {
+        let tokens: Vec<_> = body.split_whitespace().collect();
+        if tokens.first() != Some(&"STDC") {
+            return Ok(());
+        }
+        let valid_name = matches!(
+            tokens.get(1),
+            Some(&"FP_CONTRACT") | Some(&"FENV_ACCESS") | Some(&"CX_LIMITED_RANGE")
+        );
+        let valid_switch = matches!(tokens.get(2), Some(&"ON") | Some(&"OFF") | Some(&"DEFAULT"));
+        if tokens.len() == 3 && valid_name && valid_switch {
+            Ok(())
+        } else {
+            Err(Diagnostic::error(
+                "invalid #pragma STDC directive",
+                Self::span(file_id),
+            ))
         }
     }
 
     fn is_active(&self, conditionals: &[ConditionalFrame]) -> bool {
         conditionals
             .last()
-            .map_or(true, |frame| frame.currently_active)
+            .is_none_or(|frame| frame.currently_active)
     }
 
     fn handle_include(
@@ -697,6 +759,16 @@ impl Preprocessor {
         candidates.dedup();
         for candidate in candidates {
             if let Some(nested_id) = sources.find_file(&candidate) {
+                let nested_path = sources.file(nested_id).path().clone();
+                out.append(self.expand_file(sources, nested_id, &nested_path, macros)?);
+                return Ok(());
+            }
+        }
+
+        if quoted {
+            let angle_form = format!("<{name}>");
+            if let Some((path, text)) = self.internal_header(&angle_form) {
+                let nested_id = sources.add_file(path, text.to_owned());
                 let nested_path = sources.file(nested_id).path().clone();
                 out.append(self.expand_file(sources, nested_id, &nested_path, macros)?);
                 return Ok(());
@@ -813,7 +885,7 @@ impl Preprocessor {
                 Self::span(file_id),
             ));
         };
-        if is_predefined_macro(name) {
+        if is_predefined_macro(name) || name == "defined" {
             return Err(Diagnostic::error(
                 format!("predefined macro {name} cannot be redefined"),
                 Self::span(file_id),
@@ -830,6 +902,7 @@ impl Preprocessor {
             let params_text = &tail[1..close];
             let (params, variadic) = self.parse_macro_parameters(params_text, file_id)?;
             let replacement = tail[close + 1..].trim_start().to_owned();
+            self.validate_macro_paste_boundaries(&replacement, file_id)?;
             self.validate_macro_stringification_operators(
                 &replacement,
                 &params,
@@ -848,7 +921,27 @@ impl Preprocessor {
             );
         }
         let replacement = tail.trim_start().to_owned();
+        self.validate_macro_paste_boundaries(&replacement, file_id)?;
         self.install_macro_definition(name, MacroDefinition::Object(replacement), macros, file_id)?;
+        Ok(())
+    }
+
+    fn validate_macro_paste_boundaries(
+        &self,
+        replacement: &str,
+        file_id: FileId,
+    ) -> Result<(), Diagnostic> {
+        let replacement = replacement.trim();
+        if replacement.starts_with("##")
+            || replacement.starts_with("%:%:")
+            || replacement.ends_with("##")
+            || replacement.ends_with("%:%:")
+        {
+            return Err(Diagnostic::error(
+                "## cannot appear at the beginning or end of a macro replacement list",
+                Self::span(file_id),
+            ));
+        }
         Ok(())
     }
 
@@ -965,7 +1058,7 @@ impl Preprocessor {
                 Self::span(file_id),
             ));
         };
-        if is_predefined_macro(name) {
+        if is_predefined_macro(name) || name == "defined" {
             return Err(Diagnostic::error(
                 format!("predefined macro {name} cannot be undefined"),
                 Self::span(file_id),
@@ -1004,6 +1097,8 @@ impl Preprocessor {
                     idx += 1;
                 }
                 let name = &line[start..idx];
+                let current_presumed_line =
+                    presumed_line + line[..start].bytes().filter(|byte| *byte == b'\n').count();
 
                 if mode == ExpansionMode::IfExpression && name == "defined" {
                     let (defined, next_idx) =
@@ -1014,7 +1109,7 @@ impl Preprocessor {
                 }
 
                 if name == "__LINE__" {
-                    out.push_str(&presumed_line.to_string());
+                    out.push_str(&current_presumed_line.to_string());
                     continue;
                 }
                 if name == "__FILE__" {
@@ -1030,13 +1125,14 @@ impl Preprocessor {
                 match definition {
                     MacroDefinition::Object(replacement) => {
                         if active.insert(name.to_owned()) {
+                            let replacement = apply_object_macro_pastes(&replacement, file_id)?;
                             let expanded = self.expand_macros_in_line(
                                 &replacement,
                                 macros,
                                 active,
-                                mode,
+                                mode.nested(),
                                 file_id,
-                                presumed_line,
+                                current_presumed_line,
                                 presumed_file,
                             )?;
                             let boundary = boundary_function_macro_start(
@@ -1053,7 +1149,7 @@ impl Preprocessor {
                                     &joint,
                                     macros,
                                     active,
-                                    mode,
+                                    mode.nested(),
                                     file_id,
                                     presumed_line,
                                     presumed_file,
@@ -1080,11 +1176,25 @@ impl Preprocessor {
                             out.push_str(name);
                             continue;
                         }
-                        let (mut raw_args, end_idx) =
-                            self.parse_macro_invocation(line, call_start, file_id)?;
-                        if raw_args.is_empty() && (!params.is_empty() || variadic) {
-                            raw_args.push(String::new());
+                        let (mut raw_arg_infos, end_idx) =
+                            match self.parse_macro_invocation(line, call_start, file_id) {
+                                Err(diag)
+                                    if mode == ExpansionMode::Rescan
+                                        && self.is_unterminated_macro_invocation(&diag) =>
+                                {
+                                    active.remove(name);
+                                    out.push_str(&line[start..]);
+                                    break;
+                                }
+                                result => result?,
+                            };
+                        if raw_arg_infos.is_empty() && (!params.is_empty() || variadic) {
+                            raw_arg_infos.push((String::new(), 0));
                         }
+                        let raw_args = raw_arg_infos
+                            .iter()
+                            .map(|(argument, _)| argument.clone())
+                            .collect::<Vec<_>>();
                         if (!variadic && raw_args.len() != params.len())
                             || (variadic && raw_args.len() <= params.len())
                         {
@@ -1100,17 +1210,23 @@ impl Preprocessor {
                                 Self::span(file_id),
                             ));
                         }
-                        let mut expanded_args = Vec::with_capacity(raw_args.len());
-                        for arg in raw_args.iter().take(params.len()) {
+                        let mut expanded_args = Vec::with_capacity(params.len());
+                        for ((param, arg), (_, line_offset)) in
+                            params.iter().zip(raw_args.iter()).zip(raw_arg_infos.iter())
+                        {
+                            if !macro_parameter_needs_expansion(&replacement, param) {
+                                expanded_args.push(arg.clone());
+                                continue;
+                            }
                             let mut argument_active = active.clone();
                             argument_active.remove(name);
                             expanded_args.push(self.expand_macros_in_line(
                                 arg,
                                 macros,
                                 &mut argument_active,
-                                mode,
+                                mode.nested(),
                                 file_id,
-                                presumed_line,
+                                presumed_line + line_offset,
                                 presumed_file,
                             )?);
                         }
@@ -1118,31 +1234,36 @@ impl Preprocessor {
                             raw_args
                                 .iter()
                                 .skip(params.len())
-                                .map(|arg| arg.trim())
+                                .map(String::as_str)
                                 .collect::<Vec<_>>()
-                                .join(", ")
+                                .join(",")
                         } else {
                             String::new()
                         };
                         let expanded_variadic_args = if variadic {
-                            raw_args
-                                .iter()
-                                .skip(params.len())
-                                .map(|arg| {
-                                    let mut argument_active = active.clone();
-                                    argument_active.remove(name);
-                                    self.expand_macros_in_line(
-                                        arg,
-                                        macros,
-                                        &mut argument_active,
-                                        mode,
-                                        file_id,
-                                        presumed_line,
-                                        presumed_file,
-                                    )
-                                })
-                                .collect::<Result<Vec<_>, _>>()?
-                                .join(", ")
+                            if !macro_parameter_needs_expansion(&replacement, "__VA_ARGS__") {
+                                raw_variadic_args.clone()
+                            } else {
+                                raw_args
+                                    .iter()
+                                    .skip(params.len())
+                                    .zip(raw_arg_infos.iter().skip(params.len()))
+                                    .map(|(arg, (_, line_offset))| {
+                                        let mut argument_active = active.clone();
+                                        argument_active.remove(name);
+                                        self.expand_macros_in_line(
+                                            arg,
+                                            macros,
+                                            &mut argument_active,
+                                            mode.nested(),
+                                            file_id,
+                                            presumed_line + line_offset,
+                                            presumed_file,
+                                        )
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?
+                                    .join(",")
+                            }
                         } else {
                             String::new()
                         };
@@ -1160,9 +1281,9 @@ impl Preprocessor {
                             &substituted,
                             macros,
                             active,
-                            mode,
+                            mode.nested(),
                             file_id,
-                            presumed_line,
+                            current_presumed_line,
                             presumed_file,
                         )?;
                         let boundary = boundary_function_macro_start(
@@ -1179,9 +1300,9 @@ impl Preprocessor {
                                 &joint,
                                 macros,
                                 active,
-                                mode,
+                                mode.nested(),
                                 file_id,
-                                presumed_line,
+                                current_presumed_line,
                                 presumed_file,
                             )?);
                             idx = bytes.len();
@@ -1219,6 +1340,14 @@ impl Preprocessor {
                 idx = end;
                 continue;
             }
+            if ch.is_ascii_digit()
+                || (ch == '.' && bytes.get(idx + 1).is_some_and(u8::is_ascii_digit))
+            {
+                let end = preprocessing_number_end(line, idx);
+                out.push_str(&line[idx..end]);
+                idx = end;
+                continue;
+            }
             if ch == '_' || is_ident_start(ch) {
                 let start = idx;
                 idx += 1;
@@ -1231,21 +1360,42 @@ impl Preprocessor {
                     continue;
                 }
                 let mut cursor = skip_whitespace(line, idx);
-                if cursor >= bytes.len() || bytes[cursor] as char != '(' {
+                if cursor >= bytes.len() {
+                    return Err(Diagnostic::error(
+                        "unterminated _Pragma operator",
+                        Self::span(file_id),
+                    ));
+                }
+                if bytes[cursor] as char != '(' {
                     out.push_str(name);
                     continue;
                 }
                 cursor += 1;
                 cursor = skip_whitespace(line, cursor);
-                if cursor >= bytes.len() || bytes[cursor] as char != '"' {
+                if cursor >= bytes.len() {
+                    return Err(Diagnostic::error(
+                        "unterminated _Pragma operator",
+                        Self::span(file_id),
+                    ));
+                }
+                let quote = pragma_string_literal_quote(line, cursor);
+                let Some(quote) = quote else {
                     return Err(Diagnostic::error(
                         "_Pragma requires a parenthesized string literal",
                         Self::span(file_id),
                     ));
-                }
-                cursor = skip_quoted_literal(line, cursor, file_id)?;
+                };
+                cursor = skip_quoted_literal(line, quote, file_id)?;
+                let pragma_body = destringize_pragma(&line[quote + 1..cursor - 1]);
+                self.validate_pragma(&pragma_body, file_id)?;
                 cursor = skip_whitespace(line, cursor);
-                if cursor >= bytes.len() || bytes[cursor] as char != ')' {
+                if cursor >= bytes.len() {
+                    return Err(Diagnostic::error(
+                        "unterminated _Pragma operator",
+                        Self::span(file_id),
+                    ));
+                }
+                if bytes[cursor] as char != ')' {
                     return Err(Diagnostic::error(
                         "_Pragma requires a closing )",
                         Self::span(file_id),
@@ -1306,7 +1456,7 @@ impl Preprocessor {
         line: &str,
         open_paren: usize,
         file_id: FileId,
-    ) -> Result<(Vec<String>, usize), Diagnostic> {
+    ) -> Result<(Vec<(String, usize)>, usize), Diagnostic> {
         let bytes = line.as_bytes();
         let mut args = Vec::new();
         let mut idx = open_paren + 1;
@@ -1330,14 +1480,26 @@ impl Preprocessor {
                         if args.is_empty() && between.is_empty() {
                             return Ok((Vec::new(), idx + 1));
                         }
-                        args.push(line[arg_start..idx].trim().to_owned());
+                        args.push((
+                            line[arg_start..idx].to_owned(),
+                            line[..arg_start]
+                                .bytes()
+                                .filter(|byte| *byte == b'\n')
+                                .count(),
+                        ));
                         return Ok((args, idx + 1));
                     }
                     depth -= 1;
                     idx += 1;
                 }
                 ',' if depth == 0 => {
-                    args.push(line[arg_start..idx].trim().to_owned());
+                    args.push((
+                        line[arg_start..idx].to_owned(),
+                        line[..arg_start]
+                            .bytes()
+                            .filter(|byte| *byte == b'\n')
+                            .count(),
+                    ));
                     idx += 1;
                     arg_start = idx;
                 }
@@ -1362,6 +1524,8 @@ impl Preprocessor {
         expanded_variadic_args: &str,
         file_id: FileId,
     ) -> Result<String, Diagnostic> {
+        let canonical_replacement = canonicalize_digraphs_outside_literals(replacement);
+        let replacement = canonical_replacement.as_str();
         let raw_substitutions: HashMap<&str, &str> = params
             .iter()
             .zip(raw_args.iter())
@@ -1437,12 +1601,12 @@ impl Preprocessor {
                 let is_left_paste_operand = replacement[next..].starts_with("##");
                 if variadic && name == "__VA_ARGS__" {
                     out.push_str(if is_left_paste_operand {
-                        raw_variadic_args
+                        raw_variadic_args.trim()
                     } else {
                         expanded_variadic_args
                     });
                 } else if is_left_paste_operand {
-                    out.push_str(raw_substitutions.get(name).copied().unwrap_or(name));
+                    out.push_str(raw_substitutions.get(name).copied().unwrap_or(name).trim());
                 } else if let Some(arg) = expanded_substitutions.get(name) {
                     out.push_str(arg);
                 } else {
@@ -1486,21 +1650,43 @@ impl Preprocessor {
         presumed: &mut PresumedLocation,
         file_id: FileId,
     ) -> Result<(), Diagnostic> {
-        let mut parts = rest.split_whitespace();
-        let Some(number_text) = parts.next() else {
+        let rest = rest.trim();
+        let number_end = rest
+            .find(|ch: char| ch.is_ascii_whitespace())
+            .unwrap_or(rest.len());
+        let number_text = &rest[..number_end];
+        if number_text.is_empty() {
             return Err(Diagnostic::error(
                 "expected line number after #line",
                 Self::span(file_id),
             ));
-        };
+        }
         let number = number_text.parse::<usize>().map_err(|_| {
             Diagnostic::error(
                 "invalid line number in #line directive",
                 Self::span(file_id),
             )
         })?;
+        if number == 0 || number > i32::MAX as usize {
+            return Err(Diagnostic::error(
+                "#line number must be between 1 and 2147483647",
+                Self::span(file_id),
+            ));
+        }
         presumed.line_delta = number as isize - (physical_line as isize + 1);
-        if let Some(file_name) = parts.next() {
+        let file_name = rest[number_end..].trim();
+        if !file_name.is_empty() {
+            let literal_end = if file_name.starts_with('"') {
+                skip_quoted_literal(file_name, 0, file_id)?
+            } else {
+                0
+            };
+            if literal_end != file_name.len() {
+                return Err(Diagnostic::error(
+                    "invalid file name in #line directive",
+                    Self::span(file_id),
+                ));
+            }
             presumed.file_name = parse_line_file_name(file_name).ok_or_else(|| {
                 Diagnostic::error("invalid file name in #line directive", Self::span(file_id))
             })?;
@@ -1537,9 +1723,9 @@ impl Preprocessor {
             }
             let name = &replacement[start..end];
             let token = if variadic && name == "__VA_ARGS__" {
-                raw_variadic_args.to_owned()
+                raw_variadic_args.trim().to_owned()
             } else if let Some(arg) = raw_substitutions.get(name) {
-                (*arg).to_owned()
+                arg.trim().to_owned()
             } else {
                 name.to_owned()
             };
@@ -1576,6 +1762,18 @@ impl<'a> IfExprLexer<'a> {
             let ch = bytes[self.idx] as char;
             if ch.is_ascii_whitespace() {
                 self.idx += 1;
+                continue;
+            }
+            if matches!(ch, 'L' | 'u' | 'U')
+                && self.idx + 1 < bytes.len()
+                && bytes[self.idx + 1] as char == '\''
+            {
+                self.idx += 1;
+                tokens.push(IfToken::Number(parse_char_constant(
+                    self.text,
+                    &mut self.idx,
+                    self.file_id,
+                )?));
                 continue;
             }
             if is_ident_start(ch) {
@@ -1843,7 +2041,20 @@ impl IfExprParser {
                 let rhs = self.parse_additive()?;
                 if self.evaluating {
                     let shift = to_shift_count(rhs, self.span)?;
-                    value.bits = value.bits.wrapping_shl(shift);
+                    if value.unsigned {
+                        value.bits = value.bits.wrapping_shl(shift);
+                    } else {
+                        let signed = value.bits as i64;
+                        let shifted = (signed as i128) << shift;
+                        if signed < 0 || shifted > i64::MAX as i128 {
+                            return Err(Diagnostic::ub(
+                                "signed left shift has a negative operand or an unrepresentable result",
+                                self.span,
+                                Some("6.5.7"),
+                            ));
+                        }
+                        value.bits = shifted as u64;
+                    }
                 }
             } else if self.consume_simple(IfToken::Shr) {
                 let rhs = self.parse_additive()?;
@@ -2221,6 +2432,8 @@ fn predefined_macros() -> HashMap<String, MacroDefinition> {
         ("__STDC__", "1"),
         ("__STDC_HOSTED__", "1"),
         ("__STDC_VERSION__", "201112L"),
+        ("__STDC_UTF_16__", "1"),
+        ("__STDC_UTF_32__", "1"),
         ("__STDC_NO_ATOMICS__", "1"),
         ("__STDC_NO_THREADS__", "1"),
         ("__FILE__", ""),
@@ -2244,6 +2457,8 @@ fn is_predefined_macro(name: &str) -> bool {
             | "__STDC__"
             | "__STDC_HOSTED__"
             | "__STDC_VERSION__"
+            | "__STDC_UTF_16__"
+            | "__STDC_UTF_32__"
             | "__STDC_NO_ATOMICS__"
             | "__STDC_NO_THREADS__"
             | "__FILE__"
@@ -2530,6 +2745,32 @@ fn line_splice_length(bytes: &[u8], idx: usize) -> Option<usize> {
     None
 }
 
+fn splice_source_lines(text: &str) -> (String, Vec<usize>) {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(text.len());
+    let mut line_map = vec![1usize];
+    let mut physical_line = 1usize;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if let Some(consumed) = line_splice_length(bytes, idx) {
+            idx += consumed;
+            physical_line += 1;
+            continue;
+        }
+        let byte = bytes[idx];
+        out.push(byte);
+        idx += 1;
+        if byte == b'\n' {
+            physical_line += 1;
+            line_map.push(physical_line);
+        }
+    }
+    (
+        String::from_utf8(out).expect("line splicing preserves UTF-8 source bytes"),
+        line_map,
+    )
+}
+
 fn skip_quoted_literal(text: &str, start: usize, file_id: FileId) -> Result<usize, Diagnostic> {
     let bytes = text.as_bytes();
     let quote = bytes[start] as char;
@@ -2612,7 +2853,228 @@ fn trim_trailing_whitespace(text: &mut String) {
 }
 
 fn normalize_macro_argument_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut idx = 0usize;
+    let mut pending_space = false;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if ch.is_ascii_whitespace() {
+            pending_space = !out.is_empty();
+            idx += 1;
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        if matches!(ch, '\'' | '"')
+            && let Ok(end) = skip_quoted_literal(text, idx, FileId(0))
+        {
+            out.push_str(&text[idx..end]);
+            idx = end;
+            continue;
+        }
+        if let Some(rest) = text[idx..].strip_prefix("__cboxes_uc_")
+            && rest.len() >= 9
+            && rest.as_bytes()[8] == b'_'
+            && let Ok(value) = u32::from_str_radix(&rest[..8], 16)
+            && let Some(value) = char::from_u32(value)
+        {
+            out.push(value);
+            idx += "__cboxes_uc_".len() + 9;
+            continue;
+        }
+        out.push(ch);
+        idx += 1;
+    }
+    out
+}
+
+fn macro_parameter_needs_expansion(replacement: &str, parameter: &str) -> bool {
+    let bytes = replacement.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if matches!(bytes[idx], b'\'' | b'"') {
+            idx = skip_quoted_literal(replacement, idx, FileId(0)).unwrap_or(bytes.len());
+            continue;
+        }
+        if is_ident_start(bytes[idx] as char) {
+            let start = idx;
+            idx += 1;
+            while idx < bytes.len() && is_ident_continue(bytes[idx] as char) {
+                idx += 1;
+            }
+            if &replacement[start..idx] != parameter {
+                continue;
+            }
+            let before = replacement[..start].trim_end();
+            let after = replacement[idx..].trim_start();
+            let preceded_by_stringize_or_paste = before.ends_with('#') || before.ends_with("%:");
+            let followed_by_paste = after.starts_with("##") || after.starts_with("%:%:");
+            if !preceded_by_stringize_or_paste && !followed_by_paste {
+                return true;
+            }
+            continue;
+        }
+        idx += 1;
+    }
+    false
+}
+
+fn apply_object_macro_pastes(replacement: &str, file_id: FileId) -> Result<String, Diagnostic> {
+    let bytes = replacement.as_bytes();
+    let mut out = String::new();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if matches!(bytes[idx], b'\'' | b'"') {
+            let end = skip_quoted_literal(replacement, idx, file_id)?;
+            out.push_str(&replacement[idx..end]);
+            idx = end;
+            continue;
+        }
+        let paste_len = if replacement[idx..].starts_with("##") {
+            2
+        } else if replacement[idx..].starts_with("%:%:") {
+            4
+        } else {
+            0
+        };
+        if paste_len == 0 {
+            out.push(bytes[idx] as char);
+            idx += 1;
+            continue;
+        }
+        trim_trailing_whitespace(&mut out);
+        idx = skip_whitespace(replacement, idx + paste_len);
+        if out.is_empty() || idx >= bytes.len() {
+            return Err(Diagnostic::error(
+                "## cannot appear at the beginning or end of a macro replacement list",
+                Span::new(file_id, 0, 0),
+            ));
+        }
+        let end = preprocessing_token_end(replacement, idx, file_id)?;
+        out.push_str(&replacement[idx..end]);
+        idx = end;
+    }
+    Ok(out)
+}
+
+fn preprocessing_token_end(text: &str, start: usize, file_id: FileId) -> Result<usize, Diagnostic> {
+    let bytes = text.as_bytes();
+    if matches!(bytes[start], b'\'' | b'"') {
+        return skip_quoted_literal(text, start, file_id);
+    }
+    if (bytes[start] as char).is_ascii_digit()
+        || (bytes[start] == b'.' && bytes.get(start + 1).is_some_and(u8::is_ascii_digit))
+    {
+        return Ok(preprocessing_number_end(text, start));
+    }
+    if is_ident_start(bytes[start] as char) {
+        let mut end = start + 1;
+        while end < bytes.len() && is_ident_continue(bytes[end] as char) {
+            end += 1;
+        }
+        return Ok(end);
+    }
+    if let Some((_, consumed)) = digraph_at(bytes, start) {
+        return Ok(start + consumed);
+    }
+    Ok(start + 1)
+}
+
+fn preprocessing_number_end(text: &str, start: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut end = start + 1;
+    while end < bytes.len() {
+        let ch = bytes[end] as char;
+        if ch == '.' || is_ident_continue(ch) || ch.is_ascii_digit() {
+            end += 1;
+            continue;
+        }
+        if matches!(ch, '+' | '-')
+            && end > start
+            && matches!(bytes[end - 1] as char, 'e' | 'E' | 'p' | 'P')
+        {
+            end += 1;
+            continue;
+        }
+        break;
+    }
+    end
+}
+
+fn pragma_string_literal_quote(text: &str, start: usize) -> Option<usize> {
+    let rest = &text[start..];
+    if rest.starts_with('"') {
+        Some(start)
+    } else if rest.starts_with("u8\"") {
+        Some(start + 2)
+    } else if rest.starts_with("u\"") || rest.starts_with("U\"") || rest.starts_with("L\"") {
+        Some(start + 1)
+    } else {
+        None
+    }
+}
+
+fn destringize_pragma(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let Some(next) = chars.next() else {
+                result.push(ch);
+                break;
+            };
+            if matches!(next, '\\' | '"') {
+                result.push(next);
+            } else {
+                result.push(ch);
+                result.push(next);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn trailing_function_macro<'a>(
+    expanded: &'a str,
+    macros: &HashMap<String, MacroDefinition>,
+) -> Option<&'a str> {
+    let trimmed = expanded.trim_end();
+    let start = trimmed
+        .char_indices()
+        .rev()
+        .find_map(|(idx, ch)| (!is_ident_continue(ch)).then_some(idx + ch.len_utf8()))
+        .unwrap_or(0);
+    let name = &trimmed[start..];
+    matches!(macros.get(name), Some(MacroDefinition::Function { .. })).then_some(name)
+}
+
+fn canonicalize_digraphs_outside_literals(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if matches!(bytes[idx], b'\'' | b'"')
+            && let Ok(end) = skip_quoted_literal(text, idx, FileId(0))
+        {
+            out.push_str(&text[idx..end]);
+            idx = end;
+            continue;
+        }
+        if let Some((replacement, consumed)) = digraph_at(bytes, idx) {
+            out.push_str(replacement);
+            idx += consumed;
+            continue;
+        }
+        let ch = text[idx..].chars().next().expect("valid UTF-8 boundary");
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
+    out
 }
 
 fn string_literal_token(text: &str) -> String {
@@ -2629,6 +3091,36 @@ fn string_literal_token(text: &str) -> String {
         }
     }
     out.push('"');
+    out
+}
+
+fn separate_macro_generated_comment_openers(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if matches!(bytes[idx], b'\'' | b'"')
+            && let Ok(end) = skip_quoted_literal(text, idx, FileId(0))
+        {
+            out.push_str(&text[idx..end]);
+            idx = end;
+            continue;
+        }
+        if bytes[idx] == b'/'
+            && bytes
+                .get(idx + 1)
+                .is_some_and(|next| matches!(next, b'/' | b'*'))
+        {
+            out.push('/');
+            out.push(' ');
+            out.push(bytes[idx + 1] as char);
+            idx += 2;
+            continue;
+        }
+        let ch = text[idx..].chars().next().expect("valid UTF-8 boundary");
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
     out
 }
 
@@ -2664,6 +3156,40 @@ fn boundary_function_macro_start(
     macros: &HashMap<String, MacroDefinition>,
     unavailable: &HashSet<String>,
 ) -> Option<usize> {
+    // A replacement may supply the beginning of an invocation (G(~),
+    // with the remaining argument tokens supplied by following source.
+    let mut cursor = 0;
+    while cursor < expanded.len() {
+        let end = preprocessing_token_end(expanded, cursor, FileId(0)).ok()?;
+        let name = &expanded[cursor..end];
+        if !unavailable.contains(name)
+            && matches!(macros.get(name), Some(MacroDefinition::Function { .. }))
+        {
+            let open = skip_whitespace(expanded, end);
+            if expanded.as_bytes().get(open) == Some(&b'(') {
+                let mut scan = open;
+                let mut depth = 0;
+                while scan < expanded.len() {
+                    let next = preprocessing_token_end(expanded, scan, FileId(0)).ok()?;
+                    match &expanded[scan..next] {
+                        "(" => depth += 1,
+                        ")" => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    scan = next;
+                }
+                if depth > 0 && !following.is_empty() {
+                    return Some(cursor);
+                }
+            }
+        }
+        cursor = end;
+    }
     if !following.trim_start().starts_with('(') {
         return None;
     }

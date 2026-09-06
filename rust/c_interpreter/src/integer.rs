@@ -38,14 +38,13 @@ pub fn parse_integer_literal(text: &str, span: Span) -> Result<(CType, i128, boo
         .map_err(|_| Diagnostic::error("integer literal is out of supported range", span))?;
 
     let has_suffix = !suffix.is_empty();
-    let suffix = suffix.to_ascii_lowercase();
-    let (unsigned, long_count) = match suffix.as_str() {
+    let (unsigned, long_count) = match suffix {
         "" => (false, 0),
-        "u" => (true, 0),
-        "l" => (false, 1),
-        "ul" | "lu" => (true, 1),
-        "ll" => (false, 2),
-        "ull" | "llu" => (true, 2),
+        "u" | "U" => (true, 0),
+        "l" | "L" => (false, 1),
+        "ul" | "uL" | "Ul" | "UL" | "lu" | "lU" | "Lu" | "LU" => (true, 1),
+        "ll" | "LL" => (false, 2),
+        "ull" | "uLL" | "Ull" | "ULL" | "llu" | "llU" | "LLu" | "LLU" => (true, 2),
         _ => {
             return Err(Diagnostic::error(
                 "unsupported integer literal suffix",

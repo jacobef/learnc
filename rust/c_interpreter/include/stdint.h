@@ -87,10 +87,15 @@ typedef unsigned long uintmax_t;
 #define PTRDIFF_MAX 9223372036854775807L
 #define SIZE_MAX 18446744073709551615UL
 
+#define SIG_ATOMIC_MIN (-2147483647 - 1)
+#define SIG_ATOMIC_MAX 2147483647
+#define WINT_MIN (-2147483647 - 1)
+#define WINT_MAX 2147483647
+
 #define INT8_C(c) c
-#define UINT8_C(c) c##U
+#define UINT8_C(c) c
 #define INT16_C(c) c
-#define UINT16_C(c) c##U
+#define UINT16_C(c) c
 #define INT32_C(c) c
 #define UINT32_C(c) c##U
 #define INT64_C(c) c##LL

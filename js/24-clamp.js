@@ -89,5 +89,4 @@ if (low < n < high) {
         return null;
     },
     next: "25-review-ii.html",
-    isLast: false,
 });

@@ -18,6 +18,7 @@ pub const HOST_LONG_DOUBLE_ALIGN: usize = if cfg!(all(target_os = "macos", targe
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct TypeQualifiers {
+    pub is_atomic: bool,
     pub is_const: bool,
     pub is_restrict: bool,
     pub is_volatile: bool,
@@ -25,17 +26,19 @@ pub struct TypeQualifiers {
 
 impl TypeQualifiers {
     pub fn is_empty(self) -> bool {
-        !self.is_const && !self.is_restrict && !self.is_volatile
+        !self.is_atomic && !self.is_const && !self.is_restrict && !self.is_volatile
     }
 
     pub fn contains(self, other: TypeQualifiers) -> bool {
-        (!other.is_const || self.is_const)
+        (!other.is_atomic || self.is_atomic)
+            && (!other.is_const || self.is_const)
             && (!other.is_restrict || self.is_restrict)
             && (!other.is_volatile || self.is_volatile)
     }
 
     pub fn union(self, other: TypeQualifiers) -> TypeQualifiers {
         TypeQualifiers {
+            is_atomic: self.is_atomic || other.is_atomic,
             is_const: self.is_const || other.is_const,
             is_restrict: self.is_restrict || other.is_restrict,
             is_volatile: self.is_volatile || other.is_volatile,
@@ -59,6 +62,7 @@ pub struct RecordMember {
     pub bit_width_span: Option<Span>,
     pub bit_offset: u8,
     pub bit_storage_size: usize,
+    pub alignment: Option<usize>,
     pub declaration_span: Option<Span>,
 }
 
@@ -71,6 +75,7 @@ impl PartialEq for RecordMember {
             && self.bit_width == other.bit_width
             && self.bit_offset == other.bit_offset
             && self.bit_storage_size == other.bit_storage_size
+            && self.alignment == other.alignment
     }
 }
 
@@ -114,10 +119,10 @@ pub enum CType {
     LongDouble,
     Complex(Arc<CType>),
     VaList,
-    Struct(usize, Option<Arc<str>>),
-    Union(usize, Option<Arc<str>>),
-    Enum(usize, Option<Arc<str>>),
-    Function(Arc<CType>, Arc<[CType]>, bool),
+    Struct(usize, Option<Arc<String>>),
+    Union(usize, Option<Arc<String>>),
+    Enum(usize, Option<Arc<String>>),
+    Function(Arc<CType>, Arc<Vec<CType>>, bool),
     Qualified(Arc<CType>, TypeQualifiers),
     Pointer(Arc<CType>),
     Array(Arc<CType>, usize),
@@ -127,6 +132,8 @@ impl CType {
     pub fn qualified(inner: CType, qualifiers: TypeQualifiers) -> Self {
         if qualifiers.is_empty() {
             inner
+        } else if let CType::Qualified(inner, existing) = inner {
+            CType::Qualified(inner, existing.union(qualifiers))
         } else {
             CType::Qualified(Arc::new(inner), qualifiers)
         }
@@ -137,11 +144,11 @@ impl CType {
     }
 
     pub fn function(return_type: CType, params: Vec<CType>) -> Self {
-        CType::Function(Arc::new(return_type), Arc::from(params), false)
+        CType::Function(Arc::new(return_type), Arc::new(params), false)
     }
 
     pub fn variadic_function(return_type: CType, params: Vec<CType>) -> Self {
-        CType::Function(Arc::new(return_type), Arc::from(params), true)
+        CType::Function(Arc::new(return_type), Arc::new(params), true)
     }
 
     pub fn complex_of(real: CType) -> Self {
@@ -415,6 +422,9 @@ impl fmt::Display for CType {
                 write!(f, ") returning {}", return_type)
             }
             CType::Qualified(inner, qualifiers) => {
+                if qualifiers.is_atomic {
+                    write!(f, "_Atomic ")?;
+                }
                 if qualifiers.is_const {
                     write!(f, "const ")?;
                 }

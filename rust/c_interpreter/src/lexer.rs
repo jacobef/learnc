@@ -48,7 +48,7 @@ impl<'a> Lexer<'a> {
             {
                 self.bump();
                 self.bump();
-                TokenKind::StringLiteral(self.lex_string_literal(start, u8::MAX as u32)?)
+                TokenKind::Utf8StringLiteral(self.lex_string_literal(start, u8::MAX as u32)?)
             }
             'u' if matches!(self.peek_char(), Some('\'' | '"')) => match self.bump().unwrap() {
                 '\'' => {
@@ -229,6 +229,7 @@ impl<'a> Lexer<'a> {
                 match text {
                     "_Alignas" => TokenKind::Keyword(Keyword::Alignas),
                     "_Alignof" => TokenKind::Keyword(Keyword::Alignof),
+                    "_Atomic" => TokenKind::Keyword(Keyword::Atomic),
                     "auto" => TokenKind::Keyword(Keyword::Auto),
                     "break" => TokenKind::Keyword(Keyword::Break),
                     "_Bool" => TokenKind::Keyword(Keyword::Bool),
@@ -249,6 +250,7 @@ impl<'a> Lexer<'a> {
                     "goto" => TokenKind::Keyword(Keyword::Goto),
                     "if" => TokenKind::Keyword(Keyword::If),
                     "inline" => TokenKind::Keyword(Keyword::Inline),
+                    "_Imaginary" => TokenKind::Keyword(Keyword::Imaginary),
                     "int" => TokenKind::Keyword(Keyword::Int),
                     "long" => TokenKind::Keyword(Keyword::Long),
                     "_Noreturn" => TokenKind::Keyword(Keyword::Noreturn),
@@ -263,6 +265,7 @@ impl<'a> Lexer<'a> {
                     "struct" => TokenKind::Keyword(Keyword::Struct),
                     "switch" => TokenKind::Keyword(Keyword::Switch),
                     "typedef" => TokenKind::Keyword(Keyword::Typedef),
+                    "_Thread_local" => TokenKind::Keyword(Keyword::ThreadLocal),
                     "union" => TokenKind::Keyword(Keyword::Union),
                     "unsigned" => TokenKind::Keyword(Keyword::Unsigned),
                     "void" => TokenKind::Keyword(Keyword::Void),
@@ -286,7 +289,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_char_literal(&mut self, start: usize, numeric_max: u32) -> Result<i64, Diagnostic> {
-        let mut saw_char = false;
+        let mut unit_count = 0usize;
         let mut value = 0i64;
         loop {
             let ch = self.bump().ok_or_else(|| {
@@ -296,7 +299,7 @@ impl<'a> Lexer<'a> {
                 )
             })?;
             if ch == '\'' {
-                if !saw_char {
+                if unit_count == 0 {
                     return Err(Diagnostic::error(
                         "empty character constant",
                         Span::new(self.file_id, start, self.offset),
@@ -309,50 +312,65 @@ impl<'a> Lexer<'a> {
             } else {
                 ch as i64
             };
-            saw_char = true;
+            unit_count += 1;
             value = (value << 8) | (unit & 0xff);
+        }
+        if numeric_max == u8::MAX as u32 && unit_count == 1 {
+            value = (value as u8 as i8) as i64;
         }
         Ok(value)
     }
 
     fn lex_unicode_char_literal(&mut self, start: usize, utf16: bool) -> Result<u32, Diagnostic> {
-        let ch = self.bump().ok_or_else(|| {
-            Diagnostic::error(
-                "unterminated character constant",
-                Span::new(self.file_id, start, self.offset),
-            )
-        })?;
-        if ch == '\'' {
-            return Err(Diagnostic::error(
-                "empty character constant",
-                Span::new(self.file_id, start, self.offset),
-            ));
-        }
-        let value = if ch == '\\' {
-            match self.lex_escape_value(start)? {
-                EscapeValue::Character(ch) => ch as u32,
-                EscapeValue::Numeric(value) => {
-                    let maximum = if utf16 { u16::MAX as u32 } else { u32::MAX };
-                    self.require_numeric_escape_range(value, maximum, start)?;
-                    value
+        let maximum = if utf16 { u16::MAX as u32 } else { u32::MAX };
+        let mut units = Vec::new();
+        loop {
+            let ch = self.bump().ok_or_else(|| {
+                Diagnostic::error(
+                    "unterminated character constant",
+                    Span::new(self.file_id, start, self.offset),
+                )
+            })?;
+            if ch == '\'' {
+                if units.is_empty() {
+                    return Err(Diagnostic::error(
+                        "empty character constant",
+                        Span::new(self.file_id, start, self.offset),
+                    ));
                 }
+                break;
             }
-        } else {
-            ch as u32
-        };
-        if self.bump() != Some('\'') {
-            return Err(Diagnostic::error(
-                "u and U character constants must contain exactly one character",
-                Span::new(self.file_id, start, self.offset),
-            ));
+            let (value, is_numeric_escape) = if ch == '\\' {
+                match self.lex_escape_value(start)? {
+                    EscapeValue::Character(ch) => (ch as u32, false),
+                    EscapeValue::Numeric(value) => {
+                        self.require_numeric_escape_range(value, maximum, start)?;
+                        (value, true)
+                    }
+                }
+            } else {
+                (ch as u32, false)
+            };
+            units.push((value, is_numeric_escape));
         }
-        if value > 0x10ffff || (0xd800..=0xdfff).contains(&value) || (utf16 && value > 0xffff) {
+        if units.len() == 1
+            && !units[0].1
+            && (units[0].0 > 0x10ffff
+                || (0xd800..=0xdfff).contains(&units[0].0)
+                || (utf16 && units[0].0 > 0xffff))
+        {
             return Err(Diagnostic::error(
                 "character is not representable in the literal's character type",
                 Span::new(self.file_id, start, self.offset),
             ));
         }
-        Ok(value)
+        if units.len() == 1 {
+            Ok(units[0].0)
+        } else {
+            Ok(units
+                .into_iter()
+                .fold(0u32, |combined, (unit, _)| (combined << 8) | (unit & 0xff)))
+        }
     }
 
     fn lex_char_escape(&mut self, start: usize, numeric_max: u32) -> Result<i64, Diagnostic> {
@@ -613,6 +631,21 @@ impl<'a> Lexer<'a> {
                 if matches!(self.peek_char(), Some('+' | '-')) {
                     self.bump();
                 }
+                while self.peek_char().is_some_and(|ch| ch.is_ascii_digit()) {
+                    self.bump();
+                }
+            } else if self.text[start..self.offset]
+                .chars()
+                .last()
+                .is_some_and(|ch| matches!(ch, 'e' | 'E'))
+                && matches!(self.peek_char(), Some('+' | '-'))
+            {
+                // `e+` and `e-` remain part of a preprocessing number even
+                // when the preceding digits make the token invalid as a C
+                // hexadecimal constant (6.4.8). Keep the token intact so its
+                // conversion is diagnosed instead of treating the sign as an
+                // arithmetic operator.
+                self.bump();
                 while self.peek_char().is_some_and(|ch| ch.is_ascii_digit()) {
                     self.bump();
                 }

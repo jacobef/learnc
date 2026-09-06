@@ -1,17 +1,10 @@
 import {
-  applyTextTokenReplacements,
   appendStateObjects,
   bindBtnRefPulse,
   clearNode,
   createStepper,
-  ensurePanelizedMain,
   flashStatus,
-  getNavLabelForHref,
-  queryElement,
-  queryRole,
-  renderParts,
   setPartsContent,
-  syncDocumentTitleFromNav,
 } from "./shared-core.js";
 import type {
   BoxState,
@@ -24,19 +17,32 @@ import {
   ensureCodeSurfaceElements,
   updateCodeSurface,
 } from "./shared-code-editor-surface.js";
+import { ensureCodeLessonLayout } from "./shared-code-lesson-layout.js";
 import {
   diagnosticDecorations,
   diagnosticMessageText,
   offsetDiagnosticLines,
   renderDiagnosticMessage,
 } from "./shared-diagnostics.js";
-import { boxValueMatchesSpec, runCProgram } from "./shared-c-interpreter.js";
+import { runCProgram } from "./shared-c-interpreter.js";
+import type { CProgramResult } from "./shared-c-interpreter-types.js";
 import {
-  clearLevelProgress,
-  currentLevelId,
-  maybeRestoreLevelProgress,
-  writeLevelProgress,
-} from "./shared-progress.js";
+  appendDiagnosticRuntimeContext,
+  codeRuntimeIssue,
+  diagnosticRuntimeContextText,
+  offsetCodeRuntimeIssue,
+  renderCodeRuntimeIssue,
+  type CodeRuntimeIssue,
+} from "./shared-code-runtime-issues.js";
+import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
+import {
+  createButtonTokenReplacer,
+  createHintPresenter,
+  createLevelProgressController,
+  invalidTemplateConfig,
+  nextLessonLabel,
+  resetLevelAfterConfirmation,
+} from "./shared-lesson-runtime.js";
 
 type ChallengeParts = Parts;
 type ChallengeRuntimeValue = string;
@@ -49,6 +55,7 @@ type ChallengeFailureKind =
   | "compile"
   | "ub"
   | "step-limit"
+  | "blocked-input"
   | "missing-output"
   | "wrong-output-type"
   | "wrong-output-value";
@@ -70,27 +77,7 @@ interface CodeOutputChallengeConfig {
   allowNewLines?: boolean;
   hints?: ChallengePartsSpec;
   next?: string | null;
-  isLast?: boolean;
-}
-
-interface CodeOutputChallengeElements {
-  instructionsEl: HTMLElement | null;
-  lockedLineNumbers: HTMLElement | null;
-  lockedInputLine: HTMLElement | null;
-  editor: HTMLTextAreaElement | null;
-  lineNumbers: HTMLElement | null;
-  stage: HTMLElement | null;
-  status: HTMLElement | null;
-  diagnosticEl: HTMLElement | null;
-  hintPanel: HTMLElement | null;
-  hintBtn: HTMLButtonElement | null;
-  checkBtn: HTMLButtonElement | null;
-  levelResetBtn: HTMLButtonElement | null;
-  rerollBtn: HTMLButtonElement | null;
-  showFailBtn: HTMLButtonElement | null;
-  prevBtn: HTMLButtonElement | null;
-  nextBtn: HTMLButtonElement | null;
-  codeRoot: HTMLElement | null;
+  nextLabel?: string;
 }
 
 interface ChallengeCase {
@@ -118,6 +105,11 @@ interface ChallengeRunReport {
   pass: boolean;
   items: ChallengeRunItem[];
   firstFailure: ChallengeRunItem | null;
+}
+
+interface VisibleProgramFeedback {
+  diagnostic: ProgramDiagnostic | null;
+  runtimeIssue: CodeRuntimeIssue | null;
 }
 
 interface CodeOutputChallengeState {
@@ -151,183 +143,6 @@ interface CodeOutputChallengeProgress {
   hasRunChecks: boolean;
 }
 
-function collectCodeOutputChallengeElements(
-  root: ParentNode = document,
-): CodeOutputChallengeElements {
-  const role = <T extends Element>(name: string) => queryRole<T>(name, root);
-  return {
-    instructionsEl: role<HTMLElement>("code-instructions"),
-    lockedLineNumbers: role<HTMLElement>("code-locked-line-numbers"),
-    lockedInputLine: role<HTMLElement>("code-locked-input-line"),
-    editor: role<HTMLTextAreaElement>("code-editor"),
-    lineNumbers: role<HTMLElement>("code-line-numbers"),
-    stage: role<HTMLElement>("code-stage"),
-    status: role<HTMLElement>("code-status"),
-    diagnosticEl: role<HTMLElement>("code-diagnostic"),
-    hintPanel: role<HTMLElement>("code-hint"),
-    hintBtn: role<HTMLButtonElement>("code-hint-btn"),
-    checkBtn: role<HTMLButtonElement>("code-check"),
-    levelResetBtn: role<HTMLButtonElement>("code-reset-level"),
-    rerollBtn: role<HTMLButtonElement>("code-reroll"),
-    showFailBtn: role<HTMLButtonElement>("code-show-failing-case"),
-    prevBtn: queryElement<HTMLButtonElement>('button[data-stepper="prev"]', root),
-    nextBtn: queryElement<HTMLButtonElement>('button[data-stepper="next"]', root),
-    codeRoot: role<HTMLElement>("code-root"),
-  };
-}
-
-function ensureCodeOutputChallengeLayout({
-  textareaMinLines,
-}: {
-  textareaMinLines: number;
-}): CodeOutputChallengeElements {
-  const resolvedTitle = syncDocumentTitleFromNav();
-  const existing = queryRole<HTMLElement>("code-editor");
-  if (existing) return collectCodeOutputChallengeElements();
-
-  const main = ensurePanelizedMain(resolvedTitle);
-
-  const instructionsEl = document.createElement("p");
-  instructionsEl.dataset.role = "code-instructions";
-  instructionsEl.className = "intro";
-
-  const section = document.createElement("section");
-  section.dataset.role = "code-root";
-  section.classList.add("panel-shell");
-  const actionBar = document.createElement("div");
-  actionBar.className = "controls-bar controls-bar-code";
-  const controlsMain = document.createElement("div");
-  controlsMain.className = "controls-main panel panel-controls";
-  const controlsRow = document.createElement("div");
-  controlsRow.className = "controls-row controls-left";
-  controlsMain.appendChild(controlsRow);
-  actionBar.appendChild(controlsMain);
-  section.appendChild(actionBar);
-  const row = document.createElement("div");
-  row.className = "row panel-row";
-  section.appendChild(row);
-  main.appendChild(section);
-
-  const codePanel = document.createElement("div");
-  codePanel.className = "panel code-editor-panel panel-scroll code-panel-shell";
-  codePanel.dataset.role = "code-panel";
-  const codeTitle = document.createElement("div");
-  codeTitle.className = "panel-title code-title";
-  codeTitle.textContent = "Code";
-  const codePane = document.createElement("div");
-  codePane.className = "codepane panel-body";
-  const lockedRow = document.createElement("div");
-  lockedRow.className = "codepane-row code-locked-row";
-  const lockedLineNumbers = document.createElement("div");
-  lockedLineNumbers.dataset.role = "code-locked-line-numbers";
-  lockedLineNumbers.className = "code-gutter";
-  lockedLineNumbers.setAttribute("aria-hidden", "true");
-  const lockedInputLine = document.createElement("div");
-  lockedInputLine.dataset.role = "code-locked-input-line";
-  lockedInputLine.className = "code-locked-line";
-  lockedRow.appendChild(lockedLineNumbers);
-  lockedRow.appendChild(lockedInputLine);
-  const codeRow = document.createElement("div");
-  codeRow.className = "codepane-row";
-  const lineNumbers = document.createElement("div");
-  lineNumbers.dataset.role = "code-line-numbers";
-  lineNumbers.className = "code-gutter";
-  lineNumbers.setAttribute("aria-hidden", "true");
-  const editorWrap = document.createElement("div");
-  editorWrap.className = "code-editor-wrap";
-  const editor = document.createElement("textarea");
-  editor.dataset.role = "code-editor";
-  editor.className = "code-textarea";
-  editor.spellcheck = false;
-  const rows = Math.max(1, Number(textareaMinLines));
-  editor.setAttribute("rows", String(rows));
-  editorWrap.appendChild(editor);
-  codeRow.appendChild(lineNumbers);
-  codeRow.appendChild(editorWrap);
-  codePane.appendChild(lockedRow);
-  codePane.appendChild(codeRow);
-  const prevBtn = document.createElement("button");
-  prevBtn.textContent = "Back ◀";
-  prevBtn.dataset.stepper = "prev";
-  const nextBtn = document.createElement("button");
-  nextBtn.textContent = "Next Program ▶▶";
-  nextBtn.dataset.stepper = "next";
-  const controlsSpacer = document.createElement("span");
-  controlsSpacer.className = "controls-spacer";
-  controlsSpacer.setAttribute("aria-hidden", "true");
-  controlsRow.appendChild(prevBtn);
-  controlsRow.appendChild(nextBtn);
-  controlsRow.appendChild(controlsSpacer);
-  const diagnosticEl = document.createElement("div");
-  diagnosticEl.dataset.role = "code-diagnostic";
-  diagnosticEl.className = "code-diagnostic hidden";
-  codePanel.appendChild(codeTitle);
-  codePanel.appendChild(codePane);
-  codePanel.appendChild(diagnosticEl);
-
-  const stateCol = document.createElement("div");
-  stateCol.className = "code-editor-state-col";
-  const stage = document.createElement("div");
-  stage.dataset.role = "code-stage";
-  stage.className = "code-editor-state-stage";
-  const rerollBtn = document.createElement("button");
-  rerollBtn.dataset.role = "code-reroll";
-  rerollBtn.textContent = "New input";
-  const checkBtn = document.createElement("button");
-  checkBtn.dataset.role = "code-check";
-  checkBtn.textContent = "Check";
-  const levelResetBtn = document.createElement("button");
-  levelResetBtn.dataset.role = "code-reset-level";
-  levelResetBtn.textContent = "Reset level";
-  const showFailBtn = document.createElement("button");
-  showFailBtn.dataset.role = "code-show-failing-case";
-  showFailBtn.textContent = "Show failing case";
-  showFailBtn.classList.add("hidden");
-  const hintBtn = document.createElement("button");
-  hintBtn.dataset.role = "code-hint-btn";
-  hintBtn.type = "button";
-  hintBtn.className = "hint-link";
-  hintBtn.textContent = "Hint";
-  const status = document.createElement("span");
-  status.dataset.role = "code-status";
-  status.className = "muted";
-  controlsRow.appendChild(rerollBtn);
-  controlsRow.appendChild(levelResetBtn);
-  controlsRow.appendChild(hintBtn);
-  controlsRow.appendChild(checkBtn);
-  controlsRow.appendChild(showFailBtn);
-  controlsRow.appendChild(status);
-  const hintPanel = document.createElement("div");
-  hintPanel.dataset.role = "code-hint";
-  hintPanel.className = "hint-inline hidden";
-  actionBar.appendChild(hintPanel);
-  actionBar.appendChild(instructionsEl);
-  stateCol.appendChild(stage);
-
-  row.appendChild(codePanel);
-  row.appendChild(stateCol);
-
-  return {
-    instructionsEl,
-    lockedLineNumbers,
-    lockedInputLine,
-    editor,
-    lineNumbers,
-    stage,
-    status,
-    diagnosticEl,
-    hintPanel,
-    hintBtn,
-    checkBtn,
-    levelResetBtn,
-    rerollBtn,
-    showFailBtn,
-    prevBtn,
-    nextBtn,
-    codeRoot: section,
-  };
-}
-
 function createCodeOutputChallengeTemplate(
   config: CodeOutputChallengeConfig,
 ): void {
@@ -343,32 +158,27 @@ function createCodeOutputChallengeTemplate(
     allowNewLines = true,
     hints = null,
     next = null,
-    isLast = false,
+    nextLabel,
   } = config;
-  const endLabel = (() => {
-    if (isLast) return "Finish";
-    const label = getNavLabelForHref(next);
-    return label ? `Next: ${label}` : "Next Program";
-  })();
-
-  const failConfig = (message: string): never => {
-    alert(message);
-    throw new Error(message);
-  };
+  const endLabel = nextLessonLabel({
+    next,
+    fallback: "Next Program",
+    override: nextLabel,
+  });
 
   const ensureIdentifier = (name: string, label: string): string => {
     const trimmed = String(name || "").trim();
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
-      failConfig(`${label} must be a valid C identifier.`);
+      invalidTemplateConfig(`${label} must be a valid C identifier.`);
     }
     return trimmed;
   };
 
   if (!Array.isArray(inputs) || inputs.length === 0) {
-    failConfig("inputs must be a non-empty array.");
+    invalidTemplateConfig("inputs must be a non-empty array.");
   }
   if (!Array.isArray(outputs) || outputs.length === 0) {
-    failConfig("outputs must be a non-empty array.");
+    invalidTemplateConfig("outputs must be a non-empty array.");
   }
   const inputSpecs: ChallengeVariableSpec[] = inputs.map((spec, index) => ({
     name: ensureIdentifier(spec?.name || "", `Input name ${index + 1}`),
@@ -379,10 +189,10 @@ function createCodeOutputChallengeTemplate(
     type: String(spec?.type || "").trim(),
   }));
   if (!Array.isArray(testInputs)) {
-    failConfig("testInputs must be an array.");
+    invalidTemplateConfig("testInputs must be an array.");
   }
   if (testInputs.length === 0) {
-    failConfig("testInputs must contain at least one value.");
+    invalidTemplateConfig("testInputs must contain at least one value.");
   }
   if (
     testInputs.some(
@@ -392,28 +202,28 @@ function createCodeOutputChallengeTemplate(
         row.some((value) => typeof value !== "string"),
     )
   ) {
-    failConfig(
+    invalidTemplateConfig(
       `Each testInputs entry must be a string array of length ${inputSpecs.length}.`,
     );
   }
   if (!Array.isArray(startInput)) {
-    failConfig("startInput is required.");
+    invalidTemplateConfig("startInput is required.");
   }
   if (
     startInput.length !== inputSpecs.length ||
     startInput.some((value) => typeof value !== "string")
   ) {
-    failConfig(`startInput must be a string array of length ${inputSpecs.length}.`);
+    invalidTemplateConfig(`startInput must be a string array of length ${inputSpecs.length}.`);
   }
   if (typeof solve !== "string") {
-    failConfig("solve must be a C code string.");
+    invalidTemplateConfig("solve must be a C code string.");
   }
   if (!Number.isFinite(textareaMinLines)) {
-    failConfig("textareaMinLines must be a number.");
+    invalidTemplateConfig("textareaMinLines must be a number.");
   }
   const solveCode = String(solve || "").replace(/\r\n/g, "\n");
   if (!solveCode.trim()) {
-    failConfig("solve must be a non-empty C code string.");
+    invalidTemplateConfig("solve must be a non-empty C code string.");
   }
 
   const {
@@ -434,7 +244,7 @@ function createCodeOutputChallengeTemplate(
     prevBtn,
     nextBtn,
     codeRoot,
-  } = ensureCodeOutputChallengeLayout({ textareaMinLines });
+  } = ensureCodeLessonLayout({ textareaMinLines, lockedInput: true });
   const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
 
   bindBtnRefPulse(codeRoot || document);
@@ -454,10 +264,10 @@ function createCodeOutputChallengeTemplate(
     const literal = value.trim();
     const run = runCProgram(`${type} __cboxes_input = ${literal};\n`);
     if (run.kind !== "ok") {
-      return failConfig(`${label} is not valid C: ${diagnosticMessageText(run.diagnostic)}`);
+      return invalidTemplateConfig(`${label} is not valid C: ${diagnosticMessageText(run.diagnostic)}`);
     }
     const stored = run.state.find((box) => box.name === "__cboxes_input");
-    if (!stored) return failConfig(`${label} did not create a scalar C value.`);
+    if (!stored) return invalidTemplateConfig(`${label} did not create a scalar C value.`);
     return {
       runtime: stored.value,
       literal,
@@ -502,9 +312,9 @@ function createCodeOutputChallengeTemplate(
         : null;
     if (!solvedState) {
       if (analyzed.kind === "compile") {
-        failConfig(`solve does not compile for ${label}.`);
+        invalidTemplateConfig(`solve does not compile for ${label}.`);
       }
-      failConfig(`solve has undefined behavior for ${label}.`);
+      invalidTemplateConfig(`solve has undefined behavior for ${label}.`);
       return [];
     }
     const expectedLiterals: string[] = [];
@@ -512,18 +322,18 @@ function createCodeOutputChallengeTemplate(
       const outputBox =
         solvedState.find((box: BoxState) => box.name === outputSpec.name) || null;
       if (!outputBox) {
-        failConfig(`solve must create ${outputSpec.name} for ${label}.`);
+        invalidTemplateConfig(`solve must create ${outputSpec.name} for ${label}.`);
         return [];
       }
       if (String(outputBox.type || "").trim() !== outputSpec.type) {
-        failConfig(
+        invalidTemplateConfig(
           `solve must produce ${outputSpec.name} with type ${outputSpec.type} for ${label}.`,
         );
         return [];
       }
       const literal = String(outputBox.value ?? "").trim();
       if (!literal) {
-        failConfig(`solve leaves ${outputSpec.name} without a value for ${label}.`);
+        invalidTemplateConfig(`solve leaves ${outputSpec.name} without a value for ${label}.`);
         return [];
       }
       expectedLiterals.push(literal);
@@ -592,11 +402,12 @@ function createCodeOutputChallengeTemplate(
     }
   }
 
-  const levelId = currentLevelId();
+  const progress = createLevelProgressController<CodeOutputChallengeProgress>(
+    isDefaultProgress,
+  );
   const defaultText = normalizeUserCodeText(startCode);
   const defaultVisibleCase = createChallengeCaseForInputRow(startInput, "startInput");
-  const restoredProgress =
-    maybeRestoreLevelProgress<CodeOutputChallengeProgress>(levelId);
+  const restoredProgress = progress.restore();
   const restoredVisibleCase = restoreCase(
     restoredProgress?.visibleCaseInputLiterals,
   );
@@ -670,12 +481,32 @@ function createCodeOutputChallengeTemplate(
     if (lineNumbers) lineNumbers.scrollTop = editor.scrollTop;
   }
 
-  function getProgramDiagnostic(): ProgramDiagnostic | null {
-    const result = runCProgram(fullProgramTextForCase(state.visibleCase));
-    if (result.kind === "ok") return null;
-    const diagnostic = result.diagnostic;
-    if (diagnostic.range.startLine < preludeLineCount) return null;
-    return offsetDiagnosticLines(diagnostic, -preludeLineCount);
+  let visibleProgramFeedback: VisibleProgramFeedback = {
+    diagnostic: null,
+    runtimeIssue: null,
+  };
+  let visibleCaseResult: ChallengeCaseResult | null = null;
+
+  function getVisibleProgramFeedback(
+    result: CProgramResult,
+  ): VisibleProgramFeedback {
+    if (result.kind !== "ok") {
+      const diagnostic = result.diagnostic;
+      return {
+        diagnostic:
+          diagnostic.range.startLine < preludeLineCount
+            ? null
+            : offsetDiagnosticLines(diagnostic, -preludeLineCount),
+        runtimeIssue: null,
+      };
+    }
+    const issue = codeRuntimeIssue(result);
+    return {
+      diagnostic: null,
+      runtimeIssue: issue
+        ? offsetCodeRuntimeIssue(issue, -preludeLineCount)
+        : null,
+    };
   }
 
   function renderDiagnostic(diagnostic: ProgramDiagnostic | null) {
@@ -705,14 +536,19 @@ function createCodeOutputChallengeTemplate(
       tip.textContent = diagnostic.tip;
       diagnosticEl.appendChild(tip);
     }
+    appendDiagnosticRuntimeContext(diagnosticEl, diagnostic);
     editor?.setAttribute("aria-invalid", "true");
   }
 
-  function updateLineGutters(diagnostic: ProgramDiagnostic | null = null) {
+  function updateLineGutters(
+    diagnostic: ProgramDiagnostic | null,
+    runtimeIssue: CodeRuntimeIssue | null,
+  ) {
     const lines = getUserRawLines();
     const lineNumberClasses = new Map<number, string[]>();
-    if (diagnostic) {
-      lineNumberClasses.set(diagnostic.range.startLine, ["has-error"]);
+    const problemLine = diagnostic?.range.startLine ?? runtimeIssue?.range.startLine;
+    if (problemLine !== undefined) {
+      lineNumberClasses.set(problemLine, ["has-error"]);
     }
     updateCodeSurface({
       editor,
@@ -725,7 +561,16 @@ function createCodeOutputChallengeTemplate(
       lineNumberClasses,
     });
     syncEditorLinkedScroll();
-    renderDiagnostic(diagnostic);
+    if (diagnostic) {
+      renderDiagnostic(diagnostic);
+    } else {
+      renderCodeRuntimeIssue(
+        diagnosticEl,
+        editor,
+        runtimeIssue,
+        preludeLineCount,
+      );
+    }
   }
 
   type ProgramBehavior =
@@ -734,6 +579,7 @@ function createCodeOutputChallengeTemplate(
           | "compile"
           | "ub"
           | "step-limit"
+          | "blocked-input"
           | "missing-output"
           | "wrong-output-type";
       }
@@ -772,8 +618,14 @@ function createCodeOutputChallengeTemplate(
     if (analyzed.kind !== "ok") {
       return { kind: analyzed.kind };
     }
-    if (analyzed.executionLimit) {
-      return { kind: "step-limit" };
+    const runtimeIssue = codeRuntimeIssue(analyzed);
+    if (runtimeIssue) {
+      return {
+        kind:
+          runtimeIssue.kind === "execution-limit"
+            ? "step-limit"
+            : "blocked-input",
+      };
     }
     const checked = validateOutputBoxes(analyzed.state);
     if (checked.kind !== "ok") {
@@ -811,9 +663,10 @@ function createCodeOutputChallengeTemplate(
     return true;
   }
 
-  function evaluateCase(testCase: ChallengeCase): ChallengeCaseResult {
-    const text = fullProgramTextForCase(testCase);
-    const analyzed = runCProgram(text);
+  function evaluateCase(
+    testCase: ChallengeCase,
+    analyzed = runCProgram(fullProgramTextForCase(testCase)),
+  ): ChallengeCaseResult {
     const expectedBoxes = expectedBoxesForCase(testCase);
     const fallbackExpected = expectedBoxes[0] || null;
     const fallbackOutput = outputSpecs[0] || null;
@@ -821,17 +674,24 @@ function createCodeOutputChallengeTemplate(
       return {
         ok: false,
         kind: analyzed.kind,
-        state: null,
+        state: analyzed.diagnostic.runtimeContext?.state ?? null,
         outputBox: null,
         expected: fallbackExpected,
         failingOutput: fallbackOutput,
       };
     }
-    if (analyzed.executionLimit) {
+    const runtimeIssue = codeRuntimeIssue(analyzed);
+    if (runtimeIssue) {
       return {
         ok: false,
-        kind: "step-limit",
-        state: analyzed.state,
+        kind:
+          runtimeIssue.kind === "execution-limit"
+            ? "step-limit"
+            : "blocked-input",
+        state:
+          runtimeIssue.kind === "blocked-input"
+            ? analyzed.blocked?.state ?? analyzed.state
+            : analyzed.state,
         outputBox: null,
         expected: fallbackExpected,
         failingOutput: fallbackOutput,
@@ -945,12 +805,7 @@ function createCodeOutputChallengeTemplate(
   }
 
   function persistProgress() {
-    const snapshot = progressSnapshot();
-    if (isDefaultProgress(snapshot)) {
-      clearLevelProgress(levelId);
-      return;
-    }
-    writeLevelProgress(snapshot, levelId);
+    progress.save(progressSnapshot());
   }
 
   function renderStatePanel(
@@ -992,10 +847,9 @@ function createCodeOutputChallengeTemplate(
     return wrap;
   }
 
-  function renderStage(): ChallengeCaseResult | null {
-    if (!stage) return null;
+  function renderStage(currentResult: ChallengeCaseResult): void {
+    if (!stage) return;
     clearNode(stage);
-    const currentResult = evaluateCase(state.visibleCase);
     const group = document.createElement("div");
     group.className = "state-group two-col";
     const shownKind: "ok" | "compile" | "ub" =
@@ -1016,11 +870,27 @@ function createCodeOutputChallengeTemplate(
         ? currentResult.state
         : filteredShownState;
     const shownEmptyMessage =
-      shownKind === "ok" && !state.showFullShownOutput
+      currentResult.kind === "compile"
+        ? "(fix the error above to run the program)"
+        : currentResult.kind === "step-limit"
+        ? "(no output was produced before the program was stopped)"
+        : currentResult.kind === "blocked-input"
+          ? "(no output was produced before the program began waiting)"
+          : shownKind === "ok" && !state.showFullShownOutput
         ? outputSpecs.length === 1
           ? `(missing variable ${outputSpecs[0]!.name})`
           : "(missing one or more output variables)"
         : "(no variables)";
+    const shownTitle =
+      currentResult.kind === "ub" && currentResult.state
+        ? "Last recorded state before undefined behavior"
+        : currentResult.kind === "step-limit"
+          ? "State before the repeating section"
+          : currentResult.kind === "blocked-input"
+            ? "Program state when it began waiting"
+            : currentResult.kind === "compile"
+              ? "Program did not run"
+          : "Your code's output";
     const shownControls = (() => {
       if (!hasExtraShownVars) return null;
       const toggle = document.createElement("button");
@@ -1033,13 +903,13 @@ function createCodeOutputChallengeTemplate(
         : "Show full state";
       toggle.addEventListener("click", () => {
         state.showFullShownOutput = !state.showFullShownOutput;
-        renderStage();
+        renderStage(currentResult);
         persistProgress();
       });
       return toggle;
     })();
     group.appendChild(
-      renderStatePanel("Your code's output", shownBoxes, {
+      renderStatePanel(shownTitle, shownBoxes, {
         emptyMessage: shownEmptyMessage,
         controls: shownControls,
       }),
@@ -1048,7 +918,6 @@ function createCodeOutputChallengeTemplate(
       renderStatePanel("Expected output", expectedStateBoxesForCase(state.visibleCase)),
     );
     stage.appendChild(group);
-    return currentResult;
   }
 
   function buttonReplacements() {
@@ -1062,11 +931,7 @@ function createCodeOutputChallengeTemplate(
     ] as const;
   }
 
-  function applyButtonTokens(parts: ChallengeParts | null): ChallengeParts | null {
-    return applyTextTokenReplacements(parts, buttonReplacements()) as
-      | ChallengeParts
-      | null;
-  }
+  const applyButtonTokens = createButtonTokenReplacer(buttonReplacements);
 
   function setStatus(text: string, cls: string = "muted") {
     if (!status) return;
@@ -1120,32 +985,38 @@ function createCodeOutputChallengeTemplate(
     setPartsContent(instructionsEl, applyButtonTokens(msg));
   }
 
-  function hideHint() {
-    if (!hintPanel) return;
-    hintPanel.textContent = "";
-    hintPanel.classList.add("hidden");
-  }
+  const { hide: hideHint, show: showHint } = createHintPresenter(
+    hintPanel,
+    applyButtonTokens,
+  );
 
-  function showHint(parts: ChallengeParts | null) {
-    if (!hintPanel) return;
-    if (!parts || (Array.isArray(parts) && parts.length === 0)) return;
-    renderParts(hintPanel, applyButtonTokens(parts) || "");
-    hintPanel.classList.remove("hidden");
-    flashStatus(hintPanel);
-  }
-
-  function defaultHint(current: ChallengeCaseResult, report: ChallengeRunReport): string {
+  function defaultHint(
+    current: ChallengeCaseResult,
+    report?: ChallengeRunReport,
+  ): string {
     if (current.kind === "compile") {
-      const diagnostic = getProgramDiagnostic();
+      const diagnostic = visibleProgramFeedback.diagnostic;
       return diagnostic
         ? diagnosticMessageText(diagnostic)
         : "The shown case does not compile yet. Fix syntax errors first.";
     }
     if (current.kind === "ub") {
-      return "The shown case has undefined behavior. Avoid invalid pointer/math operations.";
+      const diagnostic = visibleProgramFeedback.diagnostic;
+      if (diagnostic) {
+        return [
+          diagnosticMessageText(diagnostic),
+          diagnosticRuntimeContextText(diagnostic),
+        ]
+          .filter(Boolean)
+          .join(" ");
+      }
+      return "The shown case has undefined behavior.";
     }
     if (current.kind === "step-limit") {
-      return "The shown case runs for too many steps. Check whether a loop can finish.";
+      return "The shown case did not finish. Check whether a loop condition can become false or a recursive call can reach its base case.";
+    }
+    if (current.kind === "blocked-input") {
+      return "The shown case is waiting for input, but code-writing lessons do not provide interactive input. Remove the input operation or initialize the value directly.";
     }
     if (current.kind === "missing-output") {
       if (current.failingOutput) {
@@ -1165,17 +1036,24 @@ function createCodeOutputChallengeTemplate(
       }
       return "For the shown input, one output variable has the wrong value.";
     }
-    if (!report.pass) {
+    if (report && !report.pass) {
       return "The shown input works, but at least one other test input fails. Make sure your code computes the value from the input instead of hardcoding.";
     }
     return "Looks good. Press $checkButton.";
   }
 
   function render() {
-    const currentResult = renderStage();
+    const analyzed = runCProgram(fullProgramTextForCase(state.visibleCase));
+    const currentResult = evaluateCase(state.visibleCase, analyzed);
+    visibleCaseResult = currentResult;
+    visibleProgramFeedback = getVisibleProgramFeedback(analyzed);
+    renderStage(currentResult);
     updateLockedInputLine();
     updateInstructions();
-    updateLineGutters(getProgramDiagnostic());
+    updateLineGutters(
+      visibleProgramFeedback.diagnostic,
+      visibleProgramFeedback.runtimeIssue,
+    );
     if (state.pass) {
       setStatus("correct", "ok");
     } else if (state.lastReport && !state.lastReport.pass) {
@@ -1252,21 +1130,26 @@ function createCodeOutputChallengeTemplate(
       render();
     });
     editor.addEventListener("scroll", syncEditorLinkedScroll);
-    window.addEventListener("resize", () => updateLineGutters(getProgramDiagnostic()));
+    window.addEventListener("resize", () => {
+      updateLineGutters(
+        visibleProgramFeedback.diagnostic,
+        visibleProgramFeedback.runtimeIssue,
+      );
+    });
     if (typeof ResizeObserver !== "undefined") {
-      const ro = new ResizeObserver(() => updateLineGutters(getProgramDiagnostic()));
+      const ro = new ResizeObserver(() => {
+        updateLineGutters(
+          visibleProgramFeedback.diagnostic,
+          visibleProgramFeedback.runtimeIssue,
+        );
+      });
       ro.observe(editor);
     }
   }
 
   if (levelResetBtn) {
     levelResetBtn.addEventListener("click", () => {
-      const confirmed = window.confirm(
-        "Reset your saved progress for this level and start over?",
-      );
-      if (!confirmed) return;
-      clearLevelProgress(levelId);
-      window.location.reload();
+      resetLevelAfterConfirmation(progress);
     });
   }
 
@@ -1285,7 +1168,18 @@ function createCodeOutputChallengeTemplate(
   if (hintBtn) {
     hintBtn.addEventListener("click", () => {
       hideHint();
-      const currentResult = evaluateCase(state.visibleCase);
+      const currentResult =
+        visibleCaseResult ?? evaluateCase(state.visibleCase);
+      if (
+        currentResult.kind === "compile" ||
+        currentResult.kind === "ub" ||
+        currentResult.kind === "step-limit" ||
+        currentResult.kind === "blocked-input"
+      ) {
+        state.pendingFailingCase = null;
+        showHint(defaultHint(currentResult));
+        return;
+      }
       const report = runAllCases();
       if (currentResult.ok && !report.pass) {
         const failingCase = report.firstFailure?.testCase || null;
@@ -1326,7 +1220,18 @@ function createCodeOutputChallengeTemplate(
         const failingCase = report.firstFailure?.testCase || null;
         state.pendingFailingCase = failingCase ? copyCase(failingCase) : null;
         render();
-        setStatus("incorrect", "err");
+        const failureKind = report.firstFailure?.result.kind;
+        const failureStatus =
+          failureKind === "compile"
+            ? "fix the error shown above"
+            : failureKind === "ub"
+              ? "fix the undefined behavior shown above"
+              : failureKind === "step-limit"
+                ? "program did not finish"
+                : failureKind === "blocked-input"
+                  ? "program is waiting for input"
+                  : "incorrect";
+        setStatus(failureStatus, "err");
         flashStatus(status);
         return;
       }

@@ -1,5 +1,4 @@
 import {
-  applyTextTokenReplacements,
   applyOtherNames,
   appendStateObjects,
   bindBtnRefPulse,
@@ -15,7 +14,6 @@ import {
   queryRole,
   readBoxState,
   renderCodePane,
-  renderParts,
   restoreWorkspace,
   serializeWorkspace,
   setPartsContent,
@@ -23,17 +21,17 @@ import {
 } from "./shared-core.js";
 import type { BoxState, Part, Parts } from "./shared-core.js";
 import {
-  clearLevelProgress,
-  currentLevelId,
-  maybeRestoreLevelProgress,
-  writeLevelProgress,
-} from "./shared-progress.js";
+  createButtonTokenReplacer,
+  createHintPresenter,
+  createLevelProgressController,
+  nextLessonLabel,
+} from "./shared-lesson-runtime.js";
+import { runCProgram } from "./shared-c-interpreter.js";
+import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
 import {
   allocateCWorkspaceObject,
-  boxValueMatchesSpec,
   resolveCBoxAliases,
-  runCProgram,
-} from "./shared-c-interpreter.js";
+} from "./shared-c-workspace-model.js";
 
 type ProgramParts = Parts;
 type ProgramHint = (ctx: ProgramContext) => Part | null | undefined;
@@ -73,8 +71,8 @@ interface ProgramTemplateConfig {
   steps: ProgramStep[];
   initialInstructions?: string;
   next: string | null;
-  workspace: ProgramWorkspaceConfig;
-  isLast?: boolean;
+  nextLabel?: string;
+  workspace?: ProgramWorkspaceConfig;
 }
 
 interface ProgramTemplateProgress {
@@ -723,7 +721,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     initialInstructions = "",
     next = null,
     workspace = {},
-    isLast = false,
+    nextLabel,
   } = config;
   if (!Array.isArray(steps) || !steps.length) {
     throw new Error("Program steps must be a non-empty array.");
@@ -784,11 +782,11 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   window.addEventListener("resize", placeActionButtonsForViewport);
   bindBtnRefPulse(codeRoot || document);
 
-  const endLabel = (() => {
-    if (isLast) return "Finish";
-    const label = getNavLabelForHref(next);
-    return label ? `Next: ${label}` : "Next Program";
-  })();
+  const endLabel = nextLessonLabel({
+    next,
+    fallback: "Next Program",
+    override: nextLabel,
+  });
   const previous = getPreviousNavHref();
   const previousLabel = (() => {
     const label = getNavLabelForHref(previous);
@@ -1013,8 +1011,10 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   }
   pushNoEventStages(totalLines + 1, run.state || previousState);
 
-  const levelId = currentLevelId();
-  const restored = maybeRestoreLevelProgress<ProgramTemplateProgress>(levelId);
+  const progress = createLevelProgressController<ProgramTemplateProgress>(
+    isDefaultProgress,
+  );
+  const restored = progress.restore();
   let executionSteps = Math.max(-1, Math.min(runtimeStages.length - 1, restored?.executionSteps ?? -1));
   let solvedStage = Math.max(-1, restored?.solvedStage ?? -1);
   const workspaceByStage = new Map<number, BoxState[] | null>(
@@ -1096,12 +1096,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   }
 
   function persistProgress() {
-    const snapshot = progressSnapshot();
-    if (isDefaultProgress(snapshot)) {
-      clearLevelProgress(levelId);
-    } else {
-      writeLevelProgress(snapshot, levelId);
-    }
+    progress.save(progressSnapshot());
   }
 
   function withSidebarParam(url: string | null): string | null {
@@ -1141,9 +1136,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       ["$showAliasesButton", "$b{Show aliases}"],
     ] as const;
 
-  function applyButtonTokens(parts: ProgramParts | null): ProgramParts | null {
-    return applyTextTokenReplacements(parts, buttonReplacements()) as ProgramParts | null;
-  }
+  const applyButtonTokens = createButtonTokenReplacer(buttonReplacements);
 
   function renderInstructions() {
     const stage = currentStage();
@@ -1368,18 +1361,10 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     });
   }
 
-  function hideHint() {
-    if (!hintPanel) return;
-    hintPanel.classList.add("hidden");
-  }
-
-  function showHint(parts: ProgramParts | null) {
-    if (!hintPanel) return;
-    if (!parts || (Array.isArray(parts) && parts.length === 0)) return;
-    renderParts(hintPanel, applyButtonTokens(parts) || "");
-    hintPanel.classList.remove("hidden");
-    flashStatus(hintPanel);
-  }
+  const { hide: hideHint, show: showHint } = createHintPresenter(
+    hintPanel,
+    applyButtonTokens,
+  );
 
   function hintContext(stage: RuntimeStage): ProgramContext {
     const rawBoxes = stage.editableMode === "state" && stageNeedsSolve(stage)
@@ -1784,7 +1769,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     otherNamesShown.clear();
     setStatus("", "muted");
     hideHint();
-    clearLevelProgress(levelId);
+    progress.clear();
     render();
   });
 

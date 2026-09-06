@@ -27,10 +27,14 @@ double __codex_huge_val(void);
 float __codex_huge_valf(void);
 long double __codex_huge_vall(void);
 int __codex_fpclassify(double x);
+int __codex_fpclassifyf(float x);
+int __codex_fpclassifyl(long double x);
 int __codex_isfinite(double x);
 int __codex_isinf(double x);
 int __codex_isnan(double x);
 int __codex_isnormal(double x);
+int __codex_isnormalf(float x);
+int __codex_isnormall(long double x);
 int __codex_signbit(double x);
 int __codex_isgreater(double x, double y);
 int __codex_isgreaterequal(double x, double y);
@@ -46,11 +50,11 @@ int __codex_isunordered(double x, double y);
 #define INFINITY HUGE_VALF
 #define NAN nanf("")
 
-#define fpclassify(x) __codex_fpclassify((double)(x))
+#define fpclassify(x) _Generic((x), float: __codex_fpclassifyf, long double: __codex_fpclassifyl, default: __codex_fpclassify)((x))
 #define isfinite(x) __codex_isfinite((double)(x))
 #define isinf(x) __codex_isinf((double)(x))
 #define isnan(x) __codex_isnan((double)(x))
-#define isnormal(x) __codex_isnormal((double)(x))
+#define isnormal(x) _Generic((x), float: __codex_isnormalf, long double: __codex_isnormall, default: __codex_isnormal)((x))
 #define signbit(x) __codex_signbit((double)(x))
 
 #define isgreater(x, y) __codex_isgreater((double)(x), (double)(y))

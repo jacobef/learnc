@@ -52,5 +52,4 @@ if (y < x) {
         return null;
     },
     next: "23-else-if.html",
-    isLast: false,
 });

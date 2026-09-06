@@ -1,8 +1,11 @@
 mod ast;
+mod browser_json;
 mod diag;
+mod fast_hash;
 mod integer;
 mod interpreter;
 mod lexer;
+mod native;
 mod number;
 mod parser;
 mod preprocess;
@@ -10,7 +13,10 @@ mod source;
 mod token;
 mod types;
 
-use std::collections::{HashMap, HashSet};
+#[cfg(all(not(target_os = "wasi"), feature = "native-mimalloc"))]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg(test)]
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -18,20 +24,29 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ast::{
-    Block, BlockItem, Declaration, Designator, Expr, ExternalDeclaration, ForInit, FunctionDecl,
-    FunctionDef, Initializer, InitializerItem, Linkage, Parameter, Statement, StorageClass,
-    SwitchLabel, TranslationUnit,
+    Block, BlockItem, Declaration, Expr, ExternalDeclaration, ForInit, FunctionDecl, FunctionDef,
+    Initializer, InitializerItem, Linkage, Parameter, Statement, StorageClass, SwitchLabel,
+    TranslationUnit,
+};
+use browser_json::{
+    cboxes_diagnostic_json, cboxes_error_json, cboxes_expression_success_json,
+    cboxes_implicit_main_json, cboxes_success_json, cboxes_value_literal_text,
 };
 use diag::Diagnostic;
+use fast_hash::FastHashMap;
 use interpreter::{
     Interpreter, ProgramBlocked, ProgramExecutionLimit, ProgramExpressionEvalRequest,
-    ProgramExpressionResult, ProgramOutput, ProgramSourceLocation, ProgramSourceRange,
-    ProgramStateBox, ProgramTraceEvent, ProgramTypeHelpNode, ProgramTypeInfo, ProgramValueLiteral,
+    ProgramExpressionResult, ProgramOutput, ProgramSourceLocation, ProgramStateBox,
+    ProgramTraceEvent,
 };
 use lexer::Lexer;
+pub use native::{
+    NativeExecutionOptions, NativeExecutionResult, NativeStreamIo, run_native_source,
+};
 use parser::Parser;
 use preprocess::Preprocessor;
 use source::{FileId, SourceManager, Span};
+use std::collections::{HashMap, HashSet};
 use types::{CType, EnumType, RecordMember, RecordType};
 
 #[derive(Debug)]
@@ -70,6 +85,7 @@ struct RunOptions {
     #[cfg(test)]
     pub include_dirs: Vec<PathBuf>,
     pub stdin: String,
+    pub native_stream_io: Option<Arc<dyn NativeStreamIo>>,
     pub expression_eval: Option<RunExpressionEvalRequest>,
     pub ub_detection_mode: UbDetectionMode,
     pub allocation_limit_bytes: Option<usize>,
@@ -108,7 +124,7 @@ impl SourceDisplay {
 
 type SourceDisplayMap = HashMap<String, SourceDisplay>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct CboxesImplicitMain {
     applied: bool,
     notice: Option<String>,
@@ -140,6 +156,7 @@ impl Default for RunOptions {
             #[cfg(test)]
             include_dirs: Vec::new(),
             stdin: String::new(),
+            native_stream_io: None,
             expression_eval: None,
             ub_detection_mode: UbDetectionMode::Standard,
             allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
@@ -460,6 +477,7 @@ fn cboxes_run_virtual_sources_without_expression(
                 #[cfg(test)]
                 include_dirs: options.include_dirs.clone(),
                 stdin: options.stdin.clone(),
+                native_stream_io: options.native_stream_io.clone(),
                 expression_eval: None,
                 ub_detection_mode: options.ub_detection_mode,
                 allocation_limit_bytes: options.allocation_limit_bytes,
@@ -473,7 +491,6 @@ fn cboxes_run_virtual_sources_without_expression(
     }
 }
 
-const CBOXES_BROWSER_EXECUTION_STEP_LIMIT: usize = 10_000;
 const CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT: usize = 256;
 static CBOXES_LAST_RESULT_LEN: AtomicUsize = AtomicUsize::new(0);
 
@@ -488,6 +505,15 @@ pub extern "C" fn cboxes_alloc(len: usize) -> *mut u8 {
     ptr
 }
 
+/// Releases a buffer returned by `cboxes_alloc` or a JSON-producing browser
+/// ABI function.
+///
+/// # Safety
+///
+/// `ptr` must not already have been freed. For a non-empty buffer, it must be
+/// the exact pointer returned by this crate and `len` must be its original
+/// allocation length. A JSON result's length is reported by
+/// `cboxes_last_result_len`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cboxes_free(ptr: *mut u8, len: usize) {
     if len == 0 || ptr.is_null() {
@@ -503,295 +529,173 @@ pub extern "C" fn cboxes_last_result_len() -> usize {
     CBOXES_LAST_RESULT_LEN.load(Ordering::Relaxed)
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cboxes_run_source(
-    ptr: *const u8,
-    len: usize,
-    stdin_ptr: *const u8,
-    stdin_len: usize,
-    synthetic_address_base: u32,
-) -> *mut u8 {
-    unsafe {
-        cboxes_run_source_configured(
-            ptr,
-            len,
-            stdin_ptr,
-            stdin_len,
-            synthetic_address_base,
-            true,
-            Some(CBOXES_BROWSER_EXECUTION_STEP_LIMIT),
-        )
+const CBOXES_BRIDGE_SCHEMA_ID: u32 = 1;
+const CBOXES_BRIDGE_HEADER_WORDS: usize = 10;
+const CBOXES_BRIDGE_FLAG_IMPLICIT_MAIN: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CboxesBridgeOperation {
+    RunSource,
+    RunFiles,
+    EvaluateSource,
+    EvaluateFiles,
+}
+
+impl CboxesBridgeOperation {
+    fn decode(value: u32) -> Result<Self, String> {
+        match value {
+            0 => Ok(Self::RunSource),
+            1 => Ok(Self::RunFiles),
+            2 => Ok(Self::EvaluateSource),
+            3 => Ok(Self::EvaluateFiles),
+            _ => Err(format!("unsupported interpreter operation {value}")),
+        }
+    }
+
+    fn evaluates_expression(self) -> bool {
+        matches!(self, Self::EvaluateSource | Self::EvaluateFiles)
+    }
+
+    fn uses_file_bundle(self) -> bool {
+        matches!(self, Self::RunFiles | Self::EvaluateFiles)
     }
 }
 
-/// Runs a single source file without producing website visualization data or
-/// imposing the browser step limit. The returned JSON uses the same ownership
-/// and error-reporting contract as `cboxes_run_source`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cboxes_run_source_without_visualization(
-    ptr: *const u8,
-    len: usize,
-    stdin_ptr: *const u8,
-    stdin_len: usize,
+#[derive(Debug)]
+struct CboxesBridgeRequest<'a> {
+    operation: CboxesBridgeOperation,
+    implicit_main: bool,
     synthetic_address_base: u32,
-) -> *mut u8 {
-    unsafe {
-        cboxes_run_source_configured(
-            ptr,
-            len,
-            stdin_ptr,
-            stdin_len,
-            synthetic_address_base,
-            false,
-            None,
-        )
+    event_index: usize,
+    execution_step_limit: usize,
+    execution_trace_following_limit: usize,
+    primary: &'a [u8],
+    expression: &'a str,
+    stdin: &'a str,
+}
+
+impl<'a> CboxesBridgeRequest<'a> {
+    fn decode(bytes: &'a [u8]) -> Result<Self, String> {
+        let header_bytes = CBOXES_BRIDGE_HEADER_WORDS * std::mem::size_of::<u32>();
+        let header = bytes
+            .get(..header_bytes)
+            .ok_or_else(|| "the interpreter request header is incomplete".to_owned())?;
+        let word = |index: usize| {
+            let start = index * 4;
+            u32::from_le_bytes(header[start..start + 4].try_into().expect("four bytes"))
+        };
+        let schema_id = word(0);
+        if schema_id != CBOXES_BRIDGE_SCHEMA_ID {
+            return Err(format!(
+                "interpreter request schema {schema_id} does not match {CBOXES_BRIDGE_SCHEMA_ID}"
+            ));
+        }
+        let operation = CboxesBridgeOperation::decode(word(1))?;
+        let flags = word(2);
+        if flags & !CBOXES_BRIDGE_FLAG_IMPLICIT_MAIN != 0 {
+            return Err(format!("unsupported interpreter request flags 0x{flags:x}"));
+        }
+        let lengths = [word(7) as usize, word(8) as usize, word(9) as usize];
+        let payload_len = lengths.iter().try_fold(0usize, |total, length| {
+            total
+                .checked_add(*length)
+                .ok_or_else(|| "the interpreter request is too large".to_owned())
+        })?;
+        if bytes.len() != header_bytes.saturating_add(payload_len) {
+            return Err("the interpreter request payload length is invalid".to_owned());
+        }
+        let mut cursor = header_bytes;
+        let mut take = |length: usize| {
+            let start = cursor;
+            cursor += length;
+            &bytes[start..cursor]
+        };
+        let primary = take(lengths[0]);
+        let expression_bytes = take(lengths[1]);
+        let stdin_bytes = take(lengths[2]);
+        let expression = std::str::from_utf8(expression_bytes)
+            .map_err(|_| "expression is not valid UTF-8".to_owned())?;
+        let stdin =
+            std::str::from_utf8(stdin_bytes).map_err(|_| "stdin is not valid UTF-8".to_owned())?;
+        if !operation.evaluates_expression() && !expression.is_empty() {
+            return Err("a run request cannot contain an expression".to_owned());
+        }
+        Ok(Self {
+            operation,
+            implicit_main: flags & CBOXES_BRIDGE_FLAG_IMPLICIT_MAIN != 0,
+            synthetic_address_base: word(3),
+            event_index: word(4) as usize,
+            execution_step_limit: word(5).max(1) as usize,
+            execution_trace_following_limit: word(6).max(1) as usize,
+            primary,
+            expression,
+            stdin,
+        })
+    }
+
+    fn run_options(&self) -> RunOptions {
+        RunOptions {
+            #[cfg(test)]
+            include_dirs: Vec::new(),
+            stdin: self.stdin.to_owned(),
+            native_stream_io: None,
+            expression_eval: self.operation.evaluates_expression().then(|| {
+                RunExpressionEvalRequest {
+                    expression: self.expression.to_owned(),
+                    event_index: self.event_index,
+                }
+            }),
+            ub_detection_mode: UbDetectionMode::Standard,
+            allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
+            optimizing_precomputations: false,
+            capture_visualization: true,
+            synthetic_address_base: self.synthetic_address_base.into(),
+            execution_step_limit: Some(self.execution_step_limit),
+            execution_trace_following_limit: self.execution_trace_following_limit,
+        }
     }
 }
 
-unsafe fn cboxes_run_source_configured(
-    ptr: *const u8,
-    len: usize,
-    stdin_ptr: *const u8,
-    stdin_len: usize,
-    synthetic_address_base: u32,
-    capture_visualization: bool,
-    execution_step_limit: Option<usize>,
-) -> *mut u8 {
-    let input = if len == 0 {
-        ""
+/// Executes one versioned browser-bridge request and returns an allocated JSON
+/// result. The request contains a fixed-width little-endian header followed by
+/// the source or file bundle, expression, and standard-input byte strings.
+///
+/// # Safety
+///
+/// When `len` is nonzero, `ptr` must be valid for reads of `len` bytes for
+/// the duration of this call. Free the returned buffer with `cboxes_free`,
+/// using the length from `cboxes_last_result_len`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cboxes_execute(ptr: *const u8, len: usize) -> *mut u8 {
+    let bytes = if len == 0 {
+        &[]
     } else if ptr.is_null() {
         return cboxes_store_json(cboxes_error_json(
             "compile",
-            "internal error: null source pointer",
+            "internal error: null interpreter request pointer",
             None,
         ));
     } else {
-        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(ptr, len) }) {
-            Ok(input) => input,
-            Err(_) => {
-                return cboxes_store_json(cboxes_error_json(
-                    "compile",
-                    "source is not valid UTF-8",
-                    None,
-                ));
-            }
-        }
+        unsafe { std::slice::from_raw_parts(ptr, len) }
     };
-    let stdin = if stdin_len == 0 {
-        ""
-    } else if stdin_ptr.is_null() {
-        return cboxes_store_json(cboxes_error_json(
-            "compile",
-            "internal error: null stdin pointer",
-            None,
-        ));
-    } else {
-        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(stdin_ptr, stdin_len) }) {
-            Ok(input) => input,
-            Err(_) => {
-                return cboxes_store_json(cboxes_error_json(
-                    "compile",
-                    "stdin is not valid UTF-8",
-                    None,
-                ));
-            }
-        }
-    };
-    let mut source = input.to_owned();
-    let line_offset = if cboxes_has_explicit_main(&source) {
-        if !source.is_empty() && !source.ends_with('\n') {
-            source.push('\n');
-        }
-        0
-    } else {
-        source = cboxes_wrap_implicit_main(&source);
-        1
-    };
-    let result = std::panic::catch_unwind(|| {
-        run_source_with_options(
-            "program.c",
-            source,
-            &RunOptions {
-                #[cfg(test)]
-                include_dirs: Vec::new(),
-                stdin: stdin.to_owned(),
-                expression_eval: None,
-                ub_detection_mode: UbDetectionMode::Standard,
-                allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
-                optimizing_precomputations: false,
-                capture_visualization,
-                synthetic_address_base: synthetic_address_base.into(),
-                execution_step_limit,
-                execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
-            },
-        )
-    });
-    let source_display = HashMap::from([(
-        "program.c".to_owned(),
-        cboxes_source_display(input, line_offset),
-    )]);
-    let json = match result {
-        Ok(Ok(result)) => cboxes_success_json(&result, &source_display),
-        Ok(Err(diag)) => cboxes_diagnostic_json(&diag, &source_display),
-        Err(_) => cboxes_error_json(
-            "compile",
-            "internal interpreter error while running this program",
-            None,
-        ),
-    };
-    cboxes_store_json(json)
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cboxes_run_files(
-    bundle_ptr: *const u8,
-    bundle_len: usize,
-    stdin_ptr: *const u8,
-    stdin_len: usize,
-    synthetic_address_base: u32,
-    implicit_main_requested: u32,
-    execution_step_limit: u32,
-    execution_trace_following_limit: u32,
-) -> *mut u8 {
-    if bundle_ptr.is_null() {
-        return cboxes_store_json(cboxes_error_json(
-            "compile",
-            "internal error: null file bundle pointer",
-            None,
-        ));
-    }
-    let bundle = unsafe { std::slice::from_raw_parts(bundle_ptr, bundle_len) };
-    let files = match cboxes_decode_file_bundle(bundle) {
-        Ok(files) => files,
+    let request = match CboxesBridgeRequest::decode(bytes) {
+        Ok(request) => request,
         Err(message) => {
             return cboxes_store_json(cboxes_error_json("compile", &message, None));
         }
     };
-    let stdin = if stdin_len == 0 {
-        ""
-    } else if stdin_ptr.is_null() {
-        return cboxes_store_json(cboxes_error_json(
-            "compile",
-            "internal error: null stdin pointer",
-            None,
-        ));
+    let json = if request.operation.uses_file_bundle() {
+        cboxes_execute_file_request(&request)
     } else {
-        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(stdin_ptr, stdin_len) }) {
-            Ok(input) => input,
-            Err(_) => {
-                return cboxes_store_json(cboxes_error_json(
-                    "compile",
-                    "stdin is not valid UTF-8",
-                    None,
-                ));
-            }
-        }
-    };
-
-    let options = RunOptions {
-        #[cfg(test)]
-        include_dirs: Vec::new(),
-        stdin: stdin.to_owned(),
-        expression_eval: None,
-        ub_detection_mode: UbDetectionMode::Standard,
-        allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
-        optimizing_precomputations: false,
-        capture_visualization: true,
-        synthetic_address_base: synthetic_address_base.into(),
-        execution_step_limit: Some(execution_step_limit.max(1) as usize),
-        execution_trace_following_limit: execution_trace_following_limit.max(1) as usize,
-    };
-    let result = std::panic::catch_unwind(|| {
-        cboxes_run_virtual_sources(files, &options, implicit_main_requested != 0)
-    });
-    let json = match result {
-        Ok(Ok(run)) => {
-            let json = match run.result {
-                Ok(result) => cboxes_success_json(&result, &run.source_display),
-                Err(diag) => cboxes_diagnostic_json(&diag, &run.source_display),
-            };
-            cboxes_implicit_main_json(json, &run.implicit_main)
-        }
-        Ok(Err(message)) => cboxes_error_json("compile", &message, None),
-        Err(_) => cboxes_error_json(
-            "compile",
-            "internal interpreter error while running this project",
-            None,
-        ),
+        cboxes_execute_source_request(&request)
     };
     cboxes_store_json(json)
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cboxes_eval_expression(
-    source_ptr: *const u8,
-    source_len: usize,
-    expr_ptr: *const u8,
-    expr_len: usize,
-    event_index: usize,
-    stdin_ptr: *const u8,
-    stdin_len: usize,
-    synthetic_address_base: u32,
-) -> *mut u8 {
-    let input = if source_len == 0 {
-        ""
-    } else if source_ptr.is_null() {
-        return cboxes_store_json(cboxes_error_json(
-            "compile",
-            "internal error: null source pointer",
-            None,
-        ));
-    } else {
-        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(source_ptr, source_len) }) {
-            Ok(input) => input,
-            Err(_) => {
-                return cboxes_store_json(cboxes_error_json(
-                    "compile",
-                    "source is not valid UTF-8",
-                    None,
-                ));
-            }
-        }
-    };
-    let stdin = if stdin_len == 0 {
-        ""
-    } else if stdin_ptr.is_null() {
-        return cboxes_store_json(cboxes_error_json(
-            "compile",
-            "internal error: null stdin pointer",
-            None,
-        ));
-    } else {
-        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(stdin_ptr, stdin_len) }) {
-            Ok(input) => input,
-            Err(_) => {
-                return cboxes_store_json(cboxes_error_json(
-                    "compile",
-                    "stdin is not valid UTF-8",
-                    None,
-                ));
-            }
-        }
-    };
-    let expression = if expr_len == 0 {
-        ""
-    } else if expr_ptr.is_null() {
-        return cboxes_store_json(cboxes_error_json(
-            "compile",
-            "internal error: null expression pointer",
-            None,
-        ));
-    } else {
-        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(expr_ptr, expr_len) }) {
-            Ok(input) => input,
-            Err(_) => {
-                return cboxes_store_json(cboxes_error_json(
-                    "compile",
-                    "expression is not valid UTF-8",
-                    None,
-                ));
-            }
-        }
+fn cboxes_execute_source_request(request: &CboxesBridgeRequest<'_>) -> String {
+    let input = match std::str::from_utf8(request.primary) {
+        Ok(input) => input,
+        Err(_) => return cboxes_error_json("compile", "source is not valid UTF-8", None),
     };
     let mut source = input.to_owned();
     let line_offset = if cboxes_has_explicit_main(&source) {
@@ -803,165 +707,94 @@ pub unsafe extern "C" fn cboxes_eval_expression(
         source = cboxes_wrap_implicit_main(&source);
         1
     };
-    let expression = expression.to_owned();
-    let result = std::panic::catch_unwind(|| {
-        run_source_with_options(
-            "program.c",
-            source,
-            &RunOptions {
-                #[cfg(test)]
-                include_dirs: Vec::new(),
-                stdin: stdin.to_owned(),
-                expression_eval: Some(RunExpressionEvalRequest {
-                    expression,
-                    event_index,
-                }),
-                ub_detection_mode: UbDetectionMode::Standard,
-                allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
-                optimizing_precomputations: false,
-                capture_visualization: true,
-                synthetic_address_base: synthetic_address_base.into(),
-                execution_step_limit: Some(CBOXES_BROWSER_EXECUTION_STEP_LIMIT),
-                execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
-            },
-        )
-    });
+    let options = request.run_options();
+    let result =
+        std::panic::catch_unwind(|| run_source_with_options("program.c", source, &options));
     let source_display = HashMap::from([(
         "program.c".to_owned(),
         cboxes_source_display(input, line_offset),
     )]);
-    let json = match result {
-        Ok(Ok(result)) => match result.expression {
-            Some(expression) => cboxes_expression_success_json(&expression),
-            None => cboxes_error_json(
+    match result {
+        Ok(Ok(result)) => cboxes_bridge_success_json(
+            result,
+            &source_display,
+            request.operation.evaluates_expression(),
+        ),
+        Ok(Err(diagnostic)) => cboxes_diagnostic_json(&diagnostic, &source_display),
+        Err(_) => cboxes_error_json(
+            "compile",
+            if request.operation.evaluates_expression() {
+                "internal interpreter error while evaluating this expression"
+            } else {
+                "internal interpreter error while running this program"
+            },
+            None,
+        ),
+    }
+}
+
+fn cboxes_execute_file_request(request: &CboxesBridgeRequest<'_>) -> String {
+    let files = match cboxes_decode_file_bundle(request.primary) {
+        Ok(files) => files,
+        Err(message) => {
+            return cboxes_implicit_main_json(
+                cboxes_error_json("compile", &message, None),
+                &CboxesImplicitMain::default(),
+            );
+        }
+    };
+    let options = request.run_options();
+    let result = std::panic::catch_unwind(|| {
+        cboxes_run_virtual_sources(files, &options, request.implicit_main)
+    });
+    match result {
+        Ok(Ok(run)) => {
+            let json = match run.result {
+                Ok(result) => cboxes_bridge_success_json(
+                    result,
+                    &run.source_display,
+                    request.operation.evaluates_expression(),
+                ),
+                Err(diagnostic) => cboxes_diagnostic_json(&diagnostic, &run.source_display),
+            };
+            cboxes_implicit_main_json(json, &run.implicit_main)
+        }
+        Ok(Err(message)) => cboxes_implicit_main_json(
+            cboxes_error_json("compile", &message, None),
+            &CboxesImplicitMain::default(),
+        ),
+        Err(_) => cboxes_implicit_main_json(
+            cboxes_error_json(
                 "compile",
-                "No program state is available for that expression yet.",
+                if request.operation.evaluates_expression() {
+                    "internal interpreter error while evaluating this expression"
+                } else {
+                    "internal interpreter error while running this project"
+                },
                 None,
             ),
-        },
-        Ok(Err(diag)) => cboxes_diagnostic_json(&diag, &source_display),
-        Err(_) => cboxes_error_json(
-            "compile",
-            "internal interpreter error while evaluating this expression",
-            None,
+            &CboxesImplicitMain::default(),
         ),
-    };
-    cboxes_store_json(json)
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cboxes_eval_expression_files(
-    bundle_ptr: *const u8,
-    bundle_len: usize,
-    expr_ptr: *const u8,
-    expr_len: usize,
-    event_index: usize,
-    stdin_ptr: *const u8,
-    stdin_len: usize,
-    synthetic_address_base: u32,
-    implicit_main_requested: u32,
-    execution_step_limit: u32,
-) -> *mut u8 {
-    if bundle_ptr.is_null() {
-        return cboxes_store_json(cboxes_error_json(
-            "compile",
-            "internal error: null file bundle pointer",
-            None,
-        ));
     }
-    let bundle = unsafe { std::slice::from_raw_parts(bundle_ptr, bundle_len) };
-    let files = match cboxes_decode_file_bundle(bundle) {
-        Ok(files) => files,
-        Err(message) => {
-            return cboxes_store_json(cboxes_error_json("compile", &message, None));
-        }
-    };
-    let expression = if expr_len == 0 {
-        ""
-    } else if expr_ptr.is_null() {
-        return cboxes_store_json(cboxes_error_json(
-            "compile",
-            "internal error: null expression pointer",
-            None,
-        ));
-    } else {
-        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(expr_ptr, expr_len) }) {
-            Ok(input) => input,
-            Err(_) => {
-                return cboxes_store_json(cboxes_error_json(
-                    "compile",
-                    "expression is not valid UTF-8",
-                    None,
-                ));
-            }
-        }
-    };
-    let stdin = if stdin_len == 0 {
-        ""
-    } else if stdin_ptr.is_null() {
-        return cboxes_store_json(cboxes_error_json(
-            "compile",
-            "internal error: null stdin pointer",
-            None,
-        ));
-    } else {
-        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(stdin_ptr, stdin_len) }) {
-            Ok(input) => input,
-            Err(_) => {
-                return cboxes_store_json(cboxes_error_json(
-                    "compile",
-                    "stdin is not valid UTF-8",
-                    None,
-                ));
-            }
-        }
-    };
-
-    let expression = expression.to_owned();
-    let options = RunOptions {
-        #[cfg(test)]
-        include_dirs: Vec::new(),
-        stdin: stdin.to_owned(),
-        expression_eval: Some(RunExpressionEvalRequest {
-            expression,
-            event_index,
-        }),
-        ub_detection_mode: UbDetectionMode::Standard,
-        allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
-        optimizing_precomputations: false,
-        capture_visualization: true,
-        synthetic_address_base: synthetic_address_base.into(),
-        execution_step_limit: Some(execution_step_limit.max(1) as usize),
-        execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
-    };
-    let result = std::panic::catch_unwind(|| {
-        cboxes_run_virtual_sources(files, &options, implicit_main_requested != 0)
-    });
-    let json = match result {
-        Ok(Ok(run)) => {
-            let json = match run.result {
-                Ok(result) => match result.expression {
-                    Some(expression) => cboxes_expression_success_json(&expression),
-                    None => cboxes_error_json(
-                        "compile",
-                        "No program state is available for that expression yet.",
-                        None,
-                    ),
-                },
-                Err(diag) => cboxes_diagnostic_json(&diag, &run.source_display),
-            };
-            cboxes_implicit_main_json(json, &run.implicit_main)
-        }
-        Ok(Err(message)) => cboxes_error_json("compile", &message, None),
-        Err(_) => cboxes_error_json(
-            "compile",
-            "internal interpreter error while evaluating this expression",
-            None,
-        ),
-    };
-    cboxes_store_json(json)
 }
 
+fn cboxes_bridge_success_json(
+    result: RunResult,
+    source_display: &SourceDisplayMap,
+    expects_expression: bool,
+) -> String {
+    if !expects_expression {
+        return cboxes_success_json(&result, source_display);
+    }
+    match result.expression {
+        Some(expression) => cboxes_expression_success_json(&expression),
+        None => cboxes_error_json(
+            "compile",
+            "No program state is available for that expression yet.",
+            None,
+        ),
+    }
+}
 fn cboxes_has_explicit_main(source: &str) -> bool {
     fn skip_quoted(bytes: &[u8], mut index: usize, quote: u8) -> usize {
         index += 1;
@@ -1065,574 +898,6 @@ fn cboxes_store_json(json: String) -> *mut u8 {
     CBOXES_LAST_RESULT_LEN.store(bytes.len(), Ordering::Relaxed);
     std::mem::forget(bytes);
     ptr
-}
-
-fn cboxes_implicit_main_json(mut json: String, implicit_main: &CboxesImplicitMain) -> String {
-    debug_assert!(json.ends_with('}'));
-    json.pop();
-    json.push_str(",\"implicitMainApplied\":");
-    json.push_str(if implicit_main.applied {
-        "true"
-    } else {
-        "false"
-    });
-    json.push_str(",\"implicitMainNotice\":");
-    if let Some(notice) = &implicit_main.notice {
-        json.push_str(&cboxes_json_string(notice));
-    } else {
-        json.push_str("null");
-    }
-    json.push('}');
-    json
-}
-
-fn cboxes_success_json(result: &RunResult, source_display: &SourceDisplayMap) -> String {
-    format!(
-        "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"exitStatus\":{},\"state\":{},\"trace\":{},\"mainClose\":{},\"blocked\":{},\"executionLimit\":{}}}",
-        cboxes_json_string(&result.stdout),
-        cboxes_json_string(&result.stderr),
-        result.exit_status,
-        cboxes_state_json(&result.state),
-        cboxes_trace_json(&result.trace, source_display),
-        cboxes_source_location_json(&result.main_close, source_display),
-        cboxes_blocked_json(result.blocked.as_ref(), source_display),
-        cboxes_execution_limit_json(result.execution_limit.as_ref(), source_display),
-    )
-}
-
-fn cboxes_expression_success_json(result: &ProgramExpressionResult) -> String {
-    format!(
-        "{{\"ok\":true,\"result\":{}}}",
-        cboxes_expression_result_json(result)
-    )
-}
-
-fn cboxes_expression_result_json(result: &ProgramExpressionResult) -> String {
-    let address = result
-        .address
-        .map(|address| cboxes_json_string(&address.to_string()))
-        .unwrap_or_else(|| "null".to_owned());
-    format!(
-        "{{\"kind\":{},\"type\":{},\"value\":{},\"displayValue\":{},\"exactValue\":{},\"address\":{},\"name\":{},\"valueLiteral\":{},\"typeInfo\":{}}}",
-        cboxes_json_string(&result.kind),
-        cboxes_json_string(&result.ty),
-        cboxes_json_string(&result.value),
-        cboxes_json_string(&result.display_value),
-        cboxes_json_string(&result.exact_value),
-        address,
-        cboxes_json_string(&result.name),
-        cboxes_value_literal_json(result.value_literal.as_ref()),
-        cboxes_type_info_json(&result.type_info),
-    )
-}
-
-fn cboxes_type_info_json(info: &ProgramTypeInfo) -> String {
-    let size = info
-        .size
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "null".to_owned());
-    let align = info
-        .align
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "null".to_owned());
-    let help = info
-        .help
-        .as_deref()
-        .map(cboxes_json_string)
-        .unwrap_or_else(|| "null".to_owned());
-    let help_tree = info
-        .help_tree
-        .as_ref()
-        .map(cboxes_type_help_node_json)
-        .unwrap_or_else(|| "null".to_owned());
-    format!(
-        "{{\"kind\":{},\"help\":{},\"helpTypeNames\":{},\"helpTree\":{},\"pointerDepth\":{},\"arrayShape\":{},\"pointeeArrayShape\":{},\"size\":{},\"align\":{}}}",
-        cboxes_json_string(&info.kind),
-        help,
-        cboxes_string_array_json(&info.help_type_names),
-        help_tree,
-        info.pointer_depth,
-        cboxes_usize_array_json(&info.array_shape),
-        cboxes_usize_array_json(&info.pointee_array_shape),
-        size,
-        align,
-    )
-}
-
-fn cboxes_type_help_node_json(node: &ProgramTypeHelpNode) -> String {
-    let type_name = node
-        .type_name
-        .as_deref()
-        .map(cboxes_json_string)
-        .unwrap_or_else(|| "null".to_owned());
-    let mut children = String::from("[");
-    for (index, child) in node.children.iter().enumerate() {
-        if index > 0 {
-            children.push(',');
-        }
-        children.push_str(&format!(
-            "{{\"relation\":{},\"node\":{}}}",
-            cboxes_json_string(&child.relation),
-            cboxes_type_help_node_json(&child.node),
-        ));
-    }
-    children.push(']');
-    format!(
-        "{{\"kind\":{},\"label\":{},\"typeName\":{},\"children\":{}}}",
-        cboxes_json_string(&node.kind),
-        cboxes_json_string(&node.label),
-        type_name,
-        children,
-    )
-}
-
-fn cboxes_string_array_json(values: &[String]) -> String {
-    let mut out = String::from("[");
-    for (index, value) in values.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push_str(&cboxes_json_string(value));
-    }
-    out.push(']');
-    out
-}
-
-fn cboxes_value_literal_json(literal: Option<&ProgramValueLiteral>) -> String {
-    let Some(literal) = literal else {
-        return "null".to_owned();
-    };
-    format!(
-        "{{\"kind\":{},\"hasSuffix\":{}}}",
-        cboxes_json_string(&literal.kind),
-        literal.has_suffix,
-    )
-}
-
-fn cboxes_value_literal_text(tokens: &[token::Token]) -> Option<String> {
-    use token::TokenKind;
-
-    match tokens {
-        [
-            token::Token {
-                kind: TokenKind::Number(text),
-                ..
-            },
-            token::Token {
-                kind: TokenKind::Eof,
-                ..
-            },
-        ]
-        | [
-            token::Token {
-                kind: TokenKind::Plus | TokenKind::Minus,
-                ..
-            },
-            token::Token {
-                kind: TokenKind::Number(text),
-                ..
-            },
-            token::Token {
-                kind: TokenKind::Eof,
-                ..
-            },
-        ] => Some(text.clone()),
-        _ => None,
-    }
-}
-
-fn cboxes_diagnostic_json(diag: &Diagnostic, source_display: &SourceDisplayMap) -> String {
-    let rendered = diag.render();
-    let kind = if rendered.starts_with("undefined behavior:") {
-        "ub"
-    } else {
-        "compile"
-    };
-    let range = diag
-        .display_range()
-        .and_then(|range| {
-            let file = range.path.to_string_lossy().into_owned();
-            cboxes_display_range(
-                source_display,
-                file,
-                range.start_line,
-                range.start_column,
-                range.end_line,
-                range.end_column,
-            )
-        })
-        .or_else(|| {
-            cboxes_rendered_location(&rendered).and_then(|(file, line, col)| {
-                cboxes_display_range(source_display, file, line, col, line, col + 1)
-            })
-        });
-    let annotations = diag
-        .display_annotations()
-        .iter()
-        .filter_map(|annotation| {
-            let annotation_range = &annotation.range;
-            let file = annotation_range.path.to_string_lossy().into_owned();
-            cboxes_display_range(
-                source_display,
-                file,
-                annotation_range.start_line,
-                annotation_range.start_column,
-                annotation_range.end_line,
-                annotation_range.end_column,
-            )
-            .map(|range| (annotation.id.clone(), range))
-        })
-        .collect::<Vec<_>>();
-    cboxes_error_json_with_annotations(kind, &rendered, range, &annotations)
-}
-
-type CboxesDiagnosticRange = (String, usize, usize, usize, usize);
-
-fn cboxes_display_range(
-    source_display: &SourceDisplayMap,
-    file: String,
-    start_line: usize,
-    start_col: usize,
-    end_line: usize,
-    end_col: usize,
-) -> Option<CboxesDiagnosticRange> {
-    let display = source_display
-        .get(&file)
-        .copied()
-        .unwrap_or_else(SourceDisplay::unbounded);
-    let start_line = start_line.saturating_sub(display.line_offset);
-    if start_line == display.line_count && display.normalized_final_newline {
-        let eof_line = display.line_count.saturating_sub(1);
-        return Some((
-            file,
-            eof_line,
-            display.eof_column,
-            eof_line,
-            display.eof_column,
-        ));
-    }
-    if start_line >= display.line_count {
-        return None;
-    }
-    let end_line = end_line
-        .saturating_sub(display.line_offset)
-        .max(start_line)
-        .min(display.line_count.saturating_sub(1));
-    Some((file, start_line, start_col, end_line, end_col))
-}
-
-fn cboxes_error_json(kind: &str, message: &str, range: Option<CboxesDiagnosticRange>) -> String {
-    cboxes_error_json_with_annotations(kind, message, range, &[])
-}
-
-fn cboxes_error_json_with_annotations(
-    kind: &str,
-    message: &str,
-    range: Option<CboxesDiagnosticRange>,
-    annotations: &[(String, CboxesDiagnosticRange)],
-) -> String {
-    let (file, line, col, end_line, end_col) = range
-        .map(|(file, line, col, end_line, end_col)| {
-            (
-                cboxes_json_string(&file),
-                line.to_string(),
-                col.to_string(),
-                end_line.to_string(),
-                end_col.to_string(),
-            )
-        })
-        .unwrap_or_else(|| {
-            (
-                "null".to_owned(),
-                "null".to_owned(),
-                "null".to_owned(),
-                "null".to_owned(),
-                "null".to_owned(),
-            )
-        });
-    let mut annotations_json = String::from("[");
-    for (index, (id, (file, line, col, end_line, end_col))) in annotations.iter().enumerate() {
-        if index > 0 {
-            annotations_json.push(',');
-        }
-        annotations_json.push_str(&format!(
-            "{{\"id\":{},\"file\":{},\"line\":{},\"column\":{},\"endLine\":{},\"endColumn\":{}}}",
-            cboxes_json_string(id),
-            cboxes_json_string(file),
-            line,
-            col,
-            end_line,
-            end_col,
-        ));
-    }
-    annotations_json.push(']');
-    format!(
-        "{{\"ok\":false,\"kind\":{},\"message\":{},\"file\":{},\"line\":{},\"column\":{},\"endLine\":{},\"endColumn\":{},\"annotations\":{}}}",
-        cboxes_json_string(kind),
-        cboxes_json_string(message),
-        file,
-        line,
-        col,
-        end_line,
-        end_col,
-        annotations_json,
-    )
-}
-
-fn cboxes_rendered_location(rendered: &str) -> Option<(String, usize, usize)> {
-    for line in rendered.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("--> ") else {
-            continue;
-        };
-        let mut parts = rest.rsplitn(3, ':');
-        let col = parts.next()?.parse::<usize>().ok()?;
-        let line = parts.next()?.parse::<usize>().ok()?;
-        let file = parts.next()?.to_owned();
-        return Some((file, line.saturating_sub(1), col.saturating_sub(1)));
-    }
-    None
-}
-
-fn cboxes_state_json(state: &[ProgramStateBox]) -> String {
-    let mut out = String::from("[");
-    for (index, item) in state.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push('{');
-        out.push_str("\"name\":");
-        out.push_str(&cboxes_json_string(&item.name));
-        out.push_str(",\"type\":");
-        out.push_str(&cboxes_json_string(&item.ty));
-        out.push_str(",\"value\":");
-        out.push_str(&cboxes_json_string(&item.value));
-        out.push_str(",\"displayValue\":");
-        out.push_str(&cboxes_json_string(&item.display_value));
-        out.push_str(",\"exactValue\":");
-        out.push_str(&cboxes_json_string(&item.exact_value));
-        out.push_str(",\"address\":");
-        if let Some(address) = item.address {
-            out.push_str(&cboxes_json_string(&address.to_string()));
-        } else {
-            out.push_str("null");
-        }
-        out.push_str(",\"arrayRoot\":");
-        if let Some(root) = &item.array_root {
-            out.push_str(&cboxes_json_string(root));
-        } else {
-            out.push_str("null");
-        }
-        out.push_str(",\"arrayShape\":");
-        out.push_str(&cboxes_usize_array_json(&item.array_shape));
-        out.push_str(",\"arrayIndices\":");
-        out.push_str(&cboxes_usize_array_json(&item.array_indices));
-        out.push_str(",\"aggregateRoot\":");
-        if let Some(root) = &item.aggregate_root {
-            out.push_str(&cboxes_json_string(root));
-        } else {
-            out.push_str("null");
-        }
-        out.push_str(",\"aggregatePath\":");
-        out.push_str(&cboxes_string_array_json(&item.aggregate_path));
-        out.push_str(",\"aggregateKind\":");
-        if let Some(kind) = &item.aggregate_kind {
-            out.push_str(&cboxes_json_string(kind));
-        } else {
-            out.push_str("null");
-        }
-        out.push_str(",\"aliases\":");
-        out.push_str(&cboxes_string_array_json(&item.aliases));
-        out.push_str(",\"typeInfo\":");
-        out.push_str(&cboxes_type_info_json(&item.type_info));
-        out.push('}');
-    }
-    out.push(']');
-    out
-}
-
-fn cboxes_trace_json(trace: &[ProgramTraceEvent], source_display: &SourceDisplayMap) -> String {
-    let mut out = String::from("[");
-    let mut wrote_event = false;
-    for event in trace {
-        let display = source_display
-            .get(&event.file)
-            .copied()
-            .unwrap_or_else(SourceDisplay::unbounded);
-        let start_line = event.start_line.saturating_sub(display.line_offset);
-        let end_line = event.end_line.saturating_sub(display.line_offset);
-        if start_line >= display.line_count {
-            continue;
-        }
-        if wrote_event {
-            out.push(',');
-        }
-        wrote_event = true;
-        out.push('{');
-        out.push_str("\"kind\":");
-        out.push_str(&cboxes_json_string(&event.kind));
-        out.push_str(",\"file\":");
-        out.push_str(&cboxes_json_string(&event.file));
-        out.push_str(",\"startLine\":");
-        out.push_str(&start_line.to_string());
-        out.push_str(",\"endLine\":");
-        out.push_str(
-            &end_line
-                .min(display.line_count.saturating_sub(1))
-                .to_string(),
-        );
-        out.push_str(",\"state\":");
-        out.push_str(&cboxes_state_json(&event.state));
-        out.push_str(",\"skippedRange\":");
-        out.push_str(&cboxes_source_range_json(
-            event.skipped_range.as_ref(),
-            source_display,
-        ));
-        out.push('}');
-    }
-    out.push(']');
-    out
-}
-
-fn cboxes_source_range_json(
-    range: Option<&ProgramSourceRange>,
-    source_display: &SourceDisplayMap,
-) -> String {
-    let Some(range) = range else {
-        return "null".to_owned();
-    };
-    let display = source_display
-        .get(&range.file)
-        .copied()
-        .unwrap_or_else(SourceDisplay::unbounded);
-    let start_line = range.start_line.saturating_sub(display.line_offset);
-    if start_line >= display.line_count {
-        return "null".to_owned();
-    }
-    let end_line = range
-        .end_line
-        .saturating_sub(display.line_offset)
-        .min(display.line_count.saturating_sub(1));
-    format!(
-        "{{\"file\":{},\"startLine\":{},\"startColumn\":{},\"endLine\":{},\"endColumn\":{}}}",
-        cboxes_json_string(&range.file),
-        start_line,
-        range.start_column,
-        end_line,
-        range.end_column,
-    )
-}
-
-fn cboxes_source_location_json(
-    location: &ProgramSourceLocation,
-    source_display: &SourceDisplayMap,
-) -> String {
-    let display = source_display
-        .get(&location.file)
-        .copied()
-        .unwrap_or_else(SourceDisplay::unbounded);
-    let line = location.line.saturating_sub(display.line_offset);
-    if line >= display.line_count {
-        return "null".to_owned();
-    }
-    format!(
-        "{{\"file\":{},\"line\":{}}}",
-        cboxes_json_string(&location.file),
-        line
-    )
-}
-
-fn cboxes_blocked_json(
-    blocked: Option<&ProgramBlocked>,
-    source_display: &SourceDisplayMap,
-) -> String {
-    let Some(blocked) = blocked else {
-        return "null".to_owned();
-    };
-    let display = source_display
-        .get(&blocked.file)
-        .copied()
-        .unwrap_or_else(SourceDisplay::unbounded);
-    let start_line = blocked.start_line.saturating_sub(display.line_offset);
-    if start_line >= display.line_count {
-        return "null".to_owned();
-    }
-    let end_line = blocked
-        .end_line
-        .saturating_sub(display.line_offset)
-        .min(display.line_count.saturating_sub(1));
-    format!(
-        "{{\"file\":{},\"startLine\":{},\"endLine\":{},\"function\":{},\"state\":{}}}",
-        cboxes_json_string(&blocked.file),
-        start_line,
-        end_line,
-        cboxes_json_string(&blocked.function),
-        cboxes_state_json(&blocked.state)
-    )
-}
-
-fn cboxes_execution_limit_json(
-    execution_limit: Option<&ProgramExecutionLimit>,
-    source_display: &SourceDisplayMap,
-) -> String {
-    let Some(execution_limit) = execution_limit else {
-        return "null".to_owned();
-    };
-    let display = source_display
-        .get(&execution_limit.file)
-        .copied()
-        .unwrap_or_else(SourceDisplay::unbounded);
-    let start_line = execution_limit
-        .start_line
-        .saturating_sub(display.line_offset);
-    if start_line >= display.line_count {
-        return "null".to_owned();
-    }
-    let end_line = execution_limit
-        .end_line
-        .saturating_sub(display.line_offset)
-        .min(display.line_count.saturating_sub(1));
-    format!(
-        "{{\"file\":{},\"startLine\":{},\"endLine\":{},\"tracePosition\":{}}}",
-        cboxes_json_string(&execution_limit.file),
-        start_line,
-        end_line,
-        execution_limit.trace_position,
-    )
-}
-
-fn cboxes_usize_array_json(values: &[usize]) -> String {
-    let mut out = String::from("[");
-    for (index, value) in values.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push_str(&value.to_string());
-    }
-    out.push(']');
-    out
-}
-
-fn cboxes_json_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            ch if ch <= '\u{1f}' => {
-                use std::fmt::Write as _;
-                let _ = write!(out, "\\u{:04x}", ch as u32);
-            }
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
 }
 
 fn run_with_sources(
@@ -1970,11 +1235,11 @@ fn merge_translation_units(units: Vec<TranslationUnit>) -> Result<TranslationUni
             }
             external_object_defs.insert(global_def.name.clone(), global_def);
         }
-        for (name, value) in unit.enum_constants {
-            if let Some(existing) = merged.enum_constants.insert(name.clone(), value) {
+        for (key, value) in unit.enum_constants {
+            if let Some(existing) = merged.enum_constants.insert(key.clone(), value) {
                 if existing != value {
                     return Err(Diagnostic::error(
-                        format!("conflicting enum constant {}", name),
+                        format!("conflicting enum constant {}", key.1),
                         fallback_span(&merged),
                     ));
                 }
@@ -2015,11 +1280,14 @@ fn fallback_span(unit: &TranslationUnit) -> Span {
         .or_else(|| unit.global_definitions.first().map(|global| global.span))
         .or_else(|| unit.globals.first().map(|global| global.span))
         .or_else(|| {
-            unit.externals.iter().find_map(|external| match external {
-                ExternalDeclaration::Function(function) => Some(function.span),
-                ExternalDeclaration::FunctionDeclaration(decl) => Some(decl.span),
-                ExternalDeclaration::ObjectDeclaration(decl) => Some(decl.span),
-            })
+            unit.externals
+                .iter()
+                .map(|external| match external {
+                    ExternalDeclaration::Function(function) => function.span,
+                    ExternalDeclaration::FunctionDeclaration(decl) => decl.span,
+                    ExternalDeclaration::ObjectDeclaration(decl) => decl.span,
+                })
+                .next()
         })
         .unwrap_or(Span::new(FileId(0), 0, 0))
 }
@@ -2079,8 +1347,8 @@ enum ObjectRole {
 
 fn normalize_translation_unit(
     externals: Vec<ExternalDeclaration>,
-    records: &HashMap<usize, RecordType>,
-    enums: &HashMap<usize, EnumType>,
+    records: &FastHashMap<usize, RecordType>,
+    enums: &FastHashMap<usize, EnumType>,
 ) -> Result<NormalizedTranslationUnit, Diagnostic> {
     let mut prior_symbols = HashMap::<String, PriorSymbol>::new();
     let mut function_entries = HashMap::<ScopedSymbol, UnitFunctionEntry>::new();
@@ -2323,7 +1591,7 @@ fn normalize_translation_unit(
     Ok(normalized)
 }
 
-fn type_is_complete_for_linkage(ty: &CType, records: &HashMap<usize, RecordType>) -> bool {
+fn type_is_complete_for_linkage(ty: &CType, records: &FastHashMap<usize, RecordType>) -> bool {
     match ty.unqualified() {
         CType::Void | CType::Function(..) | CType::Array(_, 0) => false,
         CType::Array(inner, _) => type_is_complete_for_linkage(inner, records),
@@ -2363,10 +1631,11 @@ fn validate_linkage(
                 span,
                 Some("6.2.2"),
             )
-            .with_note(format!(
-                "previous declaration is at {}:{}:{}",
-                prior.span.file.0, prior.span.start, prior.span.end
-            )));
+            .with_related_span(
+                "previous-declaration",
+                "previous declaration is here",
+                prior.span,
+            ));
         }
     }
     prior_symbols.insert(
@@ -2418,10 +1687,11 @@ fn collect_internal_linkage_names(
 fn validate_inline_definition_constraints(
     function: &FunctionDef,
     internal_linkage_names: &HashSet<String>,
-    records: &HashMap<usize, RecordType>,
+    records: &FastHashMap<usize, RecordType>,
 ) -> Result<(), Diagnostic> {
     let mut local_scopes = vec![HashSet::new()];
     for param in &function.params {
+        validate_inline_vla_bounds(&param.vla_bounds, internal_linkage_names, &mut local_scopes)?;
         if let Some(name) = &param.name {
             local_scopes
                 .last_mut()
@@ -2440,7 +1710,7 @@ fn validate_inline_definition_constraints(
 fn validate_inline_block(
     block: &Block,
     internal_linkage_names: &HashSet<String>,
-    records: &HashMap<usize, RecordType>,
+    records: &FastHashMap<usize, RecordType>,
     local_scopes: &mut Vec<HashSet<String>>,
 ) -> Result<(), Diagnostic> {
     local_scopes.push(HashSet::new());
@@ -2457,10 +1727,12 @@ fn validate_inline_block(
                         decl.span,
                     ));
                 }
-                local_scopes
-                    .last_mut()
-                    .expect("block scope exists")
-                    .insert(decl.name.clone());
+                if decl.storage_class != Some(StorageClass::Extern) {
+                    local_scopes
+                        .last_mut()
+                        .expect("block scope exists")
+                        .insert(decl.name.clone());
+                }
                 if let Some(init) = &decl.init {
                     validate_inline_initializer(
                         init,
@@ -2470,12 +1742,7 @@ fn validate_inline_block(
                     )?;
                 }
             }
-            BlockItem::FunctionDeclaration(decl) => {
-                local_scopes
-                    .last_mut()
-                    .expect("block scope exists")
-                    .insert(decl.name.clone());
-            }
+            BlockItem::FunctionDeclaration(_) => {}
             BlockItem::Statement(stmt) => {
                 validate_inline_statement(stmt, internal_linkage_names, records, local_scopes)?;
             }
@@ -2488,7 +1755,7 @@ fn validate_inline_block(
 fn validate_inline_statement(
     stmt: &Statement,
     internal_linkage_names: &HashSet<String>,
-    records: &HashMap<usize, RecordType>,
+    records: &FastHashMap<usize, RecordType>,
     local_scopes: &mut Vec<HashSet<String>>,
 ) -> Result<(), Diagnostic> {
     match stmt {
@@ -2531,10 +1798,12 @@ fn validate_inline_statement(
                                     decl.span,
                                 ));
                             }
-                            local_scopes
-                                .last_mut()
-                                .expect("for scope exists")
-                                .insert(decl.name.clone());
+                            if decl.storage_class != Some(StorageClass::Extern) {
+                                local_scopes
+                                    .last_mut()
+                                    .expect("for scope exists")
+                                    .insert(decl.name.clone());
+                            }
                             if let Some(init) = &decl.init {
                                 validate_inline_initializer(
                                     init,
@@ -2610,7 +1879,7 @@ fn validate_inline_statement(
 fn validate_inline_initializer(
     init: &Initializer,
     internal_linkage_names: &HashSet<String>,
-    records: &HashMap<usize, RecordType>,
+    records: &FastHashMap<usize, RecordType>,
     local_scopes: &mut Vec<HashSet<String>>,
 ) -> Result<(), Diagnostic> {
     match init {
@@ -2637,7 +1906,12 @@ fn validate_inline_vla_bounds(
     local_scopes: &mut Vec<HashSet<String>>,
 ) -> Result<(), Diagnostic> {
     for expr in bounds.iter().flatten() {
-        validate_inline_expr(expr, internal_linkage_names, &HashMap::new(), local_scopes)?;
+        validate_inline_expr(
+            expr,
+            internal_linkage_names,
+            &FastHashMap::default(),
+            local_scopes,
+        )?;
     }
     Ok(())
 }
@@ -2645,7 +1919,7 @@ fn validate_inline_vla_bounds(
 fn validate_inline_expr(
     expr: &Expr,
     internal_linkage_names: &HashSet<String>,
-    records: &HashMap<usize, RecordType>,
+    records: &FastHashMap<usize, RecordType>,
     local_scopes: &mut Vec<HashSet<String>>,
 ) -> Result<(), Diagnostic> {
     match expr {
@@ -2748,7 +2022,7 @@ fn validate_inline_expr(
     }
 }
 
-fn type_is_modifiable_object(ty: &CType, records: &HashMap<usize, RecordType>) -> bool {
+fn type_is_modifiable_object(ty: &CType, records: &FastHashMap<usize, RecordType>) -> bool {
     if ty.is_const_qualified() {
         return false;
     }
@@ -2828,8 +2102,8 @@ fn describe_external_symbol_kind(kind: ExternalSymbolKind) -> &'static str {
 fn merge_function_declaration(
     existing: &mut FunctionDecl,
     new_decl: &FunctionDecl,
-    records: &HashMap<usize, RecordType>,
-    enums: &HashMap<usize, EnumType>,
+    records: &FastHashMap<usize, RecordType>,
+    enums: &FastHashMap<usize, EnumType>,
 ) -> Result<(), Diagnostic> {
     let existing_ty = function_decl_type(existing);
     let new_ty = function_decl_type(new_decl);
@@ -2858,8 +2132,8 @@ fn merge_function_declaration(
 fn merge_object_declaration(
     existing: &mut Declaration,
     new_decl: &Declaration,
-    records: &HashMap<usize, RecordType>,
-    enums: &HashMap<usize, EnumType>,
+    records: &FastHashMap<usize, RecordType>,
+    enums: &FastHashMap<usize, EnumType>,
 ) -> Result<(), Diagnostic> {
     let composite =
         composite_type(&existing.ty, &new_decl.ty, records, enums).ok_or_else(|| {
@@ -2904,6 +2178,7 @@ fn remap_record_member(
         bit_width_span: member.bit_width_span,
         bit_offset: member.bit_offset,
         bit_storage_size: member.bit_storage_size,
+        alignment: member.alignment,
         declaration_span: member.declaration_span,
     }
 }
@@ -2990,6 +2265,7 @@ fn remap_parameter(
         static_array_bound: param
             .static_array_bound
             .map(|expr| remap_expr(expr, record_map, enum_map)),
+        prototype_vla_star: param.prototype_vla_star,
         adjusted_from_array_or_function: param.adjusted_from_array_or_function,
         storage_class: param.storage_class,
         span: param.span,
@@ -3204,16 +2480,9 @@ fn remap_initializer_item(
     enum_map: &std::collections::HashMap<usize, usize>,
 ) -> InitializerItem {
     InitializerItem {
-        designators: item.designators.into_iter().map(remap_designator).collect(),
+        designators: item.designators,
         initializer: remap_initializer(item.initializer, record_map, enum_map),
         span: item.span,
-    }
-}
-
-fn remap_designator(designator: Designator) -> Designator {
-    match designator {
-        Designator::Member(name, span) => Designator::Member(name, span),
-        Designator::Index(index, span) => Designator::Index(index, span),
     }
 }
 
@@ -3287,7 +2556,7 @@ fn remap_expr(
             span,
         } => Expr::OffsetOf {
             ty: remap_type(ty, record_map, enum_map),
-            designators: designators.into_iter().map(remap_designator).collect(),
+            designators,
             span,
         },
         Expr::Cast {
@@ -3489,6 +2758,7 @@ fn function_decl_from_type(
                 ty,
                 vla_bounds: Vec::new(),
                 static_array_bound: None,
+                prototype_vla_star: false,
                 adjusted_from_array_or_function: false,
                 storage_class: None,
                 span,
@@ -3540,8 +2810,8 @@ fn combine_object_storage(
 pub(crate) fn composite_type(
     lhs: &CType,
     rhs: &CType,
-    records: &HashMap<usize, RecordType>,
-    enums: &HashMap<usize, EnumType>,
+    records: &FastHashMap<usize, RecordType>,
+    enums: &FastHashMap<usize, EnumType>,
 ) -> Option<CType> {
     let mut seen_records = HashSet::new();
     let mut seen_enums = HashSet::new();
@@ -3551,8 +2821,8 @@ pub(crate) fn composite_type(
 fn composite_type_inner(
     lhs: &CType,
     rhs: &CType,
-    records: &HashMap<usize, RecordType>,
-    enums: &HashMap<usize, EnumType>,
+    records: &FastHashMap<usize, RecordType>,
+    enums: &FastHashMap<usize, EnumType>,
     seen_records: &mut HashSet<(usize, usize)>,
     seen_enums: &mut HashSet<(usize, usize)>,
 ) -> Option<CType> {
@@ -3646,9 +2916,9 @@ fn composite_type_inner(
         (CType::Struct(lhs_id, lhs_tag), CType::Struct(rhs_id, rhs_tag)) => {
             compatible_record_types(
                 *lhs_id,
-                lhs_tag.as_deref(),
+                lhs_tag.as_deref().map(String::as_str),
                 *rhs_id,
-                rhs_tag.as_deref(),
+                rhs_tag.as_deref().map(String::as_str),
                 RecordKindForComposite::Struct,
                 records,
                 enums,
@@ -3659,9 +2929,9 @@ fn composite_type_inner(
         }
         (CType::Union(lhs_id, lhs_tag), CType::Union(rhs_id, rhs_tag)) => compatible_record_types(
             *lhs_id,
-            lhs_tag.as_deref(),
+            lhs_tag.as_deref().map(String::as_str),
             *rhs_id,
-            rhs_tag.as_deref(),
+            rhs_tag.as_deref().map(String::as_str),
             RecordKindForComposite::Union,
             records,
             enums,
@@ -3671,9 +2941,9 @@ fn composite_type_inner(
         .then(|| select_record_composite(lhs, rhs, records)),
         (CType::Enum(lhs_id, lhs_tag), CType::Enum(rhs_id, rhs_tag)) => compatible_enum_types(
             *lhs_id,
-            lhs_tag.as_deref(),
+            lhs_tag.as_deref().map(String::as_str),
             *rhs_id,
-            rhs_tag.as_deref(),
+            rhs_tag.as_deref().map(String::as_str),
             enums,
             seen_enums,
         )
@@ -3687,7 +2957,7 @@ fn function_prototype_compatible_with_unspecified_parameters(params: &[CType]) -
     params == [CType::Void]
         || params
             .iter()
-            .all(|param| type_unchanged_by_default_argument_promotions(param))
+            .all(type_unchanged_by_default_argument_promotions)
 }
 
 fn type_unchanged_by_default_argument_promotions(ty: &CType) -> bool {
@@ -3716,8 +2986,8 @@ fn compatible_record_types(
     rhs_id: usize,
     rhs_tag: Option<&str>,
     expected_kind: RecordKindForComposite,
-    records: &HashMap<usize, RecordType>,
-    enums: &HashMap<usize, EnumType>,
+    records: &FastHashMap<usize, RecordType>,
+    enums: &FastHashMap<usize, EnumType>,
     seen_records: &mut HashSet<(usize, usize)>,
     seen_enums: &mut HashSet<(usize, usize)>,
 ) -> bool {
@@ -3775,7 +3045,7 @@ fn compatible_enum_types(
     lhs_tag: Option<&str>,
     rhs_id: usize,
     rhs_tag: Option<&str>,
-    enums: &HashMap<usize, EnumType>,
+    enums: &FastHashMap<usize, EnumType>,
     seen_enums: &mut HashSet<(usize, usize)>,
 ) -> bool {
     if lhs_id == rhs_id {
@@ -3799,7 +3069,7 @@ fn compatible_enum_types(
 fn select_record_composite(
     lhs: &CType,
     rhs: &CType,
-    records: &HashMap<usize, RecordType>,
+    records: &FastHashMap<usize, RecordType>,
 ) -> CType {
     let lhs_complete = match lhs.unqualified() {
         CType::Struct(id, _) | CType::Union(id, _) => records
@@ -3822,7 +3092,7 @@ fn select_record_composite(
     }
 }
 
-fn select_enum_composite(lhs: &CType, rhs: &CType, enums: &HashMap<usize, EnumType>) -> CType {
+fn select_enum_composite(lhs: &CType, rhs: &CType, enums: &FastHashMap<usize, EnumType>) -> CType {
     let lhs_complete = match lhs.unqualified() {
         CType::Enum(id, _) => enums.get(id).map(|ty| ty.complete).unwrap_or(false),
         _ => false,
@@ -3849,19 +3119,105 @@ fn combine_spans(lhs: Span, rhs: Span) -> Span {
 #[cfg(test)]
 mod browser_api_tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct ChunkedNativeStreamIo {
+        stdin: Mutex<VecDeque<u8>>,
+        stdout: Mutex<Vec<u8>>,
+        stderr: Mutex<Vec<u8>>,
+    }
+
+    impl ChunkedNativeStreamIo {
+        fn new(stdin: &[u8]) -> Self {
+            Self {
+                stdin: Mutex::new(stdin.iter().copied().collect()),
+                stdout: Mutex::new(Vec::new()),
+                stderr: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl NativeStreamIo for ChunkedNativeStreamIo {
+        fn read_stdin(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let mut stdin = self.stdin.lock().unwrap();
+            let count = buffer.len().min(stdin.len()).min(3);
+            for slot in &mut buffer[..count] {
+                *slot = stdin.pop_front().unwrap();
+            }
+            Ok(count)
+        }
+
+        fn write_stdout(&self, bytes: &[u8]) -> std::io::Result<()> {
+            self.stdout.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn write_stderr(&self, bytes: &[u8]) -> std::io::Result<()> {
+            self.stderr.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        }
+    }
 
     #[test]
-    fn no_visualization_entry_point_runs_without_browser_limits_or_trace_data() {
-        let source = b"int main(void) { unsigned long sum = 0; for (int i = 0; i < 12000; ++i) sum += i; return sum != 71994000; }\n";
-        let result_ptr = unsafe {
-            cboxes_run_source_without_visualization(
-                source.as_ptr(),
-                source.len(),
-                std::ptr::null(),
-                0,
-                0x1000,
-            )
-        };
+    fn native_stream_io_incrementally_reads_and_writes_standard_streams() {
+        let stream = Arc::new(ChunkedNativeStreamIo::new(b"alpha\nbeta\n"));
+        let source = format!(
+            "{}\n",
+            r#"
+            #include <stdio.h>
+            int main(void) {
+                char first[8];
+                char second[8];
+                if (!fgets(first, sizeof(first), stdin)) return 1;
+                printf("out:%s", first);
+                if (!fgets(second, sizeof(second), stdin)) return 2;
+                fprintf(stderr, "err:%s", second);
+                return 0;
+            }
+        "#
+            .trim()
+        );
+        let result = run_native_source(
+            "stream.c",
+            source,
+            &NativeExecutionOptions {
+                stream_io: Some(stream.clone()),
+                ..NativeExecutionOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_status, 0);
+        assert_eq!(result.stdout, "out:alpha\n");
+        assert_eq!(result.stderr, "err:beta\n");
+        assert_eq!(*stream.stdout.lock().unwrap(), b"out:alpha\n");
+        assert_eq!(*stream.stderr.lock().unwrap(), b"err:beta\n");
+    }
+
+    #[test]
+    fn browser_entry_point_accepts_the_current_request_schema() {
+        let source = b"int main(void) { int answer = 42; return answer != 42; }\n";
+        let words = [
+            CBOXES_BRIDGE_SCHEMA_ID,
+            0,
+            0,
+            0x1000,
+            0,
+            10_000,
+            256,
+            source.len() as u32,
+            0,
+            0,
+        ];
+        let mut request = Vec::with_capacity(CBOXES_BRIDGE_HEADER_WORDS * 4 + source.len());
+        for word in words {
+            request.extend_from_slice(&word.to_le_bytes());
+        }
+        request.extend_from_slice(source);
+
+        let result_ptr = unsafe { cboxes_execute(request.as_ptr(), request.len()) };
         let result_len = cboxes_last_result_len();
         let json = unsafe { std::slice::from_raw_parts(result_ptr, result_len) }.to_vec();
         unsafe { cboxes_free(result_ptr, result_len) };
@@ -3869,9 +3225,16 @@ mod browser_api_tests {
 
         assert!(json.contains("\"ok\":true"), "{json}");
         assert!(json.contains("\"exitStatus\":0"), "{json}");
-        assert!(json.contains("\"state\":[]"), "{json}");
-        assert!(json.contains("\"trace\":[]"), "{json}");
+        assert!(json.contains("\"trace\":[{"), "{json}");
         assert!(json.contains("\"executionLimit\":null"), "{json}");
+    }
+
+    #[test]
+    fn browser_request_rejects_a_different_schema() {
+        let mut request = vec![0; CBOXES_BRIDGE_HEADER_WORDS * 4];
+        request[..4].copy_from_slice(&(CBOXES_BRIDGE_SCHEMA_ID + 1).to_le_bytes());
+        let error = CboxesBridgeRequest::decode(&request).unwrap_err();
+        assert!(error.contains("request schema"));
     }
 
     #[test]
@@ -3897,6 +3260,59 @@ mod browser_api_tests {
         );
         assert!(json.contains("\"line\":1,\"column\":11"));
         assert!(json.contains("\"endLine\":1,\"endColumn\":15"));
+        assert!(json.contains("\"runtimeContext\":null"), "{json}");
+    }
+
+    #[test]
+    fn runtime_ub_reports_when_it_happened_and_the_pre_failure_state() {
+        let source = format!(
+            "{}\n",
+            r#"
+            int main(void) {
+                int x = 0;
+                while (x < 4) {
+                    int y = 3 / (3 - x);
+                    x++;
+                }
+                return 0;
+            }
+        "#
+            .trim()
+        );
+        let diagnostic = run_source_with_options(
+            "program.c",
+            source.clone(),
+            &RunOptions {
+                execution_step_limit: Some(10_000),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_err();
+        let context = diagnostic.runtime_context().unwrap_or_else(|| {
+            panic!(
+                "runtime undefined behavior should retain execution context: {}",
+                diagnostic.render()
+            )
+        });
+
+        assert!(context.executed_steps > 0);
+        assert_eq!(context.line_execution_count, Some(4));
+        assert!(
+            context
+                .state
+                .iter()
+                .any(|object| object.name == "x" && object.value == "3"),
+            "last recorded state before the failure was {:#?}",
+            context.state,
+        );
+
+        let json = cboxes_diagnostic_json(
+            &diagnostic,
+            &HashMap::from([("program.c".to_owned(), cboxes_source_display(&source, 0))]),
+        );
+        assert!(json.contains("\"runtimeContext\":{"), "{json}");
+        assert!(json.contains("\"lineExecutionCount\":4"), "{json}");
+        assert!(json.contains("\"name\":\"x\""), "{json}");
     }
 
     #[test]
@@ -4784,6 +4200,26 @@ mod browser_api_tests {
             execution_limit.trace_position
         );
         assert_eq!(expanded.trace.len(), expanded_limit.trace_position + 4);
+    }
+
+    #[test]
+    fn execution_step_limit_immediately_recognizes_a_constant_empty_loop() {
+        let source = "int main(void) {\n  while (1) {\n    ;\n  }\n}\n";
+        let result = run_source_with_options(
+            "program.c",
+            source,
+            &RunOptions {
+                execution_step_limit: Some(10_000),
+                execution_trace_following_limit: 6,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+
+        let execution_limit = result.execution_limit.as_ref().unwrap();
+        assert_eq!(execution_limit.start_line, 1);
+        assert_eq!(execution_limit.trace_position, 1);
+        assert_eq!(result.trace.len(), 1);
     }
 
     #[test]

@@ -3,7 +3,15 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
 
+use crate::interpreter::ProgramStateBox;
 use crate::source::{Snippet, SourceManager, Span};
+
+#[derive(Debug, Clone)]
+pub struct DiagnosticRuntimeContext {
+    pub executed_steps: usize,
+    pub line_execution_count: Option<usize>,
+    pub state: Vec<ProgramStateBox>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -32,6 +40,7 @@ pub struct Diagnostic {
     related_spans: Vec<DiagnosticRelatedSpan>,
     display_annotations: Vec<DiagnosticDisplayAnnotation>,
     control: Option<DiagnosticControl>,
+    runtime_context: Option<DiagnosticRuntimeContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +84,7 @@ impl Diagnostic {
             related_spans: Vec::new(),
             display_annotations: Vec::new(),
             control: None,
+            runtime_context: None,
         }
     }
 
@@ -94,6 +104,7 @@ impl Diagnostic {
             related_spans: Vec::new(),
             display_annotations: Vec::new(),
             control: None,
+            runtime_context: None,
         }
     }
 
@@ -109,6 +120,7 @@ impl Diagnostic {
             related_spans: Vec::new(),
             display_annotations: Vec::new(),
             control: Some(DiagnosticControl::Blocked(function_name)),
+            runtime_context: None,
         }
     }
 
@@ -131,6 +143,7 @@ impl Diagnostic {
             related_spans: Vec::new(),
             display_annotations: Vec::new(),
             control: Some(DiagnosticControl::ExecutionStepLimit),
+            runtime_context: None,
         }
     }
 
@@ -151,12 +164,26 @@ impl Diagnostic {
             related_spans: Vec::new(),
             display_annotations: Vec::new(),
             control: None,
+            runtime_context: None,
         }
     }
 
     pub fn with_note(mut self, note: impl Into<String>) -> Self {
         self.notes.push(note.into());
         self
+    }
+
+    pub fn with_runtime_context(mut self, context: DiagnosticRuntimeContext) -> Self {
+        self.runtime_context = Some(context);
+        self
+    }
+
+    pub fn runtime_context(&self) -> Option<&DiagnosticRuntimeContext> {
+        self.runtime_context.as_ref()
+    }
+
+    pub fn span(&self) -> Option<Span> {
+        self.span
     }
 
     pub fn with_message_prefix(mut self, prefix: impl AsRef<str>) -> Self {

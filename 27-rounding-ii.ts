@@ -71,5 +71,4 @@ if (rounded < n) {
     return null;
   },
   next: "28-while.html",
-  isLast: false,
 });

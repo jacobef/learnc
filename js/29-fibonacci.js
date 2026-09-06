@@ -11,5 +11,4 @@ createProgramTemplate({
     ],
     workspace: {},
     next: "sandbox.html?finished=1",
-    isLast: true,
 });

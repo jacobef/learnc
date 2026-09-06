@@ -9,6 +9,7 @@ use crate::types::CType;
 
 unsafe extern "C" {
     fn strtod(nptr: *const c_char, endptr: *mut *mut c_char) -> f64;
+    fn strtof(nptr: *const c_char, endptr: *mut *mut c_char) -> f32;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -43,7 +44,7 @@ pub fn parse_number_literal(text: String, span: Span) -> Result<NumberLiteral, D
 }
 
 fn is_floating_literal(text: &str) -> bool {
-    let body = text.trim_end_matches(|ch: char| matches!(ch, 'f' | 'F' | 'l' | 'L'));
+    let body = text.trim_end_matches(['f', 'F', 'l', 'L']);
     if body.starts_with("0x") || body.starts_with("0X") {
         body.contains('.') || body.contains('p') || body.contains('P')
     } else {
@@ -66,7 +67,11 @@ fn parse_floating_literal(text: &str, span: Span) -> Result<(CType, f64, bool), 
     let c_string = CString::new(body)
         .map_err(|_| Diagnostic::error("floating literal contains an interior NUL byte", span))?;
     let mut end_ptr = std::ptr::null_mut();
-    let value = unsafe { strtod(c_string.as_ptr(), &mut end_ptr) };
+    let value = if ty == CType::Float {
+        unsafe { strtof(c_string.as_ptr(), &mut end_ptr) as f64 }
+    } else {
+        unsafe { strtod(c_string.as_ptr(), &mut end_ptr) }
+    };
     if end_ptr != unsafe { c_string.as_ptr().add(body.len()) }.cast_mut() {
         return Err(Diagnostic::error("invalid floating literal", span));
     }
@@ -78,14 +83,13 @@ fn parse_floating_literal(text: &str, span: Span) -> Result<(CType, f64, bool), 
     }
     let converted = match ty {
         CType::Float => {
-            let narrowed = value as f32;
-            if !narrowed.is_finite() {
+            if !value.is_finite() {
                 return Err(Diagnostic::error(
                     "floating literal is out of range for float",
                     span,
                 ));
             }
-            narrowed as f64
+            value
         }
         CType::Double | CType::LongDouble => value,
         _ => unreachable!(),
@@ -121,5 +125,14 @@ mod tests {
             .unwrap_err()
             .render();
         assert!(diagnostic.contains("requires a binary exponent"));
+    }
+
+    #[test]
+    fn hexadecimal_float_literals_are_rounded_directly_to_binary32() {
+        let literal = parse_number_literal("0x1.00000100000001p+0f".to_owned(), span()).unwrap();
+        let NumberValue::Floating(value) = literal.value else {
+            panic!("expected floating literal");
+        };
+        assert_eq!(value, f32::from_bits(0x3f80_0001) as f64);
     }
 }

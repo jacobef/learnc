@@ -80,6 +80,7 @@ impl fmt::Display for StringLiteralValue {
 pub enum Keyword {
     Alignas,
     Alignof,
+    Atomic,
     Auto,
     Bool,
     Break,
@@ -100,6 +101,7 @@ pub enum Keyword {
     Goto,
     If,
     Inline,
+    Imaginary,
     Int,
     Long,
     Noreturn,
@@ -114,6 +116,7 @@ pub enum Keyword {
     Struct,
     Switch,
     Typedef,
+    ThreadLocal,
     Union,
     Unsigned,
     Void,
@@ -130,6 +133,7 @@ pub enum TokenKind {
     Utf16CharLiteral(u16),
     Utf32CharLiteral(u32),
     StringLiteral(StringLiteralValue),
+    Utf8StringLiteral(StringLiteralValue),
     WideStringLiteral(StringLiteralValue),
     Utf16StringLiteral(StringLiteralValue),
     Utf32StringLiteral(StringLiteralValue),
@@ -245,6 +249,7 @@ impl TokenKind {
             | Self::Utf16CharLiteral(..)
             | Self::Utf32CharLiteral(..) => "a character literal".to_owned(),
             Self::StringLiteral(..)
+            | Self::Utf8StringLiteral(..)
             | Self::WideStringLiteral(..)
             | Self::Utf16StringLiteral(..)
             | Self::Utf32StringLiteral(..) => "a string literal".to_owned(),
@@ -260,6 +265,7 @@ impl Keyword {
         match self {
             Self::Alignas => "_Alignas",
             Self::Alignof => "_Alignof",
+            Self::Atomic => "_Atomic",
             Self::Auto => "auto",
             Self::Bool => "_Bool",
             Self::Break => "break",
@@ -280,6 +286,7 @@ impl Keyword {
             Self::Goto => "goto",
             Self::If => "if",
             Self::Inline => "inline",
+            Self::Imaginary => "_Imaginary",
             Self::Int => "int",
             Self::Long => "long",
             Self::Noreturn => "_Noreturn",
@@ -294,6 +301,7 @@ impl Keyword {
             Self::Struct => "struct",
             Self::Switch => "switch",
             Self::Typedef => "typedef",
+            Self::ThreadLocal => "_Thread_local",
             Self::Union => "union",
             Self::Unsigned => "unsigned",
             Self::Void => "void",

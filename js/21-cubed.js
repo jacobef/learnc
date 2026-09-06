@@ -30,5 +30,4 @@ createCodeOutputChallengeTemplate({
         return null;
     },
     next: "22-max.html",
-    isLast: false,
 });

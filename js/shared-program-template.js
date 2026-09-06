@@ -1,6 +1,8 @@
-import { applyTextTokenReplacements, applyOtherNames, appendStateObjects, bindBtnRefPulse, clearNode, cloneBoxes, isMobileViewport, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, makeAnswerBox, normalizeZeroDisplay, queryRole, readBoxState, renderCodePane, renderParts, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, } from "./shared-core.js";
-import { clearLevelProgress, currentLevelId, maybeRestoreLevelProgress, writeLevelProgress, } from "./shared-progress.js";
-import { allocateCWorkspaceObject, boxValueMatchesSpec, resolveCBoxAliases, runCProgram, } from "./shared-c-interpreter.js";
+import { applyOtherNames, appendStateObjects, bindBtnRefPulse, clearNode, cloneBoxes, isMobileViewport, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, makeAnswerBox, normalizeZeroDisplay, queryRole, readBoxState, renderCodePane, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, } from "./shared-core.js";
+import { createButtonTokenReplacer, createHintPresenter, createLevelProgressController, nextLessonLabel, } from "./shared-lesson-runtime.js";
+import { runCProgram } from "./shared-c-interpreter.js";
+import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
+import { allocateCWorkspaceObject, resolveCBoxAliases, } from "./shared-c-workspace-model.js";
 function ifKeywordColumnsByLine(lines) {
     const columnsByLine = new Map();
     let inBlockComment = false;
@@ -526,7 +528,7 @@ function formatRunLabel(stage, totalLines, endLabel, { withArrow = true, badge =
         : `${prefix}${verb} lines ${start}-${end}${suffix}`;
 }
 function createProgramTemplate(config) {
-    const { steps, initialInstructions = "", next = null, workspace = {}, isLast = false, } = config;
+    const { steps, initialInstructions = "", next = null, workspace = {}, nextLabel, } = config;
     if (!Array.isArray(steps) || !steps.length) {
         throw new Error("Program steps must be a non-empty array.");
     }
@@ -565,12 +567,11 @@ function createProgramTemplate(config) {
     updateMobileActionsVisibility();
     window.addEventListener("resize", placeActionButtonsForViewport);
     bindBtnRefPulse(codeRoot || document);
-    const endLabel = (() => {
-        if (isLast)
-            return "Finish";
-        const label = getNavLabelForHref(next);
-        return label ? `Next: ${label}` : "Next Program";
-    })();
+    const endLabel = nextLessonLabel({
+        next,
+        fallback: "Next Program",
+        override: nextLabel,
+    });
     const previous = getPreviousNavHref();
     const previousLabel = (() => {
         const label = getNavLabelForHref(previous);
@@ -782,8 +783,8 @@ function createProgramTemplate(config) {
         i = j;
     }
     pushNoEventStages(totalLines + 1, run.state || previousState);
-    const levelId = currentLevelId();
-    const restored = maybeRestoreLevelProgress(levelId);
+    const progress = createLevelProgressController(isDefaultProgress);
+    const restored = progress.restore();
     let executionSteps = Math.max(-1, Math.min(runtimeStages.length - 1, restored?.executionSteps ?? -1));
     let solvedStage = Math.max(-1, restored?.solvedStage ?? -1);
     const workspaceByStage = new Map((restored?.workspaceByStage || []).map((entry) => [entry.stageIndex, entry.boxes ? cloneBoxes(entry.boxes) : null]));
@@ -853,13 +854,7 @@ function createProgramTemplate(config) {
             (snapshot.otherNamesShown?.length ?? 0) === 0);
     }
     function persistProgress() {
-        const snapshot = progressSnapshot();
-        if (isDefaultProgress(snapshot)) {
-            clearLevelProgress(levelId);
-        }
-        else {
-            writeLevelProgress(snapshot, levelId);
-        }
+        progress.save(progressSnapshot());
     }
     function withSidebarParam(url) {
         if (!url)
@@ -891,9 +886,7 @@ function createProgramTemplate(config) {
         ["$newVariableButton", "$b{+ New variable}"],
         ["$showAliasesButton", "$b{Show aliases}"],
     ];
-    function applyButtonTokens(parts) {
-        return applyTextTokenReplacements(parts, buttonReplacements());
-    }
+    const applyButtonTokens = createButtonTokenReplacer(buttonReplacements);
     function renderInstructions() {
         const stage = currentStage();
         const text = stage?.instructions ??
@@ -1083,20 +1076,7 @@ function createProgramTemplate(config) {
             });
         });
     }
-    function hideHint() {
-        if (!hintPanel)
-            return;
-        hintPanel.classList.add("hidden");
-    }
-    function showHint(parts) {
-        if (!hintPanel)
-            return;
-        if (!parts || (Array.isArray(parts) && parts.length === 0))
-            return;
-        renderParts(hintPanel, applyButtonTokens(parts) || "");
-        hintPanel.classList.remove("hidden");
-        flashStatus(hintPanel);
-    }
+    const { hide: hideHint, show: showHint } = createHintPresenter(hintPanel, applyButtonTokens);
     function hintContext(stage) {
         const rawBoxes = stage.editableMode === "state" && stageNeedsSolve(stage)
             ? readWorkspace()
@@ -1458,7 +1438,7 @@ function createProgramTemplate(config) {
         otherNamesShown.clear();
         setStatus("", "muted");
         hideHint();
-        clearLevelProgress(levelId);
+        progress.clear();
         render();
     });
     render();

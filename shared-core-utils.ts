@@ -86,6 +86,11 @@ export type ProgramDiagnostic = {
   range: ProgramDiagnosticRange;
   annotations?: ProgramDiagnosticAnnotation[];
   messageParts?: ProgramDiagnosticMessagePart[];
+  runtimeContext?: {
+    executedSteps: number;
+    lineExecutionCount: number | null;
+    state: BoxState[];
+  } | null;
 };
 
 export function normalizeZeroDisplay(value: BoxValue): string {

@@ -5,10 +5,22 @@ edition = "2024"
 autobins = false
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "cboxes-sqlite"
+path = "src/bin/cboxes_sqlite.rs"
+
+[features]
+default = ["native-mimalloc", "pure-expression-precompute"]
+native-mimalloc = ["dep:mimalloc"]
+pure-expression-precompute = []
 
 [dependencies]
 libc = "0.2"
+
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false, optional = true }
 
 [profile.release]
 codegen-units = 1

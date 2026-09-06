@@ -1,137 +1,19 @@
-import { applyTextTokenReplacements, appendStateObjects, bindBtnRefPulse, clearNode, createStepper, ensurePanelizedMain, flashStatus, getNavLabelForHref, queryElement, queryRole, renderParts, setPartsContent, syncDocumentTitleFromNav, } from "./shared-core.js";
+import { appendStateObjects, bindBtnRefPulse, clearNode, createStepper, flashStatus, setPartsContent, } from "./shared-core.js";
 import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
-import { diagnosticDecorations, renderDiagnosticMessage, } from "./shared-diagnostics.js";
-import { boxValueMatchesSpec, runCProgram } from "./shared-c-interpreter.js";
-import { clearLevelProgress, currentLevelId, maybeRestoreLevelProgress, writeLevelProgress, } from "./shared-progress.js";
-function collectCodeEditorElements(root = document) {
-    const role = (name) => queryRole(name, root);
-    return {
-        instructionsEl: role("code-instructions"),
-        editor: role("code-editor"),
-        lineNumbers: role("code-line-numbers"),
-        stage: role("code-stage"),
-        status: role("code-status"),
-        diagnosticEl: role("code-diagnostic"),
-        hintPanel: role("code-hint"),
-        hintBtn: role("code-hint-btn"),
-        checkBtn: role("code-check"),
-        levelResetBtn: role("code-reset-level"),
-        prevBtn: queryElement('button[data-stepper="prev"]', root),
-        nextBtn: queryElement('button[data-stepper="next"]', root),
-        codeRoot: role("code-root"),
-    };
-}
-function ensureCodeEditorLayout(textareaMinLines) {
-    const resolvedTitle = syncDocumentTitleFromNav();
-    const existing = queryRole("code-editor");
-    if (existing)
-        return collectCodeEditorElements();
-    const main = ensurePanelizedMain(resolvedTitle);
-    const instructionsEl = document.createElement("p");
-    instructionsEl.dataset.role = "code-instructions";
-    instructionsEl.className = "intro";
-    const section = document.createElement("section");
-    section.dataset.role = "code-root";
-    section.className = "panel-shell";
-    const actionBar = document.createElement("div");
-    actionBar.className = "controls-bar controls-bar-code";
-    const controlsMain = document.createElement("div");
-    controlsMain.className = "controls-main panel panel-controls";
-    const controlsRow = document.createElement("div");
-    controlsRow.className = "controls-row controls-left";
-    controlsMain.appendChild(controlsRow);
-    actionBar.appendChild(controlsMain);
-    const row = document.createElement("div");
-    row.className = "row panel-row";
-    section.appendChild(actionBar);
-    section.appendChild(row);
-    main.appendChild(section);
-    const codePanel = document.createElement("div");
-    codePanel.className = "panel code-editor-panel panel-scroll code-panel-shell";
-    const codeTitle = document.createElement("div");
-    codeTitle.className = "panel-title code-title";
-    codeTitle.textContent = "Code";
-    const codePane = document.createElement("div");
-    codePane.className = "codepane panel-body";
-    const codeRow = document.createElement("div");
-    codeRow.className = "codepane-row";
-    const lineNumbers = document.createElement("div");
-    lineNumbers.dataset.role = "code-line-numbers";
-    lineNumbers.className = "code-gutter";
-    lineNumbers.setAttribute("aria-hidden", "true");
-    const editorWrap = document.createElement("div");
-    editorWrap.className = "code-editor-wrap";
-    const editor = document.createElement("textarea");
-    editor.dataset.role = "code-editor";
-    editor.className = "code-textarea";
-    editor.spellcheck = false;
-    editor.rows = Math.max(1, Math.floor(textareaMinLines));
-    editorWrap.appendChild(editor);
-    codeRow.append(lineNumbers, editorWrap);
-    codePane.appendChild(codeRow);
-    const diagnosticEl = document.createElement("div");
-    diagnosticEl.dataset.role = "code-diagnostic";
-    diagnosticEl.className = "code-diagnostic hidden";
-    codePanel.append(codeTitle, codePane, diagnosticEl);
-    const stateCol = document.createElement("div");
-    stateCol.className = "code-editor-state-col";
-    const stage = document.createElement("div");
-    stage.dataset.role = "code-stage";
-    stage.className = "code-editor-state-stage";
-    stateCol.appendChild(stage);
-    const prevBtn = document.createElement("button");
-    prevBtn.dataset.stepper = "prev";
-    prevBtn.textContent = "Back ◀";
-    const nextBtn = document.createElement("button");
-    nextBtn.dataset.stepper = "next";
-    nextBtn.textContent = "Next Program ▶▶";
-    const hintBtn = document.createElement("button");
-    hintBtn.dataset.role = "code-hint-btn";
-    hintBtn.className = "hint-link";
-    hintBtn.type = "button";
-    hintBtn.textContent = "Hint";
-    const checkBtn = document.createElement("button");
-    checkBtn.dataset.role = "code-check";
-    checkBtn.textContent = "Check";
-    const levelResetBtn = document.createElement("button");
-    levelResetBtn.dataset.role = "code-reset-level";
-    levelResetBtn.textContent = "Reset level";
-    const status = document.createElement("span");
-    status.dataset.role = "code-status";
-    status.className = "muted";
-    const spacer = document.createElement("span");
-    spacer.className = "controls-spacer";
-    spacer.setAttribute("aria-hidden", "true");
-    controlsRow.append(prevBtn, nextBtn, spacer, levelResetBtn, hintBtn, checkBtn, status);
-    const hintPanel = document.createElement("div");
-    hintPanel.dataset.role = "code-hint";
-    hintPanel.className = "hint-inline hidden";
-    actionBar.append(hintPanel, instructionsEl);
-    row.append(codePanel, stateCol);
-    return {
-        instructionsEl,
-        editor,
-        lineNumbers,
-        stage,
-        status,
-        diagnosticEl,
-        hintPanel,
-        hintBtn,
-        checkBtn,
-        levelResetBtn,
-        prevBtn,
-        nextBtn,
-        codeRoot: section,
-    };
-}
+import { ensureCodeLessonLayout } from "./shared-code-lesson-layout.js";
+import { diagnosticDecorations, diagnosticMessageText, renderDiagnosticMessage, } from "./shared-diagnostics.js";
+import { runCProgram } from "./shared-c-interpreter.js";
+import { appendDiagnosticRuntimeContext, codeRuntimeIssue, diagnosticRuntimeContextText, renderCodeRuntimeIssue, } from "./shared-code-runtime-issues.js";
+import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
+import { createButtonTokenReplacer, createHintPresenter, createLevelProgressController, nextLessonLabel, resetLevelAfterConfirmation, } from "./shared-lesson-runtime.js";
 function createCodeEditorTemplate(config) {
-    const { startCode = "", targetState = [], textareaMinLines, allowNewLines = true, hints = null, instructions = "", next = null, isLast = false, } = config;
-    const { instructionsEl, editor, lineNumbers, stage, status, diagnosticEl, hintPanel, hintBtn, checkBtn, levelResetBtn, prevBtn, nextBtn, codeRoot, } = ensureCodeEditorLayout(textareaMinLines);
+    const { startCode = "", targetState = [], textareaMinLines, allowNewLines = true, hints = null, instructions = "", next = null, nextLabel, } = config;
+    const { instructionsEl, editor, lineNumbers, stage, status, diagnosticEl, hintPanel, hintBtn, checkBtn, levelResetBtn, prevBtn, nextBtn, codeRoot, } = ensureCodeLessonLayout({ textareaMinLines, lockedInput: false });
     const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
     bindBtnRefPulse(codeRoot || document);
-    const levelId = currentLevelId();
     const defaultText = normalizeEditorText(startCode);
-    const restoredProgress = maybeRestoreLevelProgress(levelId);
+    const progress = createLevelProgressController(isDefaultProgress);
+    const restoredProgress = progress.restore();
     const state = {
         text: typeof restoredProgress?.text === "string"
             ? normalizeEditorText(restoredProgress.text)
@@ -142,12 +24,11 @@ function createCodeEditorTemplate(config) {
             : null,
     };
     let pager = null;
-    const endLabel = (() => {
-        if (isLast)
-            return "Finish";
-        const label = getNavLabelForHref(next);
-        return label ? `Next: ${label}` : "Next Program";
-    })();
+    const endLabel = nextLessonLabel({
+        next,
+        fallback: "Next Program",
+        override: nextLabel,
+    });
     function buttonReplacements() {
         const backLabel = (prevBtn?.textContent || "Back ◀").trim();
         return [
@@ -175,12 +56,7 @@ function createCodeEditorTemplate(config) {
         return snapshot.text === defaultText && !snapshot.pass;
     }
     function persistProgress() {
-        const snapshot = progressSnapshot();
-        if (isDefaultProgress(snapshot)) {
-            clearLevelProgress(levelId);
-            return;
-        }
-        writeLevelProgress(snapshot, levelId);
+        progress.save(progressSnapshot());
     }
     function setStatus(text, cls = "muted") {
         if (!status)
@@ -194,23 +70,30 @@ function createCodeEditorTemplate(config) {
     function getEditorLines() {
         return getEditorText().split(/\r?\n/);
     }
+    function analyzeUserProgram() {
+        const program = runCProgram(getEditorText());
+        const runtimeIssue = codeRuntimeIssue(program);
+        const diagnostic = program.kind === "ok" ? null : program.diagnostic;
+        const outcome = (() => {
+            if (program.kind !== "ok") {
+                return {
+                    kind: program.kind,
+                    state: program.diagnostic.runtimeContext?.state ?? null,
+                };
+            }
+            if (runtimeIssue?.kind === "blocked-input") {
+                return { kind: runtimeIssue.kind, state: program.blocked?.state ?? null };
+            }
+            if (runtimeIssue) {
+                return { kind: runtimeIssue.kind, state: program.state };
+            }
+            return { kind: "ok", state: program.state };
+        })();
+        return { program, outcome, diagnostic, runtimeIssue };
+    }
     function applyUserProgram() {
-        const result = runCProgram(getEditorText());
-        return result.kind === "ok" && !result.executionLimit
-            ? result.state
-            : null;
-    }
-    function getProgramOutcome() {
-        const result = runCProgram(getEditorText());
-        if (result.kind !== "ok")
-            return { kind: result.kind, state: null };
-        if (result.executionLimit)
-            return { kind: "ok", state: null };
-        return { kind: "ok", state: result.state };
-    }
-    function getProgramDiagnostic() {
-        const result = runCProgram(getEditorText());
-        return result.kind === "ok" ? null : result.diagnostic;
+        const analysis = analyzeUserProgram();
+        return analysis.outcome.kind === "ok" ? analysis.outcome.state : null;
     }
     function renderDiagnostic(diagnostic) {
         if (!diagnosticEl)
@@ -236,13 +119,16 @@ function createCodeEditorTemplate(config) {
             tip.textContent = diagnostic.tip;
             diagnosticEl.appendChild(tip);
         }
+        appendDiagnosticRuntimeContext(diagnosticEl, diagnostic);
         editor?.setAttribute("aria-invalid", "true");
     }
-    function updateLineGutters(diagnostic = null) {
+    function updateLineGutters(analysis) {
+        const { diagnostic, runtimeIssue } = analysis;
         const lines = getEditorLines();
         const lineNumberClasses = new Map();
-        if (diagnostic) {
-            lineNumberClasses.set(diagnostic.range.startLine, ["has-error"]);
+        const problemLine = diagnostic?.range.startLine ?? runtimeIssue?.range.startLine;
+        if (problemLine !== undefined) {
+            lineNumberClasses.set(problemLine, ["has-error"]);
         }
         updateCodeSurface({
             editor,
@@ -253,7 +139,12 @@ function createCodeEditorTemplate(config) {
             decorations: diagnosticDecorations(diagnostic, lines),
             lineNumberClasses,
         });
-        renderDiagnostic(diagnostic);
+        if (diagnostic) {
+            renderDiagnostic(diagnostic);
+        }
+        else {
+            renderCodeRuntimeIssue(diagnosticEl, editor, runtimeIssue);
+        }
     }
     function isTargetMatch(outcome) {
         if (outcome.kind !== "ok" || !outcome.state)
@@ -272,11 +163,11 @@ function createCodeEditorTemplate(config) {
         }
         return true;
     }
-    function evaluate() {
-        const outcome = getProgramOutcome();
+    function evaluate(analysis = analyzeUserProgram()) {
+        const outcome = analysis.outcome;
         return { ok: isTargetMatch(outcome), outcome };
     }
-    function renderState(title, boxes) {
+    function renderState(title, boxes, emptyMessage = "(no variables)") {
         const wrap = document.createElement("div");
         wrap.className = "state-panel state-panel-scrollable";
         const heading = document.createElement("h3");
@@ -289,7 +180,7 @@ function createCodeEditorTemplate(config) {
             const msg = document.createElement("div");
             msg.className = "muted";
             msg.style.padding = "8px";
-            msg.textContent = "(no variables)";
+            msg.textContent = emptyMessage;
             grid.appendChild(msg);
         }
         else {
@@ -307,48 +198,59 @@ function createCodeEditorTemplate(config) {
         clearNode(stage);
         const group = document.createElement("div");
         group.className = "state-group two-col";
-        group.appendChild(renderState("Your code's final state", outcome.state));
+        const stateTitle = outcome.kind === "ub" && outcome.state
+            ? "Last recorded state before undefined behavior"
+            : outcome.kind === "execution-limit"
+                ? "State before the repeating section"
+                : outcome.kind === "blocked-input"
+                    ? "Program state when it began waiting"
+                    : outcome.kind === "compile"
+                        ? "Program did not run"
+                        : "Your code's final state";
+        const emptyMessage = outcome.kind === "compile"
+            ? "(fix the error above to run the program)"
+            : "(no variables)";
+        group.appendChild(renderState(stateTitle, outcome.state, emptyMessage));
         group.appendChild(renderState("Target final state", targetState));
         stage.appendChild(group);
     }
-    function partsContext() {
+    function partsContext(analysis) {
         return {
             text: getEditorText(),
             targetState,
-            diagnostic: getProgramDiagnostic(),
+            diagnostic: analysis.diagnostic,
             applyUserProgram,
         };
     }
-    function applyButtonTokens(parts) {
-        return applyTextTokenReplacements(parts, buttonReplacements());
-    }
-    function hideHint() {
-        if (!hintPanel)
-            return;
-        hintPanel.classList.add("hidden");
-        hintPanel.textContent = "";
-    }
-    function showHint(parts) {
-        if (!hintPanel)
-            return;
-        hintPanel.classList.remove("hidden");
-        clearNode(hintPanel);
-        renderParts(hintPanel, applyButtonTokens(parts) || []);
-        flashStatus(hintPanel);
-    }
+    const applyButtonTokens = createButtonTokenReplacer(buttonReplacements);
+    const { hide: hideHint, show: showHint } = createHintPresenter(hintPanel, applyButtonTokens);
     function handleHint() {
         if (state.pass)
             return;
-        const result = evaluate();
+        const analysis = analyzeUserProgram();
+        const result = evaluate(analysis);
         if (result.ok) {
             showHint("Looks good. Press $checkButton.");
             return;
         }
-        if (!hints) {
-            showHint("No hints for this page.");
+        if (analysis.runtimeIssue) {
+            showHint(`${analysis.runtimeIssue.message} ${analysis.runtimeIssue.tip}`);
             return;
         }
-        const ctx = partsContext();
+        if (analysis.diagnostic?.kind === "ub") {
+            const context = diagnosticRuntimeContextText(analysis.diagnostic);
+            showHint([diagnosticMessageText(analysis.diagnostic), context]
+                .filter(Boolean)
+                .join(" "));
+            return;
+        }
+        if (!hints) {
+            showHint(analysis.diagnostic
+                ? diagnosticMessageText(analysis.diagnostic)
+                : "No hints for this page.");
+            return;
+        }
+        const ctx = partsContext(analysis);
         const parts = typeof hints === "function" ? hints(ctx) : hints;
         if (!parts || (Array.isArray(parts) && parts.length === 0)) {
             showHint("No hint available for this state.");
@@ -356,11 +258,11 @@ function createCodeEditorTemplate(config) {
         }
         showHint(parts);
     }
-    function render() {
-        const diagnostic = getProgramDiagnostic();
-        updateLineGutters(diagnostic);
-        const outcome = getProgramOutcome();
-        renderStage(outcome);
+    let lastAnalysis = null;
+    function render(analysis = analyzeUserProgram()) {
+        lastAnalysis = analysis;
+        updateLineGutters(analysis);
+        renderStage(analysis.outcome);
         if (instructions)
             setPartsContent(instructionsEl, applyButtonTokens(instructions));
         else
@@ -391,9 +293,15 @@ function createCodeEditorTemplate(config) {
             if (lineNumbers)
                 lineNumbers.scrollTop = editor.scrollTop;
         });
-        window.addEventListener("resize", () => updateLineGutters(getProgramDiagnostic()));
+        window.addEventListener("resize", () => {
+            if (lastAnalysis)
+                updateLineGutters(lastAnalysis);
+        });
         if (typeof ResizeObserver !== "undefined") {
-            const ro = new ResizeObserver(() => updateLineGutters(getProgramDiagnostic()));
+            const ro = new ResizeObserver(() => {
+                if (lastAnalysis)
+                    updateLineGutters(lastAnalysis);
+            });
             ro.observe(editor);
         }
     }
@@ -406,8 +314,15 @@ function createCodeEditorTemplate(config) {
     if (checkBtn) {
         checkBtn.addEventListener("click", () => {
             hideHint();
-            const result = evaluate();
-            setStatus(result.ok ? "correct" : "incorrect", result.ok ? "ok" : "err");
+            const analysis = analyzeUserProgram();
+            const result = evaluate(analysis);
+            const failureStatus = analysis.runtimeIssue?.status ??
+                (analysis.diagnostic?.kind === "ub"
+                    ? "fix the undefined behavior shown above"
+                    : analysis.diagnostic
+                        ? "fix the error shown above"
+                        : "incorrect");
+            setStatus(result.ok ? "correct" : failureStatus, result.ok ? "ok" : "err");
             flashStatus(status);
             if (!result.ok)
                 return;
@@ -422,11 +337,7 @@ function createCodeEditorTemplate(config) {
     }
     if (levelResetBtn) {
         levelResetBtn.addEventListener("click", () => {
-            const confirmed = window.confirm("Reset your saved progress for this level and start over?");
-            if (!confirmed)
-                return;
-            clearLevelProgress(levelId);
-            window.location.reload();
+            resetLevelAfterConfirmation(progress);
         });
     }
     pager = createStepper({
@@ -436,7 +347,7 @@ function createCodeEditorTemplate(config) {
         endLabel,
         getBoundary: () => 0,
         setBoundary: () => { },
-        onAfterChange: render,
+        onAfterChange: () => render(),
         isStepLocked: () => !state.pass,
     });
     pager.update();

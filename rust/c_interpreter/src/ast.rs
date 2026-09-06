@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-
+use crate::fast_hash::FastHashMap;
 use crate::number::NumberLiteral;
-use crate::source::Span;
+use crate::source::{FileId, Span};
 use crate::token::StringLiteralValue;
 use crate::types::{CType, EnumType, RecordType};
 
@@ -27,9 +26,9 @@ pub struct TranslationUnit {
     pub globals: Vec<Declaration>,
     pub global_definitions: Vec<Declaration>,
     pub inline_function_definitions: Vec<FunctionDef>,
-    pub records: HashMap<usize, RecordType>,
-    pub enums: HashMap<usize, EnumType>,
-    pub enum_constants: HashMap<String, i128>,
+    pub records: FastHashMap<usize, RecordType>,
+    pub enums: FastHashMap<usize, EnumType>,
+    pub enum_constants: FastHashMap<(FileId, String), i128>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +74,7 @@ pub struct Parameter {
     pub ty: CType,
     pub vla_bounds: Vec<Option<Expr>>,
     pub static_array_bound: Option<Expr>,
+    pub prototype_vla_star: bool,
     pub adjusted_from_array_or_function: bool,
     pub storage_class: Option<StorageClass>,
     pub span: Span,

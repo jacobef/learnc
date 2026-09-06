@@ -141,9 +141,3 @@ export function clearSandboxProgress(): void {
     // Ignore window.name fallback failures.
   }
 }
-
-export function maybeRestoreLevelProgress<T>(
-  levelId: string = currentLevelId(),
-): T | null {
-  return readLevelProgress<T>(levelId);
-}

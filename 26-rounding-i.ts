@@ -45,5 +45,4 @@ createCodeOutputChallengeTemplate({
     return null;
   },
   next: "27-rounding-ii.html",
-  isLast: false,
 });

@@ -5,6 +5,10 @@
 #define FLT_ROUNDS 1
 #define FLT_EVAL_METHOD 0
 
+#define FLT_HAS_SUBNORM 1
+#define DBL_HAS_SUBNORM 1
+#define LDBL_HAS_SUBNORM 1
+
 #define DECIMAL_DIG 17
 #define FLT_DECIMAL_DIG 9
 #define DBL_DECIMAL_DIG 17

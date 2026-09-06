@@ -8,9 +8,9 @@ extern void __codex_sig_dfl(int);
 extern void __codex_sig_ign(int);
 extern void __codex_sig_err(int);
 
-#define SIG_DFL __codex_sig_dfl
-#define SIG_IGN __codex_sig_ign
-#define SIG_ERR __codex_sig_err
+#define SIG_DFL ((__codex_sighandler_t *)0)
+#define SIG_IGN ((__codex_sighandler_t *)1)
+#define SIG_ERR ((__codex_sighandler_t *)2)
 
 #define SIGABRT 6
 #define SIGFPE 8

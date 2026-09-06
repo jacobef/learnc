@@ -1,6 +1,5 @@
 import {
   appendStateObjects,
-  applyTextTokenReplacements,
   bindBtnRefPulse,
   clearNode,
   createStepper,
@@ -8,7 +7,6 @@ import {
   ensurePanelizedMain,
   findArrayObjectBoxesForResult,
   flashStatus,
-  getNavLabelForHref,
   readBoxState,
   queryRole,
   setPartsContent,
@@ -16,19 +14,23 @@ import {
   vbox,
 } from "./shared-core.js";
 import type { BoxState, CTypeInfo, Parts, Stepper } from "./shared-core.js";
+import { createSyntheticAddressBase } from "./shared-c-address-space.js";
 import {
-  boxValueMatchesSpec,
-  createSyntheticAddressBase,
   evaluateCExpression,
-  normalizeBoxValueForContext,
   runCProgram,
 } from "./shared-c-interpreter.js";
 import {
-  clearLevelProgress,
-  currentLevelId,
-  maybeRestoreLevelProgress,
-  writeLevelProgress,
-} from "./shared-progress.js";
+  boxValueMatchesSpec,
+  normalizeBoxValueForContext,
+} from "./shared-c-value-semantics.js";
+import {
+  createButtonTokenReplacer,
+  createHintPresenter,
+  createLevelProgressController,
+  invalidTemplateConfig,
+  nextLessonLabel,
+  resetLevelAfterConfirmation,
+} from "./shared-lesson-runtime.js";
 
 type AnswerMode = "selected" | "entered";
 type ExpressionHint = (ctx: ExpressionHintContext) => Parts | null | undefined;
@@ -46,7 +48,7 @@ interface ExpressionTemplateConfig {
   steps: ExpressionStep[];
   initialInstructions?: string;
   next: string | null;
-  isLast?: boolean;
+  nextLabel?: string;
   workspace?: ExpressionWorkspaceConfig;
 }
 
@@ -65,9 +67,12 @@ interface ExpressionTemplateState {
 
 interface ExpressionTemplateElements {
   instructionsEl: HTMLElement | null;
+  previousBtn: HTMLButtonElement | null;
+  nextBtn: HTMLButtonElement | null;
   continueBtn: HTMLButtonElement | null;
   levelResetBtn: HTMLButtonElement | null;
   sectionEl: HTMLElement | null;
+  exerciseStack: HTMLElement | null;
   expressionEl: HTMLElement | null;
   answerPanel: HTMLElement | null;
   answerSlot: HTMLElement | null;
@@ -112,9 +117,12 @@ function collectExpressionElements(
   const role = <T extends Element>(name: string) => queryRole<T>(name, root);
   return {
     instructionsEl: role<HTMLElement>("expr-instructions"),
+    previousBtn: root.querySelector<HTMLButtonElement>('[data-stepper="prev"]'),
+    nextBtn: root.querySelector<HTMLButtonElement>('[data-stepper="next"]'),
     continueBtn: role<HTMLButtonElement>("expr-continue"),
     levelResetBtn: role<HTMLButtonElement>("expr-reset-level"),
     sectionEl: role<HTMLElement>("expr-section"),
+    exerciseStack: root.querySelector<HTMLElement>(".expr-eval-stack"),
     expressionEl: role<HTMLElement>("expr-expression"),
     answerPanel: role<HTMLElement>("expr-answer-panel"),
     answerSlot: role<HTMLElement>("expr-answer-slot"),
@@ -279,21 +287,17 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     steps = [],
     initialInstructions = "",
     next = null,
-    isLast = false,
+    nextLabel,
     workspace = {},
   } = config;
   const alwaysShowExprResult = workspace.alwaysShowExprResult !== false;
-  const endLabel = (() => {
-    if (isLast) return "Finish";
-    const label = getNavLabelForHref(next);
-    return label ? `Next: ${label}` : "Next Page";
-  })();
-  const failConfig = (message: string): never => {
-    alert(message);
-    throw new Error(message);
-  };
+  const endLabel = nextLessonLabel({
+    next,
+    fallback: "Next Page",
+    override: nextLabel,
+  });
   if (!Array.isArray(steps) || !steps.length) {
-    failConfig("Expression template requires at least one step.");
+    invalidTemplateConfig("Expression template requires at least one step.");
   }
   const normalizedSteps = steps.map((step) => ({
     ...step,
@@ -314,9 +318,12 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
 
   const {
     instructionsEl,
+    previousBtn,
+    nextBtn,
     continueBtn,
     levelResetBtn,
     sectionEl,
+    exerciseStack,
     expressionEl,
     answerPanel,
     answerSlot,
@@ -382,10 +389,11 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     return "selected";
   }
 
-  const levelId = currentLevelId();
+  const progress = createLevelProgressController<ExpressionTemplateProgress>(
+    isDefaultProgress,
+  );
   const defaultShowIntro = !!initialInstructions;
-  const restoredProgress =
-    maybeRestoreLevelProgress<ExpressionTemplateProgress>(levelId);
+  const restoredProgress = progress.restore();
   const restoredPasses = sanitizedRecord<boolean>(restoredProgress?.passes);
   const state: ExpressionTemplateState = {
     boundary: clampBoundary(restoredProgress?.boundary ?? 0),
@@ -423,18 +431,6 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     control.classList.toggle("hidden", !visible);
   }
 
-  function showHint(text: Parts | null | undefined) {
-    if (!hintPanel) return;
-    renderHint(text);
-    hintPanel.classList.remove("hidden");
-    flashStatus(hintPanel);
-  }
-
-  function hideHint() {
-    if (!hintPanel) return;
-    hintPanel.classList.add("hidden");
-  }
-
   function visibleButtonLabel(
     button: HTMLButtonElement | null,
     fallback: string,
@@ -468,18 +464,14 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     ] as const;
   }
 
-  function applyButtonTokens(parts: Parts | null): Parts | null {
-    return applyTextTokenReplacements(parts, buttonReplacements()) as
-      | Parts
-      | null;
-  }
+  const applyButtonTokens = createButtonTokenReplacer(buttonReplacements);
+  const { hide: hideHint, show: showHint } = createHintPresenter(
+    hintPanel,
+    applyButtonTokens,
+  );
 
   function renderInstructions(parts: Parts | null) {
     setPartsContent(instructionsEl, applyButtonTokens(parts));
-  }
-
-  function renderHint(parts: Parts | null | undefined) {
-    setPartsContent(hintPanel, applyButtonTokens(parts ?? null));
   }
 
   function setActiveMode(mode: AnswerMode, editable: boolean) {
@@ -717,12 +709,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
   }
 
   function persistProgress() {
-    const snapshot = progressSnapshot();
-    if (isDefaultProgress(snapshot)) {
-      clearLevelProgress(levelId);
-      return;
-    }
-    writeLevelProgress(snapshot, levelId);
+    progress.save(progressSnapshot());
   }
 
   function isDefaultProgress(snapshot: ExpressionTemplateProgress): boolean {
@@ -909,15 +896,24 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     }
     if (state.showIntro) {
       renderInstructions(initialInstructions || null);
+      setControlVisible(sectionEl, true);
+      setControlVisible(exerciseStack, false);
+      setControlVisible(previousBtn, false);
+      setControlVisible(nextBtn, false);
       setControlVisible(continueBtn, true);
-      setControlVisible(sectionEl, false);
+      setControlVisible(levelResetBtn, false);
+      setControlVisible(checkBtn, false);
       setControlVisible(hintBtn, false);
       hideHint();
       persistProgress();
       return;
     }
+    setControlVisible(exerciseStack, true);
+    setControlVisible(previousBtn, true);
+    setControlVisible(nextBtn, true);
     setControlVisible(continueBtn, false);
     setControlVisible(sectionEl, true);
+    setControlVisible(levelResetBtn, true);
     setControlVisible(answerPanel, showExprResultPane);
     const instructionText = step.instructions ?? null;
     renderInstructions(instructionText);
@@ -1099,12 +1095,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
 
   if (levelResetBtn) {
     levelResetBtn.addEventListener("click", () => {
-      const confirmed = window.confirm(
-        "Reset your saved progress for this level and start over?",
-      );
-      if (!confirmed) return;
-      clearLevelProgress(levelId);
-      window.location.reload();
+      resetLevelAfterConfirmation(progress);
     });
   }
 
