@@ -216,6 +216,26 @@ impl<'a> Interpreter<'a> {
         text
     }
 
+    pub(super) fn host_printf_conversion_text(&self, conv: &PrintfConversion) -> String {
+        let mut host = conv.clone();
+        if matches!(host.spec, 'd' | 'i' | 'o' | 'u' | 'x' | 'X')
+            && matches!(
+                host.length,
+                PrintfLength::L | PrintfLength::J | PrintfLength::Z | PrintfLength::T
+            )
+        {
+            // These are all 64-bit in the interpreted data model. `long`,
+            // size_t, and ptrdiff_t are only 32-bit in the Wasm host ABI.
+            host.length = PrintfLength::Ll;
+        } else if matches!(host.spec, 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A')
+            && host.length == PrintfLength::BigL
+        {
+            // Interpreted long double is binary64, so pass a host double.
+            host.length = PrintfLength::None;
+        }
+        self.printf_conversion_text(&host)
+    }
+
     pub(super) fn printf_integer_type(
         &self,
         length: PrintfLength,
@@ -1652,6 +1672,7 @@ impl<'a> Interpreter<'a> {
             designated_root_ty: None,
             byte_offset_override: None,
             arithmetic_domain_start: None,
+            object_representation_domain: None,
             bit_field_width: None,
             restrict_source: None,
         }))
@@ -1694,8 +1715,14 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &ObjectFrames,
     ) -> Result<PointerValue, Diagnostic> {
+        // Library functions define their byte-addressed object from the supplied
+        // pointer and byte count (DR 0042), rather than by replaying character-
+        // pointer arithmetic from the caller's original conversion. The caller's
+        // region has already been checked before a library-derived pointer is made.
+        let mut library_pointer = pointer.clone();
+        library_pointer.object_representation_domain = None;
         let mut result = self.checked_pointer_offset(
-            pointer.clone(),
+            library_pointer,
             delta as i128,
             &CType::Char,
             objects,
@@ -3080,7 +3107,96 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &ObjectFrames,
     ) -> Result<(ObjectId, usize, usize), Diagnostic> {
-        self.byte_region_from_pointer_with_options(pointer, size, span, objects, false)
+        self.byte_region_from_pointer_with_options(pointer, size, span, objects, false, true)
+    }
+
+    /// Resolve a byte-counted library region. WG14 DR 0042 specifies the
+    /// objects used by memcpy as the `n`-byte regions beginning at its pointer
+    /// arguments, so a valid region may span nested array elements while
+    /// remaining inside the containing member/storage object.
+    pub(super) fn byte_region_from_pointer_untyped(
+        &self,
+        pointer: &PointerValue,
+        size: usize,
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<(ObjectId, usize, usize), Diagnostic> {
+        let region =
+            self.byte_region_from_pointer_with_options(pointer, size, span, objects, false, false)?;
+        if pointer.arithmetic_domain_start.is_some()
+            && let Some(object) = self.lookup_object(objects, region.0)
+            && let Some(domain) =
+                self.innermost_enclosing_record_member_domain(&object.ty, 0, region.1)
+            && region
+                .1
+                .checked_add(size)
+                .is_none_or(|end| end > domain.one_past_end)
+        {
+            return Err(Diagnostic::ub(
+                format!(
+                    "requested byte access of {} byte(s) exceeds the containing record member",
+                    size
+                ),
+                span,
+                Some("7.1.4"),
+            ));
+        }
+        Ok(region)
+    }
+
+    fn innermost_enclosing_record_member_domain(
+        &self,
+        ty: &CType,
+        base: usize,
+        address: usize,
+    ) -> Option<ByteDomain> {
+        match ty.unqualified() {
+            CType::Array(element_ty, len) if *len != 0 => {
+                let element_size = self.type_size_of(element_ty)?;
+                let relative = address.checked_sub(base)?;
+                let index = relative / element_size;
+                if index >= *len {
+                    return None;
+                }
+                self.innermost_enclosing_record_member_domain(
+                    element_ty,
+                    base.checked_add(index.checked_mul(element_size)?)?,
+                    address,
+                )
+            }
+            CType::Struct(_, _) | CType::Union(_, _) => {
+                let record = self.record_type(ty)?;
+                // A structure has at most one containing member. Union members
+                // overlap; choosing the narrowest matching member is the safe
+                // interpretation when the pointer's selected member path has
+                // already been rebased into an array root.
+                let mut candidates = record
+                    .members
+                    .iter()
+                    .filter(|member| member.bit_width.is_none())
+                    .filter_map(|member| {
+                        let start = base.checked_add(member.offset)?;
+                        let one_past_end = start.checked_add(self.type_size_of(&member.ty)?)?;
+                        (address >= start && address < one_past_end).then_some((
+                            ByteDomain {
+                                start,
+                                one_past_end,
+                            },
+                            &member.ty,
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                candidates.sort_by_key(|(domain, _)| domain.one_past_end - domain.start);
+                let (member_domain, member_ty) = candidates.into_iter().next()?;
+                self.innermost_enclosing_record_member_domain(
+                    member_ty,
+                    member_domain.start,
+                    address,
+                )
+                .or(Some(member_domain))
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn byte_region_from_pointer_allow_reserved(
@@ -3090,7 +3206,7 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &ObjectFrames,
     ) -> Result<(ObjectId, usize, usize), Diagnostic> {
-        self.byte_region_from_pointer_with_options(pointer, size, span, objects, true)
+        self.byte_region_from_pointer_with_options(pointer, size, span, objects, true, true)
     }
 
     fn byte_region_from_pointer_with_options(
@@ -3100,6 +3216,7 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &ObjectFrames,
         allow_reserved_buffer: bool,
+        enforce_designated_subobject: bool,
     ) -> Result<(ObjectId, usize, usize), Diagnostic> {
         let Some(object_id) = pointer.object else {
             return Err(Diagnostic::ub(
@@ -3148,10 +3265,27 @@ impl<'a> Interpreter<'a> {
                 Some("7.1.4"),
             ));
         }
-        if let (Some(domain_start), Some(domain_ty)) = (
-            pointer.arithmetic_domain_start,
-            pointer.designated_root_ty.as_deref(),
-        ) {
+        if enforce_designated_subobject
+            && pointer
+                .object_representation_domain
+                .and_then(ObjectRepresentationDomain::active)
+                .is_some_and(|domain| start < domain.start || end > domain.one_past_end)
+        {
+            return Err(Diagnostic::ub(
+                format!(
+                    "requested byte access of {} byte(s) exceeds the converted object's representation",
+                    size
+                ),
+                span,
+                Some("6.3.2.3"),
+            ));
+        }
+        if enforce_designated_subobject
+            && let (Some(domain_start), Some(domain_ty)) = (
+                pointer.arithmetic_domain_start,
+                pointer.designated_root_ty.as_deref(),
+            )
+        {
             let domain_end = self
                 .type_size_of(domain_ty)
                 .and_then(|size| domain_start.checked_add(size))
@@ -3204,6 +3338,14 @@ impl<'a> Interpreter<'a> {
     ) -> Option<(ObjectId, usize, usize)> {
         if let Some(start) = lvalue.byte_offset_override {
             let size = self.type_size_of(effective_ty)?;
+            let end = start.checked_add(size)?;
+            if lvalue
+                .object_representation_domain
+                .and_then(ObjectRepresentationDomain::active)
+                .is_some_and(|domain| start < domain.start || end > domain.one_past_end)
+            {
+                return None;
+            }
             return Some((lvalue.object, start, size));
         }
         if lvalue.base_offset == 0
@@ -3228,6 +3370,7 @@ impl<'a> Interpreter<'a> {
             designated_root_ty: lvalue.designated_root_ty.clone(),
             byte_offset_override: lvalue.byte_offset_override,
             arithmetic_domain_start: lvalue.arithmetic_domain_start,
+            object_representation_domain: lvalue.object_representation_domain,
         };
         let start = self.pointer_byte_offset_from_type(&pointer, effective_ty, root_ty)?;
         let size = self.type_size_of(effective_ty)?;
@@ -5074,8 +5217,11 @@ impl<'a> Interpreter<'a> {
                     && let ValueData::Pointer(pointer) = &mut data
                 {
                     let pointer = Rc::make_mut(pointer);
-                    if (((target_inner.is_character()
-                        || matches!(target_inner.unqualified(), CType::Void))
+                    let target_exposes_object_representation = target_inner.is_character()
+                        || matches!(target_inner.unqualified(), CType::Void);
+                    let source_exposes_object_representation = source_inner.is_character()
+                        || matches!(source_inner.unqualified(), CType::Void);
+                    if ((target_exposes_object_representation
                         && !self.compatible_object_layout_types(target_inner, source_inner))
                         || Self::corresponding_signed_unsigned_types(target_inner, source_inner))
                         && !pointer.is_null()
@@ -5089,6 +5235,44 @@ impl<'a> Interpreter<'a> {
                                     span,
                                 )
                             })?;
+                        pointer.byte_offset_override = Some(byte_offset);
+                        if target_exposes_object_representation
+                            && !source_exposes_object_representation
+                        {
+                            pointer.object_representation_domain = self
+                                .type_size_of(source_inner)
+                                .and_then(|size| byte_offset.checked_add(size))
+                                .map(|one_past_end| {
+                                    let domain = ByteDomain {
+                                        start: byte_offset,
+                                        one_past_end,
+                                    };
+                                    if target_inner.is_character() {
+                                        ObjectRepresentationDomain::Active(domain)
+                                    } else {
+                                        ObjectRepresentationDomain::Latent(domain)
+                                    }
+                                });
+                        }
+                    } else if matches!(source_inner.unqualified(), CType::Union(_, _))
+                        && self.record_type(source_inner).is_some_and(|record| {
+                            record.members.iter().any(|member| {
+                                member.bit_width.is_none()
+                                    && self.compatible_object_layout_types(&member.ty, target_inner)
+                            })
+                        })
+                        && !pointer.is_null()
+                        && Self::opaque_integer_pointer_address(pointer).is_none()
+                    {
+                        let byte_offset = self
+                            .pointer_byte_offset_from_root_type(pointer, source_inner)
+                            .ok_or_else(|| {
+                                Diagnostic::error(
+                                    "cannot preserve the address while converting a union pointer to a member pointer",
+                                    span,
+                                )
+                            })?;
+                        Rc::make_mut(&mut pointer.member_path).clear();
                         pointer.byte_offset_override = Some(byte_offset);
                     } else if let Some(domain) =
                         self.array_flatten_domain(source_inner, target_inner)
@@ -5110,6 +5294,21 @@ impl<'a> Interpreter<'a> {
                         pointer.designated_root_ty = Some(Rc::new(domain));
                         pointer.byte_offset_override = Some(byte_offset);
                         pointer.arithmetic_domain_start = Some(byte_offset);
+                    }
+                    if target_inner.is_character() {
+                        pointer.object_representation_domain = pointer
+                            .object_representation_domain
+                            .map(|domain| ObjectRepresentationDomain::Active(domain.byte_domain()));
+                    } else if matches!(target_inner.unqualified(), CType::Void) {
+                        pointer.object_representation_domain = pointer
+                            .object_representation_domain
+                            .map(|domain| ObjectRepresentationDomain::Latent(domain.byte_domain()));
+                    } else {
+                        // A round trip through void* or a character pointer recovers the
+                        // original typed pointer. Its ordinary array provenance remains
+                        // in designated_root_ty/arithmetic_domain_start, so the temporary
+                        // object-representation bound must no longer constrain it.
+                        pointer.object_representation_domain = None;
                     }
                 }
                 Ok(TypedValue {
@@ -6086,6 +6285,17 @@ impl<'a> Interpreter<'a> {
                     Diagnostic::ub("pointer arithmetic overflow", span, Some("6.5.6"))
                 })?
             };
+            if pointer
+                .object_representation_domain
+                .and_then(ObjectRepresentationDomain::active)
+                .is_some_and(|domain| new_byte < domain.start || new_byte > domain.one_past_end)
+            {
+                return Err(Diagnostic::ub(
+                    "pointer arithmetic left the bounds of the converted object's representation",
+                    span,
+                    Some("6.3.2.3"),
+                ));
+            }
             if let (Some(domain_start), Some(domain_ty)) = (
                 pointer.arithmetic_domain_start,
                 pointer.designated_root_ty.as_deref(),
@@ -6125,6 +6335,7 @@ impl<'a> Interpreter<'a> {
                         designated_root_ty: pointer.designated_root_ty,
                         byte_offset_override: Some(new_byte),
                         arithmetic_domain_start: pointer.arithmetic_domain_start,
+                        object_representation_domain: pointer.object_representation_domain,
                     });
                 }
             }
@@ -6198,6 +6409,7 @@ impl<'a> Interpreter<'a> {
                 designated_root_ty: pointer.designated_root_ty,
                 byte_offset_override: Some(new_byte),
                 arithmetic_domain_start: pointer.arithmetic_domain_start,
+                object_representation_domain: pointer.object_representation_domain,
             });
         }
         let limit = self
@@ -6252,6 +6464,7 @@ impl<'a> Interpreter<'a> {
             designated_root_ty: pointer.designated_root_ty,
             byte_offset_override,
             arithmetic_domain_start: pointer.arithmetic_domain_start,
+            object_representation_domain: pointer.object_representation_domain,
         })
     }
 
@@ -6301,6 +6514,17 @@ impl<'a> Interpreter<'a> {
                 .complex_component_type()
                 .expect("complex arithmetic type has component type");
             let result = |real: f64, imag: f64| -> Result<TypedValue, Diagnostic> {
+                let finite_operands = l.real.is_finite()
+                    && l.imag.is_finite()
+                    && r.real.is_finite()
+                    && r.imag.is_finite();
+                if finite_operands && (!real.is_finite() || !imag.is_finite()) {
+                    return Err(Diagnostic::ub(
+                        "complex arithmetic result is outside the range of its type",
+                        span,
+                        Some("6.5p5"),
+                    ));
+                }
                 Ok(TypedValue::complex(
                     common_ty.clone(),
                     self.convert_float_to_float(real, component_ty, span)?,
@@ -6345,6 +6569,20 @@ impl<'a> Interpreter<'a> {
             let l = lhs.to_float()?;
             let r = rhs.to_float()?;
             let result = |value: f64| -> Result<TypedValue, Diagnostic> {
+                if value.is_infinite() && l.is_finite() && r.is_finite() {
+                    return Err(Diagnostic::ub(
+                        "floating arithmetic result is outside the range of its type",
+                        span,
+                        Some("6.5p5"),
+                    ));
+                }
+                if value.is_nan() && !l.is_nan() && !r.is_nan() {
+                    return Err(Diagnostic::ub(
+                        "floating arithmetic result is not mathematically defined",
+                        span,
+                        Some("6.5p5"),
+                    ));
+                }
                 Ok(TypedValue::floating(
                     common_ty.clone(),
                     self.convert_float_to_float(value, &common_ty, span)?,

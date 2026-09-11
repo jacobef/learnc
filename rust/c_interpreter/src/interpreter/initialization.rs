@@ -2058,8 +2058,22 @@ impl<'a> Interpreter<'a> {
                         items[0].span,
                     ));
                 };
-                let item = &items[0];
-                if !item.designators.is_empty() {
+                if items[0].designators.is_empty() {
+                    let item = &items[0];
+                    let member = self.first_initializable_union_member(ty).ok_or_else(|| {
+                        Diagnostic::error("union has no initializable members", item.span)
+                    })?;
+                    let slot = self.record_slot_mut(members, &member.storage_name, item.span)?;
+                    let used = self.consume_initializer_items_into_type(
+                        slot, &member.ty, items, frame, objects, false,
+                    )?;
+                    *active_member = Some(member.storage_name.as_str().into());
+                    return Ok(used);
+                }
+
+                let mut item_index = 0;
+                while item_index < items.len() && !items[item_index].designators.is_empty() {
+                    let item = &items[item_index];
                     let selectors = self.initializer_selectors(ty, &item.designators, item.span)?;
                     let (member_name, rest) = match selectors.split_first() {
                         Some((InitSelector::Member(name), rest)) => (name.clone(), rest),
@@ -2087,26 +2101,18 @@ impl<'a> Interpreter<'a> {
                         false,
                     )?;
                     *active_member = Some(member.storage_name.as_str().into());
+                    item_index += 1;
                     let slot = self.record_slot_mut(members, &member.storage_name, item.span)?;
-                    Ok(1 + self.consume_after_designated_subobject(
+                    item_index += self.consume_after_designated_subobject(
                         slot,
                         &member.ty,
                         rest,
-                        &items[1..],
+                        &items[item_index..],
                         frame,
                         objects,
-                    )?)
-                } else {
-                    let member = self.first_initializable_union_member(ty).ok_or_else(|| {
-                        Diagnostic::error("union has no initializable members", item.span)
-                    })?;
-                    let slot = self.record_slot_mut(members, &member.storage_name, item.span)?;
-                    let used = self.consume_initializer_items_into_type(
-                        slot, &member.ty, items, frame, objects, false,
                     )?;
-                    *active_member = Some(member.storage_name.as_str().into());
-                    Ok(used)
                 }
+                Ok(item_index)
             }
             _ => Err(Diagnostic::error(
                 "initializer sequence requires an aggregate or union type",
@@ -3128,6 +3134,7 @@ impl<'a> Interpreter<'a> {
                         designated_root_ty: None,
                         byte_offset_override: Some(byte_offset),
                         arithmetic_domain_start: None,
+                        object_representation_domain: None,
                     },
                 )));
             }
@@ -3649,6 +3656,15 @@ impl<'a> Interpreter<'a> {
         }
         let current_root = lvalue.designated_root_ty.as_deref().unwrap_or(default_root);
         if self.compatible_object_layout_types(current_root, &lvalue.ty) {
+            // A typed array lvalue reconstructed over raw allocated storage already
+            // has the right root type, but it still needs its own arithmetic domain.
+            // Otherwise decaying one selected row would inherit the allocation's full
+            // byte extent and allow element pointers to walk into adjacent rows.
+            if lvalue.arithmetic_domain_start.is_none()
+                && let Some(start) = lvalue.byte_offset_override
+            {
+                lvalue.arithmetic_domain_start = Some(start);
+            }
             return Ok(());
         }
         let (_, start, _) = self

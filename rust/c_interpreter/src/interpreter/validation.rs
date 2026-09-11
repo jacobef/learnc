@@ -729,8 +729,15 @@ impl<'a> Interpreter<'a> {
             encoded_function_pointers.insert(name.clone(), address);
             decoded_pointers.insert(address, vec![EncodedPointer::Function(name)]);
         }
+        #[allow(unused_mut)]
         let mut startup_fenv = HostFEnv { opaque: [0; 16] };
-        let _ = unsafe { fegetenv(&mut startup_fenv) };
+        Self::set_host_errno(0);
+        #[cfg(not(target_os = "wasi"))]
+        unsafe {
+            let _ = feclearexcept(HOST_FE_ALL_EXCEPT);
+            let _ = fesetround(HOST_FE_TONEAREST);
+            let _ = fegetenv(&mut startup_fenv);
+        }
         Self {
             sources,
             program,
@@ -778,9 +785,12 @@ impl<'a> Interpreter<'a> {
             time_text_binding: None,
             getenv_binding: None,
             locale_generation: 0,
+            rand_state: 1,
             signal_handlers: HashMap::default(),
             fe_dfl_env_binding: None,
             startup_fenv: startup_fenv.opaque,
+            #[cfg(target_os = "wasi")]
+            modeled_fenv: RefCell::new(ModeledFloatingEnvironment::default()),
             fexcept_provenance: HashMap::default(),
             fenv_provenance: HashMap::default(),
             mbstate_provenance: HashMap::default(),
@@ -896,7 +906,15 @@ impl<'a> Interpreter<'a> {
                         .map_err(|diag| self.with_cboxes_runtime_context(diag))?
                         as c_int
                 };
-                (exit_status, None, None)
+                self.complete_termination(
+                    TerminationSignal {
+                        status: exit_status,
+                        run_atexit: true,
+                        run_quick_exit: false,
+                    },
+                    &mut objects,
+                    main.span,
+                )?
             }
             Ok(Err(diag)) => {
                 if let Some(span) = diag.execution_step_limit_span() {
@@ -914,59 +932,7 @@ impl<'a> Interpreter<'a> {
             }
             Err(payload) => {
                 if let Some(signal) = payload.downcast_ref::<TerminationSignal>().copied() {
-                    let mut exit_status = signal.status;
-                    let mut blocked = None;
-                    let mut execution_limit_span = None;
-                    if signal.run_atexit {
-                        if let Err(diag) = self.take_pending_stream_buffer_lifetime_ub() {
-                            return Err(self.with_cboxes_runtime_context(diag));
-                        }
-                        let handlers = catch_unwind(AssertUnwindSafe(|| {
-                            self.run_atexit_handlers(&mut objects, main.span)
-                        }));
-                        match handlers {
-                            Ok(Ok(())) => {}
-                            Ok(Err(diag)) => {
-                                if let Some(span) = diag.execution_step_limit_span() {
-                                    execution_limit_span = Some(span);
-                                } else {
-                                    let Some((function_name, span)) = diag.blocked_info() else {
-                                        return Err(self.with_cboxes_runtime_context(diag));
-                                    };
-                                    blocked = Some(self.cboxes_blocked_result(function_name, span));
-                                }
-                            }
-                            Err(payload) => {
-                                if let Some(signal) =
-                                    payload.downcast_ref::<TerminationSignal>().copied()
-                                {
-                                    exit_status = signal.status;
-                                } else {
-                                    resume_unwind(payload);
-                                }
-                            }
-                        }
-                    } else if signal.run_quick_exit {
-                        let handlers = catch_unwind(AssertUnwindSafe(|| {
-                            self.run_quick_exit_handlers(&mut objects, main.span)
-                        }));
-                        match handlers {
-                            Ok(Ok(())) => {}
-                            Ok(Err(diag)) => {
-                                return Err(self.with_cboxes_runtime_context(diag));
-                            }
-                            Err(payload) => {
-                                if let Some(signal) =
-                                    payload.downcast_ref::<TerminationSignal>().copied()
-                                {
-                                    exit_status = signal.status;
-                                } else {
-                                    resume_unwind(payload);
-                                }
-                            }
-                        }
-                    }
-                    (exit_status, blocked, execution_limit_span)
+                    self.complete_termination(signal, &mut objects, main.span)?
                 } else {
                     resume_unwind(payload);
                 }
@@ -1016,6 +982,52 @@ impl<'a> Interpreter<'a> {
             execution_limit,
             expression: self.cboxes_expression_result.clone(),
         })
+    }
+
+    fn complete_termination(
+        &mut self,
+        mut signal: TerminationSignal,
+        objects: &mut ObjectFrames,
+        span: Span,
+    ) -> Result<(c_int, Option<ProgramBlocked>, Option<Span>), Diagnostic> {
+        loop {
+            let handlers = if signal.run_atexit {
+                self.take_pending_stream_buffer_lifetime_ub()
+                    .map_err(|diag| self.with_cboxes_runtime_context(diag))?;
+                catch_unwind(AssertUnwindSafe(|| self.run_atexit_handlers(objects, span)))
+            } else if signal.run_quick_exit {
+                catch_unwind(AssertUnwindSafe(|| {
+                    self.run_quick_exit_handlers(objects, span)
+                }))
+            } else {
+                return Ok((signal.status, None, None));
+            };
+
+            match handlers {
+                Ok(Ok(())) => return Ok((signal.status, None, None)),
+                Ok(Err(diag)) => {
+                    if let Some(limit_span) = diag.execution_step_limit_span() {
+                        return Ok((signal.status, None, Some(limit_span)));
+                    }
+                    let Some((function_name, blocked_span)) = diag.blocked_info() else {
+                        return Err(self.with_cboxes_runtime_context(diag));
+                    };
+                    return Ok((
+                        signal.status,
+                        Some(self.cboxes_blocked_result(function_name, blocked_span)),
+                        None,
+                    ));
+                }
+                Err(payload) => {
+                    if let Some(next_signal) = payload.downcast_ref::<TerminationSignal>().copied()
+                    {
+                        signal = next_signal;
+                    } else {
+                        resume_unwind(payload);
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn consume_execution_step(&mut self, span: Span) -> Result<(), Diagnostic> {
@@ -2037,38 +2049,45 @@ impl<'a> Interpreter<'a> {
                             Self::annotate_member_initializer_error(diagnostic, &member)
                         })
                 } else {
-                    let selectors =
-                        self.initializer_selectors(target, &item.designators, item.span)?;
-                    if !matches!(selectors.first(), Some(InitSelector::Member(_))) {
-                        return Err(Diagnostic::error(
-                            "union initializer designator must begin with .member",
-                            item.span,
-                        ));
-                    }
-                    let selected = self.initializer_selector_type(target, &selectors, item.span)?;
-                    self.validate_initializer_constraints(
-                        &selected,
-                        &item.initializer,
-                        frame,
-                        objects,
-                    )
-                    .map_err(|diagnostic| {
-                        match self.initializer_selected_record_member(target, &selectors) {
-                            Some(member) => {
-                                Self::annotate_member_initializer_error(diagnostic, &member)
-                            }
-                            None => diagnostic,
+                    let mut item_index = 0;
+                    while item_index < items.len() && !items[item_index].designators.is_empty() {
+                        let item = &items[item_index];
+                        let selectors =
+                            self.initializer_selectors(target, &item.designators, item.span)?;
+                        if !matches!(selectors.first(), Some(InitSelector::Member(_))) {
+                            return Err(Diagnostic::error(
+                                "union initializer designator must begin with .member",
+                                item.span,
+                            ));
                         }
-                    })?;
-                    let member_ty =
-                        self.initializer_selector_type(target, &selectors[..1], item.span)?;
-                    Ok(1 + self.validate_after_designated_subobject(
-                        &member_ty,
-                        &selectors[1..],
-                        &items[1..],
-                        frame,
-                        objects,
-                    )?)
+                        let selected =
+                            self.initializer_selector_type(target, &selectors, item.span)?;
+                        self.validate_initializer_constraints(
+                            &selected,
+                            &item.initializer,
+                            frame,
+                            objects,
+                        )
+                        .map_err(|diagnostic| {
+                            match self.initializer_selected_record_member(target, &selectors) {
+                                Some(member) => {
+                                    Self::annotate_member_initializer_error(diagnostic, &member)
+                                }
+                                None => diagnostic,
+                            }
+                        })?;
+                        let member_ty =
+                            self.initializer_selector_type(target, &selectors[..1], item.span)?;
+                        item_index += 1;
+                        item_index += self.validate_after_designated_subobject(
+                            &member_ty,
+                            &selectors[1..],
+                            &items[item_index..],
+                            frame,
+                            objects,
+                        )?;
+                    }
+                    Ok(item_index)
                 }
             }
             _ => Err(Diagnostic::error(

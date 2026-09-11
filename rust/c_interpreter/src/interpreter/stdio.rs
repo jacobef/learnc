@@ -913,8 +913,12 @@ impl<'a> Interpreter<'a> {
         let size =
             self.checked_usize_from_unsigned_long(count, args[2].span(), "memset byte count")?;
         let dest_pointer = dest.as_pointer(args[0].span())?;
-        let _ =
-            self.ensure_library_array_destination(&dest_pointer, size, 1, args[0].span(), objects)?;
+        let _ = self.ensure_library_untyped_byte_destination(
+            &dest_pointer,
+            size,
+            args[0].span(),
+            objects,
+        )?;
         Ok(())
     }
 
@@ -957,7 +961,7 @@ impl<'a> Interpreter<'a> {
         let size =
             self.checked_usize_from_unsigned_long(count, args[2].span(), "memchr byte count")?;
         let pointer = value.as_pointer(args[0].span())?;
-        let _ = self.library_array_region(&pointer, size, 1, args[0].span(), objects)?;
+        let _ = self.library_untyped_byte_region(&pointer, size, args[0].span(), objects)?;
         Ok(())
     }
 
@@ -1002,8 +1006,8 @@ impl<'a> Interpreter<'a> {
             self.checked_usize_from_unsigned_long(count, args[2].span(), "memcmp byte count")?;
         let lhs_pointer = lhs.as_pointer(args[0].span())?;
         let rhs_pointer = rhs.as_pointer(args[1].span())?;
-        let _ = self.library_array_region(&lhs_pointer, size, 1, args[0].span(), objects)?;
-        let _ = self.library_array_region(&rhs_pointer, size, 1, args[1].span(), objects)?;
+        let _ = self.library_untyped_byte_region(&lhs_pointer, size, args[0].span(), objects)?;
+        let _ = self.library_untyped_byte_region(&rhs_pointer, size, args[1].span(), objects)?;
         Ok(())
     }
 
@@ -1411,6 +1415,12 @@ impl<'a> Interpreter<'a> {
             self.checked_usize_from_unsigned_long(count, args[2].span(), "strxfrm byte count")?;
         let dest_pointer = dest.as_pointer(args[0].span())?;
         let src_pointer = src.as_pointer(args[1].span())?;
+        // C11 7.24.4.5 permits a null destination for sizing, but still
+        // requires a valid, terminated source string.
+        if size == 0 && dest_pointer.is_null() {
+            self.read_c_string_bytes(src_pointer, args[1].span(), objects)?;
+            return Ok(());
+        }
         let (dest_object_id, dest_start, _) =
             self.ensure_library_array_destination(&dest_pointer, size, 1, args[0].span(), objects)?;
         let src_bytes = self.read_c_string_bytes(src_pointer.clone(), args[1].span(), objects)?;
@@ -2539,7 +2549,7 @@ impl<'a> Interpreter<'a> {
             standard,
             objects,
         )?;
-        let fmt = self.printf_conversion_text(conversion);
+        let fmt = self.host_printf_conversion_text(conversion);
         let width_from_arg = matches!(conversion.width, Some(PrintfCount::FromArg));
         let precision_from_arg = matches!(conversion.precision, Some(PrintfCount::FromArg));
         macro_rules! snprintf_host_no_arg {
@@ -2612,14 +2622,14 @@ impl<'a> Interpreter<'a> {
                         PrintfLength::L | PrintfLength::J | PrintfLength::T | PrintfLength::Z,
                         true,
                     ) => {
-                        let value = arg.to_int()? as c_long;
+                        let value = arg.to_int()? as c_longlong;
                         snprintf_host!(value)
                     }
                     (
                         PrintfLength::L | PrintfLength::J | PrintfLength::T | PrintfLength::Z,
                         false,
                     ) => {
-                        let value = arg.to_int()? as c_ulong;
+                        let value = arg.to_int()? as c_ulonglong;
                         snprintf_host!(value)
                     }
                     (PrintfLength::Ll, true) => {
@@ -3913,6 +3923,21 @@ impl<'a> Interpreter<'a> {
                         ScanConversionStatus::MatchingFailure
                     });
                 }
+                let Some((item_len, complete)) =
+                    self.scan_numeric_input_item_bytes(&token, conv.spec)
+                else {
+                    for &byte in token.iter().rev() {
+                        self.scan_unread(source, byte);
+                    }
+                    return Ok(ScanConversionStatus::MatchingFailure);
+                };
+                for &byte in token[item_len..].iter().rev() {
+                    self.scan_unread(source, byte);
+                }
+                if !complete {
+                    return Ok(ScanConversionStatus::MatchingFailure);
+                }
+                let token = &token[..item_len];
                 let parsed = match conv.spec {
                     'd' => self.scan_token_to_signed_bytes(&token, 10).map(
                         |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
@@ -3944,9 +3969,6 @@ impl<'a> Interpreter<'a> {
                     }
                 };
                 let Some((parsed, consumed, overflow)) = parsed else {
-                    for &byte in token.iter().rev() {
-                        self.scan_unread(source, byte);
-                    }
                     return Ok(ScanConversionStatus::MatchingFailure);
                 };
                 for &byte in token[consumed..].iter().rev() {
@@ -4028,18 +4050,28 @@ impl<'a> Interpreter<'a> {
         call_span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<(i32, usize), Diagnostic> {
-        let mut assignments = 0i32;
+        let mut progress = ScanProgress::default();
         let mut used_args = 0usize;
         for directive in directives {
             match directive {
                 ScanfDirective::Whitespace => self.scan_skip_ws(source, call_span)?,
-                ScanfDirective::Literal(expected) => {
-                    let Some(byte) = self.scan_next(source, call_span)? else {
-                        return Ok((if assignments == 0 { -1 } else { assignments }, used_args));
+                ScanfDirective::Literal(_) | ScanfDirective::Percent => {
+                    let expected = match directive {
+                        ScanfDirective::Literal(unit) => *unit,
+                        _ => {
+                            self.scan_skip_ws(source, call_span)?;
+                            '%' as libc::wchar_t
+                        }
                     };
-                    if libc::wchar_t::from(byte) != *expected {
+                    let Some(byte) = self.scan_next(source, call_span)? else {
+                        return Ok((progress.input_failure_result(), used_args));
+                    };
+                    if libc::wchar_t::from(byte) != expected {
                         self.scan_unread(source, byte);
-                        return Ok((assignments, used_args));
+                        return Ok((progress.assignments, used_args));
+                    }
+                    if matches!(directive, ScanfDirective::Percent) {
+                        progress.converted = true;
                     }
                 }
                 ScanfDirective::Conversion(conv) => {
@@ -4056,7 +4088,7 @@ impl<'a> Interpreter<'a> {
                         used_args += 1;
                         (Some(value), span)
                     };
-                    match self.eval_scanf_conversion(
+                    let status = self.eval_scanf_conversion(
                         function_name,
                         conv,
                         source,
@@ -4064,23 +4096,14 @@ impl<'a> Interpreter<'a> {
                         dest_span,
                         call_span,
                         objects,
-                    )? {
-                        ScanConversionStatus::Assigned => assignments += 1,
-                        ScanConversionStatus::NoAssignment => {}
-                        ScanConversionStatus::MatchingFailure => {
-                            return Ok((assignments, used_args));
-                        }
-                        ScanConversionStatus::InputFailure => {
-                            return Ok((
-                                if assignments == 0 { -1 } else { assignments },
-                                used_args,
-                            ));
-                        }
+                    )?;
+                    if let Some(result) = progress.conversion_result(status) {
+                        return Ok((result, used_args));
                     }
                 }
             }
         }
-        Ok((assignments, used_args))
+        Ok((progress.assignments, used_args))
     }
 
     fn run_scan_source(
@@ -5224,15 +5247,14 @@ impl<'a> Interpreter<'a> {
         let stream_object = self
             .stream_object_from_value(&evaluated[0], args[0].span(), "ftell", "7.19.9.3")?
             .expect("checked by caller");
-        let result =
-            self.tell_stream(stream_object, args[0].span(), "ftell", "7.19.9.3")? as c_long;
+        let result = self.tell_stream(stream_object, args[0].span(), "ftell", "7.19.9.3")? as i128;
         let backing = self
             .host_streams
             .get(&stream_object)
             .expect("checked stream object")
             .backing;
-        self.ftell_provenance.insert((backing, result as i128));
-        Ok(TypedValue::integer(CType::Long, result as i128))
+        self.ftell_provenance.insert((backing, result));
+        Ok(TypedValue::integer(CType::Long, result))
     }
 
     pub(super) fn eval_rewind_call(
@@ -5265,7 +5287,7 @@ impl<'a> Interpreter<'a> {
         let stream_object = self
             .stream_object_from_value(&evaluated[0], args[0].span(), "fgetpos", "7.19.9.1")?
             .expect("checked by caller");
-        let pos = self.tell_stream(stream_object, args[0].span(), "fgetpos", "7.19.9.1")? as c_long;
+        let pos = self.tell_stream(stream_object, args[0].span(), "fgetpos", "7.19.9.1")? as i128;
         let pointer = evaluated[1].as_pointer(args[1].span())?;
         let lvalue = LValue {
             object: pointer
@@ -5278,13 +5300,14 @@ impl<'a> Interpreter<'a> {
             designated_root_ty: pointer.designated_root_ty.clone(),
             byte_offset_override: pointer.byte_offset_override,
             arithmetic_domain_start: pointer.arithmetic_domain_start,
+            object_representation_domain: pointer.object_representation_domain,
             bit_field_width: None,
             restrict_source: None,
         };
         self.store_lvalue(
             objects,
             &lvalue,
-            TypedValue::integer(CType::Long, pos as i128),
+            TypedValue::integer(CType::Long, pos),
             args[1].span(),
         )?;
         if pos >= 0 {
@@ -5327,15 +5350,16 @@ impl<'a> Interpreter<'a> {
             designated_root_ty: pos_pointer.designated_root_ty.clone(),
             byte_offset_override: pos_pointer.byte_offset_override,
             arithmetic_domain_start: pos_pointer.arithmetic_domain_start,
+            object_representation_domain: pos_pointer.object_representation_domain,
             bit_field_width: None,
             restrict_source: None,
         };
         let pos = self
             .load_lvalue(pos_lvalue, args[1].span(), objects)?
-            .to_int()? as c_long;
+            .to_int()?;
         let result = self.seek_stream(
             stream_object,
-            pos as i128,
+            pos,
             libc::SEEK_SET,
             args[0].span(),
             "fsetpos",

@@ -3,6 +3,8 @@
 The crate has four layers:
 
 1. `preprocess.rs`, `lexer.rs`, and `parser.rs` turn source files into `ast.rs`.
+   `preprocess/expansion.rs` retains token spelling, whitespace, source lines,
+   and macro suppression sets through argument substitution and rescanning.
 2. `lib.rs` owns virtual-project loading, translation-unit normalization, linking,
    and the browser ABI.
 3. `interpreter.rs` defines the runtime model and coordinates the evaluator
@@ -31,6 +33,8 @@ The evaluator is split by responsibility:
 - `library_dispatch.rs` routes modeled library calls and owns their common
   precondition and stream helpers.
 - `math.rs` implements complex and real math plus shared library-region checks.
+- `calendar.rs` normalizes calendar dates for the browser's UTC environment,
+  without calling WASI's trapping local-time conversion stub.
 - `stdio.rs` implements streams and formatted I/O, together with the closely
   related byte/string validation paths.
 - `runtime_library.rs` implements the remaining standard-library families,
@@ -50,6 +54,10 @@ New code should follow these ownership rules:
 - Syntax-only transformations belong in the parser or linker, before runtime.
 - Repeated library operations should share one checker and one evaluator, with
   the function name selecting only the standard-specific differences.
+- Interpreted scalar values belong to the explicit cBoxes data model.
+  `libc::c_*` types belong only at real host-ABI boundaries; convert
+  deliberately when a host width differs from the interpreter's fixed LP64
+  model.
 - Object-representation writes must go through the shared overlay helpers so
   initialization counts, pointer slots, and modification versions stay in sync.
 
@@ -58,3 +66,6 @@ New code should follow these ownership rules:
 After Rust changes, run `cargo test`. After anything that can affect the browser
 build, also run `scripts/build-c-interpreter-wasm.sh` from the repository root
 and `tsc -p .`.
+Run `node scripts/test-c-interpreter-wasm.ts` to exercise the shared standard
+example fixtures through the generated browser build. Native tests alone cannot
+detect host ABI differences or trapping WASI library stubs.

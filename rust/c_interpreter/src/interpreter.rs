@@ -1,6 +1,4 @@
-use libc::{
-    self, c_char, c_double, c_float, c_int, c_long, c_longlong, c_ulong, c_ulonglong, c_void,
-};
+use libc::{self, c_char, c_double, c_float, c_int, c_long, c_longlong, c_ulonglong, c_void};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
@@ -24,6 +22,18 @@ use crate::{RunOptions, UbDetectionMode, composite_type};
 const INT_MIN: i128 = i32::MIN as i128;
 const INT_MAX: i128 = i32::MAX as i128;
 const HOST_MATH_ERRHANDLING: c_int = 2;
+const HOST_FE_INVALID: c_int = 0x0001;
+const HOST_FE_DIVBYZERO: c_int = 0x0002;
+const HOST_FE_OVERFLOW: c_int = 0x0004;
+const HOST_FE_UNDERFLOW: c_int = 0x0008;
+const HOST_FE_ALL_EXCEPT: c_int = 0x001f;
+const HOST_FE_TONEAREST: c_int = 0x00000000;
+#[cfg(target_os = "wasi")]
+const HOST_FE_UPWARD: c_int = 0x00400000;
+#[cfg(target_os = "wasi")]
+const HOST_FE_DOWNWARD: c_int = 0x00800000;
+#[cfg(target_os = "wasi")]
+const HOST_FE_TOWARDZERO: c_int = 0x00C00000;
 const HOST_FP_NAN: c_int = 1;
 const HOST_FP_INFINITE: c_int = 2;
 const HOST_FP_ZERO: c_int = 3;
@@ -50,9 +60,62 @@ fn byte_limit_description(bytes: usize) -> String {
     }
 }
 
-// The runtime currently backs all real floating types with f64, so host long double calls
-// are marshalled through f64 even when the nominal C type is long double.
+// These are properties of the interpreted machine, not aliases for the build
+// target's C ABI.
 type HostLongDouble = f64;
+type InterpretedLong = i64;
+
+// Route modeled-long and modeled-long-double operations through host functions
+// with matching signatures. In particular, Wasm has 32-bit long and binary128
+// long double, while the interpreter deliberately uses LP64 and binary64.
+use self::{
+    acos as acosl, acosh as acoshl, asin as asinl, asinh as asinhl, atan as atanl, atan2 as atan2l,
+    atanh as atanhl, atoll as atol, cbrt as cbrtl, ceil as ceill, copysign as copysignl,
+    cos as cosl, cosh as coshl, erf as erfl, erfc as erfcl, exp as expl, exp2 as exp2l,
+    expm1 as expm1l, fabs as fabsl, fdim as fdiml, floor as floorl, fma as fmal, fmax as fmaxl,
+    fmin as fminl, fmod as fmodl, frexp as frexpl, hypot as hypotl, ilogb as ilogbl,
+    ldexp as ldexpl, lgamma as lgammal, llround as lround, llround as lroundl, llround as llroundl,
+    llroundf as lroundf, log as logl, log1p as log1pl, log2 as log2l, log10 as log10l,
+    logb as logbl, modf as modfl, nan as nanl, nextafter as nextafterl, nextafter as nexttoward,
+    nextafter as nexttowardl, pow as powl, remainder as remainderl, remquo as remquol,
+    round as roundl, scalbn as scalbnl, sin as sinl, sinh as sinhl, sqrt as sqrtl,
+    strtod as strtold, strtoll as strtol, strtoull as strtoul, tan as tanl, tanh as tanhl,
+    tgamma as tgammal, trunc as truncl, wcstod as wcstold, wcstoll as wcstol, wcstoull as wcstoul,
+};
+
+#[cfg(not(target_os = "wasi"))]
+use self::{
+    llrint as lrint, llrint as lrintl, llrint as llrintl, llrintf as lrintf,
+    nearbyint as nearbyintl, rint as rintl,
+};
+
+unsafe extern "C" fn nexttowardf(x: c_float, y: HostLongDouble) -> c_float {
+    if x.is_nan() || y.is_nan() {
+        return x + y as c_float;
+    }
+    if f64::from(x) == y {
+        return y as c_float;
+    }
+    // Rounding y to float first could erase the requested direction.
+    let direction = if f64::from(x) < y {
+        c_float::INFINITY
+    } else {
+        c_float::NEG_INFINITY
+    };
+    unsafe { nextafterf(x, direction) }
+}
+
+fn scalbln_exponent(exponent: InterpretedLong) -> c_int {
+    exponent.clamp(c_int::MIN.into(), c_int::MAX.into()) as c_int
+}
+
+unsafe extern "C" fn modeled_scalbln(x: c_double, exponent: InterpretedLong) -> c_double {
+    unsafe { scalbn(x, scalbln_exponent(exponent)) }
+}
+
+unsafe extern "C" fn modeled_scalblnf(x: c_float, exponent: InterpretedLong) -> c_float {
+    unsafe { scalbnf(x, scalbln_exponent(exponent)) }
+}
 
 #[cfg(target_os = "wasi")]
 fn host_system(command: *const c_char) -> c_int {
@@ -74,7 +137,6 @@ struct HostMbState {
 unsafe extern "C" {
     fn atof(nptr: *const c_char) -> c_double;
     fn atoi(nptr: *const c_char) -> c_int;
-    fn atol(nptr: *const c_char) -> c_long;
     fn atoll(nptr: *const c_char) -> c_longlong;
     fn mblen(s: *const c_char, n: libc::size_t) -> c_int;
     fn mbtowc(pwc: *mut libc::wchar_t, s: *const c_char, n: libc::size_t) -> c_int;
@@ -106,10 +168,6 @@ unsafe extern "C" {
     ) -> libc::size_t;
     fn wcstof(nptr: *const libc::wchar_t, endptr: *mut *mut libc::wchar_t) -> c_float;
     fn wcstod(nptr: *const libc::wchar_t, endptr: *mut *mut libc::wchar_t) -> f64;
-    fn wcstold(nptr: *const libc::wchar_t, endptr: *mut *mut libc::wchar_t) -> HostLongDouble;
-    fn wcstol(nptr: *const libc::wchar_t, endptr: *mut *mut libc::wchar_t, base: c_int) -> c_long;
-    fn wcstoul(nptr: *const libc::wchar_t, endptr: *mut *mut libc::wchar_t, base: c_int)
-    -> c_ulong;
     fn wcstoll(
         nptr: *const libc::wchar_t,
         endptr: *mut *mut libc::wchar_t,
@@ -148,218 +206,167 @@ unsafe extern "C" {
     fn wctype(property: *const c_char) -> libc::c_uint;
     fn strtof(nptr: *const c_char, endptr: *mut *mut c_char) -> c_float;
     fn strtod(nptr: *const c_char, endptr: *mut *mut c_char) -> f64;
-    fn strtold(nptr: *const c_char, endptr: *mut *mut c_char) -> HostLongDouble;
-    fn strtol(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_long;
-    fn strtoul(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> libc::c_ulong;
     fn strtoll(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_longlong;
     fn strtoull(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> libc::c_ulonglong;
     fn div(numer: c_int, denom: c_int) -> HostDivResultInt;
-    fn ldiv(numer: c_long, denom: c_long) -> HostDivResultLong;
     fn lldiv(numer: c_longlong, denom: c_longlong) -> HostDivResultLongLong;
     fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
     fn localeconv() -> *mut HostLconv;
-    fn clock() -> c_ulong;
-    fn difftime(time1: c_long, time0: c_long) -> c_double;
-    fn mktime(timeptr: *mut HostTm) -> c_long;
+    fn clock() -> libc::clock_t;
+    fn difftime(time1: libc::time_t, time0: libc::time_t) -> c_double;
+    #[cfg(not(target_os = "wasi"))]
+    fn mktime(timeptr: *mut HostTm) -> libc::time_t;
     fn asctime(timeptr: *const HostTm) -> *mut c_char;
-    fn ctime(timer: *const c_long) -> *mut c_char;
-    fn gmtime(timer: *const c_long) -> *mut HostTm;
-    fn localtime(timer: *const c_long) -> *mut HostTm;
+    fn ctime(timer: *const libc::time_t) -> *mut c_char;
+    fn gmtime(timer: *const libc::time_t) -> *mut HostTm;
+    fn localtime(timer: *const libc::time_t) -> *mut HostTm;
     fn strftime(
         s: *mut c_char,
         maxsize: libc::size_t,
         format: *const c_char,
         timeptr: *const HostTm,
     ) -> libc::size_t;
+    #[cfg(not(target_os = "wasi"))]
     fn feclearexcept(excepts: c_int) -> c_int;
+    #[cfg(not(target_os = "wasi"))]
     fn fegetexceptflag(flagp: *mut HostFExcept, excepts: c_int) -> c_int;
+    #[cfg(not(target_os = "wasi"))]
     fn feraiseexcept(excepts: c_int) -> c_int;
+    #[cfg(not(target_os = "wasi"))]
     fn fesetexceptflag(flagp: *const HostFExcept, excepts: c_int) -> c_int;
+    #[cfg(not(target_os = "wasi"))]
     fn fetestexcept(excepts: c_int) -> c_int;
+    #[cfg(not(target_os = "wasi"))]
     fn fegetround() -> c_int;
+    #[cfg(not(target_os = "wasi"))]
     fn fesetround(round: c_int) -> c_int;
+    #[cfg(not(target_os = "wasi"))]
     fn fegetenv(envp: *mut HostFEnv) -> c_int;
+    #[cfg(not(target_os = "wasi"))]
     fn feholdexcept(envp: *mut HostFEnv) -> c_int;
+    #[cfg(not(target_os = "wasi"))]
     fn fesetenv(envp: *const HostFEnv) -> c_int;
+    #[cfg(not(target_os = "wasi"))]
     fn feupdateenv(envp: *const HostFEnv) -> c_int;
     static mut signgam: c_int;
 
     fn acos(x: c_double) -> c_double;
     fn acosf(x: c_float) -> c_float;
-    fn acosl(x: HostLongDouble) -> HostLongDouble;
     fn asin(x: c_double) -> c_double;
     fn asinf(x: c_float) -> c_float;
-    fn asinl(x: HostLongDouble) -> HostLongDouble;
     fn atan(x: c_double) -> c_double;
     fn atanf(x: c_float) -> c_float;
-    fn atanl(x: HostLongDouble) -> HostLongDouble;
     fn atan2(y: c_double, x: c_double) -> c_double;
     fn atan2f(y: c_float, x: c_float) -> c_float;
-    fn atan2l(y: HostLongDouble, x: HostLongDouble) -> HostLongDouble;
     fn cos(x: c_double) -> c_double;
     fn cosf(x: c_float) -> c_float;
-    fn cosl(x: HostLongDouble) -> HostLongDouble;
     fn sin(x: c_double) -> c_double;
     fn sinf(x: c_float) -> c_float;
-    fn sinl(x: HostLongDouble) -> HostLongDouble;
     fn tan(x: c_double) -> c_double;
     fn tanf(x: c_float) -> c_float;
-    fn tanl(x: HostLongDouble) -> HostLongDouble;
 
     fn acosh(x: c_double) -> c_double;
     fn acoshf(x: c_float) -> c_float;
-    fn acoshl(x: HostLongDouble) -> HostLongDouble;
     fn asinh(x: c_double) -> c_double;
     fn asinhf(x: c_float) -> c_float;
-    fn asinhl(x: HostLongDouble) -> HostLongDouble;
     fn atanh(x: c_double) -> c_double;
     fn atanhf(x: c_float) -> c_float;
-    fn atanhl(x: HostLongDouble) -> HostLongDouble;
     fn cosh(x: c_double) -> c_double;
     fn coshf(x: c_float) -> c_float;
-    fn coshl(x: HostLongDouble) -> HostLongDouble;
     fn sinh(x: c_double) -> c_double;
     fn sinhf(x: c_float) -> c_float;
-    fn sinhl(x: HostLongDouble) -> HostLongDouble;
     fn tanh(x: c_double) -> c_double;
     fn tanhf(x: c_float) -> c_float;
-    fn tanhl(x: HostLongDouble) -> HostLongDouble;
 
     fn exp(x: c_double) -> c_double;
     fn expf(x: c_float) -> c_float;
-    fn expl(x: HostLongDouble) -> HostLongDouble;
     fn frexp(x: c_double, exp: *mut c_int) -> c_double;
     fn frexpf(x: c_float, exp: *mut c_int) -> c_float;
-    fn frexpl(x: HostLongDouble, exp: *mut c_int) -> HostLongDouble;
     fn ldexp(x: c_double, exp: c_int) -> c_double;
     fn ldexpf(x: c_float, exp: c_int) -> c_float;
-    fn ldexpl(x: HostLongDouble, exp: c_int) -> HostLongDouble;
     fn log(x: c_double) -> c_double;
     fn logf(x: c_float) -> c_float;
-    fn logl(x: HostLongDouble) -> HostLongDouble;
     fn log10(x: c_double) -> c_double;
     fn log10f(x: c_float) -> c_float;
-    fn log10l(x: HostLongDouble) -> HostLongDouble;
     fn modf(x: c_double, iptr: *mut c_double) -> c_double;
     fn modff(x: c_float, iptr: *mut c_float) -> c_float;
-    fn modfl(x: HostLongDouble, iptr: *mut HostLongDouble) -> HostLongDouble;
     fn exp2(x: c_double) -> c_double;
     fn exp2f(x: c_float) -> c_float;
-    fn exp2l(x: HostLongDouble) -> HostLongDouble;
     fn expm1(x: c_double) -> c_double;
     fn expm1f(x: c_float) -> c_float;
-    fn expm1l(x: HostLongDouble) -> HostLongDouble;
     fn ilogb(x: c_double) -> c_int;
     fn ilogbf(x: c_float) -> c_int;
-    fn ilogbl(x: HostLongDouble) -> c_int;
     fn log1p(x: c_double) -> c_double;
     fn log1pf(x: c_float) -> c_float;
-    fn log1pl(x: HostLongDouble) -> HostLongDouble;
     fn log2(x: c_double) -> c_double;
     fn log2f(x: c_float) -> c_float;
-    fn log2l(x: HostLongDouble) -> HostLongDouble;
     fn logb(x: c_double) -> c_double;
     fn logbf(x: c_float) -> c_float;
-    fn logbl(x: HostLongDouble) -> HostLongDouble;
     fn scalbn(x: c_double, n: c_int) -> c_double;
     fn scalbnf(x: c_float, n: c_int) -> c_float;
-    fn scalbnl(x: HostLongDouble, n: c_int) -> HostLongDouble;
-    fn scalbln(x: c_double, n: c_long) -> c_double;
-    fn scalblnf(x: c_float, n: c_long) -> c_float;
-    fn scalblnl(x: HostLongDouble, n: c_long) -> HostLongDouble;
 
     fn pow(x: c_double, y: c_double) -> c_double;
     fn powf(x: c_float, y: c_float) -> c_float;
-    fn powl(x: HostLongDouble, y: HostLongDouble) -> HostLongDouble;
     fn sqrt(x: c_double) -> c_double;
     fn sqrtf(x: c_float) -> c_float;
-    fn sqrtl(x: HostLongDouble) -> HostLongDouble;
     fn cbrt(x: c_double) -> c_double;
     fn cbrtf(x: c_float) -> c_float;
-    fn cbrtl(x: HostLongDouble) -> HostLongDouble;
     fn hypot(x: c_double, y: c_double) -> c_double;
     fn hypotf(x: c_float, y: c_float) -> c_float;
-    fn hypotl(x: HostLongDouble, y: HostLongDouble) -> HostLongDouble;
 
     fn erf(x: c_double) -> c_double;
     fn erff(x: c_float) -> c_float;
-    fn erfl(x: HostLongDouble) -> HostLongDouble;
     fn erfc(x: c_double) -> c_double;
     fn erfcf(x: c_float) -> c_float;
-    fn erfcl(x: HostLongDouble) -> HostLongDouble;
     fn tgamma(x: c_double) -> c_double;
     fn tgammaf(x: c_float) -> c_float;
-    fn tgammal(x: HostLongDouble) -> HostLongDouble;
     fn lgamma(x: c_double) -> c_double;
     fn lgammaf(x: c_float) -> c_float;
-    fn lgammal(x: HostLongDouble) -> HostLongDouble;
     fn fabs(x: c_double) -> c_double;
     fn fabsf(x: c_float) -> c_float;
-    fn fabsl(x: HostLongDouble) -> HostLongDouble;
 
     fn ceil(x: c_double) -> c_double;
     fn ceilf(x: c_float) -> c_float;
-    fn ceill(x: HostLongDouble) -> HostLongDouble;
     fn floor(x: c_double) -> c_double;
     fn floorf(x: c_float) -> c_float;
-    fn floorl(x: HostLongDouble) -> HostLongDouble;
     fn fmod(x: c_double, y: c_double) -> c_double;
     fn fmodf(x: c_float, y: c_float) -> c_float;
-    fn fmodl(x: HostLongDouble, y: HostLongDouble) -> HostLongDouble;
     fn trunc(x: c_double) -> c_double;
     fn truncf(x: c_float) -> c_float;
-    fn truncl(x: HostLongDouble) -> HostLongDouble;
     fn round(x: c_double) -> c_double;
     fn roundf(x: c_float) -> c_float;
-    fn roundl(x: HostLongDouble) -> HostLongDouble;
-    fn lround(x: c_double) -> c_long;
-    fn lroundf(x: c_float) -> c_long;
-    fn lroundl(x: HostLongDouble) -> c_long;
     fn llround(x: c_double) -> c_longlong;
     fn llroundf(x: c_float) -> c_longlong;
-    fn llroundl(x: HostLongDouble) -> c_longlong;
+    #[cfg(not(target_os = "wasi"))]
     fn rint(x: c_double) -> c_double;
+    #[cfg(not(target_os = "wasi"))]
     fn rintf(x: c_float) -> c_float;
-    fn rintl(x: HostLongDouble) -> HostLongDouble;
-    fn lrint(x: c_double) -> c_long;
-    fn lrintf(x: c_float) -> c_long;
-    fn lrintl(x: HostLongDouble) -> c_long;
+    #[cfg(not(target_os = "wasi"))]
     fn llrint(x: c_double) -> c_longlong;
+    #[cfg(not(target_os = "wasi"))]
     fn llrintf(x: c_float) -> c_longlong;
-    fn llrintl(x: HostLongDouble) -> c_longlong;
+    #[cfg(not(target_os = "wasi"))]
     fn nearbyint(x: c_double) -> c_double;
+    #[cfg(not(target_os = "wasi"))]
     fn nearbyintf(x: c_float) -> c_float;
-    fn nearbyintl(x: HostLongDouble) -> HostLongDouble;
     fn remainder(x: c_double, y: c_double) -> c_double;
     fn remainderf(x: c_float, y: c_float) -> c_float;
-    fn remainderl(x: HostLongDouble, y: HostLongDouble) -> HostLongDouble;
     fn remquo(x: c_double, y: c_double, quo: *mut c_int) -> c_double;
     fn remquof(x: c_float, y: c_float, quo: *mut c_int) -> c_float;
-    fn remquol(x: HostLongDouble, y: HostLongDouble, quo: *mut c_int) -> HostLongDouble;
     fn copysign(x: c_double, y: c_double) -> c_double;
     fn copysignf(x: c_float, y: c_float) -> c_float;
-    fn copysignl(x: HostLongDouble, y: HostLongDouble) -> HostLongDouble;
     fn nan(tagp: *const c_char) -> c_double;
     fn nanf(tagp: *const c_char) -> c_float;
-    fn nanl(tagp: *const c_char) -> HostLongDouble;
     fn nextafter(x: c_double, y: c_double) -> c_double;
     fn nextafterf(x: c_float, y: c_float) -> c_float;
-    fn nextafterl(x: HostLongDouble, y: HostLongDouble) -> HostLongDouble;
-    fn nexttoward(x: c_double, y: HostLongDouble) -> c_double;
-    fn nexttowardf(x: c_float, y: HostLongDouble) -> c_float;
-    fn nexttowardl(x: HostLongDouble, y: HostLongDouble) -> HostLongDouble;
     fn fdim(x: c_double, y: c_double) -> c_double;
     fn fdimf(x: c_float, y: c_float) -> c_float;
-    fn fdiml(x: HostLongDouble, y: HostLongDouble) -> HostLongDouble;
     fn fmax(x: c_double, y: c_double) -> c_double;
     fn fmaxf(x: c_float, y: c_float) -> c_float;
-    fn fmaxl(x: HostLongDouble, y: HostLongDouble) -> HostLongDouble;
     fn fmin(x: c_double, y: c_double) -> c_double;
     fn fminf(x: c_float, y: c_float) -> c_float;
-    fn fminl(x: HostLongDouble, y: HostLongDouble) -> HostLongDouble;
     fn fma(x: c_double, y: c_double, z: c_double) -> c_double;
     fn fmaf(x: c_float, y: c_float, z: c_float) -> c_float;
-    fn fmal(x: HostLongDouble, y: HostLongDouble, z: HostLongDouble) -> HostLongDouble;
 }
 
 #[cfg(target_os = "macos")]
@@ -574,9 +581,12 @@ pub struct Interpreter<'a> {
     time_text_binding: Option<ObjectId>,
     getenv_binding: Option<ObjectId>,
     locale_generation: u64,
+    rand_state: u32,
     signal_handlers: HashMap<i32, SignalHandlerState>,
     fe_dfl_env_binding: Option<ObjectId>,
     startup_fenv: [u8; 16],
+    #[cfg(target_os = "wasi")]
+    modeled_fenv: RefCell<ModeledFloatingEnvironment>,
     fexcept_provenance: HashMap<(ObjectId, usize), (u64, i128)>,
     fenv_provenance: HashMap<(ObjectId, usize), u64>,
     mbstate_provenance: HashMap<(ObjectId, usize), (u64, u64)>,
@@ -1077,7 +1087,36 @@ enum CaptureStream {
 enum ScanfDirective {
     Whitespace,
     Literal(libc::wchar_t),
+    Percent,
     Conversion(ScanfConversion),
+}
+
+#[derive(Default)]
+struct ScanProgress {
+    assignments: i32,
+    converted: bool,
+}
+
+impl ScanProgress {
+    fn input_failure_result(&self) -> i32 {
+        if self.converted { self.assignments } else { -1 }
+    }
+
+    fn conversion_result(&mut self, status: ScanConversionStatus) -> Option<i32> {
+        match status {
+            ScanConversionStatus::Assigned => {
+                self.assignments += 1;
+                self.converted = true;
+                None
+            }
+            ScanConversionStatus::NoAssignment => {
+                self.converted = true;
+                None
+            }
+            ScanConversionStatus::MatchingFailure => Some(self.assignments),
+            ScanConversionStatus::InputFailure => Some(self.input_failure_result()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1278,6 +1317,37 @@ struct PointerValue {
     designated_root_ty: Option<Rc<CType>>,
     byte_offset_override: Option<usize>,
     arithmetic_domain_start: Option<usize>,
+    object_representation_domain: Option<ObjectRepresentationDomain>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ByteDomain {
+    start: usize,
+    one_past_end: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ObjectRepresentationDomain {
+    /// Enforced while the pointer has character-pointer type.
+    Active(ByteDomain),
+    /// Retained through void* so a later conversion to character pointer can
+    /// recover the bounds without constraining byte-counted void* APIs.
+    Latent(ByteDomain),
+}
+
+impl ObjectRepresentationDomain {
+    fn byte_domain(self) -> ByteDomain {
+        match self {
+            Self::Active(domain) | Self::Latent(domain) => domain,
+        }
+    }
+
+    fn active(self) -> Option<ByteDomain> {
+        match self {
+            Self::Active(domain) => Some(domain),
+            Self::Latent(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1312,6 +1382,7 @@ struct LValue {
     designated_root_ty: Option<Rc<CType>>,
     byte_offset_override: Option<usize>,
     arithmetic_domain_start: Option<usize>,
+    object_representation_domain: Option<ObjectRepresentationDomain>,
     bit_field_width: Option<u8>,
     restrict_source: Option<Rc<RestrictSource>>,
 }
@@ -1621,18 +1692,19 @@ type HostRemquoLongDoubleFn =
 type HostUnaryIntF64Fn = unsafe extern "C" fn(c_double) -> c_int;
 type HostUnaryIntF32Fn = unsafe extern "C" fn(c_float) -> c_int;
 type HostUnaryIntLongDoubleFn = unsafe extern "C" fn(HostLongDouble) -> c_int;
-type HostUnaryLongF64Fn = unsafe extern "C" fn(c_double) -> c_long;
-type HostUnaryLongF32Fn = unsafe extern "C" fn(c_float) -> c_long;
-type HostUnaryLongLongDoubleFn = unsafe extern "C" fn(HostLongDouble) -> c_long;
+type HostUnaryLongF64Fn = unsafe extern "C" fn(c_double) -> InterpretedLong;
+type HostUnaryLongF32Fn = unsafe extern "C" fn(c_float) -> InterpretedLong;
+type HostUnaryLongLongDoubleFn = unsafe extern "C" fn(HostLongDouble) -> InterpretedLong;
 type HostUnaryLongLongF64Fn = unsafe extern "C" fn(c_double) -> c_longlong;
 type HostUnaryLongLongF32Fn = unsafe extern "C" fn(c_float) -> c_longlong;
 type HostUnaryLongLongLongDoubleFn = unsafe extern "C" fn(HostLongDouble) -> c_longlong;
 type HostRealIntF64Fn = unsafe extern "C" fn(c_double, c_int) -> c_double;
 type HostRealIntF32Fn = unsafe extern "C" fn(c_float, c_int) -> c_float;
 type HostRealIntLongDoubleFn = unsafe extern "C" fn(HostLongDouble, c_int) -> HostLongDouble;
-type HostRealLongF64Fn = unsafe extern "C" fn(c_double, c_long) -> c_double;
-type HostRealLongF32Fn = unsafe extern "C" fn(c_float, c_long) -> c_float;
-type HostRealLongLongDoubleFn = unsafe extern "C" fn(HostLongDouble, c_long) -> HostLongDouble;
+type HostRealLongF64Fn = unsafe extern "C" fn(c_double, InterpretedLong) -> c_double;
+type HostRealLongF32Fn = unsafe extern "C" fn(c_float, InterpretedLong) -> c_float;
+type HostRealLongLongDoubleFn =
+    unsafe extern "C" fn(HostLongDouble, InterpretedLong) -> HostLongDouble;
 type HostRealLongDoubleF64Fn = unsafe extern "C" fn(c_double, HostLongDouble) -> c_double;
 type HostRealLongDoubleF32Fn = unsafe extern "C" fn(c_float, HostLongDouble) -> c_float;
 type HostRealLongDoubleLongDoubleFn =
@@ -1648,44 +1720,12 @@ struct HostDivResultInt {
 }
 
 #[repr(C)]
-struct HostDivResultLong {
-    quot: c_long,
-    rem: c_long,
-}
-
-#[repr(C)]
 struct HostDivResultLongLong {
     quot: c_longlong,
     rem: c_longlong,
 }
 
-#[repr(C)]
-struct HostLconv {
-    decimal_point: *mut c_char,
-    thousands_sep: *mut c_char,
-    grouping: *mut c_char,
-    int_curr_symbol: *mut c_char,
-    currency_symbol: *mut c_char,
-    mon_decimal_point: *mut c_char,
-    mon_thousands_sep: *mut c_char,
-    mon_grouping: *mut c_char,
-    positive_sign: *mut c_char,
-    negative_sign: *mut c_char,
-    int_frac_digits: c_char,
-    frac_digits: c_char,
-    p_cs_precedes: c_char,
-    p_sep_by_space: c_char,
-    n_cs_precedes: c_char,
-    n_sep_by_space: c_char,
-    p_sign_posn: c_char,
-    n_sign_posn: c_char,
-    int_p_cs_precedes: c_char,
-    int_p_sep_by_space: c_char,
-    int_n_cs_precedes: c_char,
-    int_n_sep_by_space: c_char,
-    int_p_sign_posn: c_char,
-    int_n_sign_posn: c_char,
-}
+type HostLconv = libc::lconv;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -1711,6 +1751,23 @@ struct HostFEnv {
     opaque: [u8; 16],
 }
 
+#[cfg(target_os = "wasi")]
+#[derive(Debug, Clone, Copy)]
+struct ModeledFloatingEnvironment {
+    exceptions: c_int,
+    rounding: c_int,
+}
+
+#[cfg(target_os = "wasi")]
+impl Default for ModeledFloatingEnvironment {
+    fn default() -> Self {
+        Self {
+            exceptions: 0,
+            rounding: HOST_FE_TONEAREST,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum SignalHandlerState {
     Default,
@@ -1726,6 +1783,7 @@ enum ComplexFunctionKind {
     UnaryReal,
 }
 
+mod calendar;
 mod execution;
 mod formatted_io;
 mod initialization;
@@ -1897,6 +1955,7 @@ impl PointerValue {
             designated_root_ty: None,
             byte_offset_override: None,
             arithmetic_domain_start: None,
+            object_representation_domain: None,
         }
     }
 

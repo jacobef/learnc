@@ -78,6 +78,117 @@ fn inverse_trig_average(real: f64, imag: f64) -> (f64, f64) {
 }
 
 impl<'a> Interpreter<'a> {
+    #[cfg(target_os = "wasi")]
+    fn raise_modeled_floating_exceptions(&self, exceptions: c_int) {
+        self.modeled_fenv.borrow_mut().exceptions |= exceptions & HOST_FE_ALL_EXCEPT;
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    fn raise_modeled_floating_exceptions(&self, _exceptions: c_int) {}
+
+    #[cfg(target_os = "wasi")]
+    fn round_in_modeled_direction(&self, value: f64) -> f64 {
+        match self.modeled_fenv.borrow().rounding {
+            HOST_FE_DOWNWARD => value.floor(),
+            HOST_FE_UPWARD => value.ceil(),
+            HOST_FE_TOWARDZERO => value.trunc(),
+            HOST_FE_TONEAREST => value.round_ties_even(),
+            _ => unreachable!("fesetround validates modeled rounding modes"),
+        }
+    }
+
+    fn record_unary_math_exceptions(&self, function_name: &str, input: f64, result: f64) {
+        if input.is_nan() {
+            return;
+        }
+        let invalid = match function_name {
+            "acos" | "acosf" | "acosl" | "asin" | "asinf" | "asinl" => input.abs() > 1.0,
+            "acosh" | "acoshf" | "acoshl" => input < 1.0,
+            "atanh" | "atanhf" | "atanhl" => input.abs() > 1.0,
+            "log" | "logf" | "logl" | "log10" | "log10f" | "log10l" | "log2" | "log2f"
+            | "log2l" => input < 0.0,
+            "log1p" | "log1pf" | "log1pl" => input < -1.0,
+            "sqrt" | "sqrtf" | "sqrtl" => input < 0.0,
+            _ => false,
+        };
+        let pole = match function_name {
+            "atanh" | "atanhf" | "atanhl" => input.abs() == 1.0,
+            "log" | "logf" | "logl" | "log10" | "log10f" | "log10l" | "log2" | "log2f"
+            | "log2l" => input == 0.0,
+            "log1p" | "log1pf" | "log1pl" => input == -1.0,
+            _ => false,
+        };
+        let may_range_error = matches!(
+            function_name,
+            "cosh"
+                | "coshf"
+                | "coshl"
+                | "sinh"
+                | "sinhf"
+                | "sinhl"
+                | "exp"
+                | "expf"
+                | "expl"
+                | "exp2"
+                | "exp2f"
+                | "exp2l"
+                | "expm1"
+                | "expm1f"
+                | "expm1l"
+                | "tgamma"
+                | "tgammaf"
+                | "tgammal"
+        );
+        let mut exceptions = 0;
+        if invalid {
+            exceptions |= HOST_FE_INVALID;
+        }
+        if pole {
+            exceptions |= HOST_FE_DIVBYZERO;
+        }
+        if may_range_error && input.is_finite() && result.is_infinite() {
+            exceptions |= HOST_FE_OVERFLOW;
+        }
+        if may_range_error && input.is_finite() && input != 0.0 && result == 0.0 {
+            exceptions |= HOST_FE_UNDERFLOW;
+        }
+        self.raise_modeled_floating_exceptions(exceptions);
+    }
+
+    fn record_binary_math_exceptions(&self, function_name: &str, lhs: f64, rhs: f64, result: f64) {
+        if lhs.is_nan() || rhs.is_nan() {
+            return;
+        }
+        let invalid = match function_name {
+            "fmod" | "fmodf" | "fmodl" | "remainder" | "remainderf" | "remainderl" => {
+                rhs == 0.0 || lhs.is_infinite()
+            }
+            "pow" | "powf" | "powl" => result.is_nan(),
+            _ => false,
+        };
+        let pole = matches!(function_name, "pow" | "powf" | "powl")
+            && lhs == 0.0
+            && rhs.is_sign_negative();
+        let may_range_error = matches!(
+            function_name,
+            "pow" | "powf" | "powl" | "hypot" | "hypotf" | "hypotl"
+        );
+        let mut exceptions = 0;
+        if invalid {
+            exceptions |= HOST_FE_INVALID;
+        }
+        if pole {
+            exceptions |= HOST_FE_DIVBYZERO;
+        }
+        if may_range_error && lhs.is_finite() && rhs.is_finite() && result.is_infinite() && !pole {
+            exceptions |= HOST_FE_OVERFLOW;
+        }
+        if may_range_error && lhs.is_finite() && rhs.is_finite() && lhs != 0.0 && result == 0.0 {
+            exceptions |= HOST_FE_UNDERFLOW;
+        }
+        self.raise_modeled_floating_exceptions(exceptions);
+    }
+
     fn typed_math_float_result(
         &self,
         function_name: &str,
@@ -436,6 +547,7 @@ impl<'a> Interpreter<'a> {
             designated_root_ty: pointer.designated_root_ty.clone(),
             byte_offset_override: pointer.byte_offset_override,
             arithmetic_domain_start: pointer.arithmetic_domain_start,
+            object_representation_domain: pointer.object_representation_domain,
             bit_field_width: None,
             restrict_source: None,
         })
@@ -591,7 +703,7 @@ impl<'a> Interpreter<'a> {
         &self,
         ty: &CType,
         value: f64,
-        long_arg: c_long,
+        long_arg: InterpretedLong,
         double_fn: HostRealLongF64Fn,
         float_fn: HostRealLongF32Fn,
         long_fn: HostRealLongLongDoubleFn,
@@ -828,10 +940,27 @@ impl<'a> Interpreter<'a> {
                 self.call_host_unary_real(&input_ty, input, round, roundf, roundl, span)?
             }
             "rint" | "rintf" | "rintl" => {
-                self.call_host_unary_real(&input_ty, input, rint, rintf, rintl, span)?
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    self.call_host_unary_real(&input_ty, input, rint, rintf, rintl, span)?
+                }
+                #[cfg(target_os = "wasi")]
+                {
+                    self.round_in_modeled_direction(input)
+                }
             }
-            "nearbyint" | "nearbyintf" | "nearbyintl" => self
-                .call_host_unary_real(&input_ty, input, nearbyint, nearbyintf, nearbyintl, span)?,
+            "nearbyint" | "nearbyintf" | "nearbyintl" => {
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    self.call_host_unary_real(
+                        &input_ty, input, nearbyint, nearbyintf, nearbyintl, span,
+                    )?
+                }
+                #[cfg(target_os = "wasi")]
+                {
+                    self.round_in_modeled_direction(input)
+                }
+            }
             _ => {
                 return Err(Diagnostic::error(
                     format!("unsupported unary math function {function_name}"),
@@ -839,6 +968,7 @@ impl<'a> Interpreter<'a> {
                 ));
             }
         };
+        self.record_unary_math_exceptions(function_name, input, value);
         self.typed_math_float_result(function_name, value, span)
     }
 
@@ -888,6 +1018,7 @@ impl<'a> Interpreter<'a> {
                 ));
             }
         };
+        self.record_binary_math_exceptions(function_name, lhs, rhs, value);
         self.typed_math_float_result(function_name, value, span)
     }
 
@@ -961,10 +1092,16 @@ impl<'a> Interpreter<'a> {
     ) -> Result<TypedValue, Diagnostic> {
         let input_ty = evaluated[0].ty.clone();
         let value = evaluated[0].to_float()?;
-        let exponent = evaluated[1].to_int()? as c_long;
+        let exponent = evaluated[1].to_int()? as InterpretedLong;
         let result = match function_name {
             "scalbln" | "scalblnf" | "scalblnl" => self.call_host_real_long(
-                &input_ty, value, exponent, scalbln, scalblnf, scalblnl, span,
+                &input_ty,
+                value,
+                exponent,
+                modeled_scalbln,
+                modeled_scalblnf,
+                modeled_scalbln,
+                span,
             )?,
             _ => {
                 return Err(Diagnostic::error(
@@ -992,14 +1129,30 @@ impl<'a> Interpreter<'a> {
                 self.call_host_unary_long_result(&input_ty, input, lround, lroundf, lroundl, span)?
             }
             "lrint" | "lrintf" | "lrintl" => {
-                self.call_host_unary_long_result(&input_ty, input, lrint, lrintf, lrintl, span)?
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    self.call_host_unary_long_result(&input_ty, input, lrint, lrintf, lrintl, span)?
+                }
+                #[cfg(target_os = "wasi")]
+                {
+                    self.round_in_modeled_direction(input) as i128
+                }
             }
             "llround" | "llroundf" | "llroundl" => self.call_host_unary_longlong_result(
                 &input_ty, input, llround, llroundf, llroundl, span,
             )?,
-            "llrint" | "llrintf" | "llrintl" => self.call_host_unary_longlong_result(
-                &input_ty, input, llrint, llrintf, llrintl, span,
-            )?,
+            "llrint" | "llrintf" | "llrintl" => {
+                #[cfg(not(target_os = "wasi"))]
+                {
+                    self.call_host_unary_longlong_result(
+                        &input_ty, input, llrint, llrintf, llrintl, span,
+                    )?
+                }
+                #[cfg(target_os = "wasi")]
+                {
+                    self.round_in_modeled_direction(input) as i128
+                }
+            }
             _ => {
                 return Err(Diagnostic::error(
                     format!("unsupported math function {function_name}"),
@@ -1422,7 +1575,32 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &ObjectFrames,
     ) -> Result<(ObjectId, usize, usize), Diagnostic> {
-        let region = self.byte_region_from_pointer(pointer, access_size, span, objects)?;
+        self.library_region_with_bounds(pointer, access_size, span, objects, true)
+    }
+
+    pub(super) fn library_untyped_byte_region(
+        &self,
+        pointer: &PointerValue,
+        access_size: usize,
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<(ObjectId, usize, usize), Diagnostic> {
+        self.library_region_with_bounds(pointer, access_size, span, objects, false)
+    }
+
+    fn library_region_with_bounds(
+        &self,
+        pointer: &PointerValue,
+        access_size: usize,
+        span: Span,
+        objects: &ObjectFrames,
+        enforce_designated_subobject: bool,
+    ) -> Result<(ObjectId, usize, usize), Diagnostic> {
+        let region = if enforce_designated_subobject {
+            self.byte_region_from_pointer(pointer, access_size, span, objects)?
+        } else {
+            self.byte_region_from_pointer_untyped(pointer, access_size, span, objects)?
+        };
         if access_size != 0 {
             let object = self
                 .lookup_object(objects, region.0)
@@ -1456,6 +1634,21 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(ObjectId, usize, usize), Diagnostic> {
         let (object_id, start, object_size) =
             self.library_array_region(pointer, access_size, element_size, span, objects)?;
+        if access_size != 0 {
+            self.ensure_library_writable_region(object_id, start, access_size, span, objects)?;
+        }
+        Ok((object_id, start, object_size))
+    }
+
+    pub(super) fn ensure_library_untyped_byte_destination(
+        &self,
+        pointer: &PointerValue,
+        access_size: usize,
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<(ObjectId, usize, usize), Diagnostic> {
+        let (object_id, start, object_size) =
+            self.library_untyped_byte_region(pointer, access_size, span, objects)?;
         if access_size != 0 {
             self.ensure_library_writable_region(object_id, start, access_size, span, objects)?;
         }

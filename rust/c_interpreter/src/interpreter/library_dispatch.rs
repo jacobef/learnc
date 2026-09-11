@@ -1754,6 +1754,10 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| Diagnostic::error("wcsxfrm size is out of supported range", span))?;
         let dest = evaluated[0].as_pointer(args[0].span())?;
         let src = evaluated[1].as_pointer(args[1].span())?;
+        if count == 0 && dest.is_null() {
+            self.read_wide_string_units(src, args[1].span(), objects)?;
+            return Ok(());
+        }
         let (dest_object, dest_start, _) = self.ensure_library_array_destination(
             &dest,
             total,
@@ -2555,7 +2559,7 @@ impl<'a> Interpreter<'a> {
             ));
         }
         let mask = value.to_int()?;
-        if mask & !(0x009f_i128) != 0 {
+        if mask & !i128::from(HOST_FE_ALL_EXCEPT) != 0 {
             return Err(Diagnostic::ub(
                 format!("{function_name} exception mask contains unsupported bits"),
                 span,
@@ -2657,14 +2661,6 @@ impl<'a> Interpreter<'a> {
             return Err(Diagnostic::error(
                 "fesetround requires an int argument",
                 args[0].span(),
-            ));
-        }
-        let round = evaluated[0].to_int()?;
-        if !matches!(round, 0x00000000 | 0x00400000 | 0x00800000 | 0x00C00000) {
-            return Err(Diagnostic::ub(
-                "fesetround requires a supported FE_* rounding-mode macro",
-                args[0].span(),
-                Some("7.6.3.2"),
             ));
         }
         Ok(())
@@ -2855,10 +2851,14 @@ impl<'a> Interpreter<'a> {
         )?;
         let dest_pointer = dest.as_pointer(args[0].span())?;
         let src_pointer = src.as_pointer(args[1].span())?;
-        let (dest_object_id, dest_start, _) =
-            self.ensure_library_array_destination(&dest_pointer, size, 1, args[0].span(), objects)?;
+        let (dest_object_id, dest_start, _) = self.ensure_library_untyped_byte_destination(
+            &dest_pointer,
+            size,
+            args[0].span(),
+            objects,
+        )?;
         let (src_object_id, src_start, _) =
-            self.library_array_region(&src_pointer, size, 1, args[1].span(), objects)?;
+            self.library_untyped_byte_region(&src_pointer, size, args[1].span(), objects)?;
         if function_name == "memcpy"
             && size != 0
             && dest_object_id == src_object_id
@@ -4383,9 +4383,16 @@ impl<'a> Interpreter<'a> {
             | "strtoimax" | "strtoumax" => {
                 self.eval_strto_call(function_name, evaluated, args, span, objects)
             }
-            "rand" => Ok(TypedValue::int(unsafe { libc::rand() } as i128)),
+            "rand" => {
+                self.rand_state = self
+                    .rand_state
+                    .wrapping_mul(1_103_515_245)
+                    .wrapping_add(12_345)
+                    & 0x7fff_ffff;
+                Ok(TypedValue::int(i128::from(self.rand_state)))
+            }
             "srand" => {
-                unsafe { libc::srand(evaluated[0].to_int()? as libc::c_uint) };
+                self.rand_state = evaluated[0].to_int()? as u32;
                 Ok(TypedValue::void())
             }
             "div" | "ldiv" | "lldiv" | "imaxdiv" => {
@@ -4425,8 +4432,8 @@ impl<'a> Interpreter<'a> {
             })),
             "difftime" => Ok(TypedValue::floating(CType::Double, unsafe {
                 difftime(
-                    evaluated[0].to_int()? as c_long,
-                    evaluated[1].to_int()? as c_long,
+                    evaluated[0].to_int()? as libc::time_t,
+                    evaluated[1].to_int()? as libc::time_t,
                 )
             })),
             "mktime" => self.eval_mktime_call(evaluated, args, span, objects),
@@ -4437,21 +4444,24 @@ impl<'a> Interpreter<'a> {
             "localtime" => self.eval_gmtime_like_call("localtime", evaluated, args, span, objects),
             "strftime" => self.eval_strftime_call(evaluated, args, span, objects),
             "timespec_get" => self.eval_timespec_get_call(evaluated, args, span, objects),
-            "feclearexcept" => Ok(TypedValue::int(unsafe {
-                feclearexcept(evaluated[0].to_int()? as c_int) as i128
-            })),
+            "feclearexcept" => {
+                Ok(self
+                    .eval_fenv_scalar_call("feclearexcept", Some(evaluated[0].to_int()? as c_int)))
+            }
             "fegetexceptflag" => self.eval_fegetexceptflag_call(evaluated, args, span, objects),
-            "feraiseexcept" => Ok(TypedValue::int(unsafe {
-                feraiseexcept(evaluated[0].to_int()? as c_int) as i128
-            })),
+            "feraiseexcept" => {
+                Ok(self
+                    .eval_fenv_scalar_call("feraiseexcept", Some(evaluated[0].to_int()? as c_int)))
+            }
             "fesetexceptflag" => self.eval_fesetexceptflag_call(evaluated, args, span, objects),
-            "fetestexcept" => Ok(TypedValue::int(unsafe {
-                fetestexcept(evaluated[0].to_int()? as c_int) as i128
-            })),
-            "fegetround" => Ok(TypedValue::int(unsafe { fegetround() as i128 })),
-            "fesetround" => Ok(TypedValue::int(unsafe {
-                fesetround(evaluated[0].to_int()? as c_int) as i128
-            })),
+            "fetestexcept" => {
+                Ok(self
+                    .eval_fenv_scalar_call("fetestexcept", Some(evaluated[0].to_int()? as c_int)))
+            }
+            "fegetround" => Ok(self.eval_fenv_scalar_call("fegetround", None)),
+            "fesetround" => {
+                Ok(self.eval_fenv_scalar_call("fesetround", Some(evaluated[0].to_int()? as c_int)))
+            }
             "fegetenv" => self.eval_fegetenv_like_call("fegetenv", evaluated, args, span, objects),
             "feholdexcept" => {
                 self.eval_fegetenv_like_call("feholdexcept", evaluated, args, span, objects)
@@ -4623,6 +4633,7 @@ impl<'a> Interpreter<'a> {
             designated_root_ty: pointer.designated_root_ty.clone(),
             byte_offset_override: pointer.byte_offset_override,
             arithmetic_domain_start: pointer.arithmetic_domain_start,
+            object_representation_domain: pointer.object_representation_domain,
             bit_field_width: None,
             restrict_source: None,
         })

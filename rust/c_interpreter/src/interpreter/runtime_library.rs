@@ -678,13 +678,12 @@ impl<'a> Interpreter<'a> {
                 (result.quot as i128, result.rem as i128)
             }
             "ldiv" => {
-                let result = unsafe {
-                    ldiv(
-                        evaluated[0].to_int()? as c_long,
-                        evaluated[1].to_int()? as c_long,
-                    )
-                };
-                (result.quot as i128, result.rem as i128)
+                let numer = evaluated[0].to_int()?;
+                let denom = evaluated[1].to_int()?;
+                (
+                    self.integer_div_for_type(numer, denom, &CType::Long, span)?,
+                    self.integer_rem_for_type(numer, denom, &CType::Long, span)?,
+                )
             }
             "lldiv" => {
                 let result = unsafe {
@@ -2561,6 +2560,7 @@ impl<'a> Interpreter<'a> {
         &self,
         value: &TypedValue,
         span: Span,
+        ignore_output_fields: bool,
     ) -> Result<HostTm, Diagnostic> {
         let ValueData::Aggregate(stored) = &value.data else {
             return Err(Diagnostic::error("expected struct tm value", span));
@@ -2612,10 +2612,22 @@ impl<'a> Interpreter<'a> {
             tm_mday: int_field("tm_mday")?,
             tm_mon: int_field("tm_mon")?,
             tm_year: int_field("tm_year")?,
-            tm_wday: int_field("tm_wday")?,
-            tm_yday: int_field("tm_yday")?,
+            tm_wday: if ignore_output_fields {
+                0
+            } else {
+                int_field("tm_wday")?
+            },
+            tm_yday: if ignore_output_fields {
+                0
+            } else {
+                int_field("tm_yday")?
+            },
             tm_isdst: int_field("tm_isdst")?,
-            tm_gmtoff: long_field("tm_gmtoff")?,
+            tm_gmtoff: if ignore_output_fields {
+                0
+            } else {
+                long_field("tm_gmtoff")?
+            },
             tm_zone: std::ptr::null(),
         })
     }
@@ -2631,7 +2643,20 @@ impl<'a> Interpreter<'a> {
         let pointer = value.as_pointer(span)?;
         let lvalue = self.pointer_lvalue(function_name, &pointer, &tm_ty, span, "7.23")?;
         let loaded = self.load_lvalue(lvalue, span, objects)?;
-        self.host_tm_from_typed_value(&loaded, span)
+        self.host_tm_from_typed_value(&loaded, span, false)
+    }
+
+    fn load_host_tm_for_mktime(
+        &mut self,
+        value: &TypedValue,
+        span: Span,
+        objects: &mut ObjectFrames,
+    ) -> Result<HostTm, Diagnostic> {
+        let tm_ty = self.tm_type_for_call(span)?;
+        let pointer = value.as_pointer(span)?;
+        let lvalue = self.pointer_lvalue("mktime", &pointer, &tm_ty, span, "7.23.2.3")?;
+        let loaded = self.load_lvalue(lvalue, span, objects)?;
+        self.host_tm_from_typed_value(&loaded, span, true)
     }
 
     fn stored_tm_value_from_host(
@@ -2680,9 +2705,8 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        let mut host_tm =
-            self.load_host_tm_from_pointer("mktime", &evaluated[0], args[0].span(), objects)?;
-        let result = unsafe { mktime(&mut host_tm) };
+        let mut host_tm = self.load_host_tm_for_mktime(&evaluated[0], args[0].span(), objects)?;
+        let result = calendar::make_local_time(&mut host_tm);
         let tm_ty = self.tm_type_for_call(span)?;
         let pointer = evaluated[0].as_pointer(args[0].span())?;
         let lvalue = self.pointer_lvalue("mktime", &pointer, &tm_ty, args[0].span(), "7.23.2.3")?;
@@ -2814,7 +2838,7 @@ impl<'a> Interpreter<'a> {
             self.pointer_lvalue("ctime", &pointer, &CType::Long, args[0].span(), "7.23.3.1")?;
         let timer = self
             .load_lvalue(lvalue, args[0].span(), objects)?
-            .to_int()? as c_long;
+            .to_int()? as libc::time_t;
         let result_ptr = unsafe { ctime(&timer) };
         let return_ty = self.host_function_return_type("ctime", span.file, span)?;
         if result_ptr.is_null() {
@@ -2846,7 +2870,7 @@ impl<'a> Interpreter<'a> {
         )?;
         let timer = self
             .load_lvalue(lvalue, args[0].span(), objects)?
-            .to_int()? as c_long;
+            .to_int()? as libc::time_t;
         let host_ptr = match function_name {
             "gmtime" => unsafe { gmtime(&timer) },
             "localtime" => unsafe { localtime(&timer) },
@@ -2983,8 +3007,18 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
         let pointer = evaluated[0].as_pointer(args[0].span())?;
-        let mut flag: HostFExcept = 0;
-        let result = unsafe { fegetexceptflag(&mut flag, evaluated[1].to_int()? as c_int) };
+        let mask = evaluated[1].to_int()? as c_int;
+        #[cfg(not(target_os = "wasi"))]
+        let (flag, result) = {
+            let mut flag: HostFExcept = 0;
+            let result = unsafe { fegetexceptflag(&mut flag, mask) };
+            (flag, result)
+        };
+        #[cfg(target_os = "wasi")]
+        let (flag, result) = (
+            (self.modeled_fenv.borrow().exceptions & mask) as HostFExcept,
+            0,
+        );
         let (object_id, start, _) =
             self.byte_region_from_pointer(&pointer, 2, args[0].span(), objects)?;
         self.overlay_known_bytes_into_object(
@@ -3019,9 +3053,16 @@ impl<'a> Interpreter<'a> {
             objects,
         )?;
         let flag = HostFExcept::from_le_bytes([bytes[0], bytes[1]]);
-        Ok(TypedValue::int(unsafe {
-            fesetexceptflag(&flag, evaluated[1].to_int()? as c_int) as i128
-        }))
+        let mask = evaluated[1].to_int()? as c_int;
+        #[cfg(not(target_os = "wasi"))]
+        let result = unsafe { fesetexceptflag(&flag, mask) };
+        #[cfg(target_os = "wasi")]
+        let result = {
+            let mut environment = self.modeled_fenv.borrow_mut();
+            environment.exceptions = (environment.exceptions & !mask) | (c_int::from(flag) & mask);
+            0
+        };
+        Ok(TypedValue::int(result as i128))
     }
 
     pub(super) fn eval_fegetenv_like_call(
@@ -3033,11 +3074,28 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
         let pointer = evaluated[0].as_pointer(args[0].span())?;
-        let mut env = HostFEnv { opaque: [0; 16] };
-        let result = match function_name {
-            "fegetenv" => unsafe { fegetenv(&mut env) },
-            "feholdexcept" => unsafe { feholdexcept(&mut env) },
-            _ => unreachable!("checked by caller"),
+        #[cfg(not(target_os = "wasi"))]
+        let (env, result) = {
+            let mut env = HostFEnv { opaque: [0; 16] };
+            let result = match function_name {
+                "fegetenv" => unsafe { fegetenv(&mut env) },
+                "feholdexcept" => unsafe { feholdexcept(&mut env) },
+                _ => unreachable!("checked by caller"),
+            };
+            (env, result)
+        };
+        #[cfg(target_os = "wasi")]
+        let (env, result) = {
+            let saved = *self.modeled_fenv.borrow();
+            if function_name == "feholdexcept" {
+                self.modeled_fenv.borrow_mut().exceptions = 0;
+            }
+            (
+                HostFEnv {
+                    opaque: Self::encode_modeled_fenv(saved),
+                },
+                0,
+            )
         };
         let (object_id, start, _) =
             self.byte_region_from_pointer(&pointer, 16, args[0].span(), objects)?;
@@ -3074,13 +3132,86 @@ impl<'a> Interpreter<'a> {
         )?;
         let mut opaque = [0u8; 16];
         opaque.copy_from_slice(&bytes);
-        let env = HostFEnv { opaque };
-        let result = match function_name {
-            "fesetenv" => unsafe { fesetenv(&env) },
-            "feupdateenv" => unsafe { feupdateenv(&env) },
-            _ => unreachable!("checked by caller"),
+        #[cfg(not(target_os = "wasi"))]
+        let result = {
+            let env = HostFEnv { opaque };
+            match function_name {
+                "fesetenv" => unsafe { fesetenv(&env) },
+                "feupdateenv" => unsafe { feupdateenv(&env) },
+                _ => unreachable!("checked by caller"),
+            }
+        };
+        #[cfg(target_os = "wasi")]
+        let result = {
+            let mut saved = Self::decode_modeled_fenv(opaque);
+            if function_name == "feupdateenv" {
+                saved.exceptions |= self.modeled_fenv.borrow().exceptions;
+            }
+            *self.modeled_fenv.borrow_mut() = saved;
+            0
         };
         Ok(TypedValue::int(result as i128))
+    }
+
+    #[cfg(target_os = "wasi")]
+    fn encode_modeled_fenv(environment: ModeledFloatingEnvironment) -> [u8; 16] {
+        let mut bytes = [0u8; 16];
+        bytes[..4].copy_from_slice(&environment.exceptions.to_le_bytes());
+        bytes[4..8].copy_from_slice(&environment.rounding.to_le_bytes());
+        bytes
+    }
+
+    #[cfg(target_os = "wasi")]
+    fn decode_modeled_fenv(bytes: [u8; 16]) -> ModeledFloatingEnvironment {
+        ModeledFloatingEnvironment {
+            exceptions: c_int::from_le_bytes(bytes[..4].try_into().unwrap()),
+            rounding: c_int::from_le_bytes(bytes[4..8].try_into().unwrap()),
+        }
+    }
+
+    pub(super) fn eval_fenv_scalar_call(
+        &self,
+        function_name: &str,
+        value: Option<c_int>,
+    ) -> TypedValue {
+        #[cfg(not(target_os = "wasi"))]
+        let result = unsafe {
+            match function_name {
+                "feclearexcept" => feclearexcept(value.unwrap()),
+                "feraiseexcept" => feraiseexcept(value.unwrap()),
+                "fetestexcept" => fetestexcept(value.unwrap()),
+                "fegetround" => fegetround(),
+                "fesetround" => fesetround(value.unwrap()),
+                _ => unreachable!("checked by caller"),
+            }
+        };
+        #[cfg(target_os = "wasi")]
+        let result = match function_name {
+            "feclearexcept" => {
+                self.modeled_fenv.borrow_mut().exceptions &= !value.unwrap();
+                0
+            }
+            "feraiseexcept" => {
+                self.modeled_fenv.borrow_mut().exceptions |= value.unwrap();
+                0
+            }
+            "fetestexcept" => self.modeled_fenv.borrow().exceptions & value.unwrap(),
+            "fegetround" => self.modeled_fenv.borrow().rounding,
+            "fesetround" => {
+                let requested = value.unwrap();
+                if matches!(
+                    requested,
+                    HOST_FE_TONEAREST | HOST_FE_UPWARD | HOST_FE_DOWNWARD | HOST_FE_TOWARDZERO
+                ) {
+                    self.modeled_fenv.borrow_mut().rounding = requested;
+                    0
+                } else {
+                    1
+                }
+            }
+            _ => unreachable!("checked by caller"),
+        };
+        TypedValue::int(result as i128)
     }
 
     fn ensure_fe_dfl_env_binding(
@@ -3341,9 +3472,9 @@ impl<'a> Interpreter<'a> {
         let src_pointer = src.as_pointer(args[1].span())?;
         self.sequence_point();
         let (dest_object_id, dest_start, _) =
-            self.byte_region_from_pointer(&dest_pointer, size, args[0].span(), objects)?;
+            self.byte_region_from_pointer_untyped(&dest_pointer, size, args[0].span(), objects)?;
         let (_, src_start, _) =
-            self.byte_region_from_pointer(&src_pointer, size, args[1].span(), objects)?;
+            self.byte_region_from_pointer_untyped(&src_pointer, size, args[1].span(), objects)?;
         if size == 0 {
             return Ok(dest);
         }
@@ -3412,7 +3543,7 @@ impl<'a> Interpreter<'a> {
         let dest_pointer = dest.as_pointer(args[0].span())?;
         self.sequence_point();
         let (dest_object_id, dest_start, _) =
-            self.byte_region_from_pointer(&dest_pointer, size, args[0].span(), objects)?;
+            self.byte_region_from_pointer_untyped(&dest_pointer, size, args[0].span(), objects)?;
         if size == 0 {
             return Ok(dest);
         }
@@ -3460,15 +3591,34 @@ impl<'a> Interpreter<'a> {
             return Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()));
         }
         let pointer = evaluated[0].as_pointer(args[0].span())?;
-        let bytes = self.read_pointer_bytes(&pointer, size, args[0].span(), objects)?;
+        let (object_id, start, _) =
+            self.byte_region_from_pointer_untyped(&pointer, size, args[0].span(), objects)?;
+        let snapshot = self
+            .lookup_object(objects, object_id)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::ub(
+                    "access through a pointer to an object whose lifetime has ended",
+                    args[0].span(),
+                    Some("6.2.4"),
+                )
+            })?;
+        let all_bytes =
+            self.serialize_stored_value(&snapshot.ty, &snapshot.value, args[0].span())?;
+        let bytes = self.known_bytes(&all_bytes[start..start + size], args[0].span())?;
         let needle = evaluated[1].to_int()? as c_int;
         let found = unsafe { libc::memchr(bytes.as_ptr().cast::<c_void>(), needle, size) };
         if found.is_null() {
             return Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()));
         }
         let offset = unsafe { found.cast::<u8>().offset_from(bytes.as_ptr()) } as usize;
+        // memchr's n-byte region is its array for this operation (DR 0042/0054),
+        // even when it spans a nested source array's ordinary arithmetic domain.
+        let mut region_pointer = pointer.clone();
+        region_pointer.arithmetic_domain_start = None;
+        region_pointer.object_representation_domain = None;
         let result_pointer =
-            self.pointer_with_byte_offset(&pointer, offset, args[0].span(), objects)?;
+            self.pointer_with_byte_offset(&region_pointer, offset, args[0].span(), objects)?;
         Ok(self.pointer_value_with_type(return_ty, result_pointer))
     }
 
@@ -3490,9 +3640,9 @@ impl<'a> Interpreter<'a> {
         let lhs_pointer = evaluated[0].as_pointer(args[0].span())?;
         let rhs_pointer = evaluated[1].as_pointer(args[1].span())?;
         let (_, lhs_start, _) =
-            self.byte_region_from_pointer(&lhs_pointer, size, args[0].span(), objects)?;
+            self.byte_region_from_pointer_untyped(&lhs_pointer, size, args[0].span(), objects)?;
         let (_, rhs_start, _) =
-            self.byte_region_from_pointer(&rhs_pointer, size, args[1].span(), objects)?;
+            self.byte_region_from_pointer_untyped(&rhs_pointer, size, args[1].span(), objects)?;
         let lhs_snapshot = self
             .lookup_object(objects, lhs_pointer.object.unwrap())
             .cloned()

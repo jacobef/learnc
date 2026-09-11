@@ -48,6 +48,68 @@ fn assert_diagnostic_contains(source: &str, expected: &str) {
 }
 
 #[test]
+fn standard_example_mktime_ignores_output_fields() {
+    assert_exit_status(
+        include_str!("../../tests/standard_examples/mktime_ignores_output_fields.c"),
+        0,
+    );
+}
+
+#[test]
+fn standard_example_long_double_math_uses_the_interpreted_format() {
+    assert_exit_status(
+        include_str!(
+            "../../tests/standard_examples/long_double_math_uses_the_interpreted_format.c"
+        ),
+        0,
+    );
+}
+
+#[test]
+fn host_abi_preserves_interpreted_long_width() {
+    assert_exit_status(
+        include_str!("../../tests/standard_examples/host_abi_preserves_interpreted_long_width.c"),
+        0,
+    );
+}
+
+#[test]
+fn standard_example_vla_parameters_retain_inner_dimensions() {
+    assert_exit_status(
+        include_str!("../../tests/standard_examples/vla_parameters_retain_inner_dimensions.c"),
+        0,
+    );
+}
+
+#[test]
+fn standard_example_transform_sizing_null_exception_is_narrow() {
+    assert_exit_status(
+        include_str!("../../tests/standard_examples/transform_sizing_null_exception_is_narrow.c"),
+        0,
+    );
+    for call in [
+        "strxfrm(NULL, \"x\", 1)",
+        "strxfrm(NULL, NULL, 0)",
+        "wcsxfrm(NULL, L\"x\", 1)",
+        "wcsxfrm(NULL, NULL, 0)",
+        "strncpy(NULL, \"x\", 0)",
+    ] {
+        assert_diagnostic_contains(
+            &format!("#include <string.h>\n#include <wchar.h>\nint main(void) {{ {call}; }}\n"),
+            "undefined behavior",
+        );
+    }
+}
+
+#[test]
+fn standard_example_scanf_percent_skips_only_leading_whitespace() {
+    assert_exit_status(
+        include_str!("../../tests/standard_examples/scanf_percent_skips_only_leading_whitespace.c"),
+        0,
+    );
+}
+
+#[test]
 fn temporary_audit_public_api_conditional_inclusion() {
     use crate::{NativeExecutionOptions, run_native_source};
     let options = NativeExecutionOptions::default();
@@ -4185,6 +4247,42 @@ fn aggregate_initializers_support_designators_brace_elision_and_array_bound_dedu
 }
 
 #[test]
+fn union_initializer_accepts_multiple_designators_for_one_struct_member() {
+    let source = r#"
+            #include <stdio.h>
+            union Animal {
+                struct { int type; int loudness; } antelope;
+                struct { int type; int sea_creature; double intelligence; } octopus;
+            };
+
+            int main(void) {
+                union Animal animal = {
+                    .octopus.type = 2,
+                    .octopus.sea_creature = 1,
+                    .octopus.intelligence = 12.8
+                };
+                printf("%d %d %.1f\n", animal.octopus.type,
+                       animal.octopus.sea_creature,
+                       animal.octopus.intelligence);
+                return 0;
+            }
+        "#;
+    assert_stdout(source, "2 1 12.8\n");
+}
+
+#[test]
+fn later_union_designator_selects_the_last_initialized_member() {
+    let source = r#"
+            union Value { int first; int second; };
+            int main(void) {
+                union Value value = { .first = 1, .second = 2 };
+                return value.second != 2;
+            }
+        "#;
+    assert_exit_status(source, 0);
+}
+
+#[test]
 fn file_scope_incomplete_array_bounds_respect_brace_elision() {
     let source = r#"
             struct Pair { int x; int y; };
@@ -4233,6 +4331,41 @@ fn union_member_subobject_write_preserves_other_bytes_from_current_representatio
             }
         "#;
     assert_stdout(source, "86 18\n");
+}
+
+#[test]
+fn suitably_converted_union_pointer_points_to_each_member() {
+    let source = r#"
+            #include <stdio.h>
+            union Value { int integer; float real; };
+
+            int main(void) {
+                union Value value;
+                int *integer = (int *)&value;
+                float *real = (float *)&value;
+                value.integer = 12;
+                printf("%d ", *integer);
+                value.real = 3.25f;
+                printf("%.2f\n", *real);
+                return 0;
+            }
+        "#;
+    assert_stdout(source, "12 3.25\n");
+}
+
+#[test]
+fn suitably_converted_union_member_pointer_points_back_to_union() {
+    let source = r#"
+            union Value { int integer; float real; };
+            int main(void) {
+                union Value value;
+                int *member = &value.integer;
+                union Value *whole = (union Value *)member;
+                whole->real = 4.5f;
+                return value.real != 4.5f;
+            }
+        "#;
+    assert_exit_status(source, 0);
 }
 
 #[test]
@@ -4614,6 +4747,52 @@ fn double_to_float_out_of_range_is_ub() {
     let rendered = rendered_diagnostic(source);
     assert!(rendered.contains("floating conversion"));
     assert!(rendered.contains("outside the range of the destination type"));
+}
+
+#[test]
+fn floating_expression_overflow_is_ub() {
+    let source = r#"
+            #include <float.h>
+            int main(void) {
+                volatile double value = DBL_MAX;
+                volatile double result = value * 2.0;
+                return result != 0.0;
+            }
+        "#;
+    let rendered = rendered_diagnostic(source);
+    assert!(rendered.contains("floating arithmetic result"));
+    assert!(rendered.contains("outside the range of its type"));
+}
+
+#[test]
+fn nonmathematical_floating_expression_result_is_ub() {
+    let source = r#"
+            #include <math.h>
+            int main(void) {
+                volatile double infinity = INFINITY;
+                volatile double result = infinity - infinity;
+                return result != 0.0;
+            }
+        "#;
+    let rendered = rendered_diagnostic(source);
+    assert!(rendered.contains("floating arithmetic result"));
+    assert!(rendered.contains("not mathematically defined"));
+}
+
+#[test]
+fn complex_expression_overflow_is_ub() {
+    let source = r#"
+            #include <complex.h>
+            #include <float.h>
+            int main(void) {
+                volatile double complex value = CMPLX(DBL_MAX, DBL_MAX);
+                volatile double complex result = value * CMPLX(2.0, 0.0);
+                return creal(result) != 0.0;
+            }
+        "#;
+    let rendered = rendered_diagnostic(source);
+    assert!(rendered.contains("complex arithmetic result"));
+    assert!(rendered.contains("outside the range of its type"));
 }
 
 #[test]
@@ -7615,6 +7794,47 @@ fn printf_supports_standard_integer_length_modifiers() {
 }
 
 #[test]
+fn printf_allows_representable_corresponding_signed_and_unsigned_arguments() {
+    let source = r#"
+            #include <stdio.h>
+            int main(void) {
+                unsigned char byte = 0xab;
+                unsigned int unsigned_value = 42;
+                printf("%02X %u %d\n", byte, byte, unsigned_value);
+                return 0;
+            }
+        "#;
+    assert_stdout(source, "AB 171 42\n");
+}
+
+#[test]
+fn printf_rejects_unrepresentable_corresponding_signed_and_unsigned_arguments() {
+    assert_diagnostic_contains(
+        r#"
+            #include <limits.h>
+            #include <stdio.h>
+            int main(void) {
+                unsigned int value = UINT_MAX;
+                printf("%d\n", value);
+                return 0;
+            }
+        "#,
+        "requires an argument of type int",
+    );
+    assert_diagnostic_contains(
+        r#"
+            #include <stdio.h>
+            int main(void) {
+                int value = -1;
+                printf("%u\n", value);
+                return 0;
+            }
+        "#,
+        "requires an argument of type unsigned int",
+    );
+}
+
+#[test]
 fn printf_rejects_wrong_type_for_size_t_length_modifier() {
     let source = r#"
             #include <stdio.h>
@@ -10461,6 +10681,54 @@ fn stdlib_header_macros_types_and_abs_family_work() {
 }
 
 #[test]
+fn rand_state_is_repeatable_and_private_to_each_execution() {
+    let source = r#"
+            #include <stdio.h>
+            #include <stdlib.h>
+
+            int main(void) {
+                int default_first = rand();
+                srand(7);
+                int seeded_first = rand();
+                int seeded_second = rand();
+                srand(7);
+                printf("%d %d %d %d\n", default_first, seeded_first,
+                       seeded_second, seeded_first == rand());
+                return 0;
+            }
+        "#;
+    let first = run_source("first.c", source).unwrap().stdout;
+    let second = run_source("second.c", source).unwrap().stdout;
+    assert_eq!(first, second);
+    assert!(first.ends_with(" 1\n"), "{first}");
+}
+
+#[test]
+fn errno_is_zero_at_the_start_of_each_execution() {
+    assert_exit_status(
+        r#"
+            #include <errno.h>
+            #include <limits.h>
+            #include <stdlib.h>
+            int main(void) {
+                (void)strtol("999999999999999999999999999999", 0, 10);
+                return errno != ERANGE;
+            }
+        "#,
+        0,
+    );
+    assert_exit_status(
+        r#"
+            #include <errno.h>
+            int main(void) {
+                return errno != 0;
+            }
+        "#,
+        0,
+    );
+}
+
+#[test]
 fn atexit_handlers_run_in_reverse_registration_order() {
     let source = r#"
             #include <stdio.h>
@@ -10481,6 +10749,58 @@ fn atexit_handlers_run_in_reverse_registration_order() {
             }
         "#;
     assert_stdout(source, "21");
+}
+
+#[test]
+fn returning_from_main_runs_atexit_handlers() {
+    let source = r#"
+            #include <stdio.h>
+            #include <stdlib.h>
+
+            void first(void) {
+                printf("1");
+            }
+
+            void second(void) {
+                printf("2");
+            }
+
+            int main(void) {
+                atexit(first);
+                atexit(second);
+                printf("M");
+                return 7;
+            }
+        "#;
+    let output = run_source("test.c", source).unwrap();
+    assert_eq!(output.stdout, "M21");
+    assert_eq!(output.exit_status, 7);
+}
+
+#[test]
+fn quick_exit_from_atexit_handler_runs_quick_exit_handlers() {
+    let source = r#"
+            #include <stdio.h>
+            #include <stdlib.h>
+
+            void quick_handler(void) {
+                printf("Q");
+            }
+
+            void normal_handler(void) {
+                printf("A");
+                quick_exit(9);
+            }
+
+            int main(void) {
+                at_quick_exit(quick_handler);
+                atexit(normal_handler);
+                return 0;
+            }
+        "#;
+    let output = run_source("test.c", source).unwrap();
+    assert_eq!(output.stdout, "AQ");
+    assert_eq!(output.exit_status, 9);
 }
 
 #[test]
@@ -10876,6 +11196,37 @@ fn fenv_header_functions_and_macros_work() {
 }
 
 #[test]
+fn floating_environment_tracks_exceptions() {
+    assert_exit_status(
+        include_str!("../../tests/standard_examples/floating_environment_tracks_exceptions.c"),
+        0,
+    );
+}
+
+#[test]
+fn floating_environment_is_reset_between_executions() {
+    assert_exit_status(
+        r#"
+            #include <fenv.h>
+            int main(void) {
+                return fesetround(FE_UPWARD) != 0;
+            }
+        "#,
+        0,
+    );
+    assert_exit_status(
+        r#"
+            #include <fenv.h>
+            int main(void) {
+                return fegetround() != FE_TONEAREST ||
+                       fetestexcept(FE_ALL_EXCEPT) != 0;
+            }
+        "#,
+        0,
+    );
+}
+
+#[test]
 fn fe_all_except_is_exactly_the_defined_exception_mask() {
     let source = r#"
             #include <fenv.h>
@@ -10908,7 +11259,7 @@ fn fenv_rejects_invalid_exception_mask_bits() {
             #include <fenv.h>
 
             int main(void) {
-                feclearexcept(0x4000);
+                feclearexcept(0x80);
                 return 0;
             }
         "#;
@@ -11560,6 +11911,27 @@ fn fwscanf_reads_wide_data_from_stream() {
 }
 
 #[test]
+fn fwscanf_restores_unread_stream_input_in_source_order() {
+    let source = r#"
+            #include <stdio.h>
+            #include <wchar.h>
+
+            int main(void) {
+                FILE *f = tmpfile();
+                fputws(L"123abc\n", f);
+                rewind(f);
+                int value = 0;
+                int count = fwscanf(f, L"%d", &value);
+                wint_t first = fgetwc(f);
+                wint_t second = fgetwc(f);
+                printf("%d %d %d %d\n", count, value, (int) first, (int) second);
+                return 0;
+            }
+        "#;
+    assert_stdout(source, "1 123 97 98\n");
+}
+
+#[test]
 fn vswscanf_consumes_interpreter_va_lists() {
     let source = r#"
             #include <stdio.h>
@@ -11635,6 +12007,127 @@ fn fscanf_reads_from_stream() {
             }
         "#;
     assert_stdout(source, "2 7 81\n");
+}
+
+#[test]
+fn fscanf_restores_unread_stream_input_in_source_order() {
+    let source = r#"
+            #include <stdio.h>
+
+            int main(void) {
+                FILE *f = tmpfile();
+                fputs("123abc\n", f);
+                rewind(f);
+                int value = 0;
+                int count = fscanf(f, "%d", &value);
+                int first = fgetc(f);
+                int second = fgetc(f);
+                printf("%d %d %d %d\n", count, value, first, second);
+                return 0;
+            }
+        "#;
+    assert_stdout(source, "1 123 97 98\n");
+}
+
+#[test]
+fn scanf_character_conversions_accept_all_character_types() {
+    let source = r#"
+            #include <stdio.h>
+
+            int main(void) {
+                unsigned char word[8] = {0};
+                signed char byte[2] = {0};
+                unsigned char set[8] = {0};
+                int a = sscanf("hello", "%s", word);
+                int b = sscanf("Q", "%c", byte);
+                int c = sscanf("abc!", "%[abc]", set);
+                printf("%d %d %d %s %d %s\n", a, b, c, word, byte[0], set);
+                return 0;
+            }
+        "#;
+    assert_stdout(source, "1 1 1 hello 81 abc\n");
+}
+
+#[test]
+fn scanf_incomplete_floating_input_item_is_a_matching_failure() {
+    let source = r#"
+            #include <stdio.h>
+
+            int main(void) {
+                FILE *f = tmpfile();
+                fputs("100er", f);
+                rewind(f);
+                float value = 7.0f;
+                int count = fscanf(f, "%f", &value);
+                printf("%d %.0f %c\n", count, value, fgetc(f));
+                return 0;
+            }
+        "#;
+    assert_stdout(source, "0 7 r\n");
+}
+
+#[test]
+fn scanf_incomplete_integer_input_item_is_a_matching_failure() {
+    let source = r#"
+            #include <stdio.h>
+
+            int main(void) {
+                FILE *hex = tmpfile();
+                fputs("0xg", hex);
+                rewind(hex);
+                int a = 7;
+                int first = fscanf(hex, "%i", &a);
+
+                FILE *decimal = tmpfile();
+                fputs("+q", decimal);
+                rewind(decimal);
+                int b = 8;
+                int second = fscanf(decimal, "%d", &b);
+
+                printf("%d %d %c %d %d %c\n",
+                       first, a, fgetc(hex), second, b, fgetc(decimal));
+                return 0;
+            }
+        "#;
+    assert_stdout(source, "0 7 g 0 8 q\n");
+}
+
+#[test]
+fn wide_scanf_incomplete_floating_input_item_is_a_matching_failure() {
+    let source = r#"
+            #include <stdio.h>
+            #include <wchar.h>
+
+            int main(void) {
+                FILE *f = tmpfile();
+                fputws(L"100er", f);
+                rewind(f);
+                float value = 7.0f;
+                int count = fwscanf(f, L"%f", &value);
+                printf("%d %.0f %d\n", count, value, (int)fgetwc(f));
+                return 0;
+            }
+        "#;
+    assert_stdout(source, "0 7 114\n");
+}
+
+#[test]
+fn scanf_accepts_complete_standard_floating_input_forms() {
+    let source = r#"
+            #include <math.h>
+            #include <stdio.h>
+
+            int main(void) {
+                double a, b, c, d, e, f, g;
+                int count = sscanf("-1.25e+2 .5 1. 0x1.8p+1 0x1.8 infinity nan(payload)",
+                                   "%lf %lf %lf %la %la %lf %lf",
+                                   &a, &b, &c, &d, &e, &f, &g);
+                printf("%d %.0f %.1f %.0f %.0f %.1f %d %d\n",
+                       count, a, b, c, d, e, isinf(f), isnan(g));
+                return 0;
+            }
+        "#;
+    assert_stdout(source, "7 -125 0.5 1 3 1.5 1 1\n");
 }
 
 #[test]
@@ -14179,6 +14672,49 @@ fn muse_multidimensional_array_decay_preserves_the_selected_row() {
 }
 
 #[test]
+fn multidimensional_array_subscript_cannot_cross_a_row_boundary() {
+    let read = r#"
+            int main(void) {
+                int matrix[2][2] = {{1, 2}, {3, 4}};
+                volatile int column = 2;
+                return matrix[0][column];
+            }
+        "#;
+    assert_diagnostic_contains(read, "not valid to dereference");
+
+    let write = r#"
+            int main(void) {
+                int matrix[2][2] = {{1, 2}, {3, 4}};
+                volatile int column = 2;
+                matrix[0][column] = 9;
+                return 0;
+            }
+        "#;
+    assert_diagnostic_contains(write, "not valid to dereference");
+
+    let member = r#"
+            struct Values { int array[2]; int next; };
+            int main(void) {
+                struct Values values = {{1, 2}, 3};
+                volatile int index = 2;
+                return values.array[index];
+            }
+        "#;
+    assert_diagnostic_contains(member, "not valid to dereference");
+
+    let allocated = r#"
+            #include <stdlib.h>
+            int main(void) {
+                int (*matrix)[3] = malloc(2 * sizeof matrix[0]);
+                if (!matrix) return 2;
+                volatile int column = 3;
+                return matrix[0][column];
+            }
+        "#;
+    assert_diagnostic_contains(allocated, "not valid to dereference");
+}
+
+#[test]
 fn audit_nonlocal_jump_after_control_entry_still_ends_block_lifetimes() {
     let goto_entry = r#"
             #include <setjmp.h>
@@ -14319,6 +14855,144 @@ fn audit_character_pointer_arithmetic_cannot_escape_its_designated_subobject() {
             }
         "#;
     assert_exit_status(valid_boundaries, 0);
+}
+
+#[test]
+fn character_pointer_conversion_is_bounded_by_the_converted_object() {
+    let array_element = r#"
+            int main(void) {
+                int values[2] = {1, 2};
+                unsigned char *bytes = (unsigned char *)&values[0];
+                bytes += sizeof values[0] + 1;
+                return *bytes;
+            }
+        "#;
+    assert_diagnostic_contains(array_element, "converted object's representation");
+
+    let matrix_row = r#"
+            int main(void) {
+                int matrix[2][3] = {{1, 2, 3}, {4, 5, 6}};
+                unsigned char *bytes = (unsigned char *)&matrix[0];
+                bytes += sizeof matrix[0] + 1;
+                return *bytes;
+            }
+        "#;
+    assert_diagnostic_contains(matrix_row, "converted object's representation");
+
+    let struct_element = r#"
+            struct Pair { int left; int right; };
+            int main(void) {
+                struct Pair pairs[2] = {{1, 2}, {3, 4}};
+                unsigned char *bytes = (unsigned char *)&pairs[0];
+                bytes += sizeof pairs[0] + 1;
+                return *bytes;
+            }
+        "#;
+    assert_diagnostic_contains(struct_element, "converted object's representation");
+
+    let through_void = r#"
+            int main(void) {
+                int values[2] = {1, 2};
+                void *object = &values[0];
+                unsigned char *bytes = object;
+                bytes += sizeof values[0] + 1;
+                return *bytes;
+            }
+    "#;
+    assert_diagnostic_contains(through_void, "converted object's representation");
+
+    let string_write = r#"
+            #include <string.h>
+            int main(void) {
+                int values[3] = {0};
+                strcpy((char *)&values[0], "abcdefgh");
+                return 0;
+            }
+        "#;
+    assert_diagnostic_contains(string_write, "converted object's representation");
+
+    let string_read = r#"
+            #include <string.h>
+            int main(void) {
+                int values[2];
+                memset(&values[0], 'A', sizeof values[0]);
+                memset(&values[1], 0, sizeof values[1]);
+                return (int)strlen((char *)&values[0]);
+            }
+        "#;
+    assert_diagnostic_contains(string_read, "converted object's representation");
+}
+
+#[test]
+fn character_pointer_conversion_preserves_valid_whole_objects_and_round_trips() {
+    let source = r#"
+            #include <string.h>
+            int main(void) {
+                int matrix[2][3] = {{0}};
+                unsigned char *whole = (unsigned char *)&matrix;
+                whole += sizeof matrix;
+                whole -= 1;
+                if (*whole != 0) return 1;
+
+                int values[3] = {1, 2, 3};
+                int *original = values;
+                void *erased = original;
+                int *restored = erased;
+                restored += 2;
+                if (*restored != 3) return 2;
+
+                memset((unsigned char *)&matrix, 0, sizeof matrix);
+                int copy[3] = {0};
+                memcpy((unsigned char *)&copy[0], values, sizeof values);
+                if (copy[2] != 3) return 3;
+                return 0;
+            }
+        "#;
+    assert_exit_status(source, 0);
+}
+
+#[test]
+fn byte_counted_memory_functions_can_span_nested_array_rows() {
+    let source = r#"
+            #include <string.h>
+            int main(void) {
+                int source[2][3] = {{1, 2, 3}, {4, 5, 6}};
+                int copy[2][3] = {{0}};
+                memcpy(&copy[0][0], &source[0][0], sizeof source);
+                if (copy[1][2] != 6) return 1;
+
+                memmove(&copy[0][1], &copy[0][0], 5 * sizeof(int));
+                if (copy[0][1] != 1 || copy[1][2] != 5) return 2;
+                memset(&copy[0][2], 0, 2 * sizeof(int));
+                if (copy[0][2] != 0 || copy[1][0] != 0) return 3;
+
+                int equal[2][3] = {{1, 2, 3}, {4, 5, 6}};
+                if (memcmp(&source[0][0], &equal[0][0], sizeof source)) return 4;
+
+                unsigned char bytes[2][3] = {{1, 2, 3}, {4, 5, 6}};
+                if (memchr(&bytes[0][0], 5, sizeof bytes) != &bytes[1][1]) return 5;
+
+                struct Matrix { int guard; int values[2][2]; int tail; };
+                struct Matrix from = {7, {{1, 2}, {3, 4}}, 8};
+                struct Matrix to = {9, {{0}}, 10};
+                memcpy(&to.values[0][0], &from.values[0][0], sizeof from.values);
+                if (to.guard != 9 || to.values[1][1] != 4 || to.tail != 10) return 6;
+                return 0;
+            }
+        "#;
+    assert_exit_status(source, 0);
+
+    let member_overflow = r#"
+            #include <string.h>
+            struct S { int member[2]; int next; };
+            int main(void) {
+                struct S value = {{0, 0}, 0};
+                int source[3] = {1, 2, 3};
+                memcpy(value.member, source, sizeof source);
+                return 0;
+            }
+        "#;
+    assert_diagnostic_contains(member_overflow, "containing record member");
 }
 
 #[test]

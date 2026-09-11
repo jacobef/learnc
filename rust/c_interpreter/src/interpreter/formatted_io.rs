@@ -314,7 +314,9 @@ impl<'a> Interpreter<'a> {
                     matches!(conversion.spec, 'd' | 'i'),
                     arg.span,
                 )?;
-                if arg.value.ty != expected {
+                if arg.value.ty != expected
+                    && !self.corresponding_signedness_value_exception(&expected, &arg.value)
+                {
                     return Err(Diagnostic::ub(
                         format!(
                             "{function_name} {} requires an argument of type {}",
@@ -1141,13 +1143,9 @@ impl<'a> Interpreter<'a> {
             }
             'c' | 's' | '[' => match conv.length {
                 ScanfLength::None => {
-                    let pointer = self.wide_scan_output_pointer(
-                        function_name,
-                        value,
-                        &self.char_ptr_type(),
-                        span,
-                    )?;
-                    let limit = self.wide_scan_capacity(&pointer, &CType::Char, span, objects)?;
+                    let (pointer, element_ty) =
+                        self.scan_character_output_pointer(function_name, value, span)?;
+                    let limit = self.wide_scan_capacity(&pointer, &element_ty, span, objects)?;
                     let needed = match conv.spec {
                         'c' => conv.width.unwrap_or(1),
                         _ => conv.width.unwrap_or(0).saturating_add(1),
@@ -1944,7 +1942,9 @@ impl<'a> Interpreter<'a> {
             }
             index += 1;
             if index < units.len() && units[index] == '%' as libc::wchar_t {
-                directives.push(ScanfDirective::Literal('%' as libc::wchar_t));
+                // %% is a conversion specification, so it skips leading input
+                // whitespace. Ordinary literal characters must not do so.
+                directives.push(ScanfDirective::Percent);
                 index += 1;
                 continue;
             }
@@ -2196,7 +2196,7 @@ impl<'a> Interpreter<'a> {
         if pushback.is_empty() {
             return Ok(());
         }
-        for &unit in pushback.iter().rev() {
+        for &unit in pushback.iter() {
             let scalar = char::from_u32(unit as u32).ok_or_else(|| {
                 Diagnostic::error("failed to restore unread wide input to stream", span)
             })?;
@@ -2334,7 +2334,7 @@ impl<'a> Interpreter<'a> {
         if pushback.is_empty() {
             return Ok(());
         }
-        for &byte in pushback.iter().rev() {
+        for &byte in pushback.iter() {
             self.unread_byte_to_stream(*stream_object, byte, span, "fscanf", "7.19.6.2")?;
         }
         if let Some(stream) = self.host_streams.get_mut(stream_object) {
@@ -2456,6 +2456,221 @@ impl<'a> Interpreter<'a> {
             unsafe { end.offset_from(bytes.as_ptr().cast::<c_char>()) as usize }
         };
         (consumed != 0).then_some((value, consumed, overflow))
+    }
+
+    pub(super) fn scan_numeric_input_item_bytes(
+        &self,
+        token: &[u8],
+        spec: char,
+    ) -> Option<(usize, bool)> {
+        let host_consumed = match spec {
+            'd' => self
+                .scan_token_to_signed_bytes(token, 10)
+                .map(|(_, consumed, _)| consumed),
+            'i' => self
+                .scan_token_to_signed_bytes(token, 0)
+                .map(|(_, consumed, _)| consumed),
+            'o' => self
+                .scan_token_to_unsigned_bytes(token, 8)
+                .map(|(_, consumed, _)| consumed),
+            'u' => self
+                .scan_token_to_unsigned_bytes(token, 10)
+                .map(|(_, consumed, _)| consumed),
+            'x' | 'X' | 'p' => self
+                .scan_token_to_unsigned_bytes(token, 16)
+                .map(|(_, consumed, _)| consumed),
+            _ => self
+                .scan_token_to_float_bytes(token)
+                .map(|(_, consumed, _)| consumed),
+        };
+        Self::scan_numeric_input_item_ascii(token, spec)
+            .map(|standard| {
+                host_consumed
+                    .filter(|consumed| *consumed > standard.0)
+                    .map_or(standard, |consumed| (consumed, true))
+            })
+            .or_else(|| host_consumed.map(|consumed| (consumed, true)))
+    }
+
+    fn scan_numeric_input_item_ascii(token: &[u8], spec: char) -> Option<(usize, bool)> {
+        let mut index = usize::from(matches!(token.first(), Some(b'+' | b'-')));
+        let signed_prefix = index != 0;
+        if index == token.len() {
+            return signed_prefix.then_some((index, false));
+        }
+
+        if matches!(spec, 'a' | 'A' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G') {
+            let lower = |byte: u8| byte.to_ascii_lowercase();
+            if matches!(lower(token[index]), b'i' | b'n') {
+                let start = index;
+                if lower(token[index]) == b'i' {
+                    let expected = b"infinity";
+                    while index - start < expected.len()
+                        && index < token.len()
+                        && lower(token[index]) == expected[index - start]
+                    {
+                        index += 1;
+                    }
+                    let matched = index - start;
+                    if matched == 0 {
+                        return None;
+                    }
+                    let complete = matched == expected.len()
+                        || (matched == 3
+                            && (index == token.len() || lower(token[index]) != expected[matched]));
+                    return Some((index, complete));
+                }
+
+                let expected = b"nan";
+                while index - start < expected.len()
+                    && index < token.len()
+                    && lower(token[index]) == expected[index - start]
+                {
+                    index += 1;
+                }
+                let matched = index - start;
+                if matched < expected.len() {
+                    return Some((index, false));
+                }
+                if token.get(index) != Some(&b'(') {
+                    return Some((index, true));
+                }
+                index += 1;
+                while token
+                    .get(index)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                {
+                    index += 1;
+                }
+                if token.get(index) == Some(&b')') {
+                    return Some((index + 1, true));
+                }
+                return Some((index, false));
+            }
+
+            if token.get(index) == Some(&b'0')
+                && token
+                    .get(index + 1)
+                    .is_some_and(|byte| matches!(byte, b'x' | b'X'))
+            {
+                index += 2;
+                let significand_start = index;
+                while token.get(index).is_some_and(u8::is_ascii_hexdigit) {
+                    index += 1;
+                }
+                let mut digits = index - significand_start;
+                if token.get(index) == Some(&b'.') {
+                    index += 1;
+                    let fraction_start = index;
+                    while token.get(index).is_some_and(u8::is_ascii_hexdigit) {
+                        index += 1;
+                    }
+                    digits += index - fraction_start;
+                }
+                if digits == 0 {
+                    return Some((index, false));
+                }
+                if !token
+                    .get(index)
+                    .is_some_and(|byte| matches!(byte, b'p' | b'P'))
+                {
+                    return Some((index, true));
+                }
+                index += 1;
+                if token
+                    .get(index)
+                    .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+                {
+                    index += 1;
+                }
+                let exponent_start = index;
+                while token.get(index).is_some_and(u8::is_ascii_digit) {
+                    index += 1;
+                }
+                return Some((index, index != exponent_start));
+            }
+
+            let significand_start = index;
+            while token.get(index).is_some_and(u8::is_ascii_digit) {
+                index += 1;
+            }
+            let mut digits = index - significand_start;
+            if token.get(index) == Some(&b'.') {
+                index += 1;
+                let fraction_start = index;
+                while token.get(index).is_some_and(u8::is_ascii_digit) {
+                    index += 1;
+                }
+                digits += index - fraction_start;
+            }
+            if digits == 0 {
+                return (index != 0).then_some((index, false));
+            }
+            if token
+                .get(index)
+                .is_some_and(|byte| matches!(byte, b'e' | b'E'))
+            {
+                index += 1;
+                if token
+                    .get(index)
+                    .is_some_and(|byte| matches!(byte, b'+' | b'-'))
+                {
+                    index += 1;
+                }
+                let exponent_start = index;
+                while token.get(index).is_some_and(u8::is_ascii_digit) {
+                    index += 1;
+                }
+                return Some((index, index != exponent_start));
+            }
+            return Some((index, true));
+        }
+
+        let digit_matches = |byte: u8, radix: u8| match radix {
+            8 => matches!(byte, b'0'..=b'7'),
+            10 => byte.is_ascii_digit(),
+            16 => byte.is_ascii_hexdigit(),
+            _ => false,
+        };
+        let radix = match spec {
+            'o' => 8,
+            'x' | 'X' | 'p' => 16,
+            'i' => {
+                if token.get(index) == Some(&b'0') {
+                    8
+                } else {
+                    10
+                }
+            }
+            _ => 10,
+        };
+        if matches!(spec, 'i' | 'x' | 'X' | 'p')
+            && token.get(index) == Some(&b'0')
+            && token
+                .get(index + 1)
+                .is_some_and(|byte| matches!(byte, b'x' | b'X'))
+        {
+            index += 2;
+            let digits_start = index;
+            while token
+                .get(index)
+                .is_some_and(|byte| digit_matches(*byte, 16))
+            {
+                index += 1;
+            }
+            return Some((index, index != digits_start));
+        }
+        let digits_start = index;
+        while token
+            .get(index)
+            .is_some_and(|byte| digit_matches(*byte, radix))
+        {
+            index += 1;
+        }
+        if index == digits_start {
+            return signed_prefix.then_some((index, false));
+        }
+        Some((index, true))
     }
 
     pub(super) fn scan_read_multibyte_char(
@@ -2608,6 +2823,41 @@ impl<'a> Interpreter<'a> {
         Ok(pointer)
     }
 
+    fn scan_character_output_pointer(
+        &self,
+        function_name: &str,
+        value: &TypedValue,
+        span: Span,
+    ) -> Result<(PointerValue, CType), Diagnostic> {
+        let CType::Pointer(element_ty) = value.ty.unqualified() else {
+            return Err(Diagnostic::ub(
+                format!(
+                    "{function_name} character conversion requires a pointer to a writable character type"
+                ),
+                span,
+                Some("7.24.2.2"),
+            ));
+        };
+        if !element_ty.is_character() || element_ty.is_const_qualified() {
+            return Err(Diagnostic::ub(
+                format!(
+                    "{function_name} character conversion requires a pointer to a writable character type"
+                ),
+                span,
+                Some("7.24.2.2"),
+            ));
+        }
+        let pointer = value.as_pointer(span)?;
+        if pointer.is_null() {
+            return Err(Diagnostic::ub(
+                format!("{function_name} requires a non-null output pointer"),
+                span,
+                Some("7.24.2.2"),
+            ));
+        }
+        Ok((pointer, (**element_ty).clone()))
+    }
+
     fn wide_scan_capacity(
         &self,
         pointer: &PointerValue,
@@ -2724,6 +2974,44 @@ impl<'a> Interpreter<'a> {
             unsafe { end.offset_from(units.as_ptr()) as usize }
         };
         (consumed != 0).then_some((value, consumed, overflow))
+    }
+
+    fn wide_scan_numeric_input_item(
+        &self,
+        token: &[libc::wchar_t],
+        spec: char,
+    ) -> Option<(usize, bool)> {
+        let ascii = token
+            .iter()
+            .map(|unit| u8::try_from(*unit).unwrap_or(0xff))
+            .collect::<Vec<_>>();
+        let host_consumed = match spec {
+            'd' => self
+                .scan_token_to_signed(token, 10)
+                .map(|(_, consumed, _)| consumed),
+            'i' => self
+                .scan_token_to_signed(token, 0)
+                .map(|(_, consumed, _)| consumed),
+            'o' => self
+                .scan_token_to_unsigned(token, 8)
+                .map(|(_, consumed, _)| consumed),
+            'u' => self
+                .scan_token_to_unsigned(token, 10)
+                .map(|(_, consumed, _)| consumed),
+            'x' | 'X' | 'p' => self
+                .scan_token_to_unsigned(token, 16)
+                .map(|(_, consumed, _)| consumed),
+            _ => self
+                .scan_token_to_float(token)
+                .map(|(_, consumed, _)| consumed),
+        };
+        Self::scan_numeric_input_item_ascii(&ascii, spec)
+            .map(|standard| {
+                host_consumed
+                    .filter(|consumed| *consumed > standard.0)
+                    .map_or(standard, |consumed| (consumed, true))
+            })
+            .or_else(|| host_consumed.map(|consumed| (consumed, true)))
     }
 
     fn wide_scan_collect_token(
@@ -2875,9 +3163,9 @@ impl<'a> Interpreter<'a> {
         add_nul: bool,
         objects: &mut ObjectFrames,
     ) -> Result<(), Diagnostic> {
-        let pointer =
-            self.wide_scan_output_pointer(function_name, dest, &self.char_ptr_type(), span)?;
-        let capacity = self.wide_scan_capacity(&pointer, &CType::Char, span, objects)?;
+        let (pointer, element_ty) =
+            self.scan_character_output_pointer(function_name, dest, span)?;
+        let capacity = self.wide_scan_capacity(&pointer, &element_ty, span, objects)?;
         let needed = bytes.len() + usize::from(add_nul);
         if needed > capacity {
             return Err(Diagnostic::ub(
@@ -3001,6 +3289,7 @@ impl<'a> Interpreter<'a> {
                             designated_root_ty: None,
                             byte_offset_override: Some((address - base) as usize),
                             arithmetic_domain_start: None,
+                            object_representation_domain: None,
                         })),
                         restrict_source: None,
                         indeterminate,
@@ -3018,6 +3307,7 @@ impl<'a> Interpreter<'a> {
                 designated_root_ty: None,
                 byte_offset_override: Some(byte_offset),
                 arithmetic_domain_start: None,
+                object_representation_domain: None,
             };
             self.opaque_integer_pointer_addresses
                 .borrow_mut()
@@ -3225,6 +3515,21 @@ impl<'a> Interpreter<'a> {
                         ScanConversionStatus::MatchingFailure
                     });
                 }
+                let Some((item_len, complete)) =
+                    self.wide_scan_numeric_input_item(&token, conv.spec)
+                else {
+                    for &unit in token.iter().rev() {
+                        self.wide_scan_unread(source, unit);
+                    }
+                    return Ok(ScanConversionStatus::MatchingFailure);
+                };
+                for &unit in token[item_len..].iter().rev() {
+                    self.wide_scan_unread(source, unit);
+                }
+                if !complete {
+                    return Ok(ScanConversionStatus::MatchingFailure);
+                }
+                let token = &token[..item_len];
                 let parsed = match conv.spec {
                     'd' => {
                         self.scan_token_to_signed(&token, 10)
@@ -3264,9 +3569,6 @@ impl<'a> Interpreter<'a> {
                         }),
                 };
                 let Some((parsed, consumed, overflow)) = parsed else {
-                    for &unit in token.iter().rev() {
-                        self.wide_scan_unread(source, unit);
-                    }
                     return Ok(ScanConversionStatus::MatchingFailure);
                 };
                 for &unit in token[consumed..].iter().rev() {
@@ -3348,20 +3650,30 @@ impl<'a> Interpreter<'a> {
         call_span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<(i32, usize), Diagnostic> {
-        let mut assignments = 0i32;
+        let mut progress = ScanProgress::default();
         let mut used_args = 0usize;
         for directive in directives {
             match directive {
                 ScanfDirective::Whitespace => {
                     self.wide_scan_skip_ws(source, call_span)?;
                 }
-                ScanfDirective::Literal(expected) => {
-                    let Some(unit) = self.wide_scan_next(source, call_span)? else {
-                        return Ok((if assignments == 0 { -1 } else { assignments }, used_args));
+                ScanfDirective::Literal(_) | ScanfDirective::Percent => {
+                    let expected = match directive {
+                        ScanfDirective::Literal(unit) => *unit,
+                        _ => {
+                            self.wide_scan_skip_ws(source, call_span)?;
+                            '%' as libc::wchar_t
+                        }
                     };
-                    if unit != *expected {
+                    let Some(unit) = self.wide_scan_next(source, call_span)? else {
+                        return Ok((progress.input_failure_result(), used_args));
+                    };
+                    if unit != expected {
                         self.wide_scan_unread(source, unit);
-                        return Ok((assignments, used_args));
+                        return Ok((progress.assignments, used_args));
+                    }
+                    if matches!(directive, ScanfDirective::Percent) {
+                        progress.converted = true;
                     }
                 }
                 ScanfDirective::Conversion(conv) => {
@@ -3378,7 +3690,7 @@ impl<'a> Interpreter<'a> {
                         used_args += 1;
                         (Some(value), span)
                     };
-                    match self.eval_wscanf_conversion(
+                    let status = self.eval_wscanf_conversion(
                         function_name,
                         conv,
                         source,
@@ -3386,22 +3698,13 @@ impl<'a> Interpreter<'a> {
                         dest_span,
                         call_span,
                         objects,
-                    )? {
-                        ScanConversionStatus::Assigned => assignments += 1,
-                        ScanConversionStatus::NoAssignment => {}
-                        ScanConversionStatus::MatchingFailure => {
-                            return Ok((assignments, used_args));
-                        }
-                        ScanConversionStatus::InputFailure => {
-                            return Ok((
-                                if assignments == 0 { -1 } else { assignments },
-                                used_args,
-                            ));
-                        }
+                    )?;
+                    if let Some(result) = progress.conversion_result(status) {
+                        return Ok((result, used_args));
                     }
                 }
             }
         }
-        Ok((assignments, used_args))
+        Ok((progress.assignments, used_args))
     }
 }

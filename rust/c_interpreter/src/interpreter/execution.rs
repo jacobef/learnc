@@ -111,14 +111,28 @@ impl<'a> Interpreter<'a> {
                     if param.ty == CType::Void {
                         continue;
                     }
-                    for bound in param.vla_bounds.iter().flatten() {
+                    // Array-to-pointer adjustment removes only the outer array
+                    // dimension. Evaluate that bound for its side effects, then
+                    // retain the remaining dimensions in the parameter object.
+                    let (_, retained) =
+                        Self::resolve_vla_type_for_constraints(&param.ty, &param.vla_bounds);
+                    let discarded = param.vla_bounds.len() - retained;
+                    for bound in param.vla_bounds[..discarded].iter().flatten() {
                         let _ = self.evaluate_vla_bound(bound, &mut frame, objects)?;
                     }
-                    self.check_static_array_parameter(param, &arg, &mut frame, objects)?;
-                    let arg = self.convert_value(arg, &param.ty, call_span)?;
+                    let mut resolved_param = param.clone();
+                    resolved_param.ty = self.resolve_decl_type(
+                        &param.ty,
+                        &param.vla_bounds[discarded..],
+                        &mut frame,
+                        objects,
+                        param.span,
+                    )?;
+                    self.check_static_array_parameter(&resolved_param, &arg, &mut frame, objects)?;
+                    let arg = self.convert_value(arg, &resolved_param.ty, call_span)?;
                     let object = self.allocate_object(
                         objects,
-                        param.ty.clone(),
+                        resolved_param.ty,
                         StorageDuration::Automatic,
                         param.span,
                         param.storage_class == Some(StorageClass::Register),
@@ -4024,6 +4038,7 @@ impl<'a> Interpreter<'a> {
                             designated_root_ty,
                             byte_offset_override: lvalue.byte_offset_override,
                             arithmetic_domain_start: lvalue.arithmetic_domain_start,
+                            object_representation_domain: lvalue.object_representation_domain,
                         })),
                         restrict_source: lvalue.restrict_source,
                         indeterminate: false,
@@ -4082,6 +4097,7 @@ impl<'a> Interpreter<'a> {
                     designated_root_ty: pointer.designated_root_ty,
                     byte_offset_override: pointer.byte_offset_override,
                     arithmetic_domain_start: pointer.arithmetic_domain_start,
+                    object_representation_domain: pointer.object_representation_domain,
                     bit_field_width: None,
                     restrict_source: None,
                 }))
@@ -4099,6 +4115,7 @@ impl<'a> Interpreter<'a> {
                     designated_root_ty: pointer.designated_root_ty,
                     byte_offset_override: pointer.byte_offset_override,
                     arithmetic_domain_start: pointer.arithmetic_domain_start,
+                    object_representation_domain: pointer.object_representation_domain,
                     bit_field_width: None,
                     restrict_source: None,
                 }))
@@ -4388,6 +4405,7 @@ impl<'a> Interpreter<'a> {
                     designated_root_ty: None,
                     byte_offset_override: None,
                     arithmetic_domain_start: None,
+                    object_representation_domain: None,
                     bit_field_width: None,
                     restrict_source: None,
                 }),
@@ -4407,6 +4425,7 @@ impl<'a> Interpreter<'a> {
                     designated_root_ty: None,
                     byte_offset_override: None,
                     arithmetic_domain_start: None,
+                    object_representation_domain: None,
                     bit_field_width: None,
                     restrict_source: None,
                 }),
@@ -4439,6 +4458,7 @@ impl<'a> Interpreter<'a> {
                     designated_root_ty: None,
                     byte_offset_override: None,
                     arithmetic_domain_start: None,
+                    object_representation_domain: None,
                     bit_field_width: None,
                     restrict_source: None,
                 }),
@@ -4561,6 +4581,7 @@ impl<'a> Interpreter<'a> {
                                 designated_root_ty: lvalue.designated_root_ty.clone(),
                                 byte_offset_override: lvalue.byte_offset_override,
                                 arithmetic_domain_start: lvalue.arithmetic_domain_start,
+                                object_representation_domain: lvalue.object_representation_domain,
                             })),
                             restrict_source: lvalue.restrict_source.clone(),
                             indeterminate: false,
@@ -4746,6 +4767,7 @@ impl<'a> Interpreter<'a> {
                     Some("6.5.3.2"),
                 ));
             }
+            self.validate_designated_subobject_dereference(&pointer, &ty, start, span)?;
             // Dereferencing a pointer only produces an lvalue; it does not read or
             // write the complete pointed-to type. Raw allocated storage can therefore
             // designate a member that fits even when another member makes the enclosing
@@ -4753,6 +4775,7 @@ impl<'a> Interpreter<'a> {
             // full byte-range check.
             Some(start)
         } else if let Some(start) = pointer.byte_offset_override {
+            self.validate_designated_subobject_dereference(&pointer, &ty, start, span)?;
             let size = self.type_size_of(&ty).ok_or_else(|| {
                 Diagnostic::ub(
                     "pointer does not point into a live supported object",
@@ -4829,9 +4852,73 @@ impl<'a> Interpreter<'a> {
             } else {
                 pointer.arithmetic_domain_start
             },
+            object_representation_domain: pointer.object_representation_domain,
             bit_field_width: None,
             restrict_source: value.restrict_source,
         }))
+    }
+
+    fn validate_designated_subobject_dereference(
+        &self,
+        pointer: &PointerValue,
+        target_ty: &CType,
+        start: usize,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let target_size = self.type_size_of(target_ty).ok_or_else(|| {
+            Diagnostic::ub(
+                "pointer does not point into a live supported object",
+                span,
+                Some("6.5.3.2"),
+            )
+        })?;
+        if pointer
+            .object_representation_domain
+            .and_then(ObjectRepresentationDomain::active)
+            .is_some_and(|domain| {
+                start < domain.start
+                    || start
+                        .checked_add(target_size)
+                        .is_none_or(|end| end > domain.one_past_end)
+            })
+        {
+            return Err(Diagnostic::ub(
+                "pointer is not valid to dereference outside the converted object's representation",
+                span,
+                Some("6.3.2.3"),
+            ));
+        }
+        let (Some(domain_start), Some(domain_ty)) = (
+            pointer.arithmetic_domain_start,
+            pointer.designated_root_ty.as_deref(),
+        ) else {
+            return Ok(());
+        };
+        if !matches!(domain_ty.unqualified(), CType::Array(_, len) if *len != 0) {
+            return Ok(());
+        }
+        let domain_size = self.type_size_of(domain_ty).ok_or_else(|| {
+            Diagnostic::ub(
+                "pointer does not point into a live supported object",
+                span,
+                Some("6.5.3.2"),
+            )
+        })?;
+        let domain_end = domain_start.checked_add(domain_size).ok_or_else(|| {
+            Diagnostic::ub("pointer is not valid to dereference", span, Some("6.5.3.2"))
+        })?;
+        if start < domain_start
+            || start
+                .checked_add(target_size)
+                .is_none_or(|end| end > domain_end)
+        {
+            return Err(Diagnostic::ub(
+                "pointer is not valid to dereference",
+                span,
+                Some("6.5.3.2"),
+            ));
+        }
+        Ok(())
     }
 
     fn eval_subscript(
@@ -4888,6 +4975,7 @@ impl<'a> Interpreter<'a> {
                     designated_root_ty: lvalue.designated_root_ty,
                     byte_offset_override: lvalue.byte_offset_override,
                     arithmetic_domain_start: lvalue.arithmetic_domain_start,
+                    object_representation_domain: lvalue.object_representation_domain,
                 };
                 let pointer =
                     self.checked_pointer_offset(pointer, index, &element_ty, objects, span)?;
@@ -4970,6 +5058,7 @@ impl<'a> Interpreter<'a> {
                         designated_root_ty: lvalue.designated_root_ty,
                         byte_offset_override: lvalue.byte_offset_override,
                         arithmetic_domain_start: lvalue.arithmetic_domain_start,
+                        object_representation_domain: lvalue.object_representation_domain,
                     },
                     index,
                     &element_ty,
@@ -5389,6 +5478,7 @@ impl<'a> Interpreter<'a> {
             designated_root_ty: None,
             byte_offset_override: None,
             arithmetic_domain_start: None,
+            object_representation_domain: None,
             bit_field_width: None,
             restrict_source: None,
         }))
@@ -5627,7 +5717,7 @@ impl<'a> Interpreter<'a> {
             if self.cross_unit_tagged_type_compatible(
                 comparison_ty.unqualified(),
                 arg.ty.unqualified(),
-            ) || self.old_style_signedness_exception(&comparison_ty, arg)
+            ) || self.corresponding_signedness_value_exception(&comparison_ty, arg)
                 || Self::old_style_character_void_pointer_exception(&comparison_ty, &arg.ty)
             {
                 continue;
@@ -5644,14 +5734,18 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    fn old_style_signedness_exception(&self, param_ty: &CType, arg: &TypedValue) -> bool {
-        if !Self::corresponding_signed_unsigned_types(param_ty, &arg.ty) {
+    pub(super) fn corresponding_signedness_value_exception(
+        &self,
+        expected_ty: &CType,
+        actual: &TypedValue,
+    ) -> bool {
+        if !Self::corresponding_signed_unsigned_types(expected_ty, &actual.ty) {
             return false;
         }
-        let Ok(value) = arg.to_int() else {
+        let Ok(value) = actual.to_int() else {
             return false;
         };
-        param_ty
+        expected_ty
             .integer_bounds()
             .is_some_and(|(min, max)| (min..=max).contains(&value))
     }
@@ -5734,6 +5828,7 @@ impl<'a> Interpreter<'a> {
             designated_root_ty: Some(Rc::new(actual_ty.clone())),
             byte_offset_override: None,
             arithmetic_domain_start: None,
+            object_representation_domain: None,
             bit_field_width: None,
             restrict_source: None,
         }))
