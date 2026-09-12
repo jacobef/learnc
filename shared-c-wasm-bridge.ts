@@ -54,13 +54,13 @@ class WasiProcExit extends Error {
   }
 }
 
-function decodeBase64(data: string): Uint8Array {
+function decodeBase64(data: string): ArrayBuffer {
   const binary = atob(data);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) {
     bytes[index] = binary.charCodeAt(index);
   }
-  return bytes;
+  return bytes.buffer;
 }
 
 function writeU32(memory: WebAssembly.Memory, pointer: number, value: number) {
@@ -126,8 +126,7 @@ function wasiImports(getExports: () => CInterpreterExports | null) {
 function interpreterExports(): CInterpreterExports {
   if (exportsCache) return exportsCache;
   let current: CInterpreterExports | null = null;
-  const bytes = Uint8Array.from(decodeBase64(C_INTERPRETER_WASM_BASE64));
-  const module = new WebAssembly.Module(bytes as unknown as BufferSource);
+  const module = new WebAssembly.Module(decodeBase64(C_INTERPRETER_WASM_BASE64));
   const instance = new WebAssembly.Instance(module, {
     env: { clock: () => Math.floor(Date.now() / 1000) },
     wasi_snapshot_preview1: wasiImports(() => current),
@@ -198,7 +197,7 @@ function encodeBridgeRequest(request: CBridgeRequest): Uint8Array {
   return output;
 }
 
-function invokeCInterpreter<T>(request: CBridgeRequest): T {
+function invokeCInterpreter(request: CBridgeRequest): unknown {
   const interpreter = interpreterExports();
   const bytes = encodeBridgeRequest(request);
   const requestPointer = interpreter.cboxes_alloc(bytes.length);
@@ -211,7 +210,7 @@ function invokeCInterpreter<T>(request: CBridgeRequest): T {
     const json = textDecoder.decode(
       new Uint8Array(interpreter.memory.buffer, outputPointer, outputLength),
     );
-    return JSON.parse(json) as T;
+    return JSON.parse(json) as unknown;
   } finally {
     try {
       interpreter.cboxes_free(requestPointer, bytes.length);
@@ -234,4 +233,3 @@ export {
   resetCInterpreterBridge,
   WasiProcExit,
 };
-export type { CBridgeOperation, CBridgeRequest };

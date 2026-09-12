@@ -6,7 +6,7 @@ import type {
 } from "./shared-core-utils.js";
 import type { CodeDecoration } from "./shared-code-editor-surface.js";
 
-export const PRIMARY_DIAGNOSTIC_ANNOTATION_ID = "primary";
+const PRIMARY_DIAGNOSTIC_ANNOTATION_ID = "primary";
 
 const diagnosticGroupIds = new WeakMap<ProgramDiagnostic, string>();
 let nextDiagnosticGroupId = 1;

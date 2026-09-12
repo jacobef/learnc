@@ -2,7 +2,7 @@ import type { BoxState, CTypeInfo } from "./shared-core-utils.js";
 import { runCProgram } from "./shared-c-interpreter.js";
 import { inspectCType } from "./shared-c-value-semantics.js";
 
-export interface WorkspaceAllocation {
+interface WorkspaceAllocation {
   address: string;
   typeInfo: CTypeInfo;
   assumedType: string;

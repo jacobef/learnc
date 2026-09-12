@@ -1,9 +1,12 @@
-use super::{CboxesImplicitMain, RunResult, SourceDisplay, SourceDisplayMap};
-use crate::diag::{Diagnostic, DiagnosticRuntimeContext};
+use crate::browser::{CboxesImplicitMain, SourceDisplay, SourceDisplayMap};
+use crate::diag::{
+    Diagnostic, DiagnosticDisplayAnnotation, DiagnosticDisplayRange, DiagnosticRuntimeContext,
+    Severity,
+};
 use crate::interpreter::{
-    ProgramBlocked, ProgramExecutionLimit, ProgramExpressionResult, ProgramSourceLocation,
-    ProgramSourceRange, ProgramStateBox, ProgramTraceEvent, ProgramTypeHelpNode, ProgramTypeInfo,
-    ProgramValueLiteral,
+    ProgramBlocked, ProgramExecutionLimit, ProgramExpressionResult, ProgramOutput,
+    ProgramSourceLocation, ProgramSourceRange, ProgramStateBox, ProgramTraceEvent,
+    ProgramTypeHelpNode, ProgramTypeInfo, ProgramValueLiteral,
 };
 use crate::token;
 
@@ -29,7 +32,10 @@ pub(super) fn cboxes_implicit_main_json(
     json
 }
 
-pub(super) fn cboxes_success_json(result: &RunResult, source_display: &SourceDisplayMap) -> String {
+pub(super) fn cboxes_success_json(
+    result: &ProgramOutput,
+    source_display: &SourceDisplayMap,
+) -> String {
     format!(
         "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"exitStatus\":{},\"state\":{},\"trace\":{},\"mainClose\":{},\"blocked\":{},\"executionLimit\":{}}}",
         cboxes_json_string(&result.stdout),
@@ -189,107 +195,82 @@ pub(super) fn cboxes_diagnostic_json(
     source_display: &SourceDisplayMap,
 ) -> String {
     let rendered = diag.render();
-    let kind = if rendered.starts_with("undefined behavior:") {
+    let kind = if diag.severity() == Severity::UndefinedBehavior {
         "ub"
     } else {
         "compile"
     };
     let range = diag
         .display_range()
-        .and_then(|range| {
-            let file = range.path.to_string_lossy().into_owned();
-            cboxes_display_range(
-                source_display,
-                file,
-                range.start_line,
-                range.start_column,
-                range.end_line,
-                range.end_column,
-            )
-        })
-        .or_else(|| {
-            cboxes_rendered_location(&rendered).and_then(|(file, line, col)| {
-                cboxes_display_range(source_display, file, line, col, line, col + 1)
-            })
-        });
+        .and_then(|range| cboxes_display_range(source_display, range));
     let annotations = diag
         .display_annotations()
         .iter()
         .filter_map(|annotation| {
-            let annotation_range = &annotation.range;
-            let file = annotation_range.path.to_string_lossy().into_owned();
-            cboxes_display_range(
-                source_display,
-                file,
-                annotation_range.start_line,
-                annotation_range.start_column,
-                annotation_range.end_line,
-                annotation_range.end_column,
-            )
-            .map(|range| (annotation.id.clone(), range))
+            cboxes_display_range(source_display, &annotation.range).map(|range| {
+                DiagnosticDisplayAnnotation {
+                    id: annotation.id.clone(),
+                    range,
+                }
+            })
         })
         .collect::<Vec<_>>();
     cboxes_error_json_with_annotations(kind, &rendered, range, &annotations, diag.runtime_context())
 }
 
-pub(super) type CboxesDiagnosticRange = (String, usize, usize, usize, usize);
-
 fn cboxes_display_range(
     source_display: &SourceDisplayMap,
-    file: String,
-    start_line: usize,
-    start_col: usize,
-    end_line: usize,
-    end_col: usize,
-) -> Option<CboxesDiagnosticRange> {
+    range: &DiagnosticDisplayRange,
+) -> Option<DiagnosticDisplayRange> {
+    let file = range.path.to_string_lossy();
     let display = source_display
-        .get(&file)
+        .get(file.as_ref())
         .copied()
         .unwrap_or_else(SourceDisplay::unbounded);
-    let start_line = start_line.saturating_sub(display.line_offset);
+    let start_line = range.start_line.saturating_sub(display.line_offset);
     if start_line == display.line_count && display.normalized_final_newline {
         let eof_line = display.line_count.saturating_sub(1);
-        return Some((
-            file,
-            eof_line,
-            display.eof_column,
-            eof_line,
-            display.eof_column,
-        ));
+        return Some(DiagnosticDisplayRange {
+            path: range.path.clone(),
+            start_line: eof_line,
+            start_column: display.eof_column,
+            end_line: eof_line,
+            end_column: display.eof_column,
+        });
     }
     if start_line >= display.line_count {
         return None;
     }
-    let end_line = end_line
-        .saturating_sub(display.line_offset)
-        .max(start_line)
-        .min(display.line_count.saturating_sub(1));
-    Some((file, start_line, start_col, end_line, end_col))
+    Some(DiagnosticDisplayRange {
+        start_line,
+        end_line: range
+            .end_line
+            .saturating_sub(display.line_offset)
+            .max(start_line)
+            .min(display.line_count.saturating_sub(1)),
+        ..range.clone()
+    })
 }
 
-pub(super) fn cboxes_error_json(
-    kind: &str,
-    message: &str,
-    range: Option<CboxesDiagnosticRange>,
-) -> String {
-    cboxes_error_json_with_annotations(kind, message, range, &[], None)
+pub(super) fn cboxes_error_json(kind: &str, message: &str) -> String {
+    cboxes_error_json_with_annotations(kind, message, None, &[], None)
 }
 
 fn cboxes_error_json_with_annotations(
     kind: &str,
     message: &str,
-    range: Option<CboxesDiagnosticRange>,
-    annotations: &[(String, CboxesDiagnosticRange)],
+    range: Option<DiagnosticDisplayRange>,
+    annotations: &[DiagnosticDisplayAnnotation],
     runtime_context: Option<&DiagnosticRuntimeContext>,
 ) -> String {
     let (file, line, col, end_line, end_col) = range
-        .map(|(file, line, col, end_line, end_col)| {
+        .map(|range| {
             (
-                cboxes_json_string(&file),
-                line.to_string(),
-                col.to_string(),
-                end_line.to_string(),
-                end_col.to_string(),
+                cboxes_json_string(&range.path.to_string_lossy()),
+                range.start_line.to_string(),
+                range.start_column.to_string(),
+                range.end_line.to_string(),
+                range.end_column.to_string(),
             )
         })
         .unwrap_or_else(|| {
@@ -302,18 +283,19 @@ fn cboxes_error_json_with_annotations(
             )
         });
     let mut annotations_json = String::from("[");
-    for (index, (id, (file, line, col, end_line, end_col))) in annotations.iter().enumerate() {
+    for (index, annotation) in annotations.iter().enumerate() {
+        let range = &annotation.range;
         if index > 0 {
             annotations_json.push(',');
         }
         annotations_json.push_str(&format!(
             "{{\"id\":{},\"file\":{},\"line\":{},\"column\":{},\"endLine\":{},\"endColumn\":{}}}",
-            cboxes_json_string(id),
-            cboxes_json_string(file),
-            line,
-            col,
-            end_line,
-            end_col,
+            cboxes_json_string(&annotation.id),
+            cboxes_json_string(&range.path.to_string_lossy()),
+            range.start_line,
+            range.start_column,
+            range.end_line,
+            range.end_column,
         ));
     }
     annotations_json.push(']');
@@ -346,20 +328,6 @@ fn cboxes_runtime_context_json(context: Option<&DiagnosticRuntimeContext>) -> St
         line_execution_count,
         cboxes_state_json(&context.state),
     )
-}
-
-fn cboxes_rendered_location(rendered: &str) -> Option<(String, usize, usize)> {
-    for line in rendered.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("--> ") else {
-            continue;
-        };
-        let mut parts = rest.rsplitn(3, ':');
-        let col = parts.next()?.parse::<usize>().ok()?;
-        let line = parts.next()?.parse::<usize>().ok()?;
-        let file = parts.next()?.to_owned();
-        return Some((file, line.saturating_sub(1), col.saturating_sub(1)));
-    }
-    None
 }
 
 fn cboxes_state_json(state: &[ProgramStateBox]) -> String {
@@ -419,19 +387,39 @@ fn cboxes_state_json(state: &[ProgramStateBox]) -> String {
     out
 }
 
+fn cboxes_display_lines(
+    source_display: &SourceDisplayMap,
+    file: &str,
+    start_line: usize,
+    end_line: usize,
+) -> Option<(usize, usize)> {
+    let display = source_display
+        .get(file)
+        .copied()
+        .unwrap_or_else(SourceDisplay::unbounded);
+    let start_line = start_line.saturating_sub(display.line_offset);
+    (start_line < display.line_count).then(|| {
+        (
+            start_line,
+            end_line
+                .saturating_sub(display.line_offset)
+                .min(display.line_count.saturating_sub(1)),
+        )
+    })
+}
+
 fn cboxes_trace_json(trace: &[ProgramTraceEvent], source_display: &SourceDisplayMap) -> String {
     let mut out = String::from("[");
     let mut wrote_event = false;
     for event in trace {
-        let display = source_display
-            .get(&event.file)
-            .copied()
-            .unwrap_or_else(SourceDisplay::unbounded);
-        let start_line = event.start_line.saturating_sub(display.line_offset);
-        let end_line = event.end_line.saturating_sub(display.line_offset);
-        if start_line >= display.line_count {
+        let Some((start_line, end_line)) = cboxes_display_lines(
+            source_display,
+            &event.file,
+            event.start_line,
+            event.end_line,
+        ) else {
             continue;
-        }
+        };
         if wrote_event {
             out.push(',');
         }
@@ -444,11 +432,7 @@ fn cboxes_trace_json(trace: &[ProgramTraceEvent], source_display: &SourceDisplay
         out.push_str(",\"startLine\":");
         out.push_str(&start_line.to_string());
         out.push_str(",\"endLine\":");
-        out.push_str(
-            &end_line
-                .min(display.line_count.saturating_sub(1))
-                .to_string(),
-        );
+        out.push_str(&end_line.to_string());
         out.push_str(",\"state\":");
         out.push_str(&cboxes_state_json(&event.state));
         out.push_str(",\"skippedRange\":");
@@ -469,18 +453,14 @@ fn cboxes_source_range_json(
     let Some(range) = range else {
         return "null".to_owned();
     };
-    let display = source_display
-        .get(&range.file)
-        .copied()
-        .unwrap_or_else(SourceDisplay::unbounded);
-    let start_line = range.start_line.saturating_sub(display.line_offset);
-    if start_line >= display.line_count {
+    let Some((start_line, end_line)) = cboxes_display_lines(
+        source_display,
+        &range.file,
+        range.start_line,
+        range.end_line,
+    ) else {
         return "null".to_owned();
-    }
-    let end_line = range
-        .end_line
-        .saturating_sub(display.line_offset)
-        .min(display.line_count.saturating_sub(1));
+    };
     format!(
         "{{\"file\":{},\"startLine\":{},\"startColumn\":{},\"endLine\":{},\"endColumn\":{}}}",
         cboxes_json_string(&range.file),
@@ -495,14 +475,11 @@ fn cboxes_source_location_json(
     location: &ProgramSourceLocation,
     source_display: &SourceDisplayMap,
 ) -> String {
-    let display = source_display
-        .get(&location.file)
-        .copied()
-        .unwrap_or_else(SourceDisplay::unbounded);
-    let line = location.line.saturating_sub(display.line_offset);
-    if line >= display.line_count {
+    let Some((line, _)) =
+        cboxes_display_lines(source_display, &location.file, location.line, location.line)
+    else {
         return "null".to_owned();
-    }
+    };
     format!(
         "{{\"file\":{},\"line\":{}}}",
         cboxes_json_string(&location.file),
@@ -517,18 +494,14 @@ fn cboxes_blocked_json(
     let Some(blocked) = blocked else {
         return "null".to_owned();
     };
-    let display = source_display
-        .get(&blocked.file)
-        .copied()
-        .unwrap_or_else(SourceDisplay::unbounded);
-    let start_line = blocked.start_line.saturating_sub(display.line_offset);
-    if start_line >= display.line_count {
+    let Some((start_line, end_line)) = cboxes_display_lines(
+        source_display,
+        &blocked.file,
+        blocked.start_line,
+        blocked.end_line,
+    ) else {
         return "null".to_owned();
-    }
-    let end_line = blocked
-        .end_line
-        .saturating_sub(display.line_offset)
-        .min(display.line_count.saturating_sub(1));
+    };
     format!(
         "{{\"file\":{},\"startLine\":{},\"endLine\":{},\"function\":{},\"state\":{}}}",
         cboxes_json_string(&blocked.file),
@@ -546,20 +519,14 @@ fn cboxes_execution_limit_json(
     let Some(execution_limit) = execution_limit else {
         return "null".to_owned();
     };
-    let display = source_display
-        .get(&execution_limit.file)
-        .copied()
-        .unwrap_or_else(SourceDisplay::unbounded);
-    let start_line = execution_limit
-        .start_line
-        .saturating_sub(display.line_offset);
-    if start_line >= display.line_count {
+    let Some((start_line, end_line)) = cboxes_display_lines(
+        source_display,
+        &execution_limit.file,
+        execution_limit.start_line,
+        execution_limit.end_line,
+    ) else {
         return "null".to_owned();
-    }
-    let end_line = execution_limit
-        .end_line
-        .saturating_sub(display.line_offset)
-        .min(display.line_count.saturating_sub(1));
+    };
     format!(
         "{{\"file\":{},\"startLine\":{},\"endLine\":{},\"tracePosition\":{}}}",
         cboxes_json_string(&execution_limit.file),

@@ -1,10 +1,5 @@
 const PROGRESS_PREFIX = "cboxes-progress-v1:";
 const SANDBOX_PROGRESS_KEY = "cboxes:sandbox-state:v1";
-function isStoredProgress(value) {
-    return ("version" in value &&
-        value.version === 1 &&
-        "state" in value);
-}
 function storage() {
     try {
         return window.localStorage;
@@ -13,127 +8,129 @@ function storage() {
         return null;
     }
 }
-export function currentLevelId() {
-    const path = String(window.location.pathname || "").trim();
-    const leaf = path.split("/").filter(Boolean).pop() || path || "index.html";
-    return leaf || "index.html";
+function readStoredText(key) {
+    try {
+        return storage()?.getItem(key) ?? null;
+    }
+    catch {
+        return null;
+    }
 }
-export function levelProgressKey(levelId = currentLevelId()) {
+function removeStoredText(key) {
+    try {
+        storage()?.removeItem(key);
+    }
+    catch {
+        // Saving progress is optional when browser storage is unavailable.
+    }
+}
+function windowNameState() {
+    try {
+        const parsed = JSON.parse(window.name || "{}");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            return parsed;
+        }
+    }
+    catch {
+        // window.name may belong to another page or contain malformed saved data.
+    }
+    return {};
+}
+function writeWindowNameProgress(value) {
+    try {
+        const state = windowNameState();
+        if (value === null)
+            delete state[SANDBOX_PROGRESS_KEY];
+        else
+            state[SANDBOX_PROGRESS_KEY] = value;
+        window.name = Object.keys(state).length ? JSON.stringify(state) : "";
+    }
+    catch {
+        // This fallback is best effort, just like localStorage.
+    }
+}
+export function currentLevelId() {
+    const path = window.location.pathname.trim();
+    return path.split("/").filter(Boolean).pop() || "index.html";
+}
+function levelProgressKey(levelId) {
     return `${PROGRESS_PREFIX}${levelId}`;
 }
 export function readLevelProgress(levelId = currentLevelId()) {
-    const store = storage();
-    if (!store)
-        return null;
-    const raw = store.getItem(levelProgressKey(levelId));
+    const raw = readStoredText(levelProgressKey(levelId));
     if (!raw)
         return null;
     try {
         const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== "object")
+        if (!parsed || typeof parsed !== "object" || !("version" in parsed) ||
+            parsed.version !== 1 || !("state" in parsed))
             return null;
-        if (isStoredProgress(parsed))
-            return parsed.state ?? null;
-        return parsed;
+        return parsed.state;
     }
     catch {
         return null;
     }
 }
 export function writeLevelProgress(state, levelId = currentLevelId()) {
-    const store = storage();
-    if (!store)
-        return;
-    const payload = {
-        version: 1,
-        savedAt: Date.now(),
-        state,
-    };
+    const payload = { version: 1, state };
     try {
-        store.setItem(levelProgressKey(levelId), JSON.stringify(payload));
+        storage()?.setItem(levelProgressKey(levelId), JSON.stringify(payload));
     }
     catch {
         // Ignore storage quota / privacy-mode failures.
     }
 }
 export function clearLevelProgress(levelId = currentLevelId()) {
-    const store = storage();
-    if (!store)
-        return;
-    try {
-        store.removeItem(levelProgressKey(levelId));
-    }
-    catch {
-        // Ignore storage failures.
-    }
+    removeStoredText(levelProgressKey(levelId));
 }
-export function savedLevelIds() {
+function savedLevelIds() {
     const store = storage();
     if (!store)
         return [];
-    const ids = [];
     try {
+        const ids = [];
         for (let i = 0; i < store.length; i++) {
             const key = store.key(i);
-            if (!key || !key.startsWith(PROGRESS_PREFIX))
-                continue;
-            ids.push(key.slice(PROGRESS_PREFIX.length));
+            if (key?.startsWith(PROGRESS_PREFIX))
+                ids.push(key.slice(PROGRESS_PREFIX.length));
         }
+        return ids;
     }
     catch {
         return [];
     }
-    ids.sort();
-    return ids;
 }
 export function savedLevelCount() {
     return savedLevelIds().length;
 }
+export function readSandboxProgress() {
+    // A failed localStorage write may leave an older value behind. The fallback
+    // is newer until a successful write clears it.
+    const fallback = windowNameState()[SANDBOX_PROGRESS_KEY];
+    return typeof fallback === "string" ? fallback : readStoredText(SANDBOX_PROGRESS_KEY);
+}
+export function writeSandboxProgress(value) {
+    try {
+        const store = storage();
+        if (store) {
+            store.setItem(SANDBOX_PROGRESS_KEY, value);
+            writeWindowNameProgress(null);
+            return;
+        }
+    }
+    catch {
+        // Preserve the latest edit in window.name when localStorage rejects it.
+    }
+    writeWindowNameProgress(value);
+}
 export function hasSandboxProgress() {
-    const store = storage();
-    try {
-        if (store?.getItem(SANDBOX_PROGRESS_KEY))
-            return true;
-    }
-    catch {
-        // Fall through to window.name fallback.
-    }
-    try {
-        const parsed = JSON.parse(window.name || "{}");
-        return typeof parsed[SANDBOX_PROGRESS_KEY] === "string";
-    }
-    catch {
-        return false;
-    }
+    return Boolean(readSandboxProgress());
 }
 export function clearAllLevelProgress() {
-    const store = storage();
-    if (!store)
-        return;
-    const keys = savedLevelIds().map((id) => levelProgressKey(id));
-    try {
-        keys.forEach((key) => store.removeItem(key));
-    }
-    catch {
-        // Ignore storage failures.
-    }
+    for (const id of savedLevelIds())
+        clearLevelProgress(id);
 }
 export function clearSandboxProgress() {
-    const store = storage();
-    try {
-        store?.removeItem(SANDBOX_PROGRESS_KEY);
-    }
-    catch {
-        // Ignore storage failures.
-    }
-    try {
-        const parsed = JSON.parse(window.name || "{}");
-        if (!(SANDBOX_PROGRESS_KEY in parsed))
-            return;
-        delete parsed[SANDBOX_PROGRESS_KEY];
-        window.name = Object.keys(parsed).length ? JSON.stringify(parsed) : "";
-    }
-    catch {
-        // Ignore window.name fallback failures.
-    }
+    removeStoredText(SANDBOX_PROGRESS_KEY);
+    writeWindowNameProgress(null);
 }

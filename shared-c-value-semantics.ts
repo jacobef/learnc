@@ -32,7 +32,7 @@ export function normalizeBoxValueForContext(box: BoxState): BoxState {
   };
 }
 
-export interface CValueMatch {
+interface CValueMatch {
   ok: boolean;
   normalized: string;
 }

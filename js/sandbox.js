@@ -1,7 +1,9 @@
+import { renderCodeDiagnostic } from "./shared-code-runtime-issues.js";
+import { readSandboxProgress, writeSandboxProgress } from "./shared-progress.js";
 import { applyOtherNames, appendStateObjects, clearNode, ensureBaseLayout, findArrayObjectBoxesForResult, queryRole, vbox, } from "./shared-core-dom.js";
 import { confettiRain } from "./confetti.js";
 import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
-import { diagnosticDecorations, diagnosticMessageText, renderDiagnosticMessage, } from "./shared-diagnostics.js";
+import { diagnosticDecorations, diagnosticMessageText, } from "./shared-diagnostics.js";
 import { evaluateCExpressionFiles, runCFiles, } from "./shared-c-interpreter.js";
 const { main } = ensureBaseLayout();
 main.classList.add("main-panelized");
@@ -34,7 +36,6 @@ const nextButtons = [requiredRole("sandbox-next")];
 const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
 bindCodeEditorTabKey(editor);
 const STDIN_EOF_MARKER = "\u2404";
-const SANDBOX_STORAGE_KEY = "cboxes:sandbox-state:v1";
 const EXECUTION_PAGE_STEP_LIMIT = 10000;
 const EXECUTION_PAGE_TRACE_LIMIT = 256;
 let finishedConfettiShown = false;
@@ -86,58 +87,9 @@ function validStepPosition(value) {
         return undefined;
     return Math.max(0, Math.floor(value));
 }
-function readWindowNameStorage() {
-    try {
-        const parsed = JSON.parse(window.name || "{}");
-        const value = parsed[SANDBOX_STORAGE_KEY];
-        return typeof value === "string" ? value : null;
-    }
-    catch {
-        return null;
-    }
-}
-function writeWindowNameStorage(value) {
-    try {
-        let parsed = {};
-        try {
-            parsed = JSON.parse(window.name || "{}");
-        }
-        catch {
-            parsed = {};
-        }
-        parsed[SANDBOX_STORAGE_KEY] = value;
-        window.name = JSON.stringify(parsed);
-    }
-    catch {
-        // This is only a fallback for browsers that do not expose localStorage.
-    }
-}
-function readSandboxStorage() {
-    try {
-        const storage = window.localStorage;
-        return storage ? storage.getItem(SANDBOX_STORAGE_KEY) : readWindowNameStorage();
-    }
-    catch {
-        return readWindowNameStorage();
-    }
-}
-function writeSandboxStorage(value) {
-    try {
-        const storage = window.localStorage;
-        if (storage) {
-            storage.setItem(SANDBOX_STORAGE_KEY, value);
-        }
-        else {
-            writeWindowNameStorage(value);
-        }
-    }
-    catch {
-        writeWindowNameStorage(value);
-    }
-}
 function loadStoredSandboxState() {
     try {
-        const raw = readSandboxStorage();
+        const raw = readSandboxProgress();
         if (!raw)
             return {};
         const parsed = JSON.parse(raw);
@@ -207,7 +159,7 @@ exprInput.value = storedSandbox.exprText ?? exprInput.value;
 stdinInput.value = sandbox.stdin;
 function saveSandboxState() {
     try {
-        writeSandboxStorage(JSON.stringify({
+        writeSandboxProgress(JSON.stringify({
             files: sandbox.files,
             activePath: sandbox.activePath,
             interfaceMode: sandbox.interfaceMode,
@@ -376,32 +328,6 @@ function updateInstructions() {
     }
     else {
         instructions.textContent = message;
-    }
-}
-function renderDiagnostic(diagnostic) {
-    if (!diagnostic) {
-        diagnosticEl.classList.add("hidden");
-        diagnosticEl.textContent = "";
-        editor.removeAttribute("aria-invalid");
-        return;
-    }
-    diagnosticEl.classList.remove("hidden");
-    diagnosticEl.replaceChildren();
-    const heading = document.createElement("div");
-    heading.className = "code-diagnostic-title";
-    const location = diagnostic.file
-        ? `${diagnostic.file}, line ${diagnostic.range.startLine + 1}, column ${diagnostic.range.startCol + 1}`
-        : `line ${diagnostic.range.startLine + 1}, column ${diagnostic.range.startCol + 1}`;
-    heading.textContent = `${diagnostic.kind === "ub" ? "Undefined behavior" : "Error"} at ${location}`;
-    const message = document.createElement("div");
-    message.className = "code-diagnostic-message";
-    renderDiagnosticMessage(message, diagnostic);
-    diagnosticEl.append(heading, message);
-    if (!diagnostic.file || diagnostic.file === sandbox.activePath) {
-        editor.setAttribute("aria-invalid", "true");
-    }
-    else {
-        editor.removeAttribute("aria-invalid");
     }
 }
 function outcomeForPosition(result, position, files) {
@@ -785,7 +711,7 @@ function updateLineGutters(linesOverride) {
         lineNumberClasses,
         decorations: diagnosticDecorations(diagnostic, lines, sandbox.activePath),
     });
-    renderDiagnostic(diagnostic);
+    renderCodeDiagnostic(diagnosticEl, editor, diagnostic, { activeFile: sandbox.activePath, showRuntimeContext: false });
     const style = window.getComputedStyle(editor);
     const paddingTop = parseFloat(style.paddingTop) || 0;
     const nextEvent = sandbox.trace[sandbox.stepPosition];

@@ -1,6 +1,35 @@
 use super::*;
 
 impl<'a> Interpreter<'a> {
+    pub(super) fn reject_indeterminate_library_value(
+        &self,
+        value: &TypedValue,
+        span: Span,
+        function_name: &str,
+    ) -> Result<(), Diagnostic> {
+        if value.indeterminate {
+            return Err(Diagnostic::ub(
+                format!("{function_name} argument has an indeterminate value"),
+                span,
+                Some("7.1.4, 7.19.6.1, WG14 DR 451"),
+            )
+            .with_note(
+                "library functions exhibit undefined behavior when used on indeterminate values",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_library_argument_value(
+        &self,
+        value: &TypedValue,
+        span: Span,
+        function_name: &str,
+    ) -> Result<(), Diagnostic> {
+        self.reject_missing_return_value(value, span)?;
+        self.reject_indeterminate_library_value(value, span, function_name)
+    }
+
     fn check_math_unary_real_call(
         &mut self,
         function_name: &str,
@@ -97,24 +126,6 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    fn check_math_unary_helper_call(
-        &mut self,
-        function_name: &str,
-        args: &[Expr],
-        evaluated: &[TypedValue],
-    ) -> Result<(), Diagnostic> {
-        self.check_math_unary_real_call(function_name, args, evaluated)
-    }
-
-    fn check_math_binary_helper_call(
-        &mut self,
-        function_name: &str,
-        args: &[Expr],
-        evaluated: &[TypedValue],
-    ) -> Result<(), Diagnostic> {
-        self.check_math_binary_real_call(function_name, args, evaluated)
-    }
-
     fn check_malloc_call(
         &mut self,
         args: &[Expr],
@@ -145,8 +156,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(), Diagnostic> {
         self.require_exact_call_args("aligned_alloc", args, evaluated, 2, span)?;
         for (index, label) in ["alignment", "size"].into_iter().enumerate() {
-            self.reject_missing_return_value(&evaluated[index], args[index].span())?;
-            self.reject_indeterminate_library_value(
+            self.check_library_argument_value(
                 &evaluated[index],
                 args[index].span(),
                 "aligned_alloc",
@@ -1806,12 +1816,7 @@ impl<'a> Interpreter<'a> {
         }
         match args.len() {
             1 => {
-                self.reject_missing_return_value(&evaluated[0], args[0].span())?;
-                self.reject_indeterminate_library_value(
-                    &evaluated[0],
-                    args[0].span(),
-                    function_name,
-                )?;
+                self.check_library_argument_value(&evaluated[0], args[0].span(), function_name)?;
                 self.check_wide_string_arg(function_name, &evaluated[0], args[0].span(), objects)
             }
             2 => {
@@ -1838,8 +1843,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(), Diagnostic> {
         self.require_exact_call_args(function_name, args, evaluated, 3, span)?;
         for index in 0..2 {
-            self.reject_missing_return_value(&evaluated[index], args[index].span())?;
-            self.reject_indeterminate_library_value(
+            self.check_library_argument_value(
                 &evaluated[index],
                 args[index].span(),
                 function_name,
@@ -2018,12 +2022,7 @@ impl<'a> Interpreter<'a> {
             args[1].span(),
             objects,
         )?;
-        self.reject_missing_return_value(&evaluated[2], args[2].span())?;
-        self.reject_indeterminate_library_value(
-            &evaluated[2],
-            args[2].span(),
-            "__codex_assert_fail",
-        )?;
+        self.check_library_argument_value(&evaluated[2], args[2].span(), "__codex_assert_fail")?;
         if evaluated[2].ty != CType::Int {
             return Err(Diagnostic::error(
                 "__codex_assert_fail requires an int line number",
@@ -2167,10 +2166,10 @@ impl<'a> Interpreter<'a> {
         self.check_math_common_args("system", args, evaluated)?;
         let value = &evaluated[0];
         self.check_library_argument_value(value, args[0].span(), "system")?;
-        if let ValueData::Pointer(pointer) = &value.data {
-            if pointer.is_null() {
-                return Ok(());
-            }
+        if let ValueData::Pointer(pointer) = &value.data
+            && pointer.is_null()
+        {
+            return Ok(());
         }
         self.check_math_string_arg("system", value, args[0].span(), objects)
     }
@@ -3316,12 +3315,9 @@ impl<'a> Interpreter<'a> {
         standard: &'static str,
     ) -> Result<Vec<u8>, Diagnostic> {
         let mut out = Vec::new();
-        loop {
-            let Some(ch) =
-                self.read_one_byte_from_stream(stream_object, span, function_name, standard)?
-            else {
-                break;
-            };
+        while let Some(ch) =
+            self.read_one_byte_from_stream(stream_object, span, function_name, standard)?
+        {
             if ch == b'\n' {
                 break;
             }
@@ -4053,16 +4049,14 @@ impl<'a> Interpreter<'a> {
             | "__codex_isnormal"
             | "__codex_isnormalf"
             | "__codex_isnormall"
-            | "__codex_signbit" => {
-                self.check_math_unary_helper_call(function_name, args, evaluated)
-            }
+            | "__codex_signbit" => self.check_math_unary_real_call(function_name, args, evaluated),
             "__codex_isgreater"
             | "__codex_isgreaterequal"
             | "__codex_isless"
             | "__codex_islessequal"
             | "__codex_islessgreater"
             | "__codex_isunordered" => {
-                self.check_math_binary_helper_call(function_name, args, evaluated)
+                self.check_math_binary_real_call(function_name, args, evaluated)
             }
             "acos" | "acosf" | "acosl" | "asin" | "asinf" | "asinl" | "atan" | "atanf"
             | "atanl" | "cos" | "cosf" | "cosl" | "sin" | "sinf" | "sinl" | "tan" | "tanf"
@@ -4809,7 +4803,7 @@ impl<'a> Interpreter<'a> {
                     Some("7.13.1.1"),
                 )
             })?;
-        if !self.setjmp_call_allowed_in_context(&context, span, &frame, objects)? {
+        if !self.setjmp_call_allowed_in_context(&context, span, frame, objects)? {
             return Err(Diagnostic::ub(
                 "setjmp must appear only as an entire expression statement or controlling expression",
                 span,
@@ -4818,21 +4812,21 @@ impl<'a> Interpreter<'a> {
         }
         let pointer = self.setjmp_buffer_pointer("setjmp", &evaluated[0], span)?;
 
-        if let Some(pending) = self.pending_longjmp_return {
-            if pending.frame_id == frame_id {
-                self.pending_longjmp_return = None;
-                return Ok(TypedValue::int(if pending.value == 0 {
-                    1
-                } else {
-                    pending.value
-                }));
-            }
+        if let Some(pending) = self.pending_longjmp_return
+            && pending.frame_id == frame_id
+        {
+            self.pending_longjmp_return = None;
+            return Ok(TypedValue::int(if pending.value == 0 {
+                1
+            } else {
+                pending.value
+            }));
         }
 
         let handle = self.next_setjmp_handle;
         self.next_setjmp_handle += 1;
         self.write_unsigned_long_at_pointer("setjmp", &pointer, handle, span, objects, "7.13.1.1")?;
-        let env = self.capture_setjmp_environment(&frame, objects, &context)?;
+        let env = self.capture_setjmp_environment(frame, objects, &context)?;
         self.setjmp_envs.insert(handle, env);
         self.live_setjmp_frames.insert(frame_id);
         let size = self.type_size_of(&CType::UnsignedLong).unwrap_or(8);

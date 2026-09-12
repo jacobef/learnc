@@ -4,7 +4,7 @@ export function normalizeZeroDisplay(value) {
         return "0";
     return trimmed;
 }
-export function replaceTextTokens(text, replacements) {
+function replaceTextTokens(text, replacements) {
     let out = String(text);
     for (const [needle, replacement] of replacements) {
         if (!needle)

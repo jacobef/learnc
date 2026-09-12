@@ -202,13 +202,9 @@ export function readBoxState(root: Element): BoxState {
   const valEl = root.querySelector(".value");
   const valText = txt(valEl);
   const typeText = txt(root.querySelector(".type"));
-  const placeholderEmpty =
-    valEl?.classList?.contains("placeholder") && valText === "";
-  const fallbackRawValue = placeholderEmpty ? "" : valText;
   const storedRawValue =
     valEl instanceof HTMLElement ? valEl.dataset.rawValue : undefined;
-  const rawValue =
-    storedRawValue !== undefined ? storedRawValue : fallbackRawValue;
+  const rawValue = storedRawValue ?? valText;
   let value = normalizeZeroDisplay(rawValue);
   const valueEditable =
     valEl instanceof HTMLElement && valEl.isContentEditable;
@@ -263,15 +259,6 @@ function parseStoredTypeInfo(raw: string | undefined): CTypeInfo | null {
 function boxAddress(box: BoxState | null | undefined): string {
   const raw = box?.address ?? "";
   return raw.trim();
-}
-
-function collectStageBoxes(root: Element): BoxState[] {
-  return [...root.querySelectorAll(".vbox")]
-    .map((node) => {
-      const box = readBoxState(node);
-      box.node = node as HTMLElement;
-      return box;
-    });
 }
 
 function updateOtherNamesList(
@@ -362,7 +349,10 @@ export function applyOtherNames(
     sourceBoxes = null,
     cleanupShownAddrs = true,
   } = opts;
-  const boxes = collectStageBoxes(root);
+  const renderedBoxes = [...root.querySelectorAll<HTMLElement>(".vbox")].map(
+    (node) => ({ node, box: readBoxState(node) }),
+  );
+  const boxes = renderedBoxes.map(({ box }) => box);
   const currentAddrs = new Set(boxes.map((box) => boxAddress(box)));
   const aliasSource =
     Array.isArray(sourceBoxes) && sourceBoxes.length ? sourceBoxes : boxes;
@@ -379,9 +369,7 @@ export function applyOtherNames(
     }
     node.dataset.otherNames = value ? "on" : "off";
   };
-  boxes.forEach((box) => {
-    const node = box.node;
-    if (!node) return;
+  renderedBoxes.forEach(({ node, box }) => {
     const addr = boxAddress(box);
     const baseName = String(box.name || "").trim();
     const aliases = aliasesByAddr.get(addr) ?? [];
@@ -1191,19 +1179,13 @@ function readArrayBoxState(root: HTMLElement): BoxState[] {
       .map((value) => Number(value)),
   );
   const rootName = String(root.dataset.arrayRoot || "").trim();
-  const values = [...root.querySelectorAll(".array-col-value")];
-  return values.map((valueNode) => {
-    const valueEl = valueNode as HTMLElement;
+  const values = [...root.querySelectorAll<HTMLElement>(".array-col-value")];
+  return values.map((valueEl): BoxState => {
     const typeText = String(
       valueEl.dataset.arrayType || root.dataset.arrayElementType || "int",
     ).trim();
     const valText = txt(valueEl);
-    const placeholderEmpty =
-      valueEl.classList.contains("placeholder") && valText === "";
-    const storedRawValue = valueEl.dataset.rawValue;
-    const fallbackRawValue = placeholderEmpty ? "" : valText;
-    const rawValue =
-      storedRawValue !== undefined ? storedRawValue : fallbackRawValue;
+    const rawValue = valueEl.dataset.rawValue ?? valText;
     const value = normalizeZeroDisplay(rawValue);
     const indices = String(valueEl.dataset.arrayIndices || "")
       .split(",")
@@ -1225,42 +1207,22 @@ function readArrayBoxState(root: HTMLElement): BoxState[] {
       allowDelete:
         root.dataset.allowDelete === "true" ||
         (root.querySelector(".delete") != null),
-    } as BoxState;
+    };
   });
 }
 
 export function serializeWorkspace(
-  target: string | Element | null,
+  target: Element | null,
 ): BoxState[] | null {
   if (!target) return null;
-  let ws: Element | null = null;
-  if (typeof target === "string") {
-    ws = document.getElementById(target);
-    if (!ws) return null;
-  } else {
-    ws = target;
-  }
-  if (!ws) return null;
-  const wsEl = ws as HTMLElement;
-  let nodes = [...ws.querySelectorAll(".vbox, .arraybox")];
-  if (!nodes.length && wsEl.dataset.inline === "true") {
-    const key = wsEl.dataset.workspaceKey || "";
-    if (key) {
-      nodes = [
-        ...document.querySelectorAll(
-          `.vbox[data-workspace="${key}"], .arraybox[data-workspace="${key}"]`,
-        ),
-      ];
-    }
-  }
+  const nodes = target.querySelectorAll<HTMLElement>(".vbox, .arraybox");
   const out: BoxState[] = [];
   nodes.forEach((node) => {
-    const el = node as HTMLElement;
-    if (el.classList.contains("arraybox")) {
-      out.push(...readArrayBoxState(el));
+    if (node.classList.contains("arraybox")) {
+      out.push(...readArrayBoxState(node));
       return;
     }
-    out.push(readBoxState(el));
+    out.push(readBoxState(node));
   });
   return out;
 }
@@ -1290,4 +1252,41 @@ export function restoreWorkspace(
     allowTypeEdit,
   });
   return wrap;
+}
+
+export function renderStatePanel(
+  title: string,
+  boxes: BoxState[] | null,
+  { emptyMessage = "(no variables)", controls }: {
+    emptyMessage?: string;
+    controls?: HTMLElement | null;
+  } = {},
+): HTMLElement {
+  const panel = document.createElement("div");
+  panel.className = "state-panel state-panel-scrollable";
+  const heading = document.createElement("h3");
+  heading.className = "panel-title state-heading";
+  heading.textContent = title;
+  panel.appendChild(heading);
+  if (controls) {
+    const controlsWrap = document.createElement("div");
+    controlsWrap.className = "state-panel-controls";
+    controlsWrap.appendChild(controls);
+    panel.appendChild(controlsWrap);
+  }
+  const grid = document.createElement("div");
+  grid.className = "grid";
+  if (boxes?.length) {
+    appendStateObjects(grid, boxes, { editable: false, deletable: false });
+  } else {
+    const message = document.createElement("div");
+    message.className = "muted state-empty-message";
+    message.textContent = emptyMessage;
+    grid.appendChild(message);
+  }
+  const body = document.createElement("div");
+  body.className = "state-panel-scroll-body";
+  body.appendChild(grid);
+  panel.appendChild(body);
+  return panel;
 }

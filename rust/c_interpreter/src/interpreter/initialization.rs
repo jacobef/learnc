@@ -1622,23 +1622,21 @@ impl<'a> Interpreter<'a> {
             Initializer::Expr(expr) => {
                 if let (CType::Array(inner, len), Expr::StringLiteral(text, init_span)) =
                     (ty.unqualified(), expr)
+                    && inner.is_character()
                 {
-                    if inner.is_character() {
-                        let (_, value) =
-                            self.string_literal_array_initializer(inner, *len, text, *init_span)?;
-                        *stored = value;
-                        return Ok(());
-                    }
+                    let (_, value) =
+                        self.string_literal_array_initializer(inner, *len, text, *init_span)?;
+                    *stored = value;
+                    return Ok(());
                 }
                 if let (CType::Array(inner, len), Expr::WideStringLiteral(text, init_span)) =
                     (ty.unqualified(), expr)
+                    && *inner.unqualified() == self.wchar_type()
                 {
-                    if *inner.unqualified() == self.wchar_type() {
-                        let (_, value) =
-                            self.wide_string_literal_array_initializer(*len, text, *init_span)?;
-                        *stored = value;
-                        return Ok(());
-                    }
+                    let (_, value) =
+                        self.wide_string_literal_array_initializer(*len, text, *init_span)?;
+                    *stored = value;
+                    return Ok(());
                 }
                 if let CType::Array(inner, len) = ty.unqualified() {
                     let unicode = match expr {
@@ -1908,8 +1906,7 @@ impl<'a> Interpreter<'a> {
                 while item_index < items.len() {
                     let item = &items[item_index];
                     if !item.designators.is_empty() {
-                        let selectors =
-                            self.initializer_selectors(ty, &item.designators, item.span)?;
+                        let selectors = self.initializer_selectors(ty, &item.designators)?;
                         let (target_index, rest) = match selectors.split_first() {
                             Some((InitSelector::Index(index), rest)) => (*index, rest),
                             _ => {
@@ -1985,8 +1982,7 @@ impl<'a> Interpreter<'a> {
                 while item_index < items.len() {
                     let item = &items[item_index];
                     if !item.designators.is_empty() {
-                        let selectors =
-                            self.initializer_selectors(ty, &item.designators, item.span)?;
+                        let selectors = self.initializer_selectors(ty, &item.designators)?;
                         let (member_name, rest) = match selectors.split_first() {
                             Some((InitSelector::Member(name), rest)) => (name.clone(), rest),
                             _ => {
@@ -2074,7 +2070,7 @@ impl<'a> Interpreter<'a> {
                 let mut item_index = 0;
                 while item_index < items.len() && !items[item_index].designators.is_empty() {
                     let item = &items[item_index];
-                    let selectors = self.initializer_selectors(ty, &item.designators, item.span)?;
+                    let selectors = self.initializer_selectors(ty, &item.designators)?;
                     let (member_name, rest) = match selectors.split_first() {
                         Some((InitSelector::Member(name), rest)) => (name.clone(), rest),
                         _ => {
@@ -2326,7 +2322,6 @@ impl<'a> Interpreter<'a> {
         &self,
         ty: &CType,
         designators: &[Designator],
-        span: Span,
     ) -> Result<Vec<InitSelector>, Diagnostic> {
         if designators.is_empty() {
             return Ok(Vec::new());
@@ -2335,7 +2330,7 @@ impl<'a> Interpreter<'a> {
             Designator::Index(index, designator_span) => match ty.unqualified() {
                 CType::Array(inner, _) => {
                     let mut result = vec![InitSelector::Index(*index)];
-                    result.extend(self.initializer_selectors(inner, &designators[1..], span)?);
+                    result.extend(self.initializer_selectors(inner, &designators[1..])?);
                     Ok(result)
                 }
                 _ => Err(Diagnostic::error(
@@ -2344,8 +2339,11 @@ impl<'a> Interpreter<'a> {
                 )),
             },
             Designator::Member(name, designator_span) => {
-                let (path, member_ty, _) =
-                    self.resolve_member_access(ty, name, *designator_span)?;
+                let ResolvedMemberAccess {
+                    path,
+                    ty: member_ty,
+                    ..
+                } = self.resolve_member_access(ty, name, *designator_span)?;
                 if matches!(member_ty.unqualified(), CType::Array(_, 0)) {
                     return Err(Diagnostic::error(
                         "flexible array members cannot be initialized",
@@ -2357,7 +2355,7 @@ impl<'a> Interpreter<'a> {
                     .cloned()
                     .map(InitSelector::Member)
                     .collect::<Vec<_>>();
-                result.extend(self.initializer_selectors(&member_ty, &designators[1..], span)?);
+                result.extend(self.initializer_selectors(&member_ty, &designators[1..])?);
                 Ok(result)
             }
         }
@@ -2490,52 +2488,27 @@ impl<'a> Interpreter<'a> {
                     self.normalize_initialized_bit_fields(value, inner, span)?;
                 }
             }
-            (StoredValue::Record(values), CType::Struct(_, _)) => {
+            (StoredValue::Record(values), CType::Struct(_, _))
+            | (
+                StoredValue::Union {
+                    members: values, ..
+                },
+                CType::Union(_, _),
+            ) => {
                 let Some(record) = self.record_type(ty) else {
                     return Ok(());
                 };
                 for member in &record.members {
                     let slot = self.record_slot_mut(values, &member.storage_name, span)?;
                     if let Some(width) = member.bit_width {
-                        if width != 0 {
-                            if let StoredValue::Scalar(value) = slot {
-                                if !value.indeterminate {
-                                    *slot = StoredValue::Scalar(TypedValue::integer(
-                                        member.ty.clone(),
-                                        self.normalize_bit_field_value(
-                                            value.to_int()?,
-                                            &member.ty,
-                                            width,
-                                        ),
-                                    ));
-                                }
-                            }
-                        }
-                    } else {
-                        self.normalize_initialized_bit_fields(slot, &member.ty, span)?;
-                    }
-                }
-            }
-            (StoredValue::Union { members, .. }, CType::Union(_, _)) => {
-                let Some(record) = self.record_type(ty) else {
-                    return Ok(());
-                };
-                for member in &record.members {
-                    let slot = self.record_slot_mut(members, &member.storage_name, span)?;
-                    if let Some(width) = member.bit_width {
-                        if width != 0 {
-                            if let StoredValue::Scalar(value) = slot {
-                                if !value.indeterminate {
-                                    *slot = StoredValue::Scalar(TypedValue::integer(
-                                        member.ty.clone(),
-                                        self.normalize_bit_field_value(
-                                            value.to_int()?,
-                                            &member.ty,
-                                            width,
-                                        ),
-                                    ));
-                                }
-                            }
+                        if width != 0
+                            && let StoredValue::Scalar(value) = slot
+                            && !value.indeterminate
+                        {
+                            *slot = StoredValue::Scalar(TypedValue::integer(
+                                member.ty.clone(),
+                                self.normalize_bit_field_value(value.to_int()?, &member.ty, width),
+                            ));
                         }
                     } else {
                         self.normalize_initialized_bit_fields(slot, &member.ty, span)?;
@@ -3540,7 +3513,7 @@ impl<'a> Interpreter<'a> {
                         )
                     })?;
                 let member_ty = self.qualified_member_type(ty, member);
-                let slot = self.extract_union_member(stored, ty, member, span)?;
+                let slot = self.extract_union_member(stored, member, span)?;
                 self.extract_stored_subobject(&slot, &member_ty, &path[1..], span)
             }
             _ => Err(Diagnostic::ub(
@@ -3554,7 +3527,6 @@ impl<'a> Interpreter<'a> {
     pub(super) fn extract_union_member(
         &self,
         stored: &StoredValue,
-        ty: &CType,
         member: &RecordMember,
         span: Span,
     ) -> Result<StoredValue, Diagnostic> {
@@ -3565,7 +3537,6 @@ impl<'a> Interpreter<'a> {
                 Some("6.5.2.3"),
             ));
         };
-        let _ = ty;
         let member_size = if member.bit_width.is_some() {
             member.bit_storage_size
         } else {

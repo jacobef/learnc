@@ -559,6 +559,16 @@ function stepperButtons(root, dir) {
     });
     return list;
 }
+function withSidebarParam(url) {
+    if (!url)
+        return url;
+    const [base, hash = ""] = url.split("#");
+    const [path, query = ""] = base.split("?");
+    const params = new URLSearchParams(query);
+    params.set("sidebar", document.body.classList.contains("sidebar-collapsed") ? "0" : "1");
+    const nextQuery = params.toString();
+    return `${path}${nextQuery ? `?${nextQuery}` : ""}${hash ? `#${hash}` : ""}`;
+}
 function createStepper({ root, prevButtons = null, nextButtons = null, lines = [], previousPage = getPreviousNavHref(), nextPage = null, getBoundary, setBoundary, onBeforeChange, onAfterChange, isStepLocked, getStepBadge, getNextLabel, getNextBoundary, getPrevBoundary, isAtEnd, startLabel, endLabel, allowSameBoundary = false, } = {}) {
     const boundButtons = new WeakSet();
     const getPrevButtons = () => prevButtons || stepperButtons(root, "prev");
@@ -651,20 +661,6 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
                 btn.disabled = isLocked;
             });
         }
-    }
-    function sidebarParamValue() {
-        return document.body.classList.contains("sidebar-collapsed") ? "0" : "1";
-    }
-    function withSidebarParam(url) {
-        if (!url)
-            return url;
-        const [base, hash = ""] = url.split("#");
-        const [path, query = ""] = base.split("?");
-        const params = new URLSearchParams(query);
-        params.set("sidebar", sidebarParamValue());
-        const nextQuery = params.toString();
-        const hashPart = hash ? `#${hash}` : "";
-        return nextQuery ? `${path}?${nextQuery}${hashPart}` : `${path}${hashPart}`;
     }
     function goTo(target) {
         const current = boundary();
@@ -1081,4 +1077,4 @@ function flashStatus(el) {
     void node.offsetWidth;
     node.classList.add("status-flash");
 }
-export { clearNode, buildNav, createStepper, disableBoxEditing, ensureBaseLayout, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, isMobileViewport, bindBtnRefPulse, makeAnswerBox, queryElement, queryRole, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, vbox, applyOtherNames, appendStateObjects, findArrayObjectBoxesForResult, };
+export { clearNode, buildNav, createStepper, withSidebarParam, disableBoxEditing, ensureBaseLayout, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, isMobileViewport, bindBtnRefPulse, makeAnswerBox, queryElement, queryRole, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, vbox, applyOtherNames, appendStateObjects, findArrayObjectBoxesForResult, };

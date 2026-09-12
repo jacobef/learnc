@@ -49,7 +49,7 @@ export function runCProgram(
   stdin: string = "",
 ): CProgramResult {
   try {
-    const parsed = invokeCInterpreter<unknown>({
+    const parsed = invokeCInterpreter({
       operation: "run-source",
       primary: source,
       stdin,
@@ -73,7 +73,7 @@ export function runCFiles(
   const bundle = encodeSourceFiles(files);
   const budget = normalizeExecutionBudget(executionBudget);
   try {
-    const parsed = invokeCInterpreter<unknown>({
+    const parsed = invokeCInterpreter({
       operation: "run-files",
       primary: bundle,
       stdin,
@@ -103,7 +103,7 @@ export function evaluateCExpression(
   stdin: string = "",
 ): CExpressionResult {
   try {
-    const parsed = invokeCInterpreter<unknown>({
+    const parsed = invokeCInterpreter({
       operation: "evaluate-source",
       primary: source,
       expression,
@@ -131,7 +131,7 @@ export function evaluateCExpressionFiles(
   const bundle = encodeSourceFiles(files);
   const budget = normalizeExecutionBudget(executionBudget);
   try {
-    const parsed = invokeCInterpreter<unknown>({
+    const parsed = invokeCInterpreter({
       operation: "evaluate-files",
       primary: bundle,
       expression,

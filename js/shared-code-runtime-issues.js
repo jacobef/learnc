@@ -1,3 +1,4 @@
+import { renderDiagnosticMessage } from "./shared-diagnostics.js";
 function ordinal(value) {
     const remainder100 = value % 100;
     if (remainder100 >= 11 && remainder100 <= 13)
@@ -23,7 +24,7 @@ export function diagnosticRuntimeContextText(diagnostic) {
     }
     return `This happened after ${steps} interpreted steps. The state below is from the last completed line before the failure.`;
 }
-export function appendDiagnosticRuntimeContext(container, diagnostic) {
+function appendDiagnosticRuntimeContext(container, diagnostic) {
     const text = diagnosticRuntimeContextText(diagnostic);
     if (!text)
         return;
@@ -97,4 +98,35 @@ export function renderCodeRuntimeIssue(container, editor, issue, displayedLineOf
     tip.textContent = issue.tip;
     container.append(heading, message, tip);
     editor?.setAttribute("aria-invalid", "true");
+}
+export function renderCodeDiagnostic(container, editor, diagnostic, { displayedLineOffset = 0, activeFile, showRuntimeContext = true, } = {}) {
+    const appliesToEditor = diagnostic &&
+        (!activeFile || !diagnostic.file || diagnostic.file === activeFile);
+    if (appliesToEditor)
+        editor?.setAttribute("aria-invalid", "true");
+    else
+        editor?.removeAttribute("aria-invalid");
+    if (!container)
+        return;
+    container.replaceChildren();
+    container.classList.toggle("hidden", !diagnostic);
+    if (!diagnostic)
+        return;
+    const heading = document.createElement("div");
+    heading.className = "code-diagnostic-title";
+    const location = `line ${diagnostic.range.startLine + displayedLineOffset + 1}, column ${diagnostic.range.startCol + 1}`;
+    const filePrefix = activeFile && diagnostic.file ? `${diagnostic.file}, ` : "";
+    heading.textContent = `${diagnostic.kind === "ub" ? "Undefined behavior" : "Error"} at ${filePrefix}${location}`;
+    const message = document.createElement("div");
+    message.className = "code-diagnostic-message";
+    renderDiagnosticMessage(message, diagnostic);
+    container.append(heading, message);
+    if (diagnostic.tip) {
+        const tip = document.createElement("div");
+        tip.className = "code-diagnostic-tip";
+        tip.textContent = diagnostic.tip;
+        container.appendChild(tip);
+    }
+    if (showRuntimeContext)
+        appendDiagnosticRuntimeContext(container, diagnostic);
 }

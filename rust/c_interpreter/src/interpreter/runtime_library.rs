@@ -978,8 +978,8 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<Vec<Vec<i8>>, Diagnostic> {
         let mut signs = vec![vec![0i8; nmemb]; nmemb];
-        for lhs in 0..nmemb {
-            for rhs in 0..nmemb {
+        for (lhs, row) in signs.iter_mut().enumerate() {
+            for (rhs, sign) in row.iter_mut().enumerate() {
                 let first = self.qsort_compare_call(
                     function_symbol,
                     base_object,
@@ -1015,7 +1015,7 @@ impl<'a> Interpreter<'a> {
                         Some("7.22.5"),
                     ));
                 }
-                signs[lhs][rhs] = first;
+                *sign = first;
             }
         }
 
@@ -1057,10 +1057,10 @@ impl<'a> Interpreter<'a> {
         }
 
         let mut representatives = Vec::new();
-        for index in 0..nmemb {
+        for (index, row) in signs.iter().enumerate() {
             if !representatives
                 .iter()
-                .any(|&representative| signs[index][representative] == 0)
+                .any(|&representative| row[representative] == 0)
             {
                 representatives.push(index);
             }
@@ -1212,8 +1212,7 @@ impl<'a> Interpreter<'a> {
         let (object_id, start, _) =
             self.byte_region_from_pointer(&base_pointer, total, args[0].span(), objects)?;
         let mut current = (0..nmemb).collect::<Vec<_>>();
-        for target in 0..nmemb {
-            let desired = order[target];
+        for (target, &desired) in order.iter().enumerate() {
             let current_position = current
                 .iter()
                 .position(|&original| original == desired)
@@ -3390,13 +3389,13 @@ impl<'a> Interpreter<'a> {
         let preserved_effective_types = old_snapshot
             .effective_types
             .iter()
-            .cloned()
-            .filter(|region| {
+            .filter(|&region| {
                 region
                     .start
                     .checked_add(region.size)
                     .is_some_and(|end| end <= copy_len)
             })
+            .cloned()
             .collect();
         let preserved_pointer_slots = Self::copied_pointer_slots(&old_snapshot, 0, 0, copy_len);
         if let Some(state) = self.lookup_object_mut(objects, object) {

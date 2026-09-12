@@ -24,7 +24,7 @@ export interface NavItem {
   href: string;
   label: string;
 }
-export interface RenderCodePaneOptions {
+interface RenderCodePaneOptions {
   progress?: boolean;
   progressIndex?: number;
   progressRange?: [number, number] | { start: number; end: number };
@@ -38,7 +38,7 @@ export interface RenderCodePaneOptions {
   strikeRanges?: Array<[number, number] | { start: number; end: number }>;
   strikeFragments?: Array<{ line: number; start: number; end: number }>;
 }
-export interface TokenPart {
+interface TokenPart {
   kind: "tok";
   role: string;
   text: string;
@@ -46,7 +46,7 @@ export interface TokenPart {
 export type Part = string;
 export type Parts = string | string[];
 
-export interface StepperOptions {
+interface StepperOptions {
   root?: ParentNode | null;
   prevButtons?: HTMLButtonElement[] | null;
   nextButtons?: HTMLButtonElement[] | null;
@@ -697,6 +697,19 @@ function stepperButtons(
   return list;
 }
 
+function withSidebarParam(url: string | null): string | null {
+  if (!url) return url;
+  const [base, hash = ""] = url.split("#");
+  const [path, query = ""] = base.split("?");
+  const params = new URLSearchParams(query);
+  params.set(
+    "sidebar",
+    document.body.classList.contains("sidebar-collapsed") ? "0" : "1",
+  );
+  const nextQuery = params.toString();
+  return `${path}${nextQuery ? `?${nextQuery}` : ""}${hash ? `#${hash}` : ""}`;
+}
+
 function createStepper({
   root,
   prevButtons = null,
@@ -816,21 +829,6 @@ function createStepper({
         btn.disabled = isLocked;
       });
     }
-  }
-
-  function sidebarParamValue() {
-    return document.body.classList.contains("sidebar-collapsed") ? "0" : "1";
-  }
-
-  function withSidebarParam(url: string | null) {
-    if (!url) return url;
-    const [base, hash = ""] = url.split("#");
-    const [path, query = ""] = base.split("?");
-    const params = new URLSearchParams(query);
-    params.set("sidebar", sidebarParamValue());
-    const nextQuery = params.toString();
-    const hashPart = hash ? `#${hash}` : "";
-    return nextQuery ? `${path}?${nextQuery}${hashPart}` : `${path}${hashPart}`;
   }
 
   function goTo(target: number) {
@@ -1289,6 +1287,7 @@ export {
   clearNode,
   buildNav,
   createStepper,
+  withSidebarParam,
   disableBoxEditing,
   ensureBaseLayout,
   ensurePanelizedMain,

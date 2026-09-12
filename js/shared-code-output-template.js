@@ -1,9 +1,10 @@
-import { appendStateObjects, bindBtnRefPulse, clearNode, createStepper, flashStatus, setPartsContent, } from "./shared-core.js";
+import { renderStatePanel } from "./shared-workspace-dom.js";
+import { bindBtnRefPulse, clearNode, createStepper, flashStatus, setPartsContent, } from "./shared-core.js";
 import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
 import { ensureCodeLessonLayout } from "./shared-code-lesson-layout.js";
-import { diagnosticDecorations, diagnosticMessageText, offsetDiagnosticLines, renderDiagnosticMessage, } from "./shared-diagnostics.js";
+import { diagnosticDecorations, diagnosticMessageText, offsetDiagnosticLines, } from "./shared-diagnostics.js";
 import { runCProgram } from "./shared-c-interpreter.js";
-import { appendDiagnosticRuntimeContext, codeRuntimeIssue, diagnosticRuntimeContextText, offsetCodeRuntimeIssue, renderCodeRuntimeIssue, } from "./shared-code-runtime-issues.js";
+import { codeRuntimeIssue, renderCodeDiagnostic, diagnosticRuntimeContextText, offsetCodeRuntimeIssue, renderCodeRuntimeIssue, } from "./shared-code-runtime-issues.js";
 import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
 import { createButtonTokenReplacer, createHintPresenter, createLevelProgressController, invalidTemplateConfig, nextLessonLabel, resetLevelAfterConfirmation, } from "./shared-lesson-runtime.js";
 function createCodeOutputChallengeTemplate(config) {
@@ -184,9 +185,6 @@ function createCodeOutputChallengeTemplate(config) {
             ? normalizeUserCodeText(restoredProgress.text)
             : defaultText,
         pass: restoredProgress?.pass === true,
-        allocBase: typeof restoredProgress?.allocBase === "number"
-            ? restoredProgress.allocBase
-            : null,
         visibleCase: restoredVisibleCase || copyCase(defaultVisibleCase),
         testCases,
         lastReport: null,
@@ -256,33 +254,6 @@ function createCodeOutputChallengeTemplate(config) {
                 : null,
         };
     }
-    function renderDiagnostic(diagnostic) {
-        if (!diagnosticEl)
-            return;
-        if (!diagnostic) {
-            diagnosticEl.classList.add("hidden");
-            diagnosticEl.textContent = "";
-            editor?.removeAttribute("aria-invalid");
-            return;
-        }
-        diagnosticEl.classList.remove("hidden");
-        diagnosticEl.replaceChildren();
-        const heading = document.createElement("div");
-        heading.className = "code-diagnostic-title";
-        heading.textContent = `${diagnostic.kind === "ub" ? "Undefined behavior" : "Error"} on line ${diagnostic.range.startLine + preludeLineCount + 1}, column ${diagnostic.range.startCol + 1}`;
-        const message = document.createElement("div");
-        message.className = "code-diagnostic-message";
-        renderDiagnosticMessage(message, diagnostic);
-        diagnosticEl.append(heading, message);
-        if (diagnostic.tip) {
-            const tip = document.createElement("div");
-            tip.className = "code-diagnostic-tip";
-            tip.textContent = diagnostic.tip;
-            diagnosticEl.appendChild(tip);
-        }
-        appendDiagnosticRuntimeContext(diagnosticEl, diagnostic);
-        editor?.setAttribute("aria-invalid", "true");
-    }
     function updateLineGutters(diagnostic, runtimeIssue) {
         const lines = getUserRawLines();
         const lineNumberClasses = new Map();
@@ -302,7 +273,7 @@ function createCodeOutputChallengeTemplate(config) {
         });
         syncEditorLinkedScroll();
         if (diagnostic) {
-            renderDiagnostic(diagnostic);
+            renderCodeDiagnostic(diagnosticEl, editor, diagnostic, { displayedLineOffset: preludeLineCount });
         }
         else {
             renderCodeRuntimeIssue(diagnosticEl, editor, runtimeIssue, preludeLineCount);
@@ -470,7 +441,6 @@ function createCodeOutputChallengeTemplate(config) {
         return {
             text: getUserText(),
             pass: state.pass,
-            allocBase: state.allocBase,
             visibleCaseInputLiterals: state.visibleCase.inputLiterals.slice(),
             pendingFailingCaseInputLiterals: state.pendingFailingCase
                 ? state.pendingFailingCase.inputLiterals.slice()
@@ -490,41 +460,6 @@ function createCodeOutputChallengeTemplate(config) {
     }
     function persistProgress() {
         progress.save(progressSnapshot());
-    }
-    function renderStatePanel(title, boxes, opts = {}) {
-        const { emptyMessage = "(no variables)", controls = null } = opts;
-        const wrap = document.createElement("div");
-        wrap.className = "state-panel state-panel-scrollable";
-        const heading = document.createElement("div");
-        heading.className = "panel-title state-heading";
-        heading.textContent = title;
-        wrap.appendChild(heading);
-        if (controls) {
-            const controlsWrap = document.createElement("div");
-            controlsWrap.className = "state-panel-controls";
-            controlsWrap.appendChild(controls);
-            wrap.appendChild(controlsWrap);
-        }
-        const grid = document.createElement("div");
-        grid.className = "grid";
-        if (!boxes || boxes.length === 0) {
-            const msg = document.createElement("div");
-            msg.className = "muted";
-            msg.style.padding = "8px";
-            msg.textContent = emptyMessage;
-            grid.appendChild(msg);
-        }
-        else {
-            appendStateObjects(grid, boxes, {
-                editable: false,
-                deletable: false,
-            });
-        }
-        const body = document.createElement("div");
-        body.className = "state-panel-scroll-body";
-        body.appendChild(grid);
-        wrap.appendChild(body);
-        return wrap;
     }
     function renderStage(currentResult) {
         if (!stage)

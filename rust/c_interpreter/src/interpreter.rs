@@ -13,11 +13,12 @@ use crate::ast::{
 };
 use crate::diag::{Diagnostic, DiagnosticRuntimeContext};
 use crate::fast_hash::{FastHashMap as HashMap, FastHashSet as HashSet};
+use crate::linker::composite_type;
 use crate::number::{NumberLiteral, NumberValue, parse_number_literal};
 use crate::source::{FileId, SourceManager, Span};
 use crate::token::StringLiteralValue;
 use crate::types::{CType, HOST_LONG_DOUBLE_ALIGN, RecordMember, RecordType, TypeQualifiers};
-use crate::{RunOptions, UbDetectionMode, composite_type};
+use crate::{RunOptions, UbDetectionMode};
 
 const INT_MIN: i128 = i32::MIN as i128;
 const INT_MAX: i128 = i32::MAX as i128;
@@ -405,6 +406,7 @@ fn host_mb_cur_max() -> usize {
     }
 }
 
+#[derive(Debug)]
 pub struct ProgramOutput {
     pub stdout: String,
     pub stderr: String,
@@ -1175,6 +1177,12 @@ struct PrintfArgRef<'a> {
     span: Span,
 }
 
+struct ResolvedPrintfArgs<'a> {
+    width: Option<i32>,
+    precision: Option<i32>,
+    value: Option<PrintfArgRef<'a>>,
+}
+
 #[derive(Debug, Clone)]
 struct Scanset {
     invert: bool,
@@ -1274,7 +1282,7 @@ enum ValueData {
     Pointer(Rc<PointerValue>),
     Function(Rc<str>),
     Aggregate(Box<StoredValue>),
-    ObjectRepresentation(Box<Vec<ByteCell>>),
+    ObjectRepresentation(Box<[ByteCell]>),
 }
 
 #[derive(Debug, Clone)]
@@ -1783,16 +1791,27 @@ enum ComplexFunctionKind {
     UnaryReal,
 }
 
+mod arithmetic;
 mod calendar;
+mod calls;
+mod control_flow;
+mod effective_type;
 mod execution;
+mod expression_types;
 mod formatted_io;
 mod initialization;
 mod library_dispatch;
+mod lifetimes;
 mod math;
+mod object_memory;
+mod pointers;
 mod runtime_library;
+mod sequencing;
 mod stdio;
+mod strings;
+mod type_compatibility;
 mod validation;
-mod value_semantics;
+mod visualization;
 
 impl TypedValue {
     fn from_data(ty: CType, data: ValueData) -> Self {
@@ -1818,7 +1837,10 @@ impl TypedValue {
     }
 
     fn object_representation(ty: CType, bytes: Vec<ByteCell>) -> Self {
-        Self::from_data(ty, ValueData::ObjectRepresentation(Box::new(bytes)))
+        Self::from_data(
+            ty,
+            ValueData::ObjectRepresentation(bytes.into_boxed_slice()),
+        )
     }
 
     fn void() -> Self {

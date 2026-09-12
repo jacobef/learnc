@@ -1,4 +1,4 @@
-export const PRIMARY_DIAGNOSTIC_ANNOTATION_ID = "primary";
+const PRIMARY_DIAGNOSTIC_ANNOTATION_ID = "primary";
 const diagnosticGroupIds = new WeakMap();
 let nextDiagnosticGroupId = 1;
 function diagnosticGroupId(diagnostic) {

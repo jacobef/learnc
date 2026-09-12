@@ -1,9 +1,10 @@
-import { appendStateObjects, bindBtnRefPulse, clearNode, createStepper, flashStatus, setPartsContent, } from "./shared-core.js";
+import { renderStatePanel } from "./shared-workspace-dom.js";
+import { bindBtnRefPulse, clearNode, createStepper, flashStatus, setPartsContent, } from "./shared-core.js";
 import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
 import { ensureCodeLessonLayout } from "./shared-code-lesson-layout.js";
-import { diagnosticDecorations, diagnosticMessageText, renderDiagnosticMessage, } from "./shared-diagnostics.js";
+import { diagnosticDecorations, diagnosticMessageText, } from "./shared-diagnostics.js";
 import { runCProgram } from "./shared-c-interpreter.js";
-import { appendDiagnosticRuntimeContext, codeRuntimeIssue, diagnosticRuntimeContextText, renderCodeRuntimeIssue, } from "./shared-code-runtime-issues.js";
+import { codeRuntimeIssue, renderCodeDiagnostic, diagnosticRuntimeContextText, renderCodeRuntimeIssue, } from "./shared-code-runtime-issues.js";
 import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
 import { createButtonTokenReplacer, createHintPresenter, createLevelProgressController, nextLessonLabel, resetLevelAfterConfirmation, } from "./shared-lesson-runtime.js";
 function createCodeEditorTemplate(config) {
@@ -19,9 +20,6 @@ function createCodeEditorTemplate(config) {
             ? normalizeEditorText(restoredProgress.text)
             : defaultText,
         pass: restoredProgress?.pass === true,
-        allocBase: typeof restoredProgress?.allocBase === "number"
-            ? restoredProgress.allocBase
-            : null,
     };
     let pager = null;
     const endLabel = nextLessonLabel({
@@ -49,7 +47,6 @@ function createCodeEditorTemplate(config) {
         return {
             text: state.text,
             pass: state.pass,
-            allocBase: state.allocBase,
         };
     }
     function isDefaultProgress(snapshot) {
@@ -95,33 +92,6 @@ function createCodeEditorTemplate(config) {
         const analysis = analyzeUserProgram();
         return analysis.outcome.kind === "ok" ? analysis.outcome.state : null;
     }
-    function renderDiagnostic(diagnostic) {
-        if (!diagnosticEl)
-            return;
-        if (!diagnostic) {
-            diagnosticEl.classList.add("hidden");
-            diagnosticEl.textContent = "";
-            editor?.removeAttribute("aria-invalid");
-            return;
-        }
-        diagnosticEl.classList.remove("hidden");
-        diagnosticEl.replaceChildren();
-        const heading = document.createElement("div");
-        heading.className = "code-diagnostic-title";
-        heading.textContent = `${diagnostic.kind === "ub" ? "Undefined behavior" : "Error"} on line ${diagnostic.range.startLine + 1}, column ${diagnostic.range.startCol + 1}`;
-        const message = document.createElement("div");
-        message.className = "code-diagnostic-message";
-        renderDiagnosticMessage(message, diagnostic);
-        diagnosticEl.append(heading, message);
-        if (diagnostic.tip) {
-            const tip = document.createElement("div");
-            tip.className = "code-diagnostic-tip";
-            tip.textContent = diagnostic.tip;
-            diagnosticEl.appendChild(tip);
-        }
-        appendDiagnosticRuntimeContext(diagnosticEl, diagnostic);
-        editor?.setAttribute("aria-invalid", "true");
-    }
     function updateLineGutters(analysis) {
         const { diagnostic, runtimeIssue } = analysis;
         const lines = getEditorLines();
@@ -140,7 +110,7 @@ function createCodeEditorTemplate(config) {
             lineNumberClasses,
         });
         if (diagnostic) {
-            renderDiagnostic(diagnostic);
+            renderCodeDiagnostic(diagnosticEl, editor, diagnostic);
         }
         else {
             renderCodeRuntimeIssue(diagnosticEl, editor, runtimeIssue);
@@ -167,31 +137,6 @@ function createCodeEditorTemplate(config) {
         const outcome = analysis.outcome;
         return { ok: isTargetMatch(outcome), outcome };
     }
-    function renderState(title, boxes, emptyMessage = "(no variables)") {
-        const wrap = document.createElement("div");
-        wrap.className = "state-panel state-panel-scrollable";
-        const heading = document.createElement("h3");
-        heading.className = "panel-title state-heading";
-        heading.textContent = title;
-        wrap.appendChild(heading);
-        const grid = document.createElement("div");
-        grid.className = "grid";
-        if (!boxes || !boxes.length) {
-            const msg = document.createElement("div");
-            msg.className = "muted";
-            msg.style.padding = "8px";
-            msg.textContent = emptyMessage;
-            grid.appendChild(msg);
-        }
-        else {
-            appendStateObjects(grid, boxes, { editable: false, deletable: false });
-        }
-        const body = document.createElement("div");
-        body.className = "state-panel-scroll-body";
-        body.appendChild(grid);
-        wrap.appendChild(body);
-        return wrap;
-    }
     function renderStage(outcome) {
         if (!stage)
             return;
@@ -210,8 +155,8 @@ function createCodeEditorTemplate(config) {
         const emptyMessage = outcome.kind === "compile"
             ? "(fix the error above to run the program)"
             : "(no variables)";
-        group.appendChild(renderState(stateTitle, outcome.state, emptyMessage));
-        group.appendChild(renderState("Target final state", targetState));
+        group.appendChild(renderStatePanel(stateTitle, outcome.state, { emptyMessage }));
+        group.appendChild(renderStatePanel("Target final state", targetState));
         stage.appendChild(group);
     }
     function partsContext(analysis) {

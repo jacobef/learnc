@@ -281,12 +281,7 @@ impl<'a> Interpreter<'a> {
             }
             ComplexFunctionKind::UnaryComplex | ComplexFunctionKind::UnaryReal => {
                 self.require_exact_call_args(function_name, args, evaluated, 1, span)?;
-                self.reject_missing_return_value(&evaluated[0], args[0].span())?;
-                self.reject_indeterminate_library_value(
-                    &evaluated[0],
-                    args[0].span(),
-                    function_name,
-                )?;
+                self.check_library_argument_value(&evaluated[0], args[0].span(), function_name)?;
                 if evaluated[0].ty != complex_ty {
                     return Err(Diagnostic::error(
                         format!(
@@ -578,7 +573,7 @@ impl<'a> Interpreter<'a> {
         match ty.unqualified() {
             CType::Float => Ok(unsafe { float_fn(value as c_float) } as f64),
             CType::Double => Ok(unsafe { double_fn(value as c_double) }),
-            CType::LongDouble => Ok(unsafe { long_fn(value as HostLongDouble) } as f64),
+            CType::LongDouble => Ok(unsafe { long_fn(value as HostLongDouble) }),
             _ => Err(Diagnostic::error("expected floating argument", span)),
         }
     }
@@ -597,7 +592,7 @@ impl<'a> Interpreter<'a> {
             CType::Float => Ok(unsafe { float_fn(lhs as c_float, rhs as c_float) } as f64),
             CType::Double => Ok(unsafe { double_fn(lhs as c_double, rhs as c_double) }),
             CType::LongDouble => {
-                Ok(unsafe { long_fn(lhs as HostLongDouble, rhs as HostLongDouble) } as f64)
+                Ok(unsafe { long_fn(lhs as HostLongDouble, rhs as HostLongDouble) })
             }
             _ => Err(Diagnostic::error("expected floating arguments", span)),
         }
@@ -625,7 +620,7 @@ impl<'a> Interpreter<'a> {
                     y as HostLongDouble,
                     z as HostLongDouble,
                 )
-            } as f64),
+            }),
             _ => Err(Diagnostic::error("expected floating arguments", span)),
         }
     }
@@ -694,7 +689,7 @@ impl<'a> Interpreter<'a> {
         match ty.unqualified() {
             CType::Float => Ok(unsafe { float_fn(value as c_float, int_arg) } as f64),
             CType::Double => Ok(unsafe { double_fn(value as c_double, int_arg) }),
-            CType::LongDouble => Ok(unsafe { long_fn(value as HostLongDouble, int_arg) } as f64),
+            CType::LongDouble => Ok(unsafe { long_fn(value as HostLongDouble, int_arg) }),
             _ => Err(Diagnostic::error("expected floating argument", span)),
         }
     }
@@ -712,7 +707,7 @@ impl<'a> Interpreter<'a> {
         match ty.unqualified() {
             CType::Float => Ok(unsafe { float_fn(value as c_float, long_arg) } as f64),
             CType::Double => Ok(unsafe { double_fn(value as c_double, long_arg) }),
-            CType::LongDouble => Ok(unsafe { long_fn(value as HostLongDouble, long_arg) } as f64),
+            CType::LongDouble => Ok(unsafe { long_fn(value as HostLongDouble, long_arg) }),
             _ => Err(Diagnostic::error("expected floating argument", span)),
         }
     }
@@ -735,10 +730,7 @@ impl<'a> Interpreter<'a> {
                 Ok(unsafe { double_fn(value as c_double, longdouble_arg as HostLongDouble) })
             }
             CType::LongDouble => {
-                Ok(
-                    unsafe { long_fn(value as HostLongDouble, longdouble_arg as HostLongDouble) }
-                        as f64,
-                )
+                Ok(unsafe { long_fn(value as HostLongDouble, longdouble_arg as HostLongDouble) })
             }
             _ => Err(Diagnostic::error("expected floating argument", span)),
         }
@@ -757,7 +749,7 @@ impl<'a> Interpreter<'a> {
         match ty.unqualified() {
             CType::Float => Ok(unsafe { float_fn(value as c_float, exponent) } as f64),
             CType::Double => Ok(unsafe { double_fn(value as c_double, exponent) }),
-            CType::LongDouble => Ok(unsafe { long_fn(value as HostLongDouble, exponent) } as f64),
+            CType::LongDouble => Ok(unsafe { long_fn(value as HostLongDouble, exponent) }),
             _ => Err(Diagnostic::error("expected floating argument", span)),
         }
     }
@@ -782,7 +774,7 @@ impl<'a> Interpreter<'a> {
             CType::Double => Ok(unsafe { double_fn(value as c_double, int_part) }),
             CType::LongDouble => {
                 let mut storage = *int_part as HostLongDouble;
-                let frac = unsafe { long_fn(value as HostLongDouble, &mut storage) } as f64;
+                let frac = unsafe { long_fn(value as HostLongDouble, &mut storage) };
                 *int_part = storage as f64;
                 Ok(frac)
             }
@@ -807,10 +799,7 @@ impl<'a> Interpreter<'a> {
             }
             CType::Double => Ok(unsafe { double_fn(lhs as c_double, rhs as c_double, quotient) }),
             CType::LongDouble => {
-                Ok(
-                    unsafe { long_fn(lhs as HostLongDouble, rhs as HostLongDouble, quotient) }
-                        as f64,
-                )
+                Ok(unsafe { long_fn(lhs as HostLongDouble, rhs as HostLongDouble, quotient) })
             }
             _ => Err(Diagnostic::error("expected floating arguments", span)),
         }
@@ -828,7 +817,7 @@ impl<'a> Interpreter<'a> {
         match ty.unqualified() {
             CType::Float => Ok(unsafe { float_fn(tag.as_ptr()) } as f64),
             CType::Double => Ok(unsafe { double_fn(tag.as_ptr()) }),
-            CType::LongDouble => Ok(unsafe { long_fn(tag.as_ptr()) } as f64),
+            CType::LongDouble => Ok(unsafe { long_fn(tag.as_ptr()) }),
             _ => Err(Diagnostic::error("expected floating result type", span)),
         }
     }
@@ -1391,7 +1380,7 @@ impl<'a> Interpreter<'a> {
             "__codex_isgreaterequal" => (!unordered && lhs >= rhs) as c_int,
             "__codex_isless" => (!unordered && lhs < rhs) as c_int,
             "__codex_islessequal" => (!unordered && lhs <= rhs) as c_int,
-            "__codex_islessgreater" => (!unordered && (lhs < rhs || lhs > rhs)) as c_int,
+            "__codex_islessgreater" => (!unordered && lhs != rhs) as c_int,
             "__codex_isunordered" => unordered as c_int,
             _ => {
                 return Err(Diagnostic::error(

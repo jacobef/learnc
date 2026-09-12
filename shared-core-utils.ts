@@ -57,7 +57,6 @@ export interface BoxState {
   defaultAddressType?: string | null;
   expectedAddress?: string | null;
   expectedAddressType?: string | null;
-  node?: HTMLElement;
 }
 
 export type ProgramDiagnosticRange = {
@@ -99,9 +98,9 @@ export function normalizeZeroDisplay(value: BoxValue): string {
   return trimmed;
 }
 
-export type TextTokenReplacement = readonly [string, string];
+type TextTokenReplacement = readonly [string, string];
 
-export function replaceTextTokens(
+function replaceTextTokens(
   text: string,
   replacements: ReadonlyArray<TextTokenReplacement>,
 ): string {

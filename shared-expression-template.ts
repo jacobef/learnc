@@ -102,15 +102,6 @@ interface ExpressionHintContext {
   hasState: boolean;
 }
 
-interface ExpressionTemplateProgress {
-  boundary: number;
-  passes: Record<number, boolean>;
-  selections: Record<number, string | null>;
-  entered: Record<number, BoxState | null>;
-  modes: Record<number, AnswerMode>;
-  showIntro: boolean;
-}
-
 function collectExpressionElements(
   root: ParentNode = document,
 ): ExpressionTemplateElements {
@@ -389,7 +380,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     return "selected";
   }
 
-  const progress = createLevelProgressController<ExpressionTemplateProgress>(
+  const progress = createLevelProgressController<ExpressionTemplateState>(
     isDefaultProgress,
   );
   const defaultShowIntro = !!initialInstructions;
@@ -680,7 +671,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     return node ? readBoxState(node) : null;
   }
 
-  function progressSnapshot(): ExpressionTemplateProgress {
+  function progressSnapshot(): ExpressionTemplateState {
     const passes = Object.fromEntries(
       Object.entries(state.passes).filter(([, value]) => value === true),
     ) as Record<number, boolean>;
@@ -712,7 +703,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     progress.save(progressSnapshot());
   }
 
-  function isDefaultProgress(snapshot: ExpressionTemplateProgress): boolean {
+  function isDefaultProgress(snapshot: ExpressionTemplateState): boolean {
     return (
       snapshot.boundary === 0 &&
       Object.keys(snapshot.passes).length === 0 &&

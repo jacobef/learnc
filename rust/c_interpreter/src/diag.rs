@@ -29,7 +29,14 @@ impl Severity {
 }
 
 #[derive(Debug, Clone)]
+// Keep the error arm of evaluator Results small. Diagnostic details are only
+// allocated when execution reports an error or an explicit control stop.
 pub struct Diagnostic {
+    data: Box<DiagnosticData>,
+}
+
+#[derive(Debug, Clone)]
+struct DiagnosticData {
     severity: Severity,
     message: String,
     span: Option<Span>,
@@ -72,20 +79,26 @@ enum DiagnosticControl {
 }
 
 impl Diagnostic {
-    pub fn error(message: impl Into<String>, span: Span) -> Self {
+    fn new(severity: Severity, message: impl Into<String>, span: Option<Span>) -> Self {
         Self {
-            severity: Severity::Error,
-            message: message.into(),
-            span: Some(span),
-            notes: Vec::new(),
-            standard_reference: None,
-            rendered_with_sources: None,
-            display_range: None,
-            related_spans: Vec::new(),
-            display_annotations: Vec::new(),
-            control: None,
-            runtime_context: None,
+            data: Box::new(DiagnosticData {
+                severity,
+                message: message.into(),
+                span,
+                notes: Vec::new(),
+                standard_reference: None,
+                rendered_with_sources: None,
+                display_range: None,
+                related_spans: Vec::new(),
+                display_annotations: Vec::new(),
+                control: None,
+                runtime_context: None,
+            }),
         }
+    }
+
+    pub fn error(message: impl Into<String>, span: Span) -> Self {
+        Self::new(Severity::Error, message, Some(span))
     }
 
     pub fn ub(
@@ -93,101 +106,75 @@ impl Diagnostic {
         span: Span,
         standard_reference: Option<&'static str>,
     ) -> Self {
-        Self {
-            severity: Severity::UndefinedBehavior,
-            message: message.into(),
-            span: Some(span),
-            notes: Vec::new(),
-            standard_reference,
-            rendered_with_sources: None,
-            display_range: None,
-            related_spans: Vec::new(),
-            display_annotations: Vec::new(),
-            control: None,
-            runtime_context: None,
-        }
+        let mut diagnostic = Self::new(Severity::UndefinedBehavior, message, Some(span));
+        diagnostic.data.standard_reference = standard_reference;
+        diagnostic
     }
 
     pub fn blocked(function_name: &'static str, span: Span) -> Self {
-        Self {
-            severity: Severity::Error,
-            message: format!("{function_name} is waiting for input"),
-            span: Some(span),
-            notes: Vec::new(),
-            standard_reference: None,
-            rendered_with_sources: None,
-            display_range: None,
-            related_spans: Vec::new(),
-            display_annotations: Vec::new(),
-            control: Some(DiagnosticControl::Blocked(function_name)),
-            runtime_context: None,
-        }
+        let mut diagnostic = Self::error(format!("{function_name} is waiting for input"), span);
+        diagnostic.data.control = Some(DiagnosticControl::Blocked(function_name));
+        diagnostic
     }
 
     pub fn blocked_info(&self) -> Option<(&'static str, Span)> {
-        match self.control? {
-            DiagnosticControl::Blocked(function_name) => Some((function_name, self.span?)),
+        match self.data.control? {
+            DiagnosticControl::Blocked(function_name) => Some((function_name, self.data.span?)),
             DiagnosticControl::ExecutionStepLimit => None,
         }
     }
 
     pub fn execution_step_limit(span: Span) -> Self {
-        Self {
-            severity: Severity::Error,
-            message: "execution step limit reached".to_owned(),
-            span: Some(span),
-            notes: Vec::new(),
-            standard_reference: None,
-            rendered_with_sources: None,
-            display_range: None,
-            related_spans: Vec::new(),
-            display_annotations: Vec::new(),
-            control: Some(DiagnosticControl::ExecutionStepLimit),
-            runtime_context: None,
-        }
+        let mut diagnostic = Self::error("execution step limit reached", span);
+        diagnostic.data.control = Some(DiagnosticControl::ExecutionStepLimit);
+        diagnostic
     }
 
     pub fn execution_step_limit_span(&self) -> Option<Span> {
-        matches!(self.control, Some(DiagnosticControl::ExecutionStepLimit)).then_some(self.span?)
+        matches!(
+            self.data.control,
+            Some(DiagnosticControl::ExecutionStepLimit)
+        )
+        .then_some(self.data.span?)
     }
 
     #[cfg(test)]
     pub fn io(path: PathBuf, err: io::Error) -> Self {
-        Self {
-            severity: Severity::Error,
-            message: format!("{}: {}", path.display(), err),
-            span: None,
-            notes: Vec::new(),
-            standard_reference: None,
-            rendered_with_sources: None,
-            display_range: None,
-            related_spans: Vec::new(),
-            display_annotations: Vec::new(),
-            control: None,
-            runtime_context: None,
-        }
+        Self::new(
+            Severity::Error,
+            format!("{}: {}", path.display(), err),
+            None,
+        )
     }
 
     pub fn with_note(mut self, note: impl Into<String>) -> Self {
-        self.notes.push(note.into());
+        self.data.notes.push(note.into());
         self
     }
 
     pub fn with_runtime_context(mut self, context: DiagnosticRuntimeContext) -> Self {
-        self.runtime_context = Some(context);
+        self.data.runtime_context = Some(context);
         self
     }
 
     pub fn runtime_context(&self) -> Option<&DiagnosticRuntimeContext> {
-        self.runtime_context.as_ref()
+        self.data.runtime_context.as_ref()
+    }
+
+    pub fn severity(&self) -> Severity {
+        self.data.severity
+    }
+
+    pub fn message(&self) -> &str {
+        &self.data.message
     }
 
     pub fn span(&self) -> Option<Span> {
-        self.span
+        self.data.span
     }
 
     pub fn with_message_prefix(mut self, prefix: impl AsRef<str>) -> Self {
-        self.message = format!("{}: {}", prefix.as_ref(), self.message);
+        self.data.message = format!("{}: {}", prefix.as_ref(), self.data.message);
         self
     }
 
@@ -198,8 +185,13 @@ impl Diagnostic {
         span: Span,
     ) -> Self {
         let id = id.into();
-        if !self.related_spans.iter().any(|related| related.id == id) {
-            self.related_spans.push(DiagnosticRelatedSpan {
+        if !self
+            .data
+            .related_spans
+            .iter()
+            .any(|related| related.id == id)
+        {
+            self.data.related_spans.push(DiagnosticRelatedSpan {
                 id,
                 label: label.into(),
                 span,
@@ -209,49 +201,46 @@ impl Diagnostic {
     }
 
     pub(crate) fn replace_placeholder_span(mut self, fallback: Span) -> Self {
-        if self.span == Some(Span::new(fallback.file, 0, 0)) {
-            self.span = Some(fallback);
+        if self.data.span == Some(Span::new(fallback.file, 0, 0)) {
+            self.data.span = Some(fallback);
         }
         self
     }
 
     pub fn render(&self) -> String {
-        if let Some(rendered) = &self.rendered_with_sources {
+        if let Some(rendered) = &self.data.rendered_with_sources {
             return rendered.clone();
         }
-        let mut out = String::new();
-        let _ = writeln!(out, "{}: {}", self.severity.label(), self.message);
-        for note in &self.notes {
-            let _ = writeln!(out, "note: {}", note);
-        }
-        if let Some(standard_reference) = self.standard_reference {
-            let _ = writeln!(out, "standard: {}", standard_reference);
-        }
-        out
+        self.render_details(None)
     }
 
     pub fn render_with_sources(&self, sources: &SourceManager) -> String {
+        self.render_details(Some(sources))
+    }
+
+    fn render_details(&self, sources: Option<&SourceManager>) -> String {
         let mut out = String::new();
-        let _ = writeln!(out, "{}: {}", self.severity.label(), self.message);
-        if let Some(span) = self.span {
-            let snippet = sources.snippet(span);
-            render_snippet(&mut out, snippet);
+        let _ = writeln!(out, "{}: {}", self.data.severity.label(), self.data.message);
+        if let Some(sources) = sources {
+            if let Some(span) = self.data.span {
+                render_snippet(&mut out, sources.snippet(span));
+            }
+            for related in &self.data.related_spans {
+                let _ = writeln!(out, "note: {}", related.label);
+                render_snippet(&mut out, sources.snippet(related.span));
+            }
         }
-        for related in &self.related_spans {
-            let _ = writeln!(out, "note: {}", related.label);
-            render_snippet(&mut out, sources.snippet(related.span));
-        }
-        for note in &self.notes {
+        for note in &self.data.notes {
             let _ = writeln!(out, "note: {}", note);
         }
-        if let Some(standard_reference) = self.standard_reference {
+        if let Some(standard_reference) = self.data.standard_reference {
             let _ = writeln!(out, "standard: {}", standard_reference);
         }
         out
     }
 
     pub fn with_sources(mut self, sources: &SourceManager) -> Self {
-        self.display_range = self.span.map(|span| {
+        self.data.display_range = self.data.span.map(|span| {
             let (path, start_line, start_column, end_line, end_column) =
                 sources.span_display_range(span);
             DiagnosticDisplayRange {
@@ -262,7 +251,8 @@ impl Diagnostic {
                 end_column,
             }
         });
-        self.display_annotations = self
+        self.data.display_annotations = self
+            .data
             .related_spans
             .iter()
             .map(|related| {
@@ -280,16 +270,16 @@ impl Diagnostic {
                 }
             })
             .collect();
-        self.rendered_with_sources = Some(self.render_with_sources(sources));
+        self.data.rendered_with_sources = Some(self.render_with_sources(sources));
         self
     }
 
     pub fn display_range(&self) -> Option<&DiagnosticDisplayRange> {
-        self.display_range.as_ref()
+        self.data.display_range.as_ref()
     }
 
     pub fn display_annotations(&self) -> &[DiagnosticDisplayAnnotation] {
-        &self.display_annotations
+        &self.data.display_annotations
     }
 }
 

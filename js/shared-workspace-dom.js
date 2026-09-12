@@ -171,10 +171,8 @@ export function readBoxState(root) {
     const valEl = root.querySelector(".value");
     const valText = txt(valEl);
     const typeText = txt(root.querySelector(".type"));
-    const placeholderEmpty = valEl?.classList?.contains("placeholder") && valText === "";
-    const fallbackRawValue = placeholderEmpty ? "" : valText;
     const storedRawValue = valEl instanceof HTMLElement ? valEl.dataset.rawValue : undefined;
-    const rawValue = storedRawValue !== undefined ? storedRawValue : fallbackRawValue;
+    const rawValue = storedRawValue ?? valText;
     let value = normalizeZeroDisplay(rawValue);
     const valueEditable = valEl instanceof HTMLElement && valEl.isContentEditable;
     if (valEl instanceof HTMLElement && !valueEditable) {
@@ -229,14 +227,6 @@ function parseStoredTypeInfo(raw) {
 function boxAddress(box) {
     const raw = box?.address ?? "";
     return raw.trim();
-}
-function collectStageBoxes(root) {
-    return [...root.querySelectorAll(".vbox")]
-        .map((node) => {
-        const box = readBoxState(node);
-        box.node = node;
-        return box;
-    });
 }
 function updateOtherNamesList(node, aliases, showAliases) {
     const listInner = node.querySelector(".name-list-inner");
@@ -305,7 +295,8 @@ export function applyOtherNames(root, opts = {}) {
     if (!root)
         return;
     const { onToggle = null, shownAddrs = null, sourceBoxes = null, cleanupShownAddrs = true, } = opts;
-    const boxes = collectStageBoxes(root);
+    const renderedBoxes = [...root.querySelectorAll(".vbox")].map((node) => ({ node, box: readBoxState(node) }));
+    const boxes = renderedBoxes.map(({ box }) => box);
     const currentAddrs = new Set(boxes.map((box) => boxAddress(box)));
     const aliasSource = Array.isArray(sourceBoxes) && sourceBoxes.length ? sourceBoxes : boxes;
     const aliasesByAddr = new Map(aliasSource.map((box) => [boxAddress(box), box.aliases ?? []]));
@@ -320,10 +311,7 @@ export function applyOtherNames(root, opts = {}) {
         }
         node.dataset.otherNames = value ? "on" : "off";
     };
-    boxes.forEach((box) => {
-        const node = box.node;
-        if (!node)
-            return;
+    renderedBoxes.forEach(({ node, box }) => {
         const addr = boxAddress(box);
         const baseName = String(box.name || "").trim();
         const aliases = aliasesByAddr.get(addr) ?? [];
@@ -988,14 +976,10 @@ function readArrayBoxState(root) {
         .map((value) => Number(value)));
     const rootName = String(root.dataset.arrayRoot || "").trim();
     const values = [...root.querySelectorAll(".array-col-value")];
-    return values.map((valueNode) => {
-        const valueEl = valueNode;
+    return values.map((valueEl) => {
         const typeText = String(valueEl.dataset.arrayType || root.dataset.arrayElementType || "int").trim();
         const valText = txt(valueEl);
-        const placeholderEmpty = valueEl.classList.contains("placeholder") && valText === "";
-        const storedRawValue = valueEl.dataset.rawValue;
-        const fallbackRawValue = placeholderEmpty ? "" : valText;
-        const rawValue = storedRawValue !== undefined ? storedRawValue : fallbackRawValue;
+        const rawValue = valueEl.dataset.rawValue ?? valText;
         const value = normalizeZeroDisplay(rawValue);
         const indices = String(valueEl.dataset.arrayIndices || "")
             .split(",")
@@ -1021,35 +1005,14 @@ function readArrayBoxState(root) {
 export function serializeWorkspace(target) {
     if (!target)
         return null;
-    let ws = null;
-    if (typeof target === "string") {
-        ws = document.getElementById(target);
-        if (!ws)
-            return null;
-    }
-    else {
-        ws = target;
-    }
-    if (!ws)
-        return null;
-    const wsEl = ws;
-    let nodes = [...ws.querySelectorAll(".vbox, .arraybox")];
-    if (!nodes.length && wsEl.dataset.inline === "true") {
-        const key = wsEl.dataset.workspaceKey || "";
-        if (key) {
-            nodes = [
-                ...document.querySelectorAll(`.vbox[data-workspace="${key}"], .arraybox[data-workspace="${key}"]`),
-            ];
-        }
-    }
+    const nodes = target.querySelectorAll(".vbox, .arraybox");
     const out = [];
     nodes.forEach((node) => {
-        const el = node;
-        if (el.classList.contains("arraybox")) {
-            out.push(...readArrayBoxState(el));
+        if (node.classList.contains("arraybox")) {
+            out.push(...readArrayBoxState(node));
             return;
         }
-        out.push(readBoxState(el));
+        out.push(readBoxState(node));
     });
     return out;
 }
@@ -1064,4 +1027,34 @@ export function restoreWorkspace(state, defaults, opts = {}) {
         allowTypeEdit,
     });
     return wrap;
+}
+export function renderStatePanel(title, boxes, { emptyMessage = "(no variables)", controls } = {}) {
+    const panel = document.createElement("div");
+    panel.className = "state-panel state-panel-scrollable";
+    const heading = document.createElement("h3");
+    heading.className = "panel-title state-heading";
+    heading.textContent = title;
+    panel.appendChild(heading);
+    if (controls) {
+        const controlsWrap = document.createElement("div");
+        controlsWrap.className = "state-panel-controls";
+        controlsWrap.appendChild(controls);
+        panel.appendChild(controlsWrap);
+    }
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    if (boxes?.length) {
+        appendStateObjects(grid, boxes, { editable: false, deletable: false });
+    }
+    else {
+        const message = document.createElement("div");
+        message.className = "muted state-empty-message";
+        message.textContent = emptyMessage;
+        grid.appendChild(message);
+    }
+    const body = document.createElement("div");
+    body.className = "state-panel-scroll-body";
+    body.appendChild(grid);
+    panel.appendChild(body);
+    return panel;
 }

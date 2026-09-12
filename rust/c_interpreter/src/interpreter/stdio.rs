@@ -171,18 +171,17 @@ impl<'a> Interpreter<'a> {
         else {
             return Ok(());
         };
-        let _ = self.require_open_stream(stream, args[0].span(), "fflush", "7.19.5.2")?;
-        if let Some(stream_state) = self.host_streams.get(&stream) {
-            if stream_state.mode.kind == HostStreamModeKind::Input
+        self.require_open_stream(stream, args[0].span(), "fflush", "7.19.5.2")?;
+        if let Some(stream_state) = self.host_streams.get(&stream)
+            && (stream_state.mode.kind == HostStreamModeKind::Input
                 || (stream_state.mode.kind == HostStreamModeKind::Update
-                    && stream_state.last_operation == Some(StreamLastOperation::Input))
-            {
-                return Err(Diagnostic::ub(
-                    "fflush is undefined for an input stream or for an update stream whose most recent operation was input",
-                    args[0].span(),
-                    Some("7.19.5.2"),
-                ));
-            }
+                    && stream_state.last_operation == Some(StreamLastOperation::Input)))
+        {
+            return Err(Diagnostic::ub(
+                "fflush is undefined for an input stream or for an update stream whose most recent operation was input",
+                args[0].span(),
+                Some("7.19.5.2"),
+            ));
         }
         self.host_streams
             .get_mut(&stream)
@@ -2518,10 +2517,10 @@ impl<'a> Interpreter<'a> {
                 break;
             }
             let bytes = self.wchar_to_multibyte_bytes(unit, span, standard)?;
-            if let Some(limit) = precision {
-                if out.len().saturating_add(bytes.len()) > limit {
-                    break;
-                }
+            if let Some(limit) = precision
+                && out.len().saturating_add(bytes.len()) > limit
+            {
+                break;
             }
             out.extend(bytes);
         }
@@ -2834,7 +2833,11 @@ impl<'a> Interpreter<'a> {
                 &mut index,
                 format_span,
             )?;
-            let (width, precision, value) = self.resolve_printf_conversion_args(
+            let ResolvedPrintfArgs {
+                width,
+                precision,
+                value,
+            } = self.resolve_printf_conversion_args(
                 function_name,
                 &conversion,
                 &variadic_args,
@@ -2905,7 +2908,11 @@ impl<'a> Interpreter<'a> {
                 &mut index,
                 format_span,
             )?;
-            let (width, precision, value) = self.resolve_printf_conversion_args(
+            let ResolvedPrintfArgs {
+                width,
+                precision,
+                value,
+            } = self.resolve_printf_conversion_args(
                 function_name,
                 &conversion,
                 &variadic_args,
@@ -3018,7 +3025,11 @@ impl<'a> Interpreter<'a> {
             index += 1;
             let conversion =
                 self.parse_printf_conversion_wide(function_name, &format, &mut index, format_span)?;
-            let (width, precision, value) = self.resolve_printf_conversion_args(
+            let ResolvedPrintfArgs {
+                width,
+                precision,
+                value,
+            } = self.resolve_printf_conversion_args(
                 function_name,
                 &conversion,
                 &variadic_args,
@@ -3085,7 +3096,11 @@ impl<'a> Interpreter<'a> {
             index += 1;
             let conversion =
                 self.parse_printf_conversion_wide(function_name, &format, &mut index, format_span)?;
-            let (width, precision, value) = self.resolve_printf_conversion_args(
+            let ResolvedPrintfArgs {
+                width,
+                precision,
+                value,
+            } = self.resolve_printf_conversion_args(
                 function_name,
                 &conversion,
                 &variadic_args,
@@ -3939,26 +3954,26 @@ impl<'a> Interpreter<'a> {
                 }
                 let token = &token[..item_len];
                 let parsed = match conv.spec {
-                    'd' => self.scan_token_to_signed_bytes(&token, 10).map(
+                    'd' => self.scan_token_to_signed_bytes(token, 10).map(
                         |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
                     ),
-                    'i' => self.scan_token_to_signed_bytes(&token, 0).map(
+                    'i' => self.scan_token_to_signed_bytes(token, 0).map(
                         |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
                     ),
-                    'o' => self.scan_token_to_unsigned_bytes(&token, 8).map(
+                    'o' => self.scan_token_to_unsigned_bytes(token, 8).map(
                         |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
                     ),
-                    'u' => self.scan_token_to_unsigned_bytes(&token, 10).map(
+                    'u' => self.scan_token_to_unsigned_bytes(token, 10).map(
                         |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
                     ),
-                    'x' | 'X' => self.scan_token_to_unsigned_bytes(&token, 16).map(
+                    'x' | 'X' => self.scan_token_to_unsigned_bytes(token, 16).map(
                         |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
                     ),
-                    'p' => self.scan_token_to_unsigned_bytes(&token, 16).map(
+                    'p' => self.scan_token_to_unsigned_bytes(token, 16).map(
                         |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
                     ),
                     _ => {
-                        self.scan_token_to_float_bytes(&token)
+                        self.scan_token_to_float_bytes(token)
                             .map(|(value, consumed, overflow)| {
                                 (
                                     TypedValue::floating(CType::Double, value),
@@ -4765,7 +4780,7 @@ impl<'a> Interpreter<'a> {
                 return Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()));
             }
         };
-        if self.virtual_filesystem.files.get(&file_id).is_none() {
+        if !self.virtual_filesystem.files.contains_key(&file_id) {
             return Ok(self.pointer_value_with_type(return_ty, Self::null_pointer()));
         }
         let stream_object = self.allocate_host_stream_object(
@@ -5168,7 +5183,7 @@ impl<'a> Interpreter<'a> {
         let bytes =
             self.read_bytes_from_stream(stream_object, total, args[3].span(), "fread", "7.19.8.1")?;
         self.overlay_known_bytes_into_object(object_id, start, &bytes, args[0].span(), objects)?;
-        if size != 0 && bytes.len() % size != 0 {
+        if !bytes.len().is_multiple_of(size) {
             let partial_start = start + (bytes.len() / size) * size;
             self.overlay_byte_cells_into_object(
                 object_id,
@@ -5178,7 +5193,7 @@ impl<'a> Interpreter<'a> {
                 objects,
             )?;
         }
-        let items = if size == 0 { 0 } else { bytes.len() / size };
+        let items = bytes.len() / size;
         Ok(TypedValue::integer(CType::UnsignedLong, items as i128))
     }
 
@@ -5214,7 +5229,7 @@ impl<'a> Interpreter<'a> {
             "fwrite",
             "7.19.8.2",
         )?;
-        let items = if size == 0 { 0 } else { written / size };
+        let items = written / size;
         Ok(TypedValue::integer(CType::UnsignedLong, items as i128))
     }
 

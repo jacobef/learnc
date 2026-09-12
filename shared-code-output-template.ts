@@ -1,5 +1,5 @@
+import { renderStatePanel } from "./shared-workspace-dom.js";
 import {
-  appendStateObjects,
   bindBtnRefPulse,
   clearNode,
   createStepper,
@@ -22,13 +22,12 @@ import {
   diagnosticDecorations,
   diagnosticMessageText,
   offsetDiagnosticLines,
-  renderDiagnosticMessage,
 } from "./shared-diagnostics.js";
 import { runCProgram } from "./shared-c-interpreter.js";
 import type { CProgramResult } from "./shared-c-interpreter-types.js";
 import {
-  appendDiagnosticRuntimeContext,
   codeRuntimeIssue,
+  renderCodeDiagnostic,
   diagnosticRuntimeContextText,
   offsetCodeRuntimeIssue,
   renderCodeRuntimeIssue,
@@ -115,7 +114,6 @@ interface VisibleProgramFeedback {
 interface CodeOutputChallengeState {
   text: string;
   pass: boolean;
-  allocBase: number | null;
   visibleCase: ChallengeCase;
   testCases: ChallengeCase[];
   lastReport: ChallengeRunReport | null;
@@ -136,7 +134,6 @@ interface CodeOutputChallengeHintContext {
 interface CodeOutputChallengeProgress {
   text: string;
   pass: boolean;
-  allocBase: number | null;
   visibleCaseInputLiterals: string[];
   pendingFailingCaseInputLiterals: string[] | null;
   showFullShownOutput: boolean;
@@ -422,10 +419,6 @@ function createCodeOutputChallengeTemplate(
         ? normalizeUserCodeText(restoredProgress.text)
         : defaultText,
     pass: restoredProgress?.pass === true,
-    allocBase:
-      typeof restoredProgress?.allocBase === "number"
-        ? restoredProgress.allocBase
-        : null,
     visibleCase: restoredVisibleCase || copyCase(defaultVisibleCase),
     testCases,
     lastReport: null,
@@ -509,37 +502,6 @@ function createCodeOutputChallengeTemplate(
     };
   }
 
-  function renderDiagnostic(diagnostic: ProgramDiagnostic | null) {
-    if (!diagnosticEl) return;
-    if (!diagnostic) {
-      diagnosticEl.classList.add("hidden");
-      diagnosticEl.textContent = "";
-      editor?.removeAttribute("aria-invalid");
-      return;
-    }
-    diagnosticEl.classList.remove("hidden");
-    diagnosticEl.replaceChildren();
-    const heading = document.createElement("div");
-    heading.className = "code-diagnostic-title";
-    heading.textContent = `${
-      diagnostic.kind === "ub" ? "Undefined behavior" : "Error"
-    } on line ${diagnostic.range.startLine + preludeLineCount + 1}, column ${
-      diagnostic.range.startCol + 1
-    }`;
-    const message = document.createElement("div");
-    message.className = "code-diagnostic-message";
-    renderDiagnosticMessage(message, diagnostic);
-    diagnosticEl.append(heading, message);
-    if (diagnostic.tip) {
-      const tip = document.createElement("div");
-      tip.className = "code-diagnostic-tip";
-      tip.textContent = diagnostic.tip;
-      diagnosticEl.appendChild(tip);
-    }
-    appendDiagnosticRuntimeContext(diagnosticEl, diagnostic);
-    editor?.setAttribute("aria-invalid", "true");
-  }
-
   function updateLineGutters(
     diagnostic: ProgramDiagnostic | null,
     runtimeIssue: CodeRuntimeIssue | null,
@@ -562,7 +524,7 @@ function createCodeOutputChallengeTemplate(
     });
     syncEditorLinkedScroll();
     if (diagnostic) {
-      renderDiagnostic(diagnostic);
+      renderCodeDiagnostic(diagnosticEl, editor, diagnostic, { displayedLineOffset: preludeLineCount });
     } else {
       renderCodeRuntimeIssue(
         diagnosticEl,
@@ -782,7 +744,6 @@ function createCodeOutputChallengeTemplate(
     return {
       text: getUserText(),
       pass: state.pass,
-      allocBase: state.allocBase,
       visibleCaseInputLiterals: state.visibleCase.inputLiterals.slice(),
       pendingFailingCaseInputLiterals: state.pendingFailingCase
         ? state.pendingFailingCase.inputLiterals.slice()
@@ -806,45 +767,6 @@ function createCodeOutputChallengeTemplate(
 
   function persistProgress() {
     progress.save(progressSnapshot());
-  }
-
-  function renderStatePanel(
-    title: string,
-    boxes: BoxState[] | null,
-    opts: { emptyMessage?: string; controls?: HTMLElement | null } = {},
-  ): HTMLElement {
-    const { emptyMessage = "(no variables)", controls = null } = opts;
-    const wrap = document.createElement("div");
-    wrap.className = "state-panel state-panel-scrollable";
-    const heading = document.createElement("div");
-    heading.className = "panel-title state-heading";
-    heading.textContent = title;
-    wrap.appendChild(heading);
-    if (controls) {
-      const controlsWrap = document.createElement("div");
-      controlsWrap.className = "state-panel-controls";
-      controlsWrap.appendChild(controls);
-      wrap.appendChild(controlsWrap);
-    }
-    const grid = document.createElement("div");
-    grid.className = "grid";
-    if (!boxes || boxes.length === 0) {
-      const msg = document.createElement("div");
-      msg.className = "muted";
-      msg.style.padding = "8px";
-      msg.textContent = emptyMessage;
-      grid.appendChild(msg);
-    } else {
-      appendStateObjects(grid, boxes, {
-        editable: false,
-        deletable: false,
-      });
-    }
-    const body = document.createElement("div");
-    body.className = "state-panel-scroll-body";
-    body.appendChild(grid);
-    wrap.appendChild(body);
-    return wrap;
   }
 
   function renderStage(currentResult: ChallengeCaseResult): void {

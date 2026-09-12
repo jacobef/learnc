@@ -1,6 +1,244 @@
 use super::*;
 
 impl<'a> Interpreter<'a> {
+    fn parse_printf_count_core<F>(
+        &self,
+        function_name: &str,
+        what: &str,
+        span: Span,
+        index: &mut usize,
+        char_at: &mut F,
+    ) -> Result<Option<PrintfCount>, Diagnostic>
+    where
+        F: FnMut(usize) -> Option<char>,
+    {
+        match char_at(*index) {
+            Some('*') => {
+                *index += 1;
+                Ok(Some(PrintfCount::FromArg))
+            }
+            Some(ch) if ch.is_ascii_digit() => {
+                let start = *index;
+                let mut value = 0i32;
+                while let Some(ch) = char_at(*index) {
+                    if !ch.is_ascii_digit() {
+                        break;
+                    }
+                    value = value
+                        .checked_mul(10)
+                        .and_then(|current| current.checked_add((ch as i32) - ('0' as i32)))
+                        .ok_or_else(|| {
+                            Diagnostic::error(
+                                format!("{function_name} {what} is out of supported range"),
+                                span,
+                            )
+                        })?;
+                    *index += 1;
+                }
+                debug_assert!(*index > start);
+                Ok(Some(PrintfCount::Literal(value)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn parse_printf_conversion_core<F>(
+        &self,
+        function_name: &str,
+        span: Span,
+        index: &mut usize,
+        mut char_at: F,
+    ) -> Result<PrintfConversion, Diagnostic>
+    where
+        F: FnMut(usize) -> Option<char>,
+    {
+        let mut flags = String::new();
+        while let Some(ch) = char_at(*index) {
+            if matches!(ch, '-' | '+' | ' ' | '#' | '0') {
+                flags.push(ch);
+                *index += 1;
+            } else {
+                break;
+            }
+        }
+        let width =
+            self.parse_printf_count_core(function_name, "field width", span, index, &mut char_at)?;
+        let precision = if char_at(*index) == Some('.') {
+            *index += 1;
+            self.parse_printf_count_core(function_name, "precision", span, index, &mut char_at)?
+                .or(Some(PrintfCount::Literal(0)))
+        } else {
+            None
+        };
+        let length = if char_at(*index) == Some('h') && char_at(*index + 1) == Some('h') {
+            *index += 2;
+            PrintfLength::Hh
+        } else if char_at(*index) == Some('h') {
+            *index += 1;
+            PrintfLength::H
+        } else if char_at(*index) == Some('l') && char_at(*index + 1) == Some('l') {
+            *index += 2;
+            PrintfLength::Ll
+        } else if char_at(*index) == Some('l') {
+            *index += 1;
+            PrintfLength::L
+        } else if char_at(*index) == Some('j') {
+            *index += 1;
+            PrintfLength::J
+        } else if char_at(*index) == Some('z') {
+            *index += 1;
+            PrintfLength::Z
+        } else if char_at(*index) == Some('t') {
+            *index += 1;
+            PrintfLength::T
+        } else if char_at(*index) == Some('L') {
+            *index += 1;
+            PrintfLength::BigL
+        } else {
+            PrintfLength::None
+        };
+        let spec = char_at(*index).ok_or_else(|| {
+            Diagnostic::error(format!("incomplete {function_name} format specifier"), span)
+        })?;
+        *index += 1;
+        Ok(PrintfConversion {
+            flags,
+            width,
+            precision,
+            length,
+            spec,
+        })
+    }
+
+    pub(super) fn parse_printf_conversion_bytes(
+        &self,
+        function_name: &str,
+        format: &[u8],
+        index: &mut usize,
+        span: Span,
+    ) -> Result<PrintfConversion, Diagnostic> {
+        self.parse_printf_conversion_core(function_name, span, index, |offset| {
+            format.get(offset).copied().map(char::from)
+        })
+    }
+
+    pub(super) fn parse_printf_conversion_wide(
+        &self,
+        function_name: &str,
+        format: &[libc::wchar_t],
+        index: &mut usize,
+        span: Span,
+    ) -> Result<PrintfConversion, Diagnostic> {
+        self.parse_printf_conversion_core(function_name, span, index, |offset| {
+            format
+                .get(offset)
+                .and_then(|unit| char::from_u32(*unit as u32))
+        })
+    }
+
+    fn printf_length_text(&self, length: PrintfLength) -> &'static str {
+        match length {
+            PrintfLength::None => "",
+            PrintfLength::Hh => "hh",
+            PrintfLength::H => "h",
+            PrintfLength::L => "l",
+            PrintfLength::Ll => "ll",
+            PrintfLength::J => "j",
+            PrintfLength::Z => "z",
+            PrintfLength::T => "t",
+            PrintfLength::BigL => "L",
+        }
+    }
+
+    pub(super) fn printf_conversion_text(&self, conv: &PrintfConversion) -> String {
+        let mut text = String::from("%");
+        text.push_str(&conv.flags);
+        match conv.width {
+            Some(PrintfCount::Literal(value)) => text.push_str(&value.to_string()),
+            Some(PrintfCount::FromArg) => text.push('*'),
+            None => {}
+        }
+        if let Some(precision) = conv.precision {
+            text.push('.');
+            match precision {
+                PrintfCount::Literal(value) => text.push_str(&value.to_string()),
+                PrintfCount::FromArg => text.push('*'),
+            }
+        }
+        text.push_str(self.printf_length_text(conv.length));
+        text.push(conv.spec);
+        text
+    }
+
+    pub(super) fn host_printf_conversion_text(&self, conv: &PrintfConversion) -> String {
+        let mut host = conv.clone();
+        if matches!(host.spec, 'd' | 'i' | 'o' | 'u' | 'x' | 'X')
+            && matches!(
+                host.length,
+                PrintfLength::L | PrintfLength::J | PrintfLength::Z | PrintfLength::T
+            )
+        {
+            // These are all 64-bit in the interpreted data model. `long`,
+            // size_t, and ptrdiff_t are only 32-bit in the Wasm host ABI.
+            host.length = PrintfLength::Ll;
+        } else if matches!(host.spec, 'f' | 'F' | 'e' | 'E' | 'g' | 'G' | 'a' | 'A')
+            && host.length == PrintfLength::BigL
+        {
+            // Interpreted long double is binary64, so pass a host double.
+            host.length = PrintfLength::None;
+        }
+        self.printf_conversion_text(&host)
+    }
+
+    pub(super) fn printf_integer_type(
+        &self,
+        length: PrintfLength,
+        signed: bool,
+        span: Span,
+    ) -> Result<CType, Diagnostic> {
+        let ty = match (length, signed) {
+            (PrintfLength::None, true) => CType::Int,
+            (PrintfLength::None, false) => CType::UnsignedInt,
+            (PrintfLength::H | PrintfLength::Hh, _) => CType::Int,
+            (PrintfLength::L | PrintfLength::J | PrintfLength::T, true) => CType::Long,
+            (PrintfLength::L | PrintfLength::J | PrintfLength::Z | PrintfLength::T, false) => {
+                CType::UnsignedLong
+            }
+            (PrintfLength::Z, true) => CType::Long,
+            (PrintfLength::Ll, true) => CType::LongLong,
+            (PrintfLength::Ll, false) => CType::UnsignedLongLong,
+            _ => {
+                return Err(Diagnostic::error(
+                    "unsupported printf length modifier",
+                    span,
+                ));
+            }
+        };
+        Ok(ty)
+    }
+
+    pub(super) fn snprintf_bytes_with_call<F>(&self, call: F) -> Result<Vec<u8>, Diagnostic>
+    where
+        F: Fn(*mut c_char, usize) -> c_int,
+    {
+        let mut buffer = vec![0u8; 256];
+        loop {
+            let written = call(buffer.as_mut_ptr().cast::<c_char>(), buffer.len());
+            if written < 0 {
+                return Err(Diagnostic::error(
+                    "host snprintf failed",
+                    Span::new(FileId(0), 0, 0),
+                ));
+            }
+            let written = written as usize;
+            if written < buffer.len() {
+                buffer.truncate(written);
+                return Ok(buffer);
+            }
+            buffer.resize(written + 1, 0);
+        }
+    }
+
     fn is_pointer_to_character_type(&self, ty: &CType) -> bool {
         matches!(ty.unqualified(), CType::Pointer(inner) if inner.is_character())
     }
@@ -170,7 +408,7 @@ impl<'a> Interpreter<'a> {
         arg_index: &mut usize,
         fallback_span: Span,
         standard: &'static str,
-    ) -> Result<(Option<i32>, Option<i32>, Option<PrintfArgRef<'b>>), Diagnostic> {
+    ) -> Result<ResolvedPrintfArgs<'b>, Diagnostic> {
         let width = self.resolve_printf_count_arg(
             function_name,
             conversion,
@@ -207,7 +445,11 @@ impl<'a> Interpreter<'a> {
             *arg_index += 1;
             Some(arg)
         };
-        Ok((width, precision, value))
+        Ok(ResolvedPrintfArgs {
+            width,
+            precision,
+            value,
+        })
     }
 
     fn validate_printf_n_destination(
@@ -315,7 +557,7 @@ impl<'a> Interpreter<'a> {
                     arg.span,
                 )?;
                 if arg.value.ty != expected
-                    && !self.corresponding_signedness_value_exception(&expected, &arg.value)
+                    && !self.corresponding_signedness_value_exception(&expected, arg.value)
                 {
                     return Err(Diagnostic::ub(
                         format!(
@@ -602,7 +844,9 @@ impl<'a> Interpreter<'a> {
                 &mut index,
                 format_span,
             )?;
-            let (_, precision, value) = self.resolve_printf_conversion_args(
+            let ResolvedPrintfArgs {
+                precision, value, ..
+            } = self.resolve_printf_conversion_args(
                 function_name,
                 &conversion,
                 &variadic_args,
@@ -908,8 +1152,7 @@ impl<'a> Interpreter<'a> {
             args[format_index].span(),
             objects,
         )?;
-        self.reject_missing_return_value(&evaluated[va_index], args[va_index].span())?;
-        self.reject_indeterminate_library_value(
+        self.check_library_argument_value(
             &evaluated[va_index],
             args[va_index].span(),
             function_name,
@@ -992,7 +1235,9 @@ impl<'a> Interpreter<'a> {
                 &mut index,
                 args[format_index].span(),
             )?;
-            let (_, precision, value) = self.resolve_printf_conversion_args(
+            let ResolvedPrintfArgs {
+                precision, value, ..
+            } = self.resolve_printf_conversion_args(
                 function_name,
                 &conversion,
                 &variadic_args,
@@ -1052,8 +1297,7 @@ impl<'a> Interpreter<'a> {
             args[format_index].span(),
             objects,
         )?;
-        self.reject_missing_return_value(&evaluated[va_index], args[va_index].span())?;
-        self.reject_indeterminate_library_value(
+        self.check_library_argument_value(
             &evaluated[va_index],
             args[va_index].span(),
             function_name,
@@ -1304,8 +1548,7 @@ impl<'a> Interpreter<'a> {
             args[format_index].span(),
             objects,
         )?;
-        self.reject_missing_return_value(&evaluated[va_index], args[va_index].span())?;
-        self.reject_indeterminate_library_value(
+        self.check_library_argument_value(
             &evaluated[va_index],
             args[va_index].span(),
             function_name,
@@ -1428,8 +1671,7 @@ impl<'a> Interpreter<'a> {
             args[format_index].span(),
             objects,
         )?;
-        self.reject_missing_return_value(&evaluated[va_index], args[va_index].span())?;
-        self.reject_indeterminate_library_value(
+        self.check_library_argument_value(
             &evaluated[va_index],
             args[va_index].span(),
             function_name,
@@ -2635,13 +2877,7 @@ impl<'a> Interpreter<'a> {
         let radix = match spec {
             'o' => 8,
             'x' | 'X' | 'p' => 16,
-            'i' => {
-                if token.get(index) == Some(&b'0') {
-                    8
-                } else {
-                    10
-                }
-            }
+            'i' if token.get(index) == Some(&b'0') => 8,
             _ => 10,
         };
         if matches!(spec, 'i' | 'x' | 'X' | 'p')
@@ -3530,44 +3766,48 @@ impl<'a> Interpreter<'a> {
                     return Ok(ScanConversionStatus::MatchingFailure);
                 }
                 let token = &token[..item_len];
-                let parsed = match conv.spec {
-                    'd' => {
-                        self.scan_token_to_signed(&token, 10)
-                            .map(|(value, consumed, overflow)| {
+                let parsed =
+                    match conv.spec {
+                        'd' => self.scan_token_to_signed(token, 10).map(
+                            |(value, consumed, overflow)| {
                                 (TypedValue::int(value), consumed, overflow)
-                            })
-                    }
-                    'i' => {
-                        self.scan_token_to_signed(&token, 0)
-                            .map(|(value, consumed, overflow)| {
+                            },
+                        ),
+                        'i' => self.scan_token_to_signed(token, 0).map(
+                            |(value, consumed, overflow)| {
                                 (TypedValue::int(value), consumed, overflow)
-                            })
-                    }
-                    'o' => {
-                        self.scan_token_to_unsigned(&token, 8)
-                            .map(|(value, consumed, overflow)| {
+                            },
+                        ),
+                        'o' => self.scan_token_to_unsigned(token, 8).map(
+                            |(value, consumed, overflow)| {
                                 (TypedValue::int(value), consumed, overflow)
-                            })
-                    }
-                    'u' => self.scan_token_to_unsigned(&token, 10).map(
-                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
-                    ),
-                    'x' | 'X' => self.scan_token_to_unsigned(&token, 16).map(
-                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
-                    ),
-                    'p' => self.scan_token_to_unsigned(&token, 16).map(
-                        |(value, consumed, overflow)| (TypedValue::int(value), consumed, overflow),
-                    ),
-                    _ => self
-                        .scan_token_to_float(&token)
-                        .map(|(value, consumed, overflow)| {
-                            (
-                                TypedValue::floating(CType::Double, value),
-                                consumed,
-                                overflow,
-                            )
-                        }),
-                };
+                            },
+                        ),
+                        'u' => self.scan_token_to_unsigned(token, 10).map(
+                            |(value, consumed, overflow)| {
+                                (TypedValue::int(value), consumed, overflow)
+                            },
+                        ),
+                        'x' | 'X' => self.scan_token_to_unsigned(token, 16).map(
+                            |(value, consumed, overflow)| {
+                                (TypedValue::int(value), consumed, overflow)
+                            },
+                        ),
+                        'p' => self.scan_token_to_unsigned(token, 16).map(
+                            |(value, consumed, overflow)| {
+                                (TypedValue::int(value), consumed, overflow)
+                            },
+                        ),
+                        _ => self
+                            .scan_token_to_float(token)
+                            .map(|(value, consumed, overflow)| {
+                                (
+                                    TypedValue::floating(CType::Double, value),
+                                    consumed,
+                                    overflow,
+                                )
+                            }),
+                    };
                 let Some((parsed, consumed, overflow)) = parsed else {
                     return Ok(ScanConversionStatus::MatchingFailure);
                 };

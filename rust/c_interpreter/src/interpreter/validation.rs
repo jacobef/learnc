@@ -141,26 +141,20 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(), Diagnostic> {
         match expr {
             Expr::Variable(name, span) => {
-                if let Some(declaration) = frame.object_decls.get(name) {
-                    if declaration.linkage.is_some()
+                let missing = if let Some(declaration) = frame.object_decls.get(name) {
+                    declaration.linkage.is_some()
                         && self.lookup_global_binding(name, span.file).is_none()
-                    {
-                        return Err(self.missing_definition_use_diag(name, *span));
-                    }
                 } else if frame.function_decls.contains_key(name) {
-                    if self.lookup_function(name, span.file).is_none()
+                    self.lookup_function(name, span.file).is_none()
                         && !Self::is_host_library_function(name)
-                    {
-                        return Err(self.missing_definition_use_diag(name, *span));
-                    }
-                } else if self.lookup_global_declaration(name, span.file).is_some()
-                    && self.lookup_global_binding(name, span.file).is_none()
-                {
-                    return Err(self.missing_definition_use_diag(name, *span));
-                } else if self.lookup_function_declaration(name, span.file).is_some()
-                    && self.lookup_function(name, span.file).is_none()
-                    && !Self::is_host_library_function(name)
-                {
+                } else {
+                    (self.lookup_global_declaration(name, span.file).is_some()
+                        && self.lookup_global_binding(name, span.file).is_none())
+                        || (self.lookup_function_declaration(name, span.file).is_some()
+                            && self.lookup_function(name, span.file).is_none()
+                            && !Self::is_host_library_function(name))
+                };
+                if missing {
                     return Err(self.missing_definition_use_diag(name, *span));
                 }
             }
@@ -1908,8 +1902,7 @@ impl<'a> Interpreter<'a> {
                 while item_index < items.len() {
                     let item = &items[item_index];
                     if !item.designators.is_empty() {
-                        let selectors =
-                            self.initializer_selectors(target, &item.designators, item.span)?;
+                        let selectors = self.initializer_selectors(target, &item.designators)?;
                         let Some((InitSelector::Index(index), _)) = selectors.split_first() else {
                             return Err(Diagnostic::error(
                                 "array initializer designator must begin with [index]",
@@ -1973,8 +1966,7 @@ impl<'a> Interpreter<'a> {
                 while item_index < items.len() {
                     let item = &items[item_index];
                     if !item.designators.is_empty() {
-                        let selectors =
-                            self.initializer_selectors(target, &item.designators, item.span)?;
+                        let selectors = self.initializer_selectors(target, &item.designators)?;
                         let Some((InitSelector::Member(name), _)) = selectors.split_first() else {
                             return Err(Diagnostic::error(
                                 "structure initializer designator must begin with .member",
@@ -2052,8 +2044,7 @@ impl<'a> Interpreter<'a> {
                     let mut item_index = 0;
                     while item_index < items.len() && !items[item_index].designators.is_empty() {
                         let item = &items[item_index];
-                        let selectors =
-                            self.initializer_selectors(target, &item.designators, item.span)?;
+                        let selectors = self.initializer_selectors(target, &item.designators)?;
                         if !matches!(selectors.first(), Some(InitSelector::Member(_))) {
                             return Err(Diagnostic::error(
                                 "union initializer designator must begin with .member",

@@ -25,7 +25,7 @@ function decodeBase64(data) {
     for (let index = 0; index < binary.length; index += 1) {
         bytes[index] = binary.charCodeAt(index);
     }
-    return bytes;
+    return bytes.buffer;
 }
 function writeU32(memory, pointer, value) {
     new DataView(memory.buffer).setUint32(pointer, value, true);
@@ -91,8 +91,7 @@ function interpreterExports() {
     if (exportsCache)
         return exportsCache;
     let current = null;
-    const bytes = Uint8Array.from(decodeBase64(C_INTERPRETER_WASM_BASE64));
-    const module = new WebAssembly.Module(bytes);
+    const module = new WebAssembly.Module(decodeBase64(C_INTERPRETER_WASM_BASE64));
     const instance = new WebAssembly.Instance(module, {
         env: { clock: () => Math.floor(Date.now() / 1000) },
         wasi_snapshot_preview1: wasiImports(() => current),

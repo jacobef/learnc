@@ -319,13 +319,11 @@ impl Preprocessor {
     }
 
     fn is_unterminated_macro_invocation(&self, diag: &Diagnostic) -> bool {
-        diag.render()
-            .starts_with("error: unterminated macro invocation")
+        diag.message().starts_with("unterminated macro invocation")
     }
 
     fn is_unterminated_pragma_operator(&self, diag: &Diagnostic) -> bool {
-        diag.render()
-            .starts_with("error: unterminated _Pragma operator")
+        diag.message().starts_with("unterminated _Pragma operator")
     }
 
     fn normalize_source_text(
@@ -769,10 +767,10 @@ impl Preprocessor {
 
         #[cfg(not(test))]
         {
-            return Err(Diagnostic::error(
+            Err(Diagnostic::error(
                 format!("header file {name:?} is not available"),
                 Self::span(file_id),
-            ));
+            ))
         }
 
         #[cfg(test)]
@@ -1027,7 +1025,7 @@ impl Preprocessor {
                     Self::span(file_id),
                 ));
             };
-            if !params.iter().any(|param| param == name) && !(variadic && name == "__VA_ARGS__") {
+            if !(params.iter().any(|param| param == name) || variadic && name == "__VA_ARGS__") {
                 return Err(Diagnostic::error(
                     "# in macro replacement must be followed by a parameter name",
                     Self::span(file_id),
@@ -1761,10 +1759,10 @@ fn to_shift_count(value: PpInt, span: Span) -> Result<u32, Diagnostic> {
         return Ok(value.bits as u32);
     }
     {
-        return Err(Diagnostic::error(
+        Err(Diagnostic::error(
             "invalid shift count in #if expression",
             span,
-        ));
+        ))
     }
 }
 
@@ -2320,9 +2318,7 @@ fn split_directive(text: &str) -> (&str, &str) {
 
 fn parse_identifier_with_end(text: &str) -> Option<(&str, usize)> {
     let mut chars = text.char_indices();
-    let Some((_, first)) = chars.next() else {
-        return None;
-    };
+    let (_, first) = chars.next()?;
     if !is_ident_start(first) {
         return None;
     }

@@ -8,12 +8,12 @@ export type CodeDecoration = {
   diagnosticGroupId?: string;
 };
 
-export interface CodeSurfaceElements {
+interface CodeSurfaceElements {
   highlightEl: HTMLPreElement | null;
   measureEl: HTMLDivElement | null;
 }
 
-export interface UpdateCodeSurfaceOptions {
+interface UpdateCodeSurfaceOptions {
   editor: HTMLTextAreaElement | null;
   lineNumbers?: HTMLElement | null;
   highlightEl?: HTMLPreElement | null;
@@ -154,20 +154,20 @@ export function ensureCodeSurfaceElements(
   return { highlightEl, measureEl };
 }
 
-export function getCodeLineHeightPx(editor: HTMLTextAreaElement | null): number {
+function getCodeLineHeightPx(editor: HTMLTextAreaElement | null): number {
   if (!editor) return 32;
   const style = window.getComputedStyle(editor);
   const value = parseFloat(style.lineHeight);
   return Number.isFinite(value) ? value : 32;
 }
 
-export function autoSizeCodeEditor(editor: HTMLTextAreaElement | null): void {
+function autoSizeCodeEditor(editor: HTMLTextAreaElement | null): void {
   if (!editor) return;
   editor.style.height = "auto";
   editor.style.height = `${editor.scrollHeight}px`;
 }
 
-export function measureCodeWrapCounts(
+function measureCodeWrapCounts(
   editor: HTMLTextAreaElement | null,
   measureEl: HTMLDivElement | null,
   lines: string[],

@@ -103,20 +103,20 @@ export function ensureCodeSurfaceElements(editor) {
     }
     return { highlightEl, measureEl };
 }
-export function getCodeLineHeightPx(editor) {
+function getCodeLineHeightPx(editor) {
     if (!editor)
         return 32;
     const style = window.getComputedStyle(editor);
     const value = parseFloat(style.lineHeight);
     return Number.isFinite(value) ? value : 32;
 }
-export function autoSizeCodeEditor(editor) {
+function autoSizeCodeEditor(editor) {
     if (!editor)
         return;
     editor.style.height = "auto";
     editor.style.height = `${editor.scrollHeight}px`;
 }
-export function measureCodeWrapCounts(editor, measureEl, lines) {
+function measureCodeWrapCounts(editor, measureEl, lines) {
     if (!editor || !measureEl)
         return lines.map(() => 1);
     const style = window.getComputedStyle(editor);
