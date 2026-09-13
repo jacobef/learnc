@@ -57,6 +57,6 @@ createProgramTemplate({
             },
         },
     ],
-    next: "29-fibonacci.html",
+    next: "29-doubling.html",
     workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

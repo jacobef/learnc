@@ -30,7 +30,9 @@ const DEFAULT_NAV_ITEMS: NavItem[] = [
   { href: "26-rounding-i.html", label: "26. Rounding I" },
   { href: "27-rounding-ii.html", label: "27. Rounding II" },
   { href: "28-while.html", label: "28. While" },
-  { href: "29-fibonacci.html", label: "29. Fibonacci" },
+  { href: "29-doubling.html", label: "29. Doubling" },
+  { href: "30-square-root.html", label: "30. Square Root" },
+  { href: "31-pizza.html", label: "31. Pizza" },
   { href: "sandbox.html", label: "Sandbox" },
 ];
 
