@@ -10,5 +10,5 @@ createProgramTemplate({
     { code: "}\n" },
   ],
   workspace: {},
-  next: "31-pizza.html",
+  next: "31-pencils.html",
 });

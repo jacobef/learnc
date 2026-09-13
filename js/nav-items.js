@@ -30,7 +30,7 @@ const DEFAULT_NAV_ITEMS = [
     { href: "28-while.html", label: "28. While" },
     { href: "29-doubling.html", label: "29. Doubling" },
     { href: "30-square-root.html", label: "30. Square Root" },
-    { href: "31-pizza.html", label: "31. Pizza" },
+    { href: "31-pencils.html", label: "31. Pencils" },
     { href: "sandbox.html", label: "Sandbox" },
 ];
 export { DEFAULT_NAV_ITEMS };
