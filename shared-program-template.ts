@@ -447,7 +447,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     const mobileMode = isMobileViewport() && !!mobileActionsEl;
     const target = mobileMode ? mobileActionsEl : controlsActionsEl;
     if (!target) return;
-    [levelResetBtn, resetBtn, addBtn, hintBtn, checkBtn, statusEl].forEach((node) => {
+    [resetBtn, addBtn, hintBtn, checkBtn, statusEl].forEach((node) => {
       if (node && node.parentElement !== target) target.appendChild(node);
     });
     if (!hintPanel) return;
@@ -469,7 +469,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
 
   function updateMobileActionsVisibility() {
     if (!mobileActionsEl) return;
-    const hasVisibleAction = [levelResetBtn, checkBtn, hintBtn, addBtn, resetBtn].some(
+    const hasVisibleAction = [checkBtn, hintBtn, addBtn, resetBtn].some(
       (btn) => !!btn && !btn.classList.contains("hidden"),
     );
     mobileActionsEl.classList.toggle("hidden", !hasVisibleAction);

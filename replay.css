@@ -1,0 +1,18 @@
+.replay-page { padding: 16px; }
+.replay-toolbar { max-width: 1100px; margin: 0 auto 28px; }
+.replay-toolbar h1 { font-size: 22px; }
+.replay-toolbar p { font: 16px/1.5 sans-serif; }
+.replay-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+#replay-position { flex: 1 1 200px; }
+.replay-stage { margin: auto; max-width: 1100px; border: 1px solid #ddd; padding: 16px; height: 844px; overflow: auto; }
+.replay-stage.is-mobile { max-width: 390px; }
+.replay-stage > .main { display: flex; flex-direction: column; gap: 16px; height: 100%; }
+.replay-stage .controls-bar { position: relative; top: 0; margin: 0; padding: 0; }
+.replay-stage.is-mobile > .main, .replay-stage.is-mobile .panel-shell, .replay-stage.is-mobile .panel-col { height: auto; }
+.replay-stage.is-mobile .row { grid-template-columns: 1fr; height: auto; }
+.replay-stage.is-mobile .expr-eval-row { flex-direction: column; }
+.replay-stage.is-mobile .panel-scroll > .panel-body { flex: 0 0 auto; overflow: auto; }
+.replay-stage.is-mobile .program-mobile-actions { display: flex; }
+.replay-stage.is-mobile .state-group.two-col { grid-template-columns: 1fr; }
+.replay-stage button, .replay-stage input, .replay-stage textarea { pointer-events: none; }
+.replay-stage .replay-focus { outline: 2px solid #1e77ff; outline-offset: 3px; }

@@ -58,6 +58,14 @@ bridge. It catches browser-specific host ABI differences that native tests
 cannot cover. Progress tests exercise persistence and browser-storage failures.
 Use the actual lesson pages for interaction and responsive-layout checks.
 
+## Level replays
+
+The optional level recorder sends a per-page replay on Check. Encoding,
+compression and uploads run in a dedicated Web Worker. The collector, privacy
+boundary, deployment configuration and local validation instructions are in
+[`telemetry/README.md`](telemetry/README.md). Open `replay.html` to play downloaded
+replays locally; `privacy.html` provides the learner's opt-out setting.
+
 ## Source map
 
 - Numbered `.ts` files define lesson content; `nav-items.ts` defines navigation.

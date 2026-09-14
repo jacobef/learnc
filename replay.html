@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>C Boxes — Level replay</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="replay.css" />
+    <script type="module" src="js/replay.js"></script>
+  </head>
+  <body class="replay-page">
+    <header class="replay-toolbar">
+      <h1>Level replay</h1>
+      <label>Open a replay <input id="replay-file" type="file" accept=".json,.gz,application/json,application/gzip" /></label>
+      <p id="replay-status">Open a downloaded .json.gz file. It stays in this browser.</p>
+      <div class="replay-controls">
+        <button id="replay-play" disabled>Play</button>
+        <label>Speed <select id="replay-speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select></label>
+        <output id="replay-time">0:00.0</output>
+        <input id="replay-position" aria-label="Replay time" type="range" min="0" max="0" value="0" disabled />
+      </div>
+    </header>
+    <div id="replay-stage" class="replay-stage"></div>
+  </body>
+</html>

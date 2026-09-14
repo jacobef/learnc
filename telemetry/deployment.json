@@ -1,0 +1,20 @@
+{
+  "project": "blueprint-ioe",
+  "region": "us-central1",
+  "service": "learnc-replays",
+  "endpoint": "https://learnc-replays-304732765112.us-central1.run.app/replays",
+  "bucket": "blueprint-ioe-learnc-replays",
+  "serviceAccount": "learnc-replays@blueprint-ioe.iam.gserviceaccount.com",
+  "requestLogExclusion": "learnc-replays-no-request-logs",
+  "frontendEnabled": true,
+  "spendControl": {
+    "type": "Cloud Billing spend-cap enforcement",
+    "amountUSD": 5,
+    "period": "monthly",
+    "scope": "Cloud Run in blueprint-ioe",
+    "budgetId": "ade4ccff-d8f5-46f2-8ae2-8785d56b33a2",
+    "status": "Configured",
+    "excludes": ["Cloud Storage", "Cloud Build", "Artifact Registry"],
+    "note": "Not a fee or a strict cap; enforcement can lag and overages are billed."
+  }
+}

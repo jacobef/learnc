@@ -77,4 +77,12 @@ import { clearAllLevelProgress, clearSandboxProgress, hasSandboxProgress, savedL
     updateResetProgressButton();
     startWrap.appendChild(resetProgressBtn);
     main.appendChild(startWrap);
+    const replayNotice = document.createElement("p");
+    replayNotice.className = "replay-notice";
+    replayNotice.append("Check sends a replay of the current level to help improve this tutorial. ");
+    const privacyLink = document.createElement("a");
+    privacyLink.href = "privacy.html";
+    privacyLink.textContent = "Privacy & replay settings";
+    replayNotice.appendChild(privacyLink);
+    main.appendChild(replayNotice);
 }

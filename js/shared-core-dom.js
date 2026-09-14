@@ -1,4 +1,5 @@
 import { DEFAULT_NAV_ITEMS as NAV_ITEMS } from "./nav-items.js";
+import { startLevelReplay } from "./shared-replay.js";
 import { clearNode, disableAutoText, el, queryElement, queryRole, txt, } from "./shared-dom-utils.js";
 import { applyOtherNames, appendStateObjects, disableBoxEditing, findArrayObjectBoxesForResult, makeAnswerBox, readBoxState, removeBoxDeleteButtons, restoreWorkspace, serializeWorkspace, vbox, } from "./shared-workspace-dom.js";
 function onDomReady(fn, { once = true } = {}) {
@@ -70,6 +71,10 @@ function buildNav(items = DEFAULT_NAV_ITEMS, { activeHref } = {}) {
         }
         nav.appendChild(link);
     });
+    const privacy = document.createElement("a");
+    privacy.href = "privacy.html";
+    privacy.textContent = "Privacy & level replays";
+    nav.appendChild(privacy);
     return nav;
 }
 function findExistingLayoutNodes(wrap) {
@@ -173,6 +178,7 @@ function ensureBaseLayout({ navItems, activeHref, } = {}) {
     applySidebarStateFromUrl();
     ensureSidebarControls(wrap, nav);
     document.body.classList.add("panel-layout");
+    startLevelReplay(main);
     requestAnimationFrame(() => {
         centerActiveNavItem(nav);
     });

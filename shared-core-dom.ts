@@ -1,4 +1,5 @@
 import { DEFAULT_NAV_ITEMS as NAV_ITEMS } from "./nav-items.js";
+import { startLevelReplay } from "./shared-replay.js";
 import {
   clearNode,
   disableAutoText,
@@ -169,6 +170,10 @@ function buildNav(
     }
     nav.appendChild(link);
   });
+  const privacy = document.createElement("a");
+  privacy.href = "privacy.html";
+  privacy.textContent = "Privacy & level replays";
+  nav.appendChild(privacy);
   return nav;
 }
 
@@ -283,6 +288,7 @@ function ensureBaseLayout({
   applySidebarStateFromUrl();
   ensureSidebarControls(wrap, nav);
   document.body.classList.add("panel-layout");
+  startLevelReplay(main);
   requestAnimationFrame(() => {
     centerActiveNavItem(nav);
   });

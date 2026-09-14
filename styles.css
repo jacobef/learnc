@@ -1585,6 +1585,10 @@ body.panel-layout .sandbox-shell .panel-controls.controls-main {
     align-items: center;
     gap: 12px;
 }
+.replay-notice {
+    font: 14px/1.5 sans-serif;
+    color: #555;
+}
 
 .state-group {
     display: grid;
@@ -2819,11 +2823,11 @@ nav.tabs a.active:hover {
         height: auto;
     }
     .panel-scroll > .panel-body {
-        overflow: visible;
+        overflow: auto;
         flex: 0 0 auto;
     }
     .sandbox-state-panel [data-role="sandbox-stage"] {
-        overflow: visible;
+        overflow: auto;
         flex: 0 0 auto;
     }
     .sandbox-terminal {
@@ -2831,7 +2835,7 @@ nav.tabs a.active:hover {
     }
     .panel-body.codepane,
     .codepane {
-        overflow: visible;
+        overflow: auto;
     }
     .program-mobile-actions {
         display: flex;
@@ -2846,22 +2850,6 @@ nav.tabs a.active:hover {
         min-width: 0;
     }
 
-    .vbox {
-        width: 100%;
-        max-width: 100%;
-        box-sizing: border-box;
-        flex-direction: column;
-        gap: 8px;
-    }
-    .vbox-main {
-        width: 100%;
-        min-width: 0;
-        max-width: 100%;
-    }
-    .vbox-meta {
-        justify-content: flex-start;
-        padding-top: 0;
-    }
     .arraybox {
         width: 100%;
         min-width: 0;

@@ -1,0 +1,7 @@
+{
+  "name": "learnc-level-replays",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": { "start": "node server.ts", "test": "node --test server.test.ts" }
+}
