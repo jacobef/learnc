@@ -7,6 +7,8 @@
   "serviceAccount": "learnc-replays@blueprint-ioe.iam.gserviceaccount.com",
   "requestLogExclusion": "learnc-replays-no-request-logs",
   "frontendEnabled": true,
+  "storageRole": "projects/blueprint-ioe/roles/learncReplayWriter",
+  "replayUpdates": "one latest history per page attempt, generation-checked replacement",
   "spendControl": {
     "type": "Cloud Billing spend-cap enforcement",
     "amountUSD": 5,

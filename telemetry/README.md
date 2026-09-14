@@ -3,7 +3,9 @@
 Numbered lessons record their lesson panel from page initialization through each
 Check click, including edits, rendered code and state, navigation within the level,
 hints, focus/click targets, scrolling, and Check feedback. Each upload is the full
-history up to that Check. The separate sandbox and other pages are excluded.
+history up to that Check and replaces the earlier upload for that page attempt.
+Only the latest successfully received history remains in the normal bucket listing;
+failed or abandoned attempts still retain their last Check. The separate sandbox and other pages are excluded.
 `replay.html` opens downloaded `.json.gz` files locally with play/pause, speed and
 scrubbing. The viewer executes no recorded HTML or code and cannot make network
 requests. This is a DOM/state replay, not a video or a raw keystroke recorder;
@@ -13,7 +15,9 @@ hover, pointer movement, native dialogs and text selections are not recorded.
 
 - Payloads contain only a level filename, elapsed milliseconds, and lesson events.
   No wall-clock time, query string, referrer, IP, cookie, browser fingerprint,
-  exact screen size, account, session or visitor identifier is collected.
+  exact screen size, account or visitor identifier is collected. A random 256-bit
+  write key in an upload header identifies only this page attempt. It is never
+  persisted in the browser, included in the replay file, or reused on another page.
 - The recorder uses an ordinary dedicated Worker, no persistent storage, and no
   shared worker. A new page gets a new history and DOM IDs starting at 1. A level
   reload starts a new replay; earlier activity is not restored from saved progress.
@@ -22,7 +26,11 @@ hover, pointer movement, native dialogs and text selections are not recorded.
   storage is an on/off flag, which is never transmitted. Unavailable preference
   storage disables recording. Opting out stops Workers in other open lesson tabs.
 - Uploads omit credentials and referrers. The receiver validates an allowlist and
-  stores only the replay, under a fresh random filename. It exposes no read/list
+  stores only the replay, under a filename derived from the level and a hash of
+  its write key. Knowing the filename does not reveal the key needed to replace it.
+  The event count and atomic storage-generation checks prevent stale requests
+  from overwriting longer histories, including concurrent requests. See the
+  [Cloud Storage preconditions](https://docs.cloud.google.com/storage/docs/request-preconditions). It exposes no read/list
   endpoint. Only authorized cloud storage users can download files.
 - **Free-form lesson content is included.** If a learner types identifying text
   into their code, names or values, it remains in the replay. Absence of tracking
@@ -33,11 +41,10 @@ hover, pointer movement, native dialogs and text selections are not recorded.
   infrastructure-managed object creation times; these are not included in replay
   files or displayed by the viewer. Provider-internal security/operational data
   and GitHub Pages' existing site delivery are outside this collector's control.
-- The private bucket uses default retention/recovery settings with no automatic
-  deletion schedule. Automatic approval review rejected the optional 30-day
-  deletion/recovery changes because the user had not authorized data loss.
-  Never enable public
-  reads, storage access logs, request tracing, or request/body logging for it.
+- The private bucket has no automatic expiration of current replays. Its existing
+  seven-day soft-delete recovery can retain replaced versions temporarily, outside
+  the normal listing. Never enable public reads, storage access logs, request
+  tracing, or request/body logging for it.
 
 ## Responsiveness and failure behavior
 
@@ -56,7 +63,7 @@ without disabling the lesson. Navigating away may cancel an unfinished upload.
 ```sh
 tsc -p .
 PORT=8767 REPLAY_LOCAL_DIR=/tmp/learnc-replays node telemetry/server.ts
-node --test telemetry/server.test.ts
+node --test telemetry/*.test.ts
 node --test scripts/test-replay-worker.ts
 ```
 
@@ -85,8 +92,10 @@ The existing account-wide alerts-only budget was left unchanged. See Google's
 
 Use a dedicated Cloud Run service and service account, a private bucket with
 uniform access and public-access prevention, and bucket-scoped
-`roles/storage.objectCreator` for the service account. The service cannot read or
-list existing replays. Disable request-log storage before deploying by excluding
+custom role `projects/blueprint-ioe/roles/learncReplayWriter` for the service account,
+with only `storage.objects.get`, `storage.objects.create`, and
+`storage.objects.delete`. These permit generation checks and replacement; no list
+permission is granted and the public collector exposes no read endpoint. Disable request-log storage before deploying by excluding
 `resource.type="cloud_run_revision" AND resource.labels.service_name="learnc-replays"`
 from all applicable sinks. Inspect ancestor sinks as well as project sinks.
 Configure `REPLAY_BUCKET`, zero minimum / one maximum instance, bounded concurrency
@@ -96,3 +105,6 @@ has body/schema/decompression limits but intentionally no IP-based rate tracking
 
 Download files with authenticated cloud storage access, then open `replay.html`.
 Do not copy replay files into this public website's repository.
+
+Already-open clients from before the replacement rollout lack the write key and
+are rejected silently; reloading the lesson activates the new recorder.

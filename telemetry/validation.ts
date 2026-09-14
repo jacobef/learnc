@@ -24,7 +24,7 @@ function node(value: unknown, depth = 0): boolean {
   return Array.isArray(value.children) && value.children.length <= 20_000 && value.children.every(child => node(child, depth + 1));
 }
 
-export function validReplay(value: unknown): boolean {
+export function validReplay(value: unknown): value is { version: 1; level: string; events: Array<{ t: number; type: string; data: Record<string, unknown> }> } {
   if (!object(value) || !keys(value, ["version", "level", "events"]) || value.version !== 1) return false;
   if (typeof value.level !== "string" || !/^\d{1,3}-[a-z0-9-]{1,80}\.html$/.test(value.level)) return false;
   if (!Array.isArray(value.events) || value.events.length < 2 || value.events.length > 50_000) return false;

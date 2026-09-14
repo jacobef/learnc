@@ -1,6 +1,8 @@
 import { REPLAY_LIMIT_BYTES, REPLAY_LIMIT_EVENTS } from "./shared-replay-protocol.js";
 let endpoint = "";
 let level = "";
+// A fresh write capability for this page only; never persisted or stored in replay data.
+const replayKey = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, "0")).join("");
 let history = [];
 let bytes = 0;
 let stopped = false;
@@ -25,7 +27,7 @@ async function upload(events) {
         await fetch(endpoint, {
             method: "POST", body, mode: "cors", credentials: "omit", referrerPolicy: "no-referrer",
             redirect: "error", cache: "no-store", signal: abort.signal,
-            headers: { "Content-Type": typeof CompressionStream === "function" ? "application/gzip" : "application/json" },
+            headers: { "X-Replay-Key": replayKey, "Content-Type": typeof CompressionStream === "function" ? "application/gzip" : "application/json" },
         });
     }
     catch { /* Best effort; no UI feedback, retry loop, or durable upload queue. */ }

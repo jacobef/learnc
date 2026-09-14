@@ -31,6 +31,9 @@ test("each submission freezes its own full history and omits browser credentials
   send(event(2)); send({ kind: "submit" });
   await until(() => uploads.length === 2);
   assert.deepEqual(uploads.map(upload => upload.replay.events.map(e => e.t)), [[1], [1, 2]]);
+  const firstKey = new Headers(uploads[0].options.headers).get("X-Replay-Key");
+  assert.match(firstKey!, /^[a-f0-9]{64}$/);
+  assert.equal(new Headers(uploads[1].options.headers).get("X-Replay-Key"), firstKey);
   for (const upload of uploads) {
     assert.equal(upload.url, "https://collector.example/replays");
     assert.equal(upload.options.credentials, "omit");
@@ -74,4 +77,18 @@ test("excessive history stops recording instead of submitting an incomplete repl
   await setImmediate();
   assert.deepEqual(messages, [{ kind: "stop" }]);
   assert.equal(uploads, 0);
+});
+
+test("a new page Worker gets an independent write key", async () => {
+  const keys: string[] = [];
+  const fetcher: typeof fetch = async (_url, options) => {
+    keys.push(new Headers(options!.headers).get("X-Replay-Key")!);
+    return new Response(null, { status: 204 });
+  };
+  for (let i = 0; i < 2; i++) {
+    const { send } = await boot(fetcher);
+    send(event(1)); send({ kind: "submit" });
+    await until(() => keys.length === i + 1);
+  }
+  assert.notEqual(keys[0], keys[1]);
 });
