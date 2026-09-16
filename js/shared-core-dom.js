@@ -71,10 +71,6 @@ function buildNav(items = DEFAULT_NAV_ITEMS, { activeHref } = {}) {
         }
         nav.appendChild(link);
     });
-    const privacy = document.createElement("a");
-    privacy.href = "privacy.html";
-    privacy.textContent = "Privacy & level replays";
-    nav.appendChild(privacy);
     return nav;
 }
 function findExistingLayoutNodes(wrap) {

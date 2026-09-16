@@ -1,4 +1,5 @@
 import { ensureBaseLayout } from "./shared-core.js";
+import { setReplaySharing } from "./shared-replay.js";
 import {
   clearAllLevelProgress,
   clearSandboxProgress,
@@ -49,31 +50,34 @@ import {
 
   const startWrap = document.createElement("div");
   startWrap.className = "home-actions";
-  const startLink = document.createElement("a");
-  const updateStartLink = (): void => {
-    const sidebarState = document.body.classList.contains("sidebar-collapsed") ? "0" : "1";
-    const startUrl = new URL("1-assignment-i.html", window.location.href);
-    startUrl.searchParams.set("sidebar", sidebarState);
-    startLink.href = startUrl.toString();
-  };
-  updateStartLink();
-  const observer = new MutationObserver(updateStartLink);
-  observer.observe(document.body, {
-    attributes: true,
-    attributeFilter: ["class"],
-  });
-  window.addEventListener(
-    "beforeunload",
-    () => {
-      observer.disconnect();
-    },
-    { once: true },
-  );
+  const replayQuestion = document.createElement("dialog");
+  replayQuestion.className = "replay-question";
+  replayQuestion.setAttribute("aria-labelledby", "replay-question-text");
+  const question = document.createElement("p");
+  question.id = "replay-question-text";
+  question.textContent = "Share your level replays to help improve this tutorial?";
+  replayQuestion.appendChild(question);
+  const choices = document.createElement("div");
+  choices.className = "home-actions";
+  for (const [label, enabled] of [["Yes", true], ["No", false]] as const) {
+    const choice = document.createElement("button");
+    choice.textContent = label;
+    choice.addEventListener("click", () => {
+      try { setReplaySharing(enabled); } catch { /* Unavailable storage disables recording. */ }
+      replayQuestion.close();
+      const startUrl = new URL("1-assignment-i.html", window.location.href);
+      startUrl.searchParams.set("sidebar", document.body.classList.contains("sidebar-collapsed") ? "0" : "1");
+      window.location.assign(startUrl.toString());
+    });
+    choices.appendChild(choice);
+  }
+  replayQuestion.appendChild(choices);
+  main.appendChild(replayQuestion);
   const startButton = document.createElement("button");
   startButton.className = "start-button";
   startButton.textContent = "Start here!";
-  startLink.appendChild(startButton);
-  startWrap.appendChild(startLink);
+  startButton.addEventListener("click", () => replayQuestion.showModal());
+  startWrap.appendChild(startButton);
   const resetProgressBtn = document.createElement("button");
   const updateResetProgressButton = (): void => {
     const count = savedLevelCount() + (hasSandboxProgress() ? 1 : 0);
@@ -95,12 +99,4 @@ import {
   updateResetProgressButton();
   startWrap.appendChild(resetProgressBtn);
   main.appendChild(startWrap);
-  const replayNotice = document.createElement("p");
-  replayNotice.className = "replay-notice";
-  replayNotice.append("Check sends a replay of the current level to help improve this tutorial. ");
-  const privacyLink = document.createElement("a");
-  privacyLink.href = "privacy.html";
-  privacyLink.textContent = "Privacy & replay settings";
-  replayNotice.appendChild(privacyLink);
-  main.appendChild(replayNotice);
 }

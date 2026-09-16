@@ -170,10 +170,6 @@ function buildNav(
     }
     nav.appendChild(link);
   });
-  const privacy = document.createElement("a");
-  privacy.href = "privacy.html";
-  privacy.textContent = "Privacy & level replays";
-  nav.appendChild(privacy);
   return nav;
 }
 

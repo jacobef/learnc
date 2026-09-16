@@ -22,9 +22,11 @@ hover, pointer movement, native dialogs and text selections are not recorded.
   shared worker. A new page gets a new history and DOM IDs starting at 1. A level
   reload starts a new replay; earlier activity is not restored from saved progress.
   BFCache restoration continues that same page's history.
-- `privacy.html` lets learners opt out. The only telemetry preference in browser
-  storage is an on/off flag, which is never transmitted. Unavailable preference
-  storage disables recording. Opting out stops Workers in other open lesson tabs.
+- Clicking Start here on the home page asks whether to share level replays.
+  Both Yes and No continue to the first lesson. Recording requires an explicit
+  Yes, saved as an on/off browser preference that is never transmitted. Direct
+  lesson visits without a saved Yes do not record. Unavailable preference storage
+  disables recording. Choosing No stops Workers in other open lesson tabs.
 - Uploads omit credentials and referrers. The receiver validates an allowlist and
   stores only the replay, under a filename derived from the level and a hash of
   its write key. Knowing the filename does not reveal the key needed to replace it.

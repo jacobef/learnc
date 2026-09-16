@@ -6,7 +6,7 @@ let started = false;
 const preferenceKey = "cboxes:share-level-replays";
 
 export function replaySharingEnabled(): boolean {
-  try { return localStorage.getItem(preferenceKey) !== "off"; }
+  try { return localStorage.getItem(preferenceKey) === "on"; }
   catch { return false; }
 }
 
