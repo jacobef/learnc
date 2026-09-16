@@ -39,6 +39,15 @@ import { clearAllLevelProgress, clearSandboxProgress, hasSandboxProgress, savedL
     const replayQuestion = document.createElement("dialog");
     replayQuestion.className = "replay-question";
     replayQuestion.setAttribute("aria-labelledby", "replay-question-text");
+    replayQuestion.addEventListener("click", (event) => {
+        if (event.target !== replayQuestion)
+            return;
+        const bounds = replayQuestion.getBoundingClientRect();
+        if (event.clientX < bounds.left || event.clientX > bounds.right ||
+            event.clientY < bounds.top || event.clientY > bounds.bottom) {
+            replayQuestion.close();
+        }
+    });
     const question = document.createElement("p");
     question.id = "replay-question-text";
     question.textContent = "Share your level replays to help improve this tutorial?";
