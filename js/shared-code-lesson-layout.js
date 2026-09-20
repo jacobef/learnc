@@ -1,4 +1,5 @@
-import { ensurePanelizedMain, queryElement, queryRole, syncDocumentTitleFromNav, } from "./shared-core.js";
+import { ensurePanelizedMain, isMobileViewport, queryElement, queryRole, syncDocumentTitleFromNav, } from "./shared-core.js";
+import { disableAutoText } from "./shared-dom-utils.js";
 function collectCodeLessonElements(root = document) {
     const role = (name) => queryRole(name, root);
     const rootElement = root instanceof HTMLElement ? root : null;
@@ -89,7 +90,8 @@ function ensureCodeLessonLayout({ textareaMinLines, lockedInput, }) {
     const editor = document.createElement("textarea");
     editor.dataset.role = "code-editor";
     editor.className = "code-textarea";
-    editor.spellcheck = false;
+    disableAutoText(editor);
+    editor.setAttribute("aria-label", "C code");
     editor.rows = Math.max(1, Math.floor(textareaMinLines));
     editorWrap.appendChild(editor);
     codeRow.append(lineNumbers, editorWrap);
@@ -133,6 +135,21 @@ function ensureCodeLessonLayout({ textareaMinLines, lockedInput, }) {
     instructions.dataset.role = "code-instructions";
     instructions.className = "intro";
     actionBar.append(hintPanel, instructions);
+    const answerActions = document.createElement("div");
+    answerActions.className = "controls code-mobile-actions";
+    codePanel.appendChild(answerActions);
+    const actionButtons = Array.from(controlsRow.querySelectorAll('[data-role="code-hint-btn"], [data-role="code-check"], [data-role="code-reroll"], [data-role="code-show-failing-case"], [data-role="code-status"]'));
+    const placeActions = () => {
+        const mobile = isMobileViewport();
+        const target = mobile ? answerActions : controlsRow;
+        actionButtons.forEach((button) => target.appendChild(button));
+        if (mobile)
+            answerActions.appendChild(hintPanel);
+        else
+            actionBar.insertBefore(hintPanel, instructions);
+    };
+    placeActions();
+    window.matchMedia("(max-width: 900px)").addEventListener("change", placeActions);
     return collectCodeLessonElements(section);
 }
 export { ensureCodeLessonLayout };

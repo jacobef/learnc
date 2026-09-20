@@ -198,12 +198,14 @@ function ensureWrapConnected(wrap: HTMLElement, nav: HTMLElement, main: HTMLElem
 
 function updateSidebarToggleLabel(btn: HTMLButtonElement) {
   const hidden = document.body.classList.contains("sidebar-collapsed");
-  const label = hidden ? "Show sidebar" : "Hide sidebar";
+  const label = hidden ? "Show lessons" : "Close lessons";
   btn.classList.toggle("is-expanded", !hidden);
   btn.setAttribute("aria-label", label);
   btn.setAttribute("aria-expanded", hidden ? "false" : "true");
   const sr = btn.querySelector(".sr-only");
   if (sr) sr.textContent = label;
+  const caption = btn.querySelector(".sidebar-toggle-caption");
+  if (caption) caption.textContent = hidden ? "Lessons" : "Close";
 }
 
 function updateSidebarQueryParam() {
@@ -232,20 +234,93 @@ function ensureSidebarControls(wrap: HTMLElement, nav: HTMLElement) {
   ) as HTMLButtonElement | null;
   if (!btn) {
     btn = el(
-      '<button type="button" class="sidebar-toggle"><span class="hamburger" aria-hidden="true"><span></span><span></span><span></span></span><span class="sr-only">Toggle sidebar</span></button>',
+      '<button type="button" class="sidebar-toggle"><span class="hamburger" aria-hidden="true"><span></span><span></span><span></span></span><span class="sidebar-toggle-caption" aria-hidden="true">Lessons</span><span class="sr-only">Show lessons</span></button>',
     ) as HTMLButtonElement;
     sidebarWrap.insertBefore(btn, sidebarWrap.firstChild);
   } else if (btn.parentElement !== sidebarWrap) {
     sidebarWrap.insertBefore(btn, sidebarWrap.firstChild);
   }
   btn.setAttribute("aria-controls", nav.id);
+  nav.setAttribute("aria-label", "Lessons");
+  let title = sidebarWrap.querySelector<HTMLElement>(".mobile-page-title");
+  if (!title) {
+    title = document.createElement("span");
+    title.className = "mobile-page-title";
+    sidebarWrap.insertBefore(title, nav);
+  }
+  title.textContent = nav.querySelector(".active")?.textContent || "C Boxes";
   if (btn.dataset.bound !== "1") {
     btn.dataset.bound = "1";
-    btn.addEventListener("click", () => {
-      document.body.classList.toggle("sidebar-collapsed");
+    let menuScroll: { x: number; y: number } | null = null;
+    const syncMenu = () => {
+      const open = !document.body.classList.contains("sidebar-collapsed");
+      const main = wrap.querySelector<HTMLElement>(".main");
+      if (main) main.inert = isMobileViewport() && open;
+      if (isMobileViewport() && open) {
+        sidebarWrap.setAttribute("role", "dialog");
+        sidebarWrap.setAttribute("aria-modal", "true");
+        sidebarWrap.setAttribute("aria-label", "Lessons");
+        if (!sidebarWrap.contains(document.activeElement)) btn.focus({ preventScroll: true });
+      } else {
+        sidebarWrap.removeAttribute("role");
+        sidebarWrap.removeAttribute("aria-modal");
+        sidebarWrap.removeAttribute("aria-label");
+      }
       updateSidebarToggleLabel(btn);
+    };
+    const setOpen = (open: boolean) => {
+      if (open && isMobileViewport()) {
+        menuScroll = { x: window.scrollX, y: window.scrollY };
+        wrap.style.setProperty("--mobile-menu-space", `${sidebarWrap.getBoundingClientRect().height + 12}px`);
+      }
+      document.body.classList.toggle("sidebar-collapsed", !open);
+      syncMenu();
       updateSidebarQueryParam();
+      if (isMobileViewport() && open) {
+        centerActiveNavItem(nav);
+        nav.querySelector<HTMLAnchorElement>("a.active")?.focus({ preventScroll: true });
+      } else {
+        btn.focus({ preventScroll: true });
+        if (menuScroll && isMobileViewport()) {
+          window.scrollTo(menuScroll.x, menuScroll.y);
+        }
+        menuScroll = null;
+      }
+    };
+    btn.addEventListener("click", () => {
+      setOpen(document.body.classList.contains("sidebar-collapsed"));
     });
+    sidebarWrap.addEventListener("keydown", (event) => {
+      if (!isMobileViewport() || document.body.classList.contains("sidebar-collapsed")) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+      } else if (event.key === "Tab") {
+        const last = nav.querySelector<HTMLAnchorElement>("a:last-child");
+        if (event.shiftKey && document.activeElement === btn) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          btn.focus();
+        }
+      }
+    });
+    nav.addEventListener("click", (event) => {
+      const link = (event.target as Element).closest("a");
+      if (!link || !isMobileViewport() || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      if (link.classList.contains("active")) {
+        event.preventDefault();
+        setOpen(false);
+      } else {
+        // Carry the closed menu into the next lesson.
+        const url = new URL(link.href);
+        url.searchParams.set("sidebar", "0");
+        link.href = url.toString();
+      }
+    });
+    window.matchMedia(MOBILE_MEDIA_QUERY).addEventListener("change", syncMenu);
+    syncMenu();
   }
   updateSidebarToggleLabel(btn);
 }
@@ -655,7 +730,7 @@ function bindBtnRefPulse(root: ParentNode | null = document): void {
       const label = (target.dataset.btnRef || target.textContent || "").trim();
       if (!label) return;
       document.querySelectorAll("button").forEach((btn) => {
-        if (btn.textContent?.trim() === label)
+        if ((btn.getAttribute("aria-label") || btn.textContent)?.trim() === label)
           btn.classList.add("btn-ref-hover");
       });
     },
@@ -713,6 +788,22 @@ function withSidebarParam(url: string | null): string | null {
   );
   const nextQuery = params.toString();
   return `${path}${nextQuery ? `?${nextQuery}` : ""}${hash ? `#${hash}` : ""}`;
+}
+
+export function setStepperLabel(button: HTMLButtonElement, label: string, compactLabel = label) {
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  if (label === compactLabel) {
+    button.textContent = label;
+    return;
+  }
+  const full = document.createElement("span");
+  full.className = "stepper-label-full";
+  full.textContent = label;
+  const compact = document.createElement("span");
+  compact.className = "stepper-label-compact";
+  compact.textContent = compactLabel;
+  button.replaceChildren(full, compact);
 }
 
 function createStepper({
@@ -781,11 +872,12 @@ function createStepper({
       const atStart = current === 0;
       const canNavigateBack = atStart && !!previousPage;
       btn.disabled = atStart && !canNavigateBack;
-      btn.textContent = canNavigateBack
+      const label = canNavigateBack
         ? `${resolvedStartLabel} ◀◀`
         : atStart
           ? "At start"
           : "Back ◀";
+      setStepperLabel(btn, label, canNavigateBack ? "◀ Prev" : label);
       btn.dataset.stepperStart = String(atStart);
     });
     if (nextButtons.length) {
@@ -815,7 +907,8 @@ function createStepper({
         const label = customLabel || endLabel || "Next Program";
         nextButtons.forEach((btn) => {
           const baseText = `${labelPrefix}${label} ▶▶`;
-          btn.textContent = isLocked ? `${baseText} 🔒` : baseText;
+          setStepperLabel(btn, isLocked ? `${baseText} 🔒` : baseText,
+            isLocked ? "Next 🔒" : "Next ▶");
           btn.dataset.stepperEnd = "true";
         });
       } else {
@@ -826,7 +919,7 @@ function createStepper({
         const arrowSuffix = isEndPreview ? "▶▶" : "▶";
         nextButtons.forEach((btn) => {
           const baseText = `${labelPrefix}${adjustedLabel} ${arrowSuffix}`;
-          btn.textContent = isLocked ? `${baseText} 🔒` : baseText;
+          setStepperLabel(btn, isLocked ? `${baseText} 🔒` : baseText);
           btn.dataset.stepperEnd = "false";
         });
       }
@@ -983,6 +1076,7 @@ function isTextInputActive(el: HTMLElement | null) {
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  if (document.querySelector<HTMLElement>(".main")?.inert) return;
   if (
     isTextInputActive(document.activeElement as HTMLElement | null) ||
     isTextInputActive(e.target as HTMLElement | null)
@@ -1033,7 +1127,9 @@ function initCustomPanelScrollbars() {
       states.delete(state);
       return;
     }
-    if (isMobileViewport()) {
+    const mobile = isMobileViewport();
+    host.classList.toggle("custom-scroll-host", !mobile);
+    if (mobile) {
       trackY.classList.add("hidden");
       trackX.classList.add("hidden");
       return;

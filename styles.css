@@ -237,6 +237,14 @@ body.sidebar-collapsed .sidebar-toggle {
 .sidebar-toggle.is-expanded .hamburger span {
     display: none;
 }
+.sidebar-toggle-caption,
+.mobile-page-title,
+.stepper-label-compact,
+.code-mobile-actions,
+.expression-mobile-actions {
+    display: none;
+}
+
 .sr-only {
     position: absolute;
     width: 1px;
@@ -2673,47 +2681,61 @@ nav.tabs a.active:hover {
 }
 
 @media (max-width: 900px) {
-    .wrap {
+    html {
+        scroll-padding-top: 76px;
+    }
+    body.panel-layout {
+        height: auto;
+        min-height: 100svh;
+        overflow: auto;
+    }
+    .wrap,
+    body.panel-layout .wrap,
+    body.panel-layout.sidebar-collapsed .wrap,
+    body.sidebar-collapsed .wrap {
         display: block;
-        padding: 10px 16px 24px;
+        height: auto;
+        min-height: 100svh;
+        padding: 0 max(12px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
     }
-    body.panel-layout .wrap {
-        height: 100vh;
-        padding: 8px 12px 12px;
-    }
-    .sidebar-wrap {
-        position: relative;
-        margin: 0 0 16px;
+    .sidebar-wrap,
+    body.panel-layout .sidebar-wrap,
+    body.sidebar-collapsed .sidebar-wrap {
+        position: sticky;
+        top: 0;
+        height: auto;
+        min-height: 60px;
+        margin: 0 0 12px;
+        padding: max(8px, env(safe-area-inset-top)) 0 8px;
+        display: flex;
+        flex-direction: row;
+        align-items: center;
         gap: 12px;
-        padding-top: 48px;
+        overflow: visible;
+        background: var(--bg);
+        border-bottom: 1px solid var(--border);
     }
-    body.panel-layout .sidebar-wrap {
-        height: 100%;
-    }
-    .sidebar-wrap nav {
+    .sidebar-toggle,
+    body.sidebar-collapsed .sidebar-toggle {
         position: static;
-        top: auto;
-    }
-    .controls-main {
-        column-gap: 0;
-    }
-    .controls-main .controls-left {
-        width: 100%;
-    }
-    .sandbox-shell .controls-main {
-        flex-wrap: wrap;
-    }
-    .sandbox-shell .controls-main .controls-row {
+        flex-shrink: 0;
         width: auto;
-        flex-wrap: nowrap;
+        min-height: 44px;
+        padding: 0 12px;
+        gap: 8px;
+        margin: 0;
+        align-self: center;
     }
-    .sandbox-shell .controls-main .controls-left {
-        width: auto;
+    .sidebar-toggle-caption {
+        display: inline;
+        font-size: 13px;
     }
-    .sandbox-shell .controls-main .controls-right {
-        width: auto;
-        justify-content: flex-end;
-        margin-left: auto;
+    .mobile-page-title {
+        display: block;
+        min-width: 0;
+        font-size: 14px;
+        font-weight: 700;
+        line-height: 1.4;
     }
     body:not(.sidebar-collapsed) {
         overflow: hidden;
@@ -2721,87 +2743,155 @@ nav.tabs a.active:hover {
     body:not(.sidebar-collapsed) .sidebar-wrap {
         position: fixed;
         inset: 0;
-        z-index: 200;
+        height: 100dvh;
         margin: 0;
-        padding: 64px 20px 24px;
-        background: var(--bg);
-        overflow-y: auto;
+        padding: max(8px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        grid-template-rows: auto minmax(0, 1fr);
+        align-items: center;
     }
-    body:not(.sidebar-collapsed) .sidebar-toggle {
-        position: fixed;
-        top: max(12px, env(safe-area-inset-top));
-        left: 12px;
-        margin: 0;
-        z-index: 260;
+    /* Keep the lesson in flow while the menu covers it, preserving scroll position. */
+    body:not(.sidebar-collapsed) .wrap {
+        padding-top: var(--mobile-menu-space, calc(73px + max(0px, env(safe-area-inset-top) - 8px)));
     }
-    body:not(.sidebar-collapsed) .wrap > .main {
-        display: none;
-    }
-    body.sidebar-collapsed .sidebar-wrap {
-        margin: 0 0 12px;
-        padding-top: 0;
-    }
-    .wrap > nav {
+    .sidebar-wrap nav,
+    body.panel-layout .sidebar-wrap nav {
         position: static;
-        margin: 0;
-        padding-top: 0;
-    }
-    .wrap > .main {
-        grid-column: auto;
-    }
-    body.panel-layout .wrap > .main {
+        grid-column: 1 / -1;
         height: 100%;
+        max-height: none;
         min-height: 0;
-        overflow: auto;
-    }
-    body.panel-layout .wrap > .main.panelized,
-    body.panel-layout .wrap > .main.main-panelized {
-        overflow: hidden;
-    }
-    body.panel-layout.sidebar-collapsed {
-        height: auto;
-        min-height: 100svh;
-        overflow: auto;
-    }
-    body.panel-layout.sidebar-collapsed .wrap {
-        height: auto;
-        min-height: 100svh;
-    }
-    body.panel-layout.sidebar-collapsed .sidebar-wrap {
-        height: auto;
-        overflow: visible;
-    }
-    body.panel-layout.sidebar-collapsed .wrap > .main {
-        height: auto;
-        overflow: visible;
-    }
-    body.panel-layout.sidebar-collapsed .wrap > .main.panelized,
-    body.panel-layout.sidebar-collapsed .wrap > .main.main-panelized {
-        overflow: visible;
-    }
-    body.sidebar-collapsed .wrap {
-        padding-left: 16px;
-        padding-right: 16px;
-    }
-    body.sidebar-collapsed .sidebar-toggle {
-        margin: 0;
-    }
-    nav {
-        flex-direction: column;
-        flex-wrap: nowrap;
-        gap: 10px;
+        gap: 4px;
+        padding: 8px;
     }
     nav.tabs a {
-        width: 100%;
-        margin: 0;
+        display: flex;
+        align-items: center;
+        min-height: 44px;
+        padding: 10px 12px;
+        line-height: 1.4;
     }
-    .panel-title {
-        max-width: 90%;
+    .wrap > .main,
+    body.panel-layout .wrap > .main,
+    body.panel-layout .wrap > .main.panelized,
+    body.panel-layout .wrap > .main.main-panelized {
+        height: auto;
+        min-height: 0;
+        overflow: visible;
+        gap: 12px;
+    }
+    .page-title {
+        /* The same lesson title is in the mobile header. Keep the h1 accessible. */
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        margin: 0 !important;
+    }
+    .intro,
+    .controls-bar-code .intro,
+    .controls-bar-expr .intro {
+        font-size: 18px;
+        line-height: 1.45;
+        padding: 12px;
+        box-shadow: none;
+        overflow-wrap: break-word;
+    }
+    .intro code {
+        font-size: 16px;
+    }
+    button {
+        min-height: 44px;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: transparent;
+    }
+    .sandbox-shell .controls-left button,
+    .sandbox-interface-toggle button,
+    .sandbox-implicit-main,
+    .sandbox-file-name,
+    .sandbox-file-action {
+        min-height: 44px;
+    }
+    .sandbox-file-action {
+        flex-basis: 44px;
+        width: 44px;
+    }
+    .sandbox-file-bar {
+        flex-wrap: wrap;
+    }
+    input,
+    textarea,
+    .sandbox-file-name,
+    .sandbox-terminal-input {
+        font-size: 16px;
+    }
+    button:focus-visible,
+    a:focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 3px;
+    }
+    .controls-main .controls-row {
+        gap: 8px;
+    }
+    body.panel-layout .panel-controls.controls-main {
+        padding: 8px;
+    }
+    .controls-spacer,
+    .reserved-button-slot.hidden {
+        display: none !important;
+    }
+    .stepper-label-full {
+        display: none;
+    }
+    .stepper-label-compact {
+        display: inline;
+    }
+    .controls-row > [data-stepper] {
+        flex: 1 1 0;
+        min-width: 0;
+        font-size: 14px;
+        line-height: 1.4;
+        overflow-wrap: anywhere;
+    }
+    .controls-row [data-role$="reset-level"] {
+        font-size: 12px;
+        min-height: 44px;
+        padding: 6px 8px;
+    }
+    .controls-row > [data-role$="status"]:empty {
+        display: none;
+    }
+    .panel-title,
+    .panel-title.code-title {
+        position: static;
+        transform: none;
+        align-self: flex-start;
+        max-width: 100%;
+        width: fit-content;
+        margin: 0 0 8px;
+        padding: 0;
+        border: 0;
+        background: none;
+        font-size: 13px;
+        text-align: left;
         white-space: normal;
-        text-align: center;
+    }
+    .panel,
+    .program-state-panel,
+    .expr-answer-panel {
+        padding: 10px;
+    }
+    .program-state-panel .panel-body {
+        padding: 8px;
+    }
+    .panel-title + .codepane {
+        margin-top: 0;
     }
     .codepane {
-        overflow-x: auto;
+        font-size: 16px;
+        overflow: auto;
         -webkit-overflow-scrolling: touch;
     }
     .state-group.two-col {
@@ -2809,6 +2899,12 @@ nav.tabs a.active:hover {
     }
     .mobile-note {
         display: block;
+    }
+    .home-actions {
+        gap: 8px;
+    }
+    .home-actions > button {
+        font-size: 16px;
     }
 }
 
@@ -2912,8 +3008,50 @@ nav.tabs a.active:hover {
     .sandbox-terminal {
         grid-template-columns: 1fr;
     }
+    .panel-shell .panel-row > .panel.code-panel-shell > .panel-body.codepane {
+        max-height: 34svh;
+        scrollbar-width: thin;
+    }
     .sandbox-shell .code-panel-shell > .panel-body.codepane {
-        max-height: 45dvh;
+        max-height: 45svh;
+    }
+    .codepane-row {
+        --code-line-height: 36px;
+    }
+    .codepane-row .code-textarea {
+        min-height: calc(var(--code-line-height) * 2 + 16px);
+    }
+    .line {
+        min-height: 40px;
+        padding: 6px;
+    }
+    .codecol.boundary-targets .line {
+        min-height: 44px;
+    }
+    .codecol.boundary-targets .boundary.selectable {
+        padding-block: 22px;
+        margin-block: -22px;
+        z-index: 1;
+        touch-action: manipulation;
+    }
+    .boundary.selectable:not(.selected)::before {
+        opacity: 0.25;
+    }
+    .code-mobile-actions,
+    .expression-mobile-actions {
+        display: flex;
+        padding-top: 10px;
+    }
+    .code-mobile-actions .hint-inline,
+    .expression-mobile-actions .hint-inline,
+    .program-mobile-actions .hint-inline {
+        flex-basis: 100%;
+    }
+    .program-mobile-actions [data-role="program-status"] {
+        flex-basis: 100%;
+    }
+    .program-mobile-actions [data-role="program-status"]:empty {
+        display: none;
     }
     .panel-body.codepane,
     .codepane {
@@ -2924,6 +3062,16 @@ nav.tabs a.active:hover {
     }
     .expr-eval-row {
         flex-direction: column;
+    }
+    .expr-left-col,
+    .expr-left-col .quiz-expression-panel,
+    .expr-left-col .expr-answer-panel,
+    .expr-eval-row .program-state-panel {
+        flex: 0 0 auto;
+        min-width: 0;
+    }
+    .expr-answer-slot {
+        min-height: 0;
     }
     .grid {
         width: 100%;
@@ -3060,6 +3208,8 @@ nav.tabs a.active:hover {
 @media (max-width: 900px) {
     .sandbox-panel-row { grid-template-columns: minmax(0, 1fr); }
     .sandbox-panel-divider { display: none; }
+    .sandbox-step-limit input { min-height: 44px; font-size: 16px; }
+    .sandbox-jump-setting { min-height: 44px; }
 }
 
 /* Two disjoint hit areas around a loop-header gap: first above, nearest below. */

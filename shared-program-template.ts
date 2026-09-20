@@ -16,6 +16,7 @@ import {
   restoreWorkspace,
   serializeWorkspace,
   setPartsContent,
+  setStepperLabel,
   syncDocumentTitleFromNav,
   withSidebarParam,
 } from "./shared-core.js";
@@ -472,7 +473,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     const hasVisibleAction = [checkBtn, hintBtn, addBtn, resetBtn].some(
       (btn) => !!btn && !btn.classList.contains("hidden"),
     );
-    mobileActionsEl.classList.toggle("hidden", !hasVisibleAction);
+    mobileActionsEl.classList.toggle("hidden", !hasVisibleAction && !statusEl?.textContent?.trim());
   }
 
   placeActionButtonsForViewport();
@@ -1121,14 +1122,16 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     const locked = stageNeedsSolve(stage);
     if (prevBtn) {
       prevBtn.disabled = executionSteps < 0 && !previous;
-      prevBtn.textContent = previousButtonLabel();
+      setStepperLabel(prevBtn, previousButtonLabel(),
+        executionSteps < 0 && previous ? "◀ Prev" : previousButtonLabel());
       prevBtn.dataset.stepperStart = String(executionSteps < 0);
     }
     if (nextBtn) {
       const complete = executionSteps >= runtimeStages.length - 1 && !locked;
       nextBtn.disabled = locked;
       const label = complete ? nextProgramLabel() : nextButtonLabel();
-      nextBtn.textContent = locked ? `${label} 🔒` : label;
+      setStepperLabel(nextBtn, locked ? `${label} 🔒` : label,
+        complete ? "Next lesson ▶" : locked ? `${label} 🔒` : label);
       nextBtn.dataset.stepperEnd = String(complete);
     }
     if (checkBtn) checkBtn.classList.toggle("hidden", !locked);

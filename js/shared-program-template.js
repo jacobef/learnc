@@ -1,4 +1,4 @@
-import { applyOtherNames, appendStateObjects, bindBtnRefPulse, clearNode, cloneBoxes, isMobileViewport, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, makeAnswerBox, queryRole, readBoxState, renderCodePane, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, withSidebarParam, } from "./shared-core.js";
+import { applyOtherNames, appendStateObjects, bindBtnRefPulse, clearNode, cloneBoxes, isMobileViewport, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, makeAnswerBox, queryRole, readBoxState, renderCodePane, restoreWorkspace, serializeWorkspace, setPartsContent, setStepperLabel, syncDocumentTitleFromNav, withSidebarParam, } from "./shared-core.js";
 import { createButtonTokenReplacer, createHintPresenter, createLevelProgressController, nextLessonLabel, resetLevelAfterConfirmation, } from "./shared-lesson-runtime.js";
 import { runCProgram } from "./shared-c-interpreter.js";
 import { basicHintForBoxes, stateMatches, stateWithArrayRoots, } from "./shared-program-state.js";
@@ -289,7 +289,7 @@ function createProgramTemplate(config) {
         if (!mobileActionsEl)
             return;
         const hasVisibleAction = [checkBtn, hintBtn, addBtn, resetBtn].some((btn) => !!btn && !btn.classList.contains("hidden"));
-        mobileActionsEl.classList.toggle("hidden", !hasVisibleAction);
+        mobileActionsEl.classList.toggle("hidden", !hasVisibleAction && !statusEl?.textContent?.trim());
     }
     placeActionButtonsForViewport();
     updateMobileActionsVisibility();
@@ -859,14 +859,14 @@ function createProgramTemplate(config) {
         const locked = stageNeedsSolve(stage);
         if (prevBtn) {
             prevBtn.disabled = executionSteps < 0 && !previous;
-            prevBtn.textContent = previousButtonLabel();
+            setStepperLabel(prevBtn, previousButtonLabel(), executionSteps < 0 && previous ? "◀ Prev" : previousButtonLabel());
             prevBtn.dataset.stepperStart = String(executionSteps < 0);
         }
         if (nextBtn) {
             const complete = executionSteps >= runtimeStages.length - 1 && !locked;
             nextBtn.disabled = locked;
             const label = complete ? nextProgramLabel() : nextButtonLabel();
-            nextBtn.textContent = locked ? `${label} 🔒` : label;
+            setStepperLabel(nextBtn, locked ? `${label} 🔒` : label, complete ? "Next lesson ▶" : locked ? `${label} 🔒` : label);
             nextBtn.dataset.stepperEnd = String(complete);
         }
         if (checkBtn)

@@ -1,4 +1,4 @@
-import { appendStateObjects, bindBtnRefPulse, clearNode, createStepper, disableBoxEditing, ensurePanelizedMain, findArrayObjectBoxesForResult, flashStatus, readBoxState, queryRole, setPartsContent, syncDocumentTitleFromNav, vbox, } from "./shared-core.js";
+import { appendStateObjects, bindBtnRefPulse, clearNode, createStepper, disableBoxEditing, ensurePanelizedMain, isMobileViewport, findArrayObjectBoxesForResult, flashStatus, readBoxState, queryRole, setPartsContent, syncDocumentTitleFromNav, vbox, } from "./shared-core.js";
 import { createSyntheticAddressBase } from "./shared-c-address-space.js";
 import { evaluateCExpression, runCProgram, } from "./shared-c-interpreter.js";
 import { boxValueMatchesSpec, normalizeBoxValueForContext, } from "./shared-c-value-semantics.js";
@@ -155,6 +155,20 @@ function ensureExpressionLayout() {
     row.appendChild(leftCol);
     row.appendChild(statePanel);
     stack.appendChild(row);
+    const answerActions = document.createElement("div");
+    answerActions.className = "controls expression-mobile-actions";
+    answerPanel.appendChild(answerActions);
+    const placeActions = () => {
+        const mobile = isMobileViewport();
+        const target = mobile ? answerActions : controlsRow;
+        target.append(hintBtn, checkBtn, statusEl);
+        if (mobile)
+            answerActions.appendChild(hintPanel);
+        else
+            actionBar.insertBefore(hintPanel, instructionsEl);
+    };
+    placeActions();
+    window.matchMedia("(max-width: 900px)").addEventListener("change", placeActions);
     return collectExpressionElements();
 }
 function createExpressionEvalTemplate(config) {
