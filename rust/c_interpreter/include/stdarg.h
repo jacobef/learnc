@@ -1,6 +1,8 @@
-#ifndef __CODEX_STDARG_H
-#define __CODEX_STDARG_H
+#ifndef __CBOXES_STDARG_H
+#define __CBOXES_STDARG_H
 
-/* va_list and the va_* builtins are provided by the interpreter runtime. */
+typedef __cboxes_va_list va_list;
+
+/* The va_* operations are provided by the interpreter runtime. */
 
 #endif

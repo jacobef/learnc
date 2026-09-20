@@ -94,6 +94,7 @@ fn browser_entry_point_accepts_the_current_request_schema() {
         source.len() as u32,
         0,
         0,
+        0,
     ];
     let mut request = Vec::with_capacity(CBOXES_BRIDGE_HEADER_WORDS * 4 + source.len());
     for word in words {
@@ -140,7 +141,7 @@ fn browser_diagnostics_preserve_the_full_source_range() {
 
     let json = cboxes_diagnostic_json(
         &diagnostic,
-        &HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]),
+        &HashMap::from([("program.c".to_owned(), cboxes_source_display(source, None))]),
     );
     assert!(json.contains("\"line\":1,\"column\":11"));
     assert!(json.contains("\"endLine\":1,\"endColumn\":15"));
@@ -192,7 +193,7 @@ fn runtime_ub_reports_when_it_happened_and_the_pre_failure_state() {
 
     let json = cboxes_diagnostic_json(
         &diagnostic,
-        &HashMap::from([("program.c".to_owned(), cboxes_source_display(&source, 0))]),
+        &HashMap::from([("program.c".to_owned(), cboxes_source_display(&source, None))]),
     );
     assert!(json.contains("\"runtimeContext\":{"), "{json}");
     assert!(json.contains("\"lineExecutionCount\":4"), "{json}");
@@ -545,7 +546,7 @@ fn aggregate_initializer_diagnostics_identify_and_annotate_the_failing_member() 
 
         let json = cboxes_diagnostic_json(
             &diagnostic,
-            &HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]),
+            &HashMap::from([("program.c".to_owned(), cboxes_source_display(source, None))]),
         );
         assert!(json.contains("\"annotations\":[{\"id\":\"destination\""));
     }
@@ -694,7 +695,7 @@ fn browser_state_exposes_semantic_metadata_and_aliases() {
 
     let json = cboxes_success_json(
         &result,
-        &HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]),
+        &HashMap::from([("program.c".to_owned(), cboxes_source_display(source, None))]),
     );
     assert!(json.contains("\"typeInfo\""));
     assert!(json.contains("\"exactValue\""));
@@ -1022,7 +1023,7 @@ fn explicit_main_reports_its_closing_brace_as_the_program_end() {
     let source = "int main(void) {\n  int a = 1;\n}\n";
     let result = run_source("program.c", source).unwrap();
     let source_display =
-        HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]);
+        HashMap::from([("program.c".to_owned(), cboxes_source_display(source, None))]);
     let json = cboxes_success_json(&result, &source_display);
 
     assert_eq!(result.trace.len(), 1);
@@ -1046,7 +1047,7 @@ fn execution_step_limit_returns_the_trace_before_an_infinite_loop() {
     )
     .unwrap();
     let source_display =
-        HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]);
+        HashMap::from([("program.c".to_owned(), cboxes_source_display(source, None))]);
     let json = cboxes_success_json(&result, &source_display);
 
     let execution_limit = result.execution_limit.as_ref().unwrap();
@@ -1064,7 +1065,7 @@ fn execution_step_limit_returns_the_trace_before_an_infinite_loop() {
     );
     assert!(
         json.contains(
-            "\"executionLimit\":{\"file\":\"program.c\",\"startLine\":2,\"endLine\":2,\"tracePosition\":1}"
+            "\"executionLimit\":{\"file\":\"program.c\",\"startLine\":2,\"endLine\":2,\"tracePosition\":1,\"reason\":\"repeating-loop\""
         )
     );
 
@@ -1157,7 +1158,7 @@ fn blocked_stdin_location_is_exposed_to_the_browser() {
         "#include <stdio.h>\nint main(void) {\n  int before = 1;\n  int ch = getchar();\n}\n";
     let result = run_source("program.c", source).unwrap();
     let source_display =
-        HashMap::from([("program.c".to_owned(), cboxes_source_display(source, 0))]);
+        HashMap::from([("program.c".to_owned(), cboxes_source_display(source, None))]);
     let json = cboxes_success_json(&result, &source_display);
 
     assert!(result.blocked.is_some());
@@ -1184,7 +1185,7 @@ fn implicit_main_wraps_the_entire_entry_source() {
 }
 
 #[test]
-fn implicit_main_wraps_header_includes_too() {
+fn implicit_main_keeps_leading_headers_at_file_scope() {
     let original = "#include <stdio.h>\nprintf(\"hello\\n\");";
     let (files, _, implicit_main) = cboxes_prepare_virtual_sources(
         vec![(PathBuf::from("program.c"), original.to_owned())],
@@ -1197,8 +1198,43 @@ fn implicit_main_wraps_header_includes_too() {
     assert!(
         files[0]
             .1
-            .starts_with("int main(void) {\n#include <stdio.h>")
+            .starts_with("#include <stdio.h>\nint main(void) {")
     );
+}
+
+#[test]
+fn implicit_main_preserves_complete_preprocessing_and_comment_groups() {
+    for source in [
+        "// example\n/* header */\n#include <stdio.h>\nputs(\"ok\");",
+        "#include <stdio.h>\n/* two\nlines */ puts(\"ok\");",
+        "#include <stdio.h>\n#define SAY(x) \\\nputs(x)\nSAY(\"ok\");",
+        "#include <stdio.h>\r\n#define SAY(x) \\\r\nputs(x)\r\nSAY(\"ok\");",
+        "#define TEXT \"/*\"\n#if(1)\n#include <stdio.h>\n#endif\nputs(\"ok\");",
+        "#include <stdio.h>\n#if(0)\ninvalid text\n#endif\nputs(\"ok\");",
+    ] {
+        let (wrapped, _) = cboxes_wrap_implicit_main(source);
+        let result = run_source("program.c", &wrapped)
+            .unwrap_or_else(|error| panic!("{source}: {error:?}\n{wrapped}"));
+        assert_eq!(result.stdout, "ok\n", "{source}");
+    }
+}
+
+#[test]
+fn implicit_main_maps_lines_on_both_sides_of_the_inserted_wrapper() {
+    let source = "// header\n#include <stdio.h>\nint n = 1;\nprintf(\"%d\", n);";
+    let (files, display, _) =
+        cboxes_prepare_virtual_sources(vec![(PathBuf::from("program.c"), source.to_owned())], true)
+            .unwrap();
+    let mapping = display.get("program.c").unwrap();
+    assert_eq!(mapping.source_line(0), 0);
+    assert_eq!(mapping.source_line(1), 1);
+    assert_eq!(mapping.source_line(3), 2);
+    assert_eq!(mapping.source_line(4), 3);
+    let result = run_virtual_sources_with_options(&files, &RunOptions::default()).unwrap();
+    let json = cboxes_success_json(&result, &display);
+    assert!(json.contains("\"startLine\":2"));
+    assert!(json.contains("\"startLine\":3"));
+    assert!(!json.contains("\"startLine\":4"));
 }
 
 #[test]
@@ -1208,7 +1244,7 @@ fn legacy_implicit_main_detection_ignores_comments_and_literals() {
         printf("main() is where programs start\n");
     "#;
     assert!(!cboxes_has_explicit_main(source));
-    let result = run_source("program.c", cboxes_wrap_implicit_main(source)).unwrap();
+    let result = run_source("program.c", cboxes_wrap_implicit_main(source).0).unwrap();
     assert_eq!(result.stdout, "main() is where programs start\n");
 
     assert!(!cboxes_has_explicit_main("/* int main(void) {} */\n"));
@@ -1271,7 +1307,7 @@ fn implicit_main_stays_on_and_suggests_the_toggle_for_header_programs() {
 
 #[test]
 fn tutorial_implicit_main_keeps_includes_outside_the_wrapper() {
-    let source = cboxes_wrap_implicit_main(
+    let (source, _) = cboxes_wrap_implicit_main(
         "#include <stdio.h>\nprintf(\"tutorial wrapper still works\\n\");",
     );
     let result = run_source("program.c", source).unwrap();
@@ -1326,4 +1362,252 @@ fn external_performance_harness() {
             error.render()
         ),
     }
+}
+
+mod loop_detection;
+
+#[test]
+fn input_positions_follow_each_completed_step_and_scanf_lookahead() {
+    let source = "#include <stdio.h>\nint main(void) {\nint n=0;\nscanf(\"%d\", &n);\ngetchar();\nscanf(\"%d\", &n);\ngetchar();\nungetc('x',stdin);\ngetchar();\ngetchar();\n}\n";
+    let output = run_source_with_options(
+        "program.c",
+        source,
+        &RunOptions {
+            stdin: "12 x\u{4}".to_owned(),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    for (line, expected) in [
+        (2, 0),
+        (3, 2),
+        (4, 3),
+        (5, 3),
+        (6, 4),
+        (7, 3),
+        (8, 4),
+        (9, 4),
+    ] {
+        let event = output
+            .trace
+            .iter()
+            .find(|event| event.start_line == line)
+            .unwrap();
+        assert_eq!(event.stdin_position, expected, "line {}", line + 1);
+    }
+    assert_eq!(output.stdin_position, 4);
+}
+
+#[test]
+fn input_position_reports_partial_blocked_reads_and_utf8_bytes() {
+    let blocked = run_source_with_options(
+        "program.c",
+        "#include <stdio.h>\nint main(void) { int a,b; scanf(\"%d%d\", &a,&b); }\n",
+        &RunOptions {
+            stdin: "12 ".to_owned(),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(blocked.blocked.is_some());
+    assert_eq!(blocked.stdin_position, 3);
+    let output = run_source_with_options(
+        "program.c",
+        "#include <stdio.h>\nint main(void) {\ngetchar();\ngetchar();\n}\n",
+        &RunOptions {
+            stdin: "éx\u{4}".to_owned(),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    for (line, expected) in [(2, 1), (3, 2)] {
+        assert_eq!(
+            output
+                .trace
+                .iter()
+                .find(|event| event.start_line == line)
+                .unwrap()
+                .stdin_position,
+            expected
+        );
+    }
+    assert_eq!(output.stdin_position, 2);
+}
+
+#[test]
+fn for_headers_record_counter_updates_before_the_body() {
+    let source = "#include <stdio.h>\nint main(void) {\nfor (int i = 0; i < 3; i++) {\nprintf(\"%d\", i);\n}\n}\n";
+    let output = run_source("program.c", source).unwrap();
+    let headers = output
+        .trace
+        .iter()
+        .filter(|event| event.start_line == 2)
+        .collect::<Vec<_>>();
+    assert_eq!(headers.len(), 4);
+    for (i, event) in headers.iter().enumerate() {
+        assert_eq!(
+            event
+                .state
+                .iter()
+                .find(|item| item.name == "i")
+                .unwrap()
+                .value,
+            i.to_string()
+        );
+        assert_eq!(event.stdout_length, i);
+    }
+    for (i, event) in output
+        .trace
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.start_line == 3)
+    {
+        let before = &output.trace[i - 1];
+        assert_eq!(before.start_line, 2);
+        assert_eq!(before.stdout_length + 1, event.stdout_length);
+    }
+}
+
+#[test]
+fn do_while_conditions_record_side_effects_and_final_false_test() {
+    let source = "int main(void) {\nint i = 0;\ndo {\ncontinue;\n} while (++i < 3);\n}\n";
+    let output = run_source("program.c", source).unwrap();
+    let values = output
+        .trace
+        .iter()
+        .filter(|event| event.start_line == 4 && event.kind == "loop")
+        .map(|event| {
+            event
+                .state
+                .iter()
+                .find(|item| item.name == "i")
+                .unwrap()
+                .value
+                .as_str()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, ["1", "2", "3"]);
+}
+
+#[test]
+fn for_without_condition_still_has_header_stops() {
+    let source = "int main(void) {\nint i = 0;\nfor (;;) {\nif (++i == 3) break;\n}\n}\n";
+    let output = run_source("program.c", source).unwrap();
+    let headers = output
+        .trace
+        .iter()
+        .filter(|event| event.start_line == 2)
+        .collect::<Vec<_>>();
+    assert_eq!(headers.len(), 3);
+    assert!(headers.iter().all(|event| event.end_line == 2));
+}
+
+#[test]
+fn implicit_main_requires_one_c_file_but_allows_headers() {
+    let sources = vec![
+        (PathBuf::from("program.c"), "int a;\n".to_owned()),
+        (PathBuf::from("other.c"), String::new()),
+    ];
+    assert!(
+        cboxes_prepare_virtual_sources(sources.clone(), true)
+            .unwrap_err()
+            .contains("single .c file")
+    );
+    assert!(cboxes_prepare_virtual_sources(sources, false).is_ok());
+    assert!(
+        cboxes_prepare_virtual_sources(
+            vec![
+                (PathBuf::from("program.c"), "int a;\n".to_owned()),
+                (PathBuf::from("values.h"), String::new())
+            ],
+            true
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn paged_traces_are_exact_prefixes_and_do_not_exceed_the_requested_size() {
+    let source =
+        "#include <stdio.h>\nint main(void) { int i=0; while(i<20) { printf(\"%d \",i); i++; } }\n";
+    let complete = run_source_with_options("program.c", source, &RunOptions::default()).unwrap();
+    for limit in [1, 4, 13, 40] {
+        let paged = run_source_with_options(
+            "program.c",
+            source,
+            &RunOptions {
+                execution_step_limit: Some(100000),
+                execution_trace_limit: Some(limit),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(paged.trace.len(), limit);
+        assert_eq!(
+            paged.execution_limit.as_ref().unwrap().reason,
+            "trace-limit"
+        );
+        assert_eq!(paged.execution_limit.unwrap().trace_position, limit);
+        assert_eq!(
+            format!("{:?}", paged.trace),
+            format!("{:?}", &complete.trace[..limit])
+        );
+    }
+    let capped = run_source_with_options(
+        "program.c",
+        source,
+        &RunOptions {
+            execution_step_limit: Some(10),
+            execution_trace_limit: Some(512),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        capped.execution_limit.as_ref().unwrap().reason,
+        "step-limit"
+    );
+    assert_eq!(
+        capped.execution_limit.unwrap().trace_position,
+        capped.trace.len()
+    );
+    assert_eq!(
+        format!("{:?}", capped.trace),
+        format!("{:?}", &complete.trace[..capped.trace.len()])
+    );
+}
+
+#[test]
+fn expression_inspection_stops_at_the_requested_state_before_later_execution() {
+    for event_index in [u32::MAX as usize, 0] {
+        let output = run_source_with_options(
+            "program.c",
+            "int main(void) { int i=7; while(1) {} }\n",
+            &RunOptions {
+                expression_eval: Some(RunExpressionEvalRequest {
+                    event_index,
+                    expression: "3+4".into(),
+                }),
+                execution_step_limit: Some(100000),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(output.expression.unwrap().value, "7");
+        assert!(output.execution_limit.is_none());
+        assert!(output.trace.len() <= 1);
+    }
+    let output = run_source_with_options(
+        "program.c",
+        "int main(void) { int i=7; int zero=0; i/=zero; }\n",
+        &RunOptions {
+            expression_eval: Some(RunExpressionEvalRequest {
+                event_index: 0,
+                expression: "i".into(),
+            }),
+            ..RunOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(output.expression.unwrap().value, "7");
 }

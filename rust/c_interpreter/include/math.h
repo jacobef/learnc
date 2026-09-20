@@ -1,5 +1,5 @@
-#ifndef __CODEX_MATH_H
-#define __CODEX_MATH_H
+#ifndef __CBOXES_MATH_H
+#define __CBOXES_MATH_H
 
 typedef float float_t;
 typedef double double_t;
@@ -20,109 +20,109 @@ typedef double double_t;
 #define FP_FAST_FMAF 1
 #define FP_FAST_FMAL 1
 
-extern int __codex_signgam;
+extern int __cboxes_signgam;
 
-int __codex_math_errhandling(void);
-double __codex_huge_val(void);
-float __codex_huge_valf(void);
-long double __codex_huge_vall(void);
-int __codex_fpclassify(double x);
-int __codex_fpclassifyf(float x);
-int __codex_fpclassifyl(long double x);
-int __codex_isfinite(double x);
-int __codex_isinf(double x);
-int __codex_isnan(double x);
-int __codex_isnormal(double x);
-int __codex_isnormalf(float x);
-int __codex_isnormall(long double x);
-int __codex_signbit(double x);
-int __codex_isgreater(double x, double y);
-int __codex_isgreaterequal(double x, double y);
-int __codex_isless(double x, double y);
-int __codex_islessequal(double x, double y);
-int __codex_islessgreater(double x, double y);
-int __codex_isunordered(double x, double y);
+int __cboxes_math_errhandling(void);
+double __cboxes_huge_val(void);
+float __cboxes_huge_valf(void);
+long double __cboxes_huge_vall(void);
+int __cboxes_fpclassify(double x);
+int __cboxes_fpclassifyf(float x);
+int __cboxes_fpclassifyl(long double x);
+int __cboxes_isfinite(double x);
+int __cboxes_isinf(double x);
+int __cboxes_isnan(double x);
+int __cboxes_isnormal(double x);
+int __cboxes_isnormalf(float x);
+int __cboxes_isnormall(long double x);
+int __cboxes_signbit(double x);
+int __cboxes_isgreater(double x, double y);
+int __cboxes_isgreaterequal(double x, double y);
+int __cboxes_isless(double x, double y);
+int __cboxes_islessequal(double x, double y);
+int __cboxes_islessgreater(double x, double y);
+int __cboxes_isunordered(double x, double y);
 
-#define math_errhandling (__codex_math_errhandling())
-#define HUGE_VAL (__codex_huge_val())
-#define HUGE_VALF (__codex_huge_valf())
-#define HUGE_VALL (__codex_huge_vall())
+#define math_errhandling (__cboxes_math_errhandling())
+#define HUGE_VAL (__cboxes_huge_val())
+#define HUGE_VALF (__cboxes_huge_valf())
+#define HUGE_VALL (__cboxes_huge_vall())
 #define INFINITY HUGE_VALF
 #define NAN nanf("")
 
-#define fpclassify(x) _Generic((x), float: __codex_fpclassifyf, long double: __codex_fpclassifyl, default: __codex_fpclassify)((x))
-#define isfinite(x) __codex_isfinite((double)(x))
-#define isinf(x) __codex_isinf((double)(x))
-#define isnan(x) __codex_isnan((double)(x))
-#define isnormal(x) _Generic((x), float: __codex_isnormalf, long double: __codex_isnormall, default: __codex_isnormal)((x))
-#define signbit(x) __codex_signbit((double)(x))
+#define fpclassify(x) _Generic((x), float: __cboxes_fpclassifyf, long double: __cboxes_fpclassifyl, default: __cboxes_fpclassify)((x))
+#define isfinite(x) __cboxes_isfinite((double)(x))
+#define isinf(x) __cboxes_isinf((double)(x))
+#define isnan(x) __cboxes_isnan((double)(x))
+#define isnormal(x) _Generic((x), float: __cboxes_isnormalf, long double: __cboxes_isnormall, default: __cboxes_isnormal)((x))
+#define signbit(x) __cboxes_signbit((double)(x))
 
-#define isgreater(x, y) __codex_isgreater((double)(x), (double)(y))
-#define isgreaterequal(x, y) __codex_isgreaterequal((double)(x), (double)(y))
-#define isless(x, y) __codex_isless((double)(x), (double)(y))
-#define islessequal(x, y) __codex_islessequal((double)(x), (double)(y))
-#define islessgreater(x, y) __codex_islessgreater((double)(x), (double)(y))
-#define isunordered(x, y) __codex_isunordered((double)(x), (double)(y))
+#define isgreater(x, y) __cboxes_isgreater((double)(x), (double)(y))
+#define isgreaterequal(x, y) __cboxes_isgreaterequal((double)(x), (double)(y))
+#define isless(x, y) __cboxes_isless((double)(x), (double)(y))
+#define islessequal(x, y) __cboxes_islessequal((double)(x), (double)(y))
+#define islessgreater(x, y) __cboxes_islessgreater((double)(x), (double)(y))
+#define isunordered(x, y) __cboxes_isunordered((double)(x), (double)(y))
 
-#define signgam (__codex_signgam)
+#define signgam (__cboxes_signgam)
 
-#define __CODEX_DECLARE_UNARY_REAL(name) \
+#define __CBOXES_DECLARE_UNARY_REAL(name) \
 double name(double x); \
 float name##f(float x); \
 long double name##l(long double x)
 
-#define __CODEX_DECLARE_BINARY_REAL(name) \
+#define __CBOXES_DECLARE_BINARY_REAL(name) \
 double name(double x, double y); \
 float name##f(float x, float y); \
 long double name##l(long double x, long double y)
 
-__CODEX_DECLARE_UNARY_REAL(acos);
-__CODEX_DECLARE_UNARY_REAL(asin);
-__CODEX_DECLARE_UNARY_REAL(atan);
-__CODEX_DECLARE_BINARY_REAL(atan2);
-__CODEX_DECLARE_UNARY_REAL(cos);
-__CODEX_DECLARE_UNARY_REAL(sin);
-__CODEX_DECLARE_UNARY_REAL(tan);
+__CBOXES_DECLARE_UNARY_REAL(acos);
+__CBOXES_DECLARE_UNARY_REAL(asin);
+__CBOXES_DECLARE_UNARY_REAL(atan);
+__CBOXES_DECLARE_BINARY_REAL(atan2);
+__CBOXES_DECLARE_UNARY_REAL(cos);
+__CBOXES_DECLARE_UNARY_REAL(sin);
+__CBOXES_DECLARE_UNARY_REAL(tan);
 
-__CODEX_DECLARE_UNARY_REAL(acosh);
-__CODEX_DECLARE_UNARY_REAL(asinh);
-__CODEX_DECLARE_UNARY_REAL(atanh);
-__CODEX_DECLARE_UNARY_REAL(cosh);
-__CODEX_DECLARE_UNARY_REAL(sinh);
-__CODEX_DECLARE_UNARY_REAL(tanh);
+__CBOXES_DECLARE_UNARY_REAL(acosh);
+__CBOXES_DECLARE_UNARY_REAL(asinh);
+__CBOXES_DECLARE_UNARY_REAL(atanh);
+__CBOXES_DECLARE_UNARY_REAL(cosh);
+__CBOXES_DECLARE_UNARY_REAL(sinh);
+__CBOXES_DECLARE_UNARY_REAL(tanh);
 
-__CODEX_DECLARE_UNARY_REAL(exp);
-__CODEX_DECLARE_UNARY_REAL(log);
-__CODEX_DECLARE_UNARY_REAL(log10);
-__CODEX_DECLARE_UNARY_REAL(exp2);
-__CODEX_DECLARE_UNARY_REAL(expm1);
-__CODEX_DECLARE_UNARY_REAL(log1p);
-__CODEX_DECLARE_UNARY_REAL(log2);
-__CODEX_DECLARE_UNARY_REAL(logb);
-__CODEX_DECLARE_BINARY_REAL(pow);
-__CODEX_DECLARE_UNARY_REAL(sqrt);
-__CODEX_DECLARE_UNARY_REAL(cbrt);
-__CODEX_DECLARE_BINARY_REAL(hypot);
+__CBOXES_DECLARE_UNARY_REAL(exp);
+__CBOXES_DECLARE_UNARY_REAL(log);
+__CBOXES_DECLARE_UNARY_REAL(log10);
+__CBOXES_DECLARE_UNARY_REAL(exp2);
+__CBOXES_DECLARE_UNARY_REAL(expm1);
+__CBOXES_DECLARE_UNARY_REAL(log1p);
+__CBOXES_DECLARE_UNARY_REAL(log2);
+__CBOXES_DECLARE_UNARY_REAL(logb);
+__CBOXES_DECLARE_BINARY_REAL(pow);
+__CBOXES_DECLARE_UNARY_REAL(sqrt);
+__CBOXES_DECLARE_UNARY_REAL(cbrt);
+__CBOXES_DECLARE_BINARY_REAL(hypot);
 
-__CODEX_DECLARE_UNARY_REAL(erf);
-__CODEX_DECLARE_UNARY_REAL(erfc);
-__CODEX_DECLARE_UNARY_REAL(tgamma);
-__CODEX_DECLARE_UNARY_REAL(lgamma);
+__CBOXES_DECLARE_UNARY_REAL(erf);
+__CBOXES_DECLARE_UNARY_REAL(erfc);
+__CBOXES_DECLARE_UNARY_REAL(tgamma);
+__CBOXES_DECLARE_UNARY_REAL(lgamma);
 
-__CODEX_DECLARE_UNARY_REAL(fabs);
-__CODEX_DECLARE_UNARY_REAL(ceil);
-__CODEX_DECLARE_UNARY_REAL(floor);
-__CODEX_DECLARE_BINARY_REAL(fmod);
-__CODEX_DECLARE_UNARY_REAL(trunc);
-__CODEX_DECLARE_UNARY_REAL(round);
-__CODEX_DECLARE_UNARY_REAL(rint);
-__CODEX_DECLARE_UNARY_REAL(nearbyint);
-__CODEX_DECLARE_BINARY_REAL(remainder);
-__CODEX_DECLARE_BINARY_REAL(copysign);
-__CODEX_DECLARE_BINARY_REAL(nextafter);
-__CODEX_DECLARE_BINARY_REAL(fdim);
-__CODEX_DECLARE_BINARY_REAL(fmax);
-__CODEX_DECLARE_BINARY_REAL(fmin);
+__CBOXES_DECLARE_UNARY_REAL(fabs);
+__CBOXES_DECLARE_UNARY_REAL(ceil);
+__CBOXES_DECLARE_UNARY_REAL(floor);
+__CBOXES_DECLARE_BINARY_REAL(fmod);
+__CBOXES_DECLARE_UNARY_REAL(trunc);
+__CBOXES_DECLARE_UNARY_REAL(round);
+__CBOXES_DECLARE_UNARY_REAL(rint);
+__CBOXES_DECLARE_UNARY_REAL(nearbyint);
+__CBOXES_DECLARE_BINARY_REAL(remainder);
+__CBOXES_DECLARE_BINARY_REAL(copysign);
+__CBOXES_DECLARE_BINARY_REAL(nextafter);
+__CBOXES_DECLARE_BINARY_REAL(fdim);
+__CBOXES_DECLARE_BINARY_REAL(fmax);
+__CBOXES_DECLARE_BINARY_REAL(fmin);
 
 double frexp(double x, int *exp);
 float frexpf(float x, int *exp);
@@ -180,7 +180,7 @@ double fma(double x, double y, double z);
 float fmaf(float x, float y, float z);
 long double fmal(long double x, long double y, long double z);
 
-#undef __CODEX_DECLARE_UNARY_REAL
-#undef __CODEX_DECLARE_BINARY_REAL
+#undef __CBOXES_DECLARE_UNARY_REAL
+#undef __CBOXES_DECLARE_BINARY_REAL
 
 #endif

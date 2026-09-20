@@ -1,5 +1,5 @@
-#ifndef __CODEX_ISO646_H
-#define __CODEX_ISO646_H
+#ifndef __CBOXES_ISO646_H
+#define __CBOXES_ISO646_H
 
 #define and &&
 #define and_eq &=

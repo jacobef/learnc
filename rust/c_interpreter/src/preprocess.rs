@@ -8,35 +8,37 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::diag::Diagnostic;
 use crate::integer::parse_integer_literal as parse_c_integer_literal;
-use crate::source::{FileId, LineOrigin, SourceManager, Span};
+use crate::source::{FileId, LineOrigin, SourceManager, Span, StandardHeaderInclude};
 
-const HIDDEN_STDIO_H: &str = include_str!("../include/stdio.h");
-const HIDDEN_STDLIB_H: &str = include_str!("../include/stdlib.h");
-const HIDDEN_STRING_H: &str = include_str!("../include/string.h");
-const HIDDEN_STDARG_H: &str = include_str!("../include/stdarg.h");
-const HIDDEN_MATH_H: &str = include_str!("../include/math.h");
-const HIDDEN_COMPLEX_H: &str = include_str!("../include/complex.h");
-const HIDDEN_TGMATH_H: &str = include_str!("../include/tgmath.h");
-const HIDDEN_WCHAR_H: &str = include_str!("../include/wchar.h");
-const HIDDEN_WCTYPE_H: &str = include_str!("../include/wctype.h");
-const HIDDEN_STDDEF_H: &str = include_str!("../include/stddef.h");
-const HIDDEN_STDINT_H: &str = include_str!("../include/stdint.h");
-const HIDDEN_SETJMP_H: &str = include_str!("../include/setjmp.h");
-const HIDDEN_ASSERT_H: &str = include_str!("../include/assert.h");
-const HIDDEN_CTYPE_H: &str = include_str!("../include/ctype.h");
-const HIDDEN_ERRNO_H: &str = include_str!("../include/errno.h");
-const HIDDEN_FLOAT_H: &str = include_str!("../include/float.h");
-const HIDDEN_ISO646_H: &str = include_str!("../include/iso646.h");
-const HIDDEN_LIMITS_H: &str = include_str!("../include/limits.h");
-const HIDDEN_STDBOOL_H: &str = include_str!("../include/stdbool.h");
-const HIDDEN_LOCALE_H: &str = include_str!("../include/locale.h");
-const HIDDEN_SIGNAL_H: &str = include_str!("../include/signal.h");
-const HIDDEN_INTTYPES_H: &str = include_str!("../include/inttypes.h");
-const HIDDEN_TIME_H: &str = include_str!("../include/time.h");
-const HIDDEN_FENV_H: &str = include_str!("../include/fenv.h");
-const HIDDEN_STDALIGN_H: &str = include_str!("../include/stdalign.h");
-const HIDDEN_STDNORETURN_H: &str = include_str!("../include/stdnoreturn.h");
-const HIDDEN_UCHAR_H: &str = include_str!("../include/uchar.h");
+pub(crate) const STANDARD_HEADERS: &[(&str, &str)] = &[
+    ("stddef.h", include_str!("../include/stddef.h")),
+    ("math.h", include_str!("../include/math.h")),
+    ("complex.h", include_str!("../include/complex.h")),
+    ("stdint.h", include_str!("../include/stdint.h")),
+    ("assert.h", include_str!("../include/assert.h")),
+    ("ctype.h", include_str!("../include/ctype.h")),
+    ("errno.h", include_str!("../include/errno.h")),
+    ("fenv.h", include_str!("../include/fenv.h")),
+    ("float.h", include_str!("../include/float.h")),
+    ("inttypes.h", include_str!("../include/inttypes.h")),
+    ("iso646.h", include_str!("../include/iso646.h")),
+    ("limits.h", include_str!("../include/limits.h")),
+    ("locale.h", include_str!("../include/locale.h")),
+    ("setjmp.h", include_str!("../include/setjmp.h")),
+    ("signal.h", include_str!("../include/signal.h")),
+    ("stdalign.h", include_str!("../include/stdalign.h")),
+    ("stdarg.h", include_str!("../include/stdarg.h")),
+    ("stdbool.h", include_str!("../include/stdbool.h")),
+    ("stdio.h", include_str!("../include/stdio.h")),
+    ("stdlib.h", include_str!("../include/stdlib.h")),
+    ("stdnoreturn.h", include_str!("../include/stdnoreturn.h")),
+    ("string.h", include_str!("../include/string.h")),
+    ("tgmath.h", include_str!("../include/tgmath.h")),
+    ("time.h", include_str!("../include/time.h")),
+    ("uchar.h", include_str!("../include/uchar.h")),
+    ("wchar.h", include_str!("../include/wchar.h")),
+    ("wctype.h", include_str!("../include/wctype.h")),
+];
 
 pub struct Preprocessed {
     pub file_id: FileId,
@@ -46,6 +48,7 @@ pub struct Preprocessed {
 struct ExpandedFile {
     text: String,
     line_origins: Vec<LineOrigin>,
+    standard_header_includes: Vec<StandardHeaderInclude>,
 }
 
 impl ExpandedFile {
@@ -56,6 +59,17 @@ impl ExpandedFile {
     }
 
     fn append(&mut self, nested: ExpandedFile) {
+        let offset = self.text.len();
+        self.standard_header_includes
+            .extend(
+                nested
+                    .standard_header_includes
+                    .into_iter()
+                    .map(|mut include| {
+                        include.offset += offset;
+                        include
+                    }),
+            );
         self.text.push_str(&nested.text);
         self.line_origins.extend(nested.line_origins);
     }
@@ -161,6 +175,34 @@ impl PpInt {
 }
 
 impl Preprocessor {
+    /// Inventory the same expanded declarations and macros that programs use.
+    /// User headers never participate in missing-system-header suggestions.
+    pub(crate) fn standard_header_identifiers(header: &str) -> Result<Vec<String>, Diagnostic> {
+        #[cfg(test)]
+        let preprocessor = Self::new(PathBuf::new(), Vec::new());
+        #[cfg(not(test))]
+        let preprocessor = Self::new();
+        let mut sources = SourceManager::default();
+        let path = PathBuf::from("header-inventory.c");
+        let root = sources.add_file(path.clone(), format!("#include <{header}>\n"));
+        let mut macros = predefined_macros();
+        let expanded = preprocessor.expand_file(&mut sources, root, &path, &mut macros)?;
+        let file = sources.add_generated_file(
+            path,
+            expanded.text,
+            expanded.line_origins,
+            expanded.standard_header_includes,
+        );
+        let tokens = crate::lexer::Lexer::new(&sources, file).lex()?;
+        let mut names = crate::parser::Parser::new(&sources, tokens).parse_header_identifiers()?;
+        names.extend(macros.into_keys());
+        names.retain(|name| !name.starts_with("__") && name != "va_list");
+        if header == "stdarg.h" {
+            names.extend(["va_list", "va_start", "va_end", "va_copy", "va_arg"].map(str::to_owned));
+        }
+        Ok(names)
+    }
+
     #[cfg(not(test))]
     pub fn new() -> Self {
         Self {}
@@ -182,8 +224,43 @@ impl Preprocessor {
         let root_path = sources.file(root_file).path().clone();
         let mut macros = predefined_macros();
         let expanded = self.expand_file(sources, root_file, &root_path, &mut macros)?;
-        let file_id = sources.add_generated_file(root_path, expanded.text, expanded.line_origins);
+        let file_id = sources.add_generated_file(
+            root_path,
+            expanded.text,
+            expanded.line_origins,
+            expanded.standard_header_includes,
+        );
         Ok(Preprocessed { file_id })
+    }
+
+    pub(crate) fn preprocess_expression(
+        &self,
+        sources: &mut SourceManager,
+        translation_file: FileId,
+        expression_file: FileId,
+    ) -> Result<FileId, Diagnostic> {
+        // Reuse the translation unit's macro environment, including user headers,
+        // conditional definitions, and undefinitions. Lexing the expression alone
+        // leaves macros such as stdin and INT_MAX looking like undeclared variables.
+        let path = sources.file(translation_file).path().clone();
+        let root = sources.find_file(&path).unwrap_or(translation_file);
+        let mut macros = predefined_macros();
+        self.expand_file(sources, root, &path, &mut macros)?;
+        let expression_path = sources.file(expression_file).path().clone();
+        let expanded = self.expand_file(sources, expression_file, &expression_path, &mut macros)?;
+        let mut includes = sources
+            .file(translation_file)
+            .standard_header_includes
+            .clone();
+        for include in &mut includes {
+            include.offset = 0;
+        }
+        Ok(sources.add_generated_file(
+            expression_path,
+            expanded.text,
+            expanded.line_origins,
+            includes,
+        ))
     }
 
     fn expand_file(
@@ -641,16 +718,9 @@ impl Preprocessor {
                 rest.trim().to_owned(),
                 Self::span(file_id),
             )),
-            "include" if active => self.handle_include(
-                rest,
-                sources,
-                path,
-                macros,
-                out,
-                file_id,
-                line_number,
-                presumed,
-            ),
+            "include" if active => {
+                self.handle_include(rest, sources, path, macros, out, directive_span, presumed)
+            }
             "define" if active => self.handle_define(rest, macros, file_id),
             "undef" if active => self.handle_undef(rest, macros, file_id),
             _ if active => Ok(()),
@@ -691,17 +761,12 @@ impl Preprocessor {
         including_path: &Path,
         macros: &mut HashMap<String, MacroDefinition>,
         out: &mut ExpandedFile,
-        file_id: FileId,
-        line_number: usize,
+        directive_span: Span,
         presumed: &PresumedLocation,
     ) -> Result<(), Diagnostic> {
+        let file_id = directive_span.file;
+        let line_number = sources.file(file_id).line_col(directive_span.start).0;
         let direct = rest.trim();
-        if let Some((path, text)) = self.internal_header(direct) {
-            let nested_id = sources.add_file(path, text.to_owned());
-            let nested_path = sources.file(nested_id).path().clone();
-            out.append(self.expand_file(sources, nested_id, &nested_path, macros)?);
-            return Ok(());
-        }
         let rest = if direct.starts_with('"') || direct.starts_with('<') {
             direct.to_owned()
         } else {
@@ -716,11 +781,8 @@ impl Preprocessor {
             )?
         };
         let rest = rest.trim();
-        if let Some((path, text)) = self.internal_header(rest) {
-            let nested_id = sources.add_file(path, text.to_owned());
-            let nested_path = sources.file(nested_id).path().clone();
-            out.append(self.expand_file(sources, nested_id, &nested_path, macros)?);
-            return Ok(());
+        if let Some(header) = self.internal_header(rest) {
+            return self.append_standard_header(header, directive_span, sources, macros, out);
         }
         let (name, quoted) =
             if let Some(name) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
@@ -757,11 +819,8 @@ impl Preprocessor {
 
         if quoted {
             let angle_form = format!("<{name}>");
-            if let Some((path, text)) = self.internal_header(&angle_form) {
-                let nested_id = sources.add_file(path, text.to_owned());
-                let nested_path = sources.file(nested_id).path().clone();
-                out.append(self.expand_file(sources, nested_id, &nested_path, macros)?);
-                return Ok(());
+            if let Some(header) = self.internal_header(&angle_form) {
+                return self.append_standard_header(header, directive_span, sources, macros, out);
             }
         }
 
@@ -814,6 +873,26 @@ impl Preprocessor {
         }
     }
 
+    fn append_standard_header(
+        &self,
+        (path, text): (PathBuf, &'static str),
+        directive: Span,
+        sources: &mut SourceManager,
+        macros: &mut HashMap<String, MacroDefinition>,
+        out: &mut ExpandedFile,
+    ) -> Result<(), Diagnostic> {
+        // Keep the directive even if an include guard suppresses every header token.
+        // The parser can then check its placement against actual declaration spans.
+        out.standard_header_includes.push(StandardHeaderInclude {
+            offset: out.text.len(),
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            directive,
+        });
+        let nested_id = sources.add_file(path.clone(), text.to_owned());
+        out.append(self.expand_file(sources, nested_id, &path, macros)?);
+        Ok(())
+    }
+
     fn normalize_virtual_path(path: &Path) -> PathBuf {
         let mut normalized = PathBuf::new();
         for component in path.components() {
@@ -831,36 +910,11 @@ impl Preprocessor {
 
     fn internal_header(&self, rest: &str) -> Option<(PathBuf, &'static str)> {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("include");
-        match rest {
-            "<stdio.h>" => Some((manifest.join("stdio.h"), HIDDEN_STDIO_H)),
-            "<stdlib.h>" => Some((manifest.join("stdlib.h"), HIDDEN_STDLIB_H)),
-            "<string.h>" => Some((manifest.join("string.h"), HIDDEN_STRING_H)),
-            "<stdarg.h>" => Some((manifest.join("stdarg.h"), HIDDEN_STDARG_H)),
-            "<math.h>" => Some((manifest.join("math.h"), HIDDEN_MATH_H)),
-            "<complex.h>" => Some((manifest.join("complex.h"), HIDDEN_COMPLEX_H)),
-            "<tgmath.h>" => Some((manifest.join("tgmath.h"), HIDDEN_TGMATH_H)),
-            "<wchar.h>" => Some((manifest.join("wchar.h"), HIDDEN_WCHAR_H)),
-            "<wctype.h>" => Some((manifest.join("wctype.h"), HIDDEN_WCTYPE_H)),
-            "<stddef.h>" => Some((manifest.join("stddef.h"), HIDDEN_STDDEF_H)),
-            "<stdint.h>" => Some((manifest.join("stdint.h"), HIDDEN_STDINT_H)),
-            "<setjmp.h>" => Some((manifest.join("setjmp.h"), HIDDEN_SETJMP_H)),
-            "<assert.h>" => Some((manifest.join("assert.h"), HIDDEN_ASSERT_H)),
-            "<ctype.h>" => Some((manifest.join("ctype.h"), HIDDEN_CTYPE_H)),
-            "<errno.h>" => Some((manifest.join("errno.h"), HIDDEN_ERRNO_H)),
-            "<float.h>" => Some((manifest.join("float.h"), HIDDEN_FLOAT_H)),
-            "<iso646.h>" => Some((manifest.join("iso646.h"), HIDDEN_ISO646_H)),
-            "<limits.h>" => Some((manifest.join("limits.h"), HIDDEN_LIMITS_H)),
-            "<stdbool.h>" => Some((manifest.join("stdbool.h"), HIDDEN_STDBOOL_H)),
-            "<locale.h>" => Some((manifest.join("locale.h"), HIDDEN_LOCALE_H)),
-            "<signal.h>" => Some((manifest.join("signal.h"), HIDDEN_SIGNAL_H)),
-            "<inttypes.h>" => Some((manifest.join("inttypes.h"), HIDDEN_INTTYPES_H)),
-            "<time.h>" => Some((manifest.join("time.h"), HIDDEN_TIME_H)),
-            "<fenv.h>" => Some((manifest.join("fenv.h"), HIDDEN_FENV_H)),
-            "<stdalign.h>" => Some((manifest.join("stdalign.h"), HIDDEN_STDALIGN_H)),
-            "<stdnoreturn.h>" => Some((manifest.join("stdnoreturn.h"), HIDDEN_STDNORETURN_H)),
-            "<uchar.h>" => Some((manifest.join("uchar.h"), HIDDEN_UCHAR_H)),
-            _ => None,
-        }
+        let name = rest.strip_prefix('<')?.strip_suffix('>')?;
+        STANDARD_HEADERS
+            .iter()
+            .find(|(header, _)| *header == name)
+            .map(|(header, text)| (manifest.join(header), *text))
     }
 
     fn handle_define(
@@ -2309,7 +2363,7 @@ fn skip_quoted_literal(text: &str, start: usize, file_id: FileId) -> Result<usiz
 
 fn split_directive(text: &str) -> (&str, &str) {
     let keyword_end = text
-        .find(|ch: char| ch.is_ascii_whitespace())
+        .find(|ch: char| !is_ident_continue(ch))
         .unwrap_or(text.len());
     let keyword = &text[..keyword_end];
     let rest = text[keyword_end..].trim_start();

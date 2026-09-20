@@ -570,15 +570,6 @@ function declarationDiagnostic(context) {
         if (name === "print") {
             return { message: "C does not have Python-style print(...). Use printf(...) with #include <stdio.h>, or just assign values to variables in these lessons." };
         }
-        if (name === "printf")
-            return { message: "To use printf, add #include <stdio.h> at the top of the program." };
-        if (name === "scanf")
-            return { message: "To use scanf, add #include <stdio.h> and make sure the variables you read into are declared." };
-        if (name === "malloc")
-            return { message: "To use malloc, add #include <stdlib.h>. In the tutorial levels, you usually do not need malloc." };
-        if (name === "true" || name === "false") {
-            return { message: "In these lessons, use 1 for true and 0 for false. C bool values require #include <stdbool.h>." };
-        }
         if (declarationLooksLikeUnknownType(text, col, name)) {
             return {
                 message: unknownTypeNameDiagnostic(lines, safeLine, col, name),

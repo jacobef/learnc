@@ -4,7 +4,7 @@
         <meta charset="utf-8" />
         <title>C Boxes — Sandbox</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="stylesheet" href="styles.css" />
+        <link rel="stylesheet" href="styles.css?v=panel-divider-1" />
     </head>
     <body>
         <div class="wrap">
@@ -46,28 +46,41 @@
                                         Advanced
                                     </button>
                                 </div>
+                                <label data-role="sandbox-jump-setting" class="sandbox-jump-setting hidden">
+                                    <input data-role="sandbox-ask-jump" type="checkbox" />
+                                    <span>Ask when a jump has multiple occurrences</span>
+                                </label>
+                                <label data-role="sandbox-step-limit-control" class="sandbox-step-limit hidden">
+                                    <span>Step limit</span>
+                                    <input data-role="sandbox-step-limit" type="number" min="1" max="1000000" step="1" value="100000" title="Maximum interpreted steps (1–1,000,000)" />
+                                </label>
                                 <label
                                     data-role="sandbox-implicit-main-control"
                                     class="sandbox-implicit-main hidden"
                                 >
                                     <input
                                         data-role="sandbox-implicit-main"
+                                        aria-describedby="sandbox-implicit-main-restriction"
                                         type="checkbox"
                                         checked
                                     />
                                     <span>Implicit main</span>
+                                    <small id="sandbox-implicit-main-restriction" data-role="sandbox-implicit-main-restriction" class="hidden">Requires a single .c file.</small>
                                 </label>
                             </div>
                         </div>
-                        <p data-role="sandbox-instructions" class="intro"></p>
+                        <div data-role="sandbox-introduction" class="sandbox-introduction">
+                            <p data-role="sandbox-instructions" class="intro"></p>
+                            <button data-role="sandbox-dismiss-introduction" type="button" aria-label="Dismiss sandbox introduction" title="Dismiss introduction">×</button>
+                        </div>
                         <div
                             data-role="sandbox-implicit-main-notice"
                             class="sandbox-mode-notice hidden"
                             role="status"
                         ></div>
                     </div>
-                    <div class="row panel-row">
-                        <div class="panel panel-scroll code-panel-shell">
+                    <div class="row panel-row sandbox-panel-row" data-role="sandbox-panels">
+                        <div id="sandbox-code-panel" class="panel panel-scroll code-panel-shell">
                             <div class="panel-title code-title">Code</div>
                             <div
                                 data-role="sandbox-file-bar"
@@ -122,6 +135,7 @@
                                         ×
                                     </button>
                                 </div>
+                                <div data-role="sandbox-file-error" class="sandbox-file-error hidden" role="status"></div>
                                 <div
                                     data-role="sandbox-file-delete-confirm"
                                     class="sandbox-file-delete-confirm hidden"
@@ -153,7 +167,6 @@
                                     <div
                                         data-role="sandbox-line-numbers"
                                         class="code-gutter"
-                                        aria-hidden="true"
                                     ></div>
                                     <div class="code-editor-wrap">
                                         <textarea
@@ -173,13 +186,19 @@
                                     <label class="sandbox-terminal-label" for="sandbox-stdin">
                                         stdin
                                     </label>
+                                    <div class="sandbox-stdin-surface">
+                                        <pre data-role="sandbox-stdin-highlight" class="sandbox-terminal-input sandbox-stdin-highlight" aria-hidden="true"></pre>
                                     <textarea
                                         id="sandbox-stdin"
                                         data-role="sandbox-stdin"
                                         class="sandbox-terminal-input"
                                         spellcheck="false"
                                         rows="3"
+                                        aria-describedby="sandbox-stdin-position"
                                     ></textarea>
+                                    </div>
+                                    <div id="sandbox-stdin-position" data-role="sandbox-stdin-position" class="sandbox-stdin-position"
+                                        title="The orange marker shows where stdin will be read next at the selected execution step."></div>
                                 </div>
                                 <div class="sandbox-terminal-section sandbox-terminal-output-wrap">
                                     <div class="sandbox-terminal-label">stdout</div>
@@ -201,6 +220,16 @@
                             </div>
                         </div>
                         <div
+                            data-role="sandbox-panel-divider"
+                            class="sandbox-panel-divider"
+                            role="separator"
+                            aria-label="Resize Code and Program state"
+                            aria-orientation="vertical"
+                            aria-controls="sandbox-code-panel sandbox-state-panel"
+                            title="Drag to resize; double-click resets."
+                        ></div>
+                        <div
+                            id="sandbox-state-panel"
                             class="panel program-state-panel sandbox-state-panel panel-scroll"
                         >
                             <div class="panel-title">Program state</div>
@@ -230,6 +259,17 @@
             </div>
         </div>
 
-        <script type="module" src="js/sandbox.js?v=incomplete-array-type-1"></script>
+        <dialog data-role="sandbox-jump-dialog" class="sandbox-jump-dialog" aria-labelledby="sandbox-jump-title" aria-describedby="sandbox-jump-description">
+            <h2 id="sandbox-jump-title" data-role="sandbox-jump-title">Jump to a line</h2>
+            <p id="sandbox-jump-description" data-role="sandbox-jump-description"></p>
+            <div data-role="sandbox-jump-choices" class="sandbox-jump-choices"></div>
+            <form data-role="sandbox-jump-form" class="sandbox-jump-form">
+                <label for="sandbox-jump-occurrence">Occurrence</label>
+                <input id="sandbox-jump-occurrence" data-role="sandbox-jump-occurrence" type="number" min="1" step="1" required />
+                <button type="submit">Jump</button>
+            </form>
+            <button data-role="sandbox-jump-cancel" type="button">Cancel</button>
+        </dialog>
+        <script type="module" src="js/sandbox.js?v=line-jumps-2"></script>
     </body>
 </html>

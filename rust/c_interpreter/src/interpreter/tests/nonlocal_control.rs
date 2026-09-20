@@ -342,9 +342,9 @@ fn reported_signal_sentinels_are_not_declarable_function_addresses() {
                 void (*previous)(int) = signal(SIGINT, SIG_IGN);
                 void (*ignored)(int) = signal(SIGINT, SIG_DFL);
                 printf("%d %d %d %d %d\n",
-                    SIG_DFL == __codex_sig_dfl,
-                    SIG_IGN == __codex_sig_ign,
-                    SIG_ERR == __codex_sig_err,
+                    SIG_DFL == __cboxes_sig_dfl,
+                    SIG_IGN == __cboxes_sig_ign,
+                    SIG_ERR == __cboxes_sig_err,
                     previous == SIG_DFL,
                     ignored == SIG_IGN);
                 return 0;

@@ -162,6 +162,7 @@ impl<'a> Interpreter<'a> {
                         || matches!(target_inner.unqualified(), CType::Void);
                     let source_exposes_object_representation = source_inner.is_character()
                         || matches!(source_inner.unqualified(), CType::Void);
+                    self.recover_initial_member_array_pointer(pointer, source_inner, target_inner);
                     if ((target_exposes_object_representation
                         && !self.compatible_object_layout_types(target_inner, source_inner))
                         || Self::corresponding_signed_unsigned_types(target_inner, source_inner))
@@ -265,6 +266,48 @@ impl<'a> Interpreter<'a> {
                 span,
             )),
         }
+    }
+
+    fn recover_initial_member_array_pointer(
+        &self,
+        pointer: &mut PointerValue,
+        source: &CType,
+        target: &CType,
+    ) {
+        if pointer.member_path.is_empty() || pointer.offset != 0 {
+            return;
+        }
+        let Some(root) = pointer.designated_root_ty.as_deref().or_else(|| {
+            pointer
+                .object
+                .and_then(|id| self.object_type_registry.get(&id))
+        }) else {
+            return;
+        };
+        let CType::Array(inner, len) = root.unqualified() else {
+            return;
+        };
+        if !matches!(target.unqualified(), CType::Struct(..) | CType::Union(..))
+            || !self.compatible_object_layout_types(inner, target)
+            || !self.path_is_initial_member_chain(inner, &pointer.member_path)
+        {
+            return;
+        }
+        let Some(index) = self
+            .pointer_byte_offset_from_root_type(pointer, source)
+            .and_then(|byte| byte.checked_sub(pointer.arithmetic_domain_start.unwrap_or(0)))
+            .zip(self.type_size_of(target))
+            .and_then(|(byte, size)| (size != 0 && byte % size == 0).then(|| byte / size))
+            .filter(|index| *index < *len)
+            .and_then(|index| isize::try_from(index).ok())
+        else {
+            return;
+        };
+        // Converting the initial member back to its enclosing array element must
+        // recover both directions of array arithmetic, not just the remaining tail.
+        pointer.base_offset = 0;
+        pointer.offset = index;
+        Rc::make_mut(&mut pointer.member_path).clear();
     }
 
     pub(super) fn array_value_types_compatible(

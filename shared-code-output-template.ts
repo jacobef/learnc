@@ -24,6 +24,7 @@ import {
   offsetDiagnosticLines,
 } from "./shared-diagnostics.js";
 import { runCProgram } from "./shared-c-interpreter.js";
+import { normalizeChallengeInput } from "./shared-code-challenge-input.js";
 import type { CProgramResult } from "./shared-c-interpreter-types.js";
 import {
   codeRuntimeIssue,
@@ -258,17 +259,11 @@ function createCodeOutputChallengeTemplate(
     type: string,
     label: string,
   ): { runtime: ChallengeRuntimeValue; literal: string } {
-    const literal = value.trim();
-    const run = runCProgram(`${type} __cboxes_input = ${literal};\n`);
-    if (run.kind !== "ok") {
-      return invalidTemplateConfig(`${label} is not valid C: ${diagnosticMessageText(run.diagnostic)}`);
+    try {
+      return normalizeChallengeInput(value, type);
+    } catch (error) {
+      return invalidTemplateConfig(`${label} ${error instanceof Error ? error.message : String(error)}`);
     }
-    const stored = run.state.find((box) => box.name === "__cboxes_input");
-    if (!stored) return invalidTemplateConfig(`${label} did not create a scalar C value.`);
-    return {
-      runtime: stored.value,
-      literal,
-    };
   }
 
   const preludeLineCount = inputSpecs.length;

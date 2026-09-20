@@ -558,7 +558,7 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<(), Diagnostic> {
         let lvalue = self.math_pointer_lvalue(function_name, pointer, pointed_ty, span)?;
-        self.store_lvalue(objects, &lvalue, value, span)
+        self.store_lvalue(objects, &lvalue, value, span).map(|_| ())
     }
 
     fn call_host_unary_real(
@@ -1308,15 +1308,17 @@ impl<'a> Interpreter<'a> {
         span: Span,
     ) -> Result<TypedValue, Diagnostic> {
         match function_name {
-            "__codex_math_errhandling" => Ok(TypedValue::integer(
+            "__cboxes_math_errhandling" => Ok(TypedValue::integer(
                 CType::Int,
                 HOST_MATH_ERRHANDLING as i128,
             )),
-            "__codex_huge_val" => self.typed_math_float_result(function_name, f64::INFINITY, span),
-            "__codex_huge_valf" => {
+            "__cboxes_huge_val" => self.typed_math_float_result(function_name, f64::INFINITY, span),
+            "__cboxes_huge_valf" => {
                 self.typed_math_float_result(function_name, f32::INFINITY as f64, span)
             }
-            "__codex_huge_vall" => self.typed_math_float_result(function_name, f64::INFINITY, span),
+            "__cboxes_huge_vall" => {
+                self.typed_math_float_result(function_name, f64::INFINITY, span)
+            }
             _ => Err(Diagnostic::error(
                 format!("unsupported math helper {function_name}"),
                 span,
@@ -1332,30 +1334,30 @@ impl<'a> Interpreter<'a> {
     ) -> Result<TypedValue, Diagnostic> {
         let value = evaluated[0].to_float()?;
         let result = match function_name {
-            "__codex_fpclassifyf" => match (value as f32).classify() {
+            "__cboxes_fpclassifyf" => match (value as f32).classify() {
                 std::num::FpCategory::Nan => HOST_FP_NAN,
                 std::num::FpCategory::Infinite => HOST_FP_INFINITE,
                 std::num::FpCategory::Zero => HOST_FP_ZERO,
                 std::num::FpCategory::Subnormal => HOST_FP_SUBNORMAL,
                 std::num::FpCategory::Normal => HOST_FP_NORMAL,
             },
-            "__codex_fpclassify" | "__codex_fpclassifyl" => match value.classify() {
+            "__cboxes_fpclassify" | "__cboxes_fpclassifyl" => match value.classify() {
                 std::num::FpCategory::Nan => HOST_FP_NAN,
                 std::num::FpCategory::Infinite => HOST_FP_INFINITE,
                 std::num::FpCategory::Zero => HOST_FP_ZERO,
                 std::num::FpCategory::Subnormal => HOST_FP_SUBNORMAL,
                 std::num::FpCategory::Normal => HOST_FP_NORMAL,
             },
-            "__codex_isfinite" => (!value.is_nan() && !value.is_infinite()) as c_int,
-            "__codex_isinf" => value.is_infinite() as c_int,
-            "__codex_isnan" => value.is_nan() as c_int,
-            "__codex_isnormalf" => {
+            "__cboxes_isfinite" => (!value.is_nan() && !value.is_infinite()) as c_int,
+            "__cboxes_isinf" => value.is_infinite() as c_int,
+            "__cboxes_isnan" => value.is_nan() as c_int,
+            "__cboxes_isnormalf" => {
                 matches!((value as f32).classify(), std::num::FpCategory::Normal) as c_int
             }
-            "__codex_isnormal" | "__codex_isnormall" => {
+            "__cboxes_isnormal" | "__cboxes_isnormall" => {
                 matches!(value.classify(), std::num::FpCategory::Normal) as c_int
             }
-            "__codex_signbit" => value.is_sign_negative() as c_int,
+            "__cboxes_signbit" => value.is_sign_negative() as c_int,
             _ => {
                 return Err(Diagnostic::error(
                     format!("unsupported math helper {function_name}"),
@@ -1376,12 +1378,12 @@ impl<'a> Interpreter<'a> {
         let rhs = evaluated[1].to_float()?;
         let unordered = lhs.is_nan() || rhs.is_nan();
         let result = match function_name {
-            "__codex_isgreater" => (!unordered && lhs > rhs) as c_int,
-            "__codex_isgreaterequal" => (!unordered && lhs >= rhs) as c_int,
-            "__codex_isless" => (!unordered && lhs < rhs) as c_int,
-            "__codex_islessequal" => (!unordered && lhs <= rhs) as c_int,
-            "__codex_islessgreater" => (!unordered && lhs != rhs) as c_int,
-            "__codex_isunordered" => unordered as c_int,
+            "__cboxes_isgreater" => (!unordered && lhs > rhs) as c_int,
+            "__cboxes_isgreaterequal" => (!unordered && lhs >= rhs) as c_int,
+            "__cboxes_isless" => (!unordered && lhs < rhs) as c_int,
+            "__cboxes_islessequal" => (!unordered && lhs <= rhs) as c_int,
+            "__cboxes_islessgreater" => (!unordered && lhs != rhs) as c_int,
+            "__cboxes_isunordered" => unordered as c_int,
             _ => {
                 return Err(Diagnostic::error(
                     format!("unsupported math helper {function_name}"),

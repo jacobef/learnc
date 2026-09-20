@@ -18,6 +18,9 @@ export function createSyntheticAddressBase() {
 }
 /** Keeps a page's displayed addresses stable across reloads. */
 function loadPageAddressBase() {
+    // Workers supply their own address base and have no page storage.
+    if (typeof window === "undefined")
+        return createSyntheticAddressBase();
     const storageKey = `${STORAGE_KEY_PREFIX}${window.location.pathname}`;
     try {
         const stored = Number.parseInt(localStorage.getItem(storageKey) ?? "", 10);

@@ -1,7 +1,7 @@
 import { C_INTERPRETER_WASM_BASE64 } from "./shared-c-interpreter-wasm-data.js";
 // This identifies the one supported wire shape; it is not a compatibility version.
-const BRIDGE_SCHEMA_ID = 1;
-const BRIDGE_HEADER_WORDS = 10;
+const BRIDGE_SCHEMA_ID = 2;
+const BRIDGE_HEADER_WORDS = 11;
 const BRIDGE_FLAG_IMPLICIT_MAIN = 1;
 const OPERATION_CODES = {
     "run-source": 0,
@@ -137,12 +137,14 @@ function encodeBridgeRequest(request) {
     word(1, OPERATION_CODES[request.operation]);
     word(2, request.implicitMain ? BRIDGE_FLAG_IMPLICIT_MAIN : 0);
     word(3, request.syntheticAddressBase);
-    word(4, request.eventIndex ?? 0);
+    // -1 selects main's initial state, before any statement has executed.
+    word(4, request.eventIndex === -1 ? 0xffffffff : request.eventIndex ?? 0);
     word(5, request.executionBudget.stepLimit);
     word(6, request.executionBudget.followingTraceLimit);
     word(7, primary.length);
     word(8, expression.length);
     word(9, stdin.length);
+    word(10, request.executionBudget.traceLimit ?? 0);
     let offset = headerBytes;
     output.set(primary, offset);
     offset += primary.length;

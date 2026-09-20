@@ -1,5 +1,5 @@
-#ifndef __CODEX_STDALIGN_H
-#define __CODEX_STDALIGN_H
+#ifndef __CBOXES_STDALIGN_H
+#define __CBOXES_STDALIGN_H
 
 #define alignas _Alignas
 #define alignof _Alignof

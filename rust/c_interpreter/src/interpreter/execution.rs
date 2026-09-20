@@ -230,8 +230,9 @@ impl<'a> Interpreter<'a> {
                     frame,
                     objects,
                 )?;
-                self.store_lvalue(objects, &lvalue, converted.clone(), *span)?;
-                Ok(ValueCategory::RValue(converted))
+                Ok(ValueCategory::RValue(
+                    self.store_lvalue(objects, &lvalue, converted, *span)?,
+                ))
             }
             Expr::CompoundAssign { op, lhs, rhs, span } => {
                 let lvalue = match self.eval(lhs, frame, objects)? {
@@ -277,8 +278,9 @@ impl<'a> Interpreter<'a> {
                 let stored = self.convert_value_in_context(
                     &binary, computed, &lvalue.ty, *span, frame, objects,
                 )?;
-                self.store_lvalue(objects, &lvalue, stored.clone(), *span)?;
-                Ok(ValueCategory::RValue(stored))
+                Ok(ValueCategory::RValue(
+                    self.store_lvalue(objects, &lvalue, stored, *span)?,
+                ))
             }
             Expr::SizeofType {
                 ty,
@@ -536,10 +538,7 @@ impl<'a> Interpreter<'a> {
         {
             (ValueCategory::RValue(TypedValue::int(*value)), false)
         } else {
-            return Err(Diagnostic::error(
-                format!("use of undeclared identifier {name}"),
-                span,
-            ));
+            return Err(crate::standard_headers::undeclared_identifier(name, span));
         };
 
         self.variable_cache.insert(
@@ -1268,7 +1267,7 @@ impl<'a> Interpreter<'a> {
         )?))
     }
 
-    fn eval_equality(
+    pub(super) fn eval_equality(
         &self,
         op: BinaryOp,
         mut lhs: TypedValue,
@@ -1399,8 +1398,7 @@ impl<'a> Interpreter<'a> {
                 objects,
             )?
         };
-        let stored = self.convert_value(new_value, &lvalue.ty, span)?;
-        self.store_lvalue(objects, &lvalue, stored.clone(), span)?;
+        let stored = self.store_lvalue(objects, &lvalue, new_value, span)?;
         Ok(ValueCategory::RValue(if is_prefix {
             stored
         } else {

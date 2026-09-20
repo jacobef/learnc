@@ -12,6 +12,7 @@ mod number;
 mod parser;
 mod preprocess;
 mod source;
+mod standard_headers;
 mod token;
 mod types;
 
@@ -31,7 +32,6 @@ use browser_json::cboxes_value_literal_text;
 use diag::Diagnostic;
 use interpreter::{Interpreter, ProgramExpressionEvalRequest, ProgramOutput};
 use lexer::Lexer;
-#[cfg(not(target_os = "wasi"))]
 use linker::fallback_span;
 use linker::{merge_translation_units, normalize_single_translation_unit};
 pub use native::{
@@ -74,6 +74,7 @@ struct RunOptions {
     pub synthetic_address_base: u64,
     pub execution_step_limit: Option<usize>,
     pub execution_trace_following_limit: usize,
+    pub execution_trace_limit: Option<usize>,
 }
 
 type VirtualSource = (PathBuf, String);
@@ -98,6 +99,7 @@ impl Default for RunOptions {
             synthetic_address_base: 0x1000,
             execution_step_limit: None,
             execution_trace_following_limit: CBOXES_BROWSER_EXECUTION_TRACE_FOLLOWING_LIMIT,
+            execution_trace_limit: None,
         }
     }
 }
@@ -248,6 +250,29 @@ fn run_translation_unit(
             text.push('\n');
         }
         let expr_file = sources.add_file(PathBuf::from("<expression>"), text);
+        let translation_file = translation_unit
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .map_or_else(
+                || fallback_span(&translation_unit).file,
+                |function| function.span.file,
+            );
+        #[cfg(test)]
+        let preprocessor = Preprocessor::new(
+            sources
+                .file(translation_file)
+                .path()
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+            options.include_dirs.clone(),
+        );
+        #[cfg(not(test))]
+        let preprocessor = Preprocessor::new();
+        let expr_file = preprocessor
+            .preprocess_expression(sources, translation_file, expr_file)
+            .map_err(|diag| diag.with_sources(sources))?;
         let tokens = Lexer::new(sources, expr_file)
             .lex()
             .map_err(|diag| diag.with_sources(sources))?;

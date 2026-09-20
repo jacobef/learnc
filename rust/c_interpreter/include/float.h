@@ -1,5 +1,5 @@
-#ifndef __CODEX_FLOAT_H
-#define __CODEX_FLOAT_H
+#ifndef __CBOXES_FLOAT_H
+#define __CBOXES_FLOAT_H
 
 #define FLT_RADIX 2
 #define FLT_ROUNDS 1

@@ -75,7 +75,7 @@ impl<'a> Interpreter<'a> {
                     return Ok(bytes);
                 }
                 ByteCell::Known(byte) => bytes.push(byte),
-                ByteCell::Indeterminate => {
+                ByteCell::Indeterminate | ByteCell::Partial { .. } => {
                     return Err(Diagnostic::ub(
                         "library string argument contains an indeterminate byte",
                         span,
@@ -111,7 +111,7 @@ impl<'a> Interpreter<'a> {
                     return Ok((object_id, start, available));
                 }
                 ByteCell::Known(_) => {}
-                ByteCell::Indeterminate => {
+                ByteCell::Indeterminate | ByteCell::Partial { .. } => {
                     return Err(Diagnostic::ub(
                         "library string argument contains an indeterminate byte",
                         span,
@@ -151,19 +151,19 @@ impl<'a> Interpreter<'a> {
             return Ok(Vec::new());
         }
         let (_, start, all_bytes) = self.pointer_object_bytes(&pointer, span, objects)?;
-        let mut result = vec![0u8; limit];
+        let mut result = Vec::new();
         let available = all_bytes.len().saturating_sub(start);
         let prefix_len = available.min(limit);
         for index in 0..prefix_len {
             match all_bytes[start + index] {
                 ByteCell::Known(byte) => {
-                    result[index] = byte;
+                    result.push(byte);
                     if byte == 0 {
                         let _ = self.library_array_region(&pointer, index + 1, 1, span, objects)?;
                         return Ok(result);
                     }
                 }
-                ByteCell::Indeterminate => {
+                ByteCell::Indeterminate | ByteCell::Partial { .. } => {
                     return Err(Diagnostic::ub(
                         "library string argument contains an indeterminate byte",
                         span,

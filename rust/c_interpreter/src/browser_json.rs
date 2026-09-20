@@ -37,9 +37,12 @@ pub(super) fn cboxes_success_json(
     source_display: &SourceDisplayMap,
 ) -> String {
     format!(
-        "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"exitStatus\":{},\"state\":{},\"trace\":{},\"mainClose\":{},\"blocked\":{},\"executionLimit\":{}}}",
+        "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"stdoutBytes\":{:?},\"stderrBytes\":{:?},\"stdinPosition\":{},\"exitStatus\":{},\"state\":{},\"trace\":{},\"mainClose\":{},\"blocked\":{},\"executionLimit\":{}}}",
         cboxes_json_string(&result.stdout),
         cboxes_json_string(&result.stderr),
+        result.stdout_bytes,
+        result.stderr_bytes,
+        result.stdin_position,
         result.exit_status,
         cboxes_state_json(&result.state),
         cboxes_trace_json(&result.trace, source_display),
@@ -227,7 +230,7 @@ fn cboxes_display_range(
         .get(file.as_ref())
         .copied()
         .unwrap_or_else(SourceDisplay::unbounded);
-    let start_line = range.start_line.saturating_sub(display.line_offset);
+    let start_line = display.source_line(range.start_line);
     if start_line == display.line_count && display.normalized_final_newline {
         let eof_line = display.line_count.saturating_sub(1);
         return Some(DiagnosticDisplayRange {
@@ -243,9 +246,8 @@ fn cboxes_display_range(
     }
     Some(DiagnosticDisplayRange {
         start_line,
-        end_line: range
-            .end_line
-            .saturating_sub(display.line_offset)
+        end_line: display
+            .source_line(range.end_line)
             .max(start_line)
             .min(display.line_count.saturating_sub(1)),
         ..range.clone()
@@ -397,12 +399,12 @@ fn cboxes_display_lines(
         .get(file)
         .copied()
         .unwrap_or_else(SourceDisplay::unbounded);
-    let start_line = start_line.saturating_sub(display.line_offset);
+    let start_line = display.source_line(start_line);
     (start_line < display.line_count).then(|| {
         (
             start_line,
-            end_line
-                .saturating_sub(display.line_offset)
+            display
+                .source_line(end_line)
                 .min(display.line_count.saturating_sub(1)),
         )
     })
@@ -435,6 +437,12 @@ fn cboxes_trace_json(trace: &[ProgramTraceEvent], source_display: &SourceDisplay
         out.push_str(&end_line.to_string());
         out.push_str(",\"state\":");
         out.push_str(&cboxes_state_json(&event.state));
+        out.push_str(",\"stdinPosition\":");
+        out.push_str(&event.stdin_position.to_string());
+        out.push_str(",\"stdoutLength\":");
+        out.push_str(&event.stdout_length.to_string());
+        out.push_str(",\"stderrLength\":");
+        out.push_str(&event.stderr_length.to_string());
         out.push_str(",\"skippedRange\":");
         out.push_str(&cboxes_source_range_json(
             event.skipped_range.as_ref(),
@@ -528,11 +536,13 @@ fn cboxes_execution_limit_json(
         return "null".to_owned();
     };
     format!(
-        "{{\"file\":{},\"startLine\":{},\"endLine\":{},\"tracePosition\":{}}}",
+        "{{\"file\":{},\"startLine\":{},\"endLine\":{},\"tracePosition\":{},\"reason\":{},\"executedSteps\":{}}}",
         cboxes_json_string(&execution_limit.file),
         start_line,
         end_line,
         execution_limit.trace_position,
+        cboxes_json_string(execution_limit.reason),
+        execution_limit.executed_steps,
     )
 }
 

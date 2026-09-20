@@ -1,5 +1,5 @@
-#ifndef __CODEX_WCTYPE_H
-#define __CODEX_WCTYPE_H
+#ifndef __CBOXES_WCTYPE_H
+#define __CBOXES_WCTYPE_H
 
 typedef int wint_t;
 typedef unsigned int wctype_t;

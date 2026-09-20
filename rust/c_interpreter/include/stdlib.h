@@ -1,5 +1,5 @@
-#ifndef __CODEX_STDLIB_H
-#define __CODEX_STDLIB_H
+#ifndef __CBOXES_STDLIB_H
+#define __CBOXES_STDLIB_H
 
 #include <stddef.h>
 
@@ -7,8 +7,8 @@
 #define EXIT_FAILURE 1
 #define RAND_MAX 0x7fffffff
 
-size_t __codex_mb_cur_max(void);
-#define MB_CUR_MAX (__codex_mb_cur_max())
+size_t __cboxes_mb_cur_max(void);
+#define MB_CUR_MAX (__cboxes_mb_cur_max())
 
 typedef struct {
     int quot;

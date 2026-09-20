@@ -1,5 +1,5 @@
-#ifndef __CODEX_STDNORETURN_H
-#define __CODEX_STDNORETURN_H
+#ifndef __CBOXES_STDNORETURN_H
+#define __CBOXES_STDNORETURN_H
 
 #define noreturn _Noreturn
 

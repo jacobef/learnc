@@ -42,15 +42,34 @@ function lineRange(startLine, endLine) {
         endCol: 1,
     };
 }
+export function executionLimitExplanation(limit) {
+    if (limit.reason === "repeating-loop") {
+        return {
+            title: "Loop cannot reach its stopping condition",
+            status: "non-terminating loop detected",
+            message: "The values that control this loop's exits are repeating, so the loop cannot reach its stopping condition. Check for a missing increment, a value reset inside the loop, or the wrong variable being updated. The stepper is rewound to just before the loop.",
+        };
+    }
+    if (limit.reason === "unreachable-loop-exit") {
+        return {
+            title: "Loop cannot reach its stopping condition",
+            status: "non-terminating loop detected",
+            message: "The counter's update cannot reach this loop's stopping condition. Check its direction, increment size, and comparison. A signed integer counter may eventually overflow instead of ending the loop. The stepper is rewound to just before the loop.",
+        };
+    }
+    return {
+        title: "Program did not finish",
+        status: "program did not finish",
+        message: `The interpreter paused after ${limit.executedSteps.toLocaleString()} steps. The program may need more time, or it may contain an infinite loop or recursion that never reaches a base case. The stepper is moved back so you can inspect the execution.`,
+    };
+}
 export function codeRuntimeIssue(result) {
     if (result.kind !== "ok")
         return null;
     if (result.executionLimit) {
         return {
             kind: "execution-limit",
-            title: "Program did not finish",
-            status: "program did not finish",
-            message: "The interpreter stopped this program because it ran for too many steps. This usually means an infinite loop or recursion that never reaches a base case. The state below is rewound to just before the repeating section.",
+            ...executionLimitExplanation(result.executionLimit),
             tip: "Check whether a loop condition can become false or a recursive call can reach its base case.",
             range: lineRange(result.executionLimit.startLine, result.executionLimit.endLine),
         };

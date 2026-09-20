@@ -68,6 +68,7 @@ impl<'a> Interpreter<'a> {
             self.pointer_value_with_type(self.char_ptr_type(), result_pointer),
             endptr_span,
         )
+        .map(|_| ())
     }
 
     fn write_wcsto_end_pointer(
@@ -110,6 +111,7 @@ impl<'a> Interpreter<'a> {
             self.pointer_value_with_type(self.wchar_ptr_type(), result_pointer),
             endptr_span,
         )
+        .map(|_| ())
     }
 
     pub(super) fn eval_atof_call(
@@ -2487,10 +2489,10 @@ impl<'a> Interpreter<'a> {
             {
                 SignalHandlerState::Ignore
             }
-            ValueData::Function(name) if name.as_ref() == "__codex_sig_dfl" => {
+            ValueData::Function(name) if name.as_ref() == "__cboxes_sig_dfl" => {
                 SignalHandlerState::Default
             }
-            ValueData::Function(name) if name.as_ref() == "__codex_sig_ign" => {
+            ValueData::Function(name) if name.as_ref() == "__cboxes_sig_ign" => {
                 SignalHandlerState::Ignore
             }
             ValueData::Function(name) => SignalHandlerState::Function(name.to_string()),
@@ -3221,9 +3223,12 @@ impl<'a> Interpreter<'a> {
         if let Some(object) = self.fe_dfl_env_binding {
             return Ok(object);
         }
-        let return_ty = self.host_function_return_type("__codex_fe_dfl_env", span.file, span)?;
+        let return_ty = self.host_function_return_type("__cboxes_fe_dfl_env", span.file, span)?;
         let env_ty = return_ty.element_type().cloned().ok_or_else(|| {
-            Diagnostic::error("__codex_fe_dfl_env does not return an fenv_t pointer", span)
+            Diagnostic::error(
+                "__cboxes_fe_dfl_env does not return an fenv_t pointer",
+                span,
+            )
         })?;
         let object = self.allocate_object(
             objects,
@@ -3256,7 +3261,7 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
         let object = self.ensure_fe_dfl_env_binding(objects, span)?;
-        let return_ty = self.host_function_return_type("__codex_fe_dfl_env", span.file, span)?;
+        let return_ty = self.host_function_return_type("__cboxes_fe_dfl_env", span.file, span)?;
         Ok(self.pointer_value_with_type(return_ty, PointerValue::at_object(object)))
     }
 
@@ -3381,7 +3386,7 @@ impl<'a> Interpreter<'a> {
         self.overlay_bytes(&mut new_bytes, 0, &old_bytes[..copy_len]);
         let indeterminate_bytes = new_bytes
             .iter()
-            .filter(|byte| matches!(byte, ByteCell::Indeterminate))
+            .filter(|byte| !matches!(byte, ByteCell::Known(_)))
             .count();
         let object = self.allocate_dynamic_raw_object(objects, size, span, false)?;
         let new_value = StoredValue::ObjectRepresentation(new_bytes);

@@ -476,6 +476,12 @@ impl<'a> Parser<'a> {
         }
 
         if !saw_any {
+            if self.suggest_system_headers
+                && let Some(TokenKind::Identifier(name)) = self.peek_kind(0)
+                && crate::standard_headers::header_for(name).is_some()
+            {
+                return Err(self.undeclared_identifier(name, start));
+            }
             return Err(Diagnostic::error("expected declaration specifiers", start));
         }
         self.validate_decl_specifier_context(storage_class, is_inline, context, start)?;
@@ -521,6 +527,13 @@ impl<'a> Parser<'a> {
         let base_type = if let Some(ty) = direct_type {
             CType::qualified(ty, qualifiers)
         } else {
+            if !builtin.has_any()
+                && self.suggest_system_headers
+                && let Some(TokenKind::Identifier(name)) = self.peek_kind(0)
+                && crate::standard_headers::header_for(name).is_some()
+            {
+                return Err(self.undeclared_identifier(name, self.current_span()));
+            }
             CType::qualified(builtin.finish(type_error_span)?, qualifiers)
         };
         Ok(DeclarationSpecifiers {

@@ -1,5 +1,5 @@
-#ifndef __CODEX_INTTYPES_H
-#define __CODEX_INTTYPES_H
+#ifndef __CBOXES_INTTYPES_H
+#define __CBOXES_INTTYPES_H
 
 #include <stdint.h>
 

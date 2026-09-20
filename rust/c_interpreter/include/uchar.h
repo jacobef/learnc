@@ -1,5 +1,5 @@
-#ifndef __CODEX_UCHAR_H
-#define __CODEX_UCHAR_H
+#ifndef __CBOXES_UCHAR_H
+#define __CBOXES_UCHAR_H
 
 #include <wchar.h>
 #include <stdint.h>

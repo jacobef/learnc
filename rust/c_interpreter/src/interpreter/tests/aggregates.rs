@@ -1,6 +1,112 @@
 use super::*;
 
 #[test]
+fn bit_fields_preserve_known_bits_in_partially_initialized_storage() {
+    let source = r#"
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        struct Bits { signed int x:3; unsigned int y:5; unsigned int z:12; };
+        int main(void) {
+            struct Bits *p=malloc(sizeof *p), *q=malloc(sizeof *q);
+            p->y=19;
+            printf("%u ", p->y);
+            memcpy(q,p,sizeof *p);
+            printf("%u ", q->y);
+            p=realloc(p,2*sizeof *p);
+            printf("%u ", p->y);
+            p->x=-3;
+            p->z=1234;
+            printf("%d %u %u ", p->x,p->y,p->z);
+            struct Bits local;
+            local.y=7;
+            memcpy(q,&local,sizeof local);
+            printf("%u ",q->y);
+            memset(q,255,sizeof *q);
+            q->y=0;
+            printf("%d %u %u",q->x,q->y,q->z);
+            free(p);free(q);
+        }
+    "#;
+    for optimized in [false, true] {
+        let result = run_source_with_options(
+            "test.c",
+            source,
+            &RunOptions {
+                optimizing_precomputations: optimized,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.stdout, "19 19 19 -3 19 1234 7 -1 0 4095");
+    }
+}
+
+#[test]
+fn assigning_one_bit_field_does_not_initialize_its_neighbor() {
+    for setup in [
+        "",
+        "p->y=3;",
+        "p->y=3; struct Bits copy; memcpy(&copy,p,sizeof copy); memcpy(p,&copy,sizeof copy);",
+    ] {
+        let source = format!(
+            "#include <stdlib.h>\n#include <string.h>\nstruct Bits {{ unsigned x:3,y:5; }};\nint main(void) {{ struct Bits *p=malloc(sizeof *p); {setup} unsigned n=p->x; }}\n"
+        );
+        let result = run_source("test.c", &source).unwrap();
+        assert_eq!(
+            result
+                .state
+                .iter()
+                .find(|item| item.name == "n")
+                .unwrap()
+                .value,
+            ""
+        );
+    }
+}
+
+#[test]
+fn bit_field_assignment_expressions_return_the_stored_value() {
+    let source = r#"
+        #include <stdlib.h>
+        struct Bits { unsigned int x : 3; signed int y : 3; };
+        int check(struct Bits *p) {
+            if ((p->x = 9) != 1 || p->x != 1) return 1;
+            if ((p->x += 8) != 1 || p->x != 1) return 2;
+            p->x = 7;
+            if (++p->x != 0 || p->x != 0) return 3;
+            if (p->x-- != 0 || p->x != 7) return 4;
+            if ((p->y = 7) != -1 || p->y != -1) return 5;
+            if ((p->y *= 4) != -4 || p->y != -4) return 6;
+            return 0;
+        }
+        int main(void) {
+            struct Bits local = {0};
+            struct Bits *heap = malloc(sizeof *heap);
+            *heap = (struct Bits){0};
+            int result = check(&local);
+            if (result) return result;
+            result = check(heap);
+            if (result) return result + 10;
+            free(heap);
+            return result;
+        }
+    "#;
+    for optimizing_precomputations in [false, true] {
+        let output = run_source_with_options(
+            "test.c",
+            source,
+            &RunOptions {
+                optimizing_precomputations,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(output.exit_status, 0);
+    }
+}
+
+#[test]
 fn multidimensional_array_zero_index_assignment_preserves_rows() {
     let source = r#"
             #include <stdio.h>
@@ -2086,4 +2192,22 @@ fn multidimensional_array_subscript_cannot_cross_a_row_boundary() {
             }
         "#;
     assert_diagnostic_contains(allocated, "not valid to dereference");
+}
+
+#[test]
+fn initial_member_cast_recovers_the_containing_array_element() {
+    let source = r#"
+        struct S { int a; int b; };
+        int main(void) {
+            struct S s[3] = {{1,2},{3,4},{5,6}};
+            struct S *p = (struct S *)&s[1].a;
+            if (p - s != 1 || p != &s[1]) return 1;
+            if (p[-1].b != 2 || p[1].a != 5) return 2;
+            p--;
+            if (p->b != 2) return 3;
+            p += 3;
+            return p - s != 3;
+        }
+    "#;
+    assert_exit_status(source, 0);
 }

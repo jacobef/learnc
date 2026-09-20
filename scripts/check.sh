@@ -8,8 +8,12 @@ cargo fmt --manifest-path rust/c_interpreter/Cargo.toml --check
 cargo test --manifest-path rust/c_interpreter/Cargo.toml --all-targets
 tsc -p .
 node scripts/test-progress.ts
+node scripts/test-stdin-position.ts
+node scripts/test-sandbox-navigation.ts
 ./scripts/build-c-interpreter-wasm.sh
 tsc -p .
 node scripts/test-c-interpreter-wasm.ts
 node scripts/test-program-state.ts
+node scripts/test-lessons.ts
+node scripts/test-sandbox-execution.ts
 git diff --check

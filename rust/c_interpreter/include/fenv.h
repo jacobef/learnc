@@ -1,12 +1,12 @@
-#ifndef __CODEX_FENV_H
-#define __CODEX_FENV_H
+#ifndef __CBOXES_FENV_H
+#define __CBOXES_FENV_H
 
 typedef unsigned short fexcept_t;
 typedef struct {
     unsigned char __opaque[16];
 } fenv_t;
 
-const fenv_t *__codex_fe_dfl_env(void);
+const fenv_t *__cboxes_fe_dfl_env(void);
 
 #define FE_DIVBYZERO 0x0002
 #define FE_INEXACT 0x0010
@@ -20,7 +20,7 @@ const fenv_t *__codex_fe_dfl_env(void);
 #define FE_TOWARDZERO 0x00C00000
 #define FE_UPWARD 0x00400000
 
-#define FE_DFL_ENV (__codex_fe_dfl_env())
+#define FE_DFL_ENV (__cboxes_fe_dfl_env())
 
 int feclearexcept(int excepts);
 int fegetexceptflag(fexcept_t *flagp, int excepts);

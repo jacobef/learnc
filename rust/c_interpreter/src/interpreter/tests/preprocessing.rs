@@ -1018,3 +1018,63 @@ fn muse_whole_aggregate_copy_may_include_volatile_members() {
         "#;
     assert_diagnostic_contains(hidden_volatile, "volatile-qualified object");
 }
+
+#[test]
+fn standard_headers_must_be_outside_external_declarations() {
+    for source in [
+        "int main(void) {\n#include <stdio.h>\n}\n",
+        "int main(void) {\n#include <stdbool.h>\nreturn 0;\n}\n",
+        "#include <stdio.h>\nint main(void) {\n#include <stdio.h>\n}\n",
+        "#define HEADER <stdio.h>\nint main(void) {\n#include HEADER\n}\n",
+        "int main(void) {\n#include \"stdio.h\"\n}\n",
+        "int\n#include <stdbool.h>\nx;\nint main(void) {}\n",
+        "int main(\n#include <stdbool.h>\nvoid) {}\n",
+        "struct S {\n#include <stdbool.h>\nint x;\n};\nint main(void) {}\n",
+        "#define OPEN {\nint main(void) OPEN\n#include <stdbool.h>\n}\n",
+        "_Static_assert(\n#include <stdbool.h>\n1, \"ok\");\nint main(void) {}\n",
+    ] {
+        let error = run_source("header-placement.c", source).unwrap_err();
+        let rendered = error.render();
+        assert!(
+            rendered.contains("outside functions and other declarations"),
+            "{source}\n{rendered}"
+        );
+        assert!(rendered.contains("#include"), "{rendered}");
+        assert!(rendered.contains("7.1.2p4"), "{rendered}");
+    }
+    for source in [
+        "#include <stdio.h>\n#include <stdio.h>\nint main(void) {}\n",
+        "int f(void) {return 1;}\n#include <stdbool.h>\nint main(void) {return false;}\n",
+        "int main(void) {\n#if 0\n#include <stdio.h>\n#endif\nreturn 0;\n}\n",
+        "int x;\n#include <stdio.h>\nint main(void) {}\n",
+    ] {
+        assert_eq!(
+            run_source("header-placement.c", source)
+                .unwrap()
+                .exit_status,
+            0
+        );
+    }
+}
+
+#[test]
+fn local_textual_includes_can_supply_block_statements() {
+    let project = TestProject::new("block-include-placement");
+    project.write("fragment.h", "int value=7;\n").unwrap();
+    project
+        .write(
+            "main.c",
+            "int main(void) {\n#include \"fragment.h\"\nreturn value;\n}\n",
+        )
+        .unwrap();
+    assert_eq!(run_file(project.path("main.c")).unwrap().exit_status, 7);
+    project
+        .write("fragment.h", "#include <stdbool.h>\nint value=7;\n")
+        .unwrap();
+    let error = run_file(project.path("main.c")).unwrap_err().render();
+    assert!(
+        error.contains("outside functions and other declarations"),
+        "{error}"
+    );
+    assert!(error.contains("fragment.h:1:"), "{error}");
+}

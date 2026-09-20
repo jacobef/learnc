@@ -1279,14 +1279,18 @@ impl<'a> Interpreter<'a> {
         let src_pointer = src.as_pointer(args[1].span())?;
         let (dest_object_id, dest_start, _) =
             self.ensure_library_array_destination(&dest_pointer, size, 1, args[0].span(), objects)?;
-        let _ = self.library_array_region(&src_pointer, size, 1, args[1].span(), objects)?;
-        let (src_object_id, src_start, _) = self.byte_region_from_pointer_bounded_string(
-            &src_pointer,
+        let source =
+            self.read_bounded_c_string_source(src_pointer.clone(), size, args[1].span(), objects)?;
+        let (src_object_id, src_start, _) =
+            self.library_array_region(&src_pointer, source.len(), 1, args[1].span(), objects)?;
+        if self.ranges_overlap_with_sizes(
+            dest_object_id,
+            dest_start,
             size,
-            args[1].span(),
-            objects,
-        )?;
-        if self.ranges_overlap(dest_object_id, dest_start, src_object_id, src_start, size) {
+            src_object_id,
+            src_start,
+            source.len(),
+        ) {
             return Err(Diagnostic::ub(
                 "strncpy source and destination regions overlap",
                 span,
@@ -1335,7 +1339,6 @@ impl<'a> Interpreter<'a> {
             self.checked_usize_from_unsigned_long(count, args[2].span(), "strncat byte count")?;
         let dest_pointer = dest.as_pointer(args[0].span())?;
         let src_pointer = src.as_pointer(args[1].span())?;
-        let _ = self.library_array_region(&src_pointer, size, 1, args[1].span(), objects)?;
         let dest_bytes = self.read_c_string_bytes(dest_pointer.clone(), args[0].span(), objects)?;
         let (src_object_id, src_start, _) = self.byte_region_from_pointer_bounded_string(
             &src_pointer,
@@ -1913,16 +1916,16 @@ impl<'a> Interpreter<'a> {
             .unwrap_or_else(|| {
                 all_bytes
                     .iter()
-                    .filter(|byte| matches!(byte, ByteCell::Indeterminate))
+                    .filter(|byte| !matches!(byte, ByteCell::Known(_)))
                     .count()
             });
         for (index, source) in bytes.into_iter().enumerate() {
             if let Some(destination) = all_bytes.get_mut(start + index) {
                 match (*destination, source) {
-                    (ByteCell::Indeterminate, ByteCell::Known(_)) => {
+                    (ByteCell::Indeterminate | ByteCell::Partial { .. }, ByteCell::Known(_)) => {
                         indeterminate_bytes = indeterminate_bytes.saturating_sub(1);
                     }
-                    (ByteCell::Known(_), ByteCell::Indeterminate) => {
+                    (ByteCell::Known(_), ByteCell::Indeterminate | ByteCell::Partial { .. }) => {
                         indeterminate_bytes = indeterminate_bytes.saturating_add(1);
                     }
                     _ => {}
@@ -1954,7 +1957,7 @@ impl<'a> Interpreter<'a> {
         self.overlay_bytes(&mut all_bytes, start, bytes);
         let indeterminate_bytes = all_bytes
             .iter()
-            .filter(|byte| matches!(byte, ByteCell::Indeterminate))
+            .filter(|byte| !matches!(byte, ByteCell::Known(_)))
             .count();
         let object = self
             .lookup_object_mut(objects, object_id)
@@ -2451,6 +2454,7 @@ impl<'a> Interpreter<'a> {
             objects,
         )?;
         self.store_lvalue(objects, &lvalue, TypedValue::integer(pointee, stored), span)
+            .map(|_| ())
     }
 
     fn normalized_printf_width(&self, width: Option<i32>, flags: &str) -> (usize, bool) {
@@ -5572,7 +5576,7 @@ impl<'a> Interpreter<'a> {
             .errno_binding
             .ok_or_else(|| Diagnostic::error("errno storage is not initialized", span))?;
         let return_ty =
-            self.host_function_return_type("__codex_errno_location", span.file, span)?;
+            self.host_function_return_type("__cboxes_errno_location", span.file, span)?;
         Ok(self.pointer_value_with_type(return_ty, PointerValue::at_object(object)))
     }
 

@@ -1508,9 +1508,18 @@ impl<'a> Interpreter<'a> {
         let width = self.wide_char_byte_width();
         let (dest_object, dest_start, _) =
             self.ensure_library_array_destination(&dest, total, width, args[0].span(), objects)?;
+        let source = self.read_bounded_wide_source(src.clone(), count, args[1].span(), objects)?;
+        let source_size = source.len() * width;
         let (src_object, src_start, _) =
-            self.library_array_region(&src, total, width, args[1].span(), objects)?;
-        if self.ranges_overlap(dest_object, dest_start, src_object, src_start, total) {
+            self.library_array_region(&src, source_size, width, args[1].span(), objects)?;
+        if self.ranges_overlap_with_sizes(
+            dest_object,
+            dest_start,
+            total,
+            src_object,
+            src_start,
+            source_size,
+        ) {
             return Err(Diagnostic::ub(
                 "wcsncpy source and destination regions overlap",
                 span,
@@ -1676,16 +1685,6 @@ impl<'a> Interpreter<'a> {
             self.checked_usize_from_unsigned_long(&evaluated[2], args[2].span(), "wcsncat count")?;
         let dest = evaluated[0].as_pointer(args[0].span())?;
         let src = evaluated[1].as_pointer(args[1].span())?;
-        let bounded_source_size = count
-            .checked_mul(self.wide_char_byte_width())
-            .ok_or_else(|| Diagnostic::error("wcsncat source size is out of range", span))?;
-        let _ = self.library_array_region(
-            &src,
-            bounded_source_size,
-            self.wide_char_byte_width(),
-            args[1].span(),
-            objects,
-        )?;
         let dest_units = self.read_wide_string_units(dest.clone(), args[0].span(), objects)?;
         let src_buffer =
             self.read_bounded_wide_source(src.clone(), count, args[1].span(), objects)?;
@@ -2009,28 +2008,28 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &ObjectFrames,
     ) -> Result<(), Diagnostic> {
-        self.require_exact_call_args("__codex_assert_fail", args, evaluated, 4, span)?;
+        self.require_exact_call_args("__cboxes_assert_fail", args, evaluated, 4, span)?;
         self.check_math_string_arg(
-            "__codex_assert_fail",
+            "__cboxes_assert_fail",
             &evaluated[0],
             args[0].span(),
             objects,
         )?;
         self.check_math_string_arg(
-            "__codex_assert_fail",
+            "__cboxes_assert_fail",
             &evaluated[1],
             args[1].span(),
             objects,
         )?;
-        self.check_library_argument_value(&evaluated[2], args[2].span(), "__codex_assert_fail")?;
+        self.check_library_argument_value(&evaluated[2], args[2].span(), "__cboxes_assert_fail")?;
         if evaluated[2].ty != CType::Int {
             return Err(Diagnostic::error(
-                "__codex_assert_fail requires an int line number",
+                "__cboxes_assert_fail requires an int line number",
                 args[2].span(),
             ));
         }
         self.check_math_string_arg(
-            "__codex_assert_fail",
+            "__cboxes_assert_fail",
             &evaluated[3],
             args[3].span(),
             objects,
@@ -3670,8 +3669,8 @@ impl<'a> Interpreter<'a> {
             "feof" => self.check_ftell_like_call("feof", args, evaluated, span, "7.19.10.2"),
             "ferror" => self.check_ftell_like_call("ferror", args, evaluated, span, "7.19.10.1"),
             "perror" => self.check_perror_call(args, evaluated, span, objects),
-            "__codex_assert_fail" => self.check_assert_fail_call(args, evaluated, span, objects),
-            "__codex_errno_location" => {
+            "__cboxes_assert_fail" => self.check_assert_fail_call(args, evaluated, span, objects),
+            "__cboxes_errno_location" => {
                 self.check_math_helper_nullary_call(function_name, args, evaluated, span)
             }
             "isalnum" | "isalpha" | "isblank" | "iscntrl" | "isdigit" | "isgraph" | "islower"
@@ -3689,8 +3688,8 @@ impl<'a> Interpreter<'a> {
             "abs" => self.check_abs_call("abs", args, evaluated, &CType::Int, span),
             "labs" => self.check_abs_call("labs", args, evaluated, &CType::Long, span),
             "llabs" => self.check_abs_call("llabs", args, evaluated, &CType::LongLong, span),
-            "__codex_mb_cur_max" => {
-                self.check_math_helper_nullary_call("__codex_mb_cur_max", args, evaluated, span)
+            "__cboxes_mb_cur_max" => {
+                self.check_math_helper_nullary_call("__cboxes_mb_cur_max", args, evaluated, span)
             }
             "atof" => self.check_unary_string_call("atof", args, evaluated, span, objects),
             "atoi" | "atol" | "atoll" => {
@@ -3971,7 +3970,7 @@ impl<'a> Interpreter<'a> {
             }
             "signal" => self.check_signal_call(args, evaluated, span),
             "raise" => self.check_raise_call(args, evaluated, span),
-            "__codex_sig_dfl" | "__codex_sig_ign" | "__codex_sig_err" => {
+            "__cboxes_sig_dfl" | "__cboxes_sig_ign" | "__cboxes_sig_err" => {
                 self.check_signal_sentinel_call(function_name, args, evaluated, span)
             }
             "clock" => self.check_math_helper_nullary_call("clock", args, evaluated, span),
@@ -4000,8 +3999,8 @@ impl<'a> Interpreter<'a> {
             "fesetenv" | "feupdateenv" => {
                 self.check_fenv_env_input_call(function_name, args, evaluated, span, objects)
             }
-            "__codex_fe_dfl_env" => {
-                self.check_math_helper_nullary_call("__codex_fe_dfl_env", args, evaluated, span)
+            "__cboxes_fe_dfl_env" => {
+                self.check_math_helper_nullary_call("__cboxes_fe_dfl_env", args, evaluated, span)
             }
             "memcpy" | "memmove" => {
                 self.check_memory_copy_call(function_name, args, evaluated, span, objects)
@@ -4009,7 +4008,7 @@ impl<'a> Interpreter<'a> {
             "memset" => self.check_memset_call(args, evaluated, span, objects),
             "memchr" => self.check_memchr_call(args, evaluated, span, objects),
             "memcmp" => self.check_memcmp_call(args, evaluated, span, objects),
-            "__codex_setjmp" => self.check_setjmp_call(args, evaluated, span, frame, objects),
+            "__cboxes_setjmp" => self.check_setjmp_call(args, evaluated, span, frame, objects),
             "longjmp" => self.check_longjmp_call(args, evaluated, span, objects),
             "strlen" => self.check_strlen_call(args, evaluated, span, objects),
             "strcmp" | "strcoll" | "strspn" | "strcspn" | "strpbrk" | "strstr" => {
@@ -4034,28 +4033,28 @@ impl<'a> Interpreter<'a> {
             _ if Self::is_host_complex_function(function_name) => {
                 self.check_complex_call(function_name, args, evaluated, span)
             }
-            "__codex_math_errhandling"
-            | "__codex_huge_val"
-            | "__codex_huge_valf"
-            | "__codex_huge_vall" => {
+            "__cboxes_math_errhandling"
+            | "__cboxes_huge_val"
+            | "__cboxes_huge_valf"
+            | "__cboxes_huge_vall" => {
                 self.check_math_helper_nullary_call(function_name, args, evaluated, span)
             }
-            "__codex_fpclassify"
-            | "__codex_fpclassifyf"
-            | "__codex_fpclassifyl"
-            | "__codex_isfinite"
-            | "__codex_isinf"
-            | "__codex_isnan"
-            | "__codex_isnormal"
-            | "__codex_isnormalf"
-            | "__codex_isnormall"
-            | "__codex_signbit" => self.check_math_unary_real_call(function_name, args, evaluated),
-            "__codex_isgreater"
-            | "__codex_isgreaterequal"
-            | "__codex_isless"
-            | "__codex_islessequal"
-            | "__codex_islessgreater"
-            | "__codex_isunordered" => {
+            "__cboxes_fpclassify"
+            | "__cboxes_fpclassifyf"
+            | "__cboxes_fpclassifyl"
+            | "__cboxes_isfinite"
+            | "__cboxes_isinf"
+            | "__cboxes_isnan"
+            | "__cboxes_isnormal"
+            | "__cboxes_isnormalf"
+            | "__cboxes_isnormall"
+            | "__cboxes_signbit" => self.check_math_unary_real_call(function_name, args, evaluated),
+            "__cboxes_isgreater"
+            | "__cboxes_isgreaterequal"
+            | "__cboxes_isless"
+            | "__cboxes_islessequal"
+            | "__cboxes_islessgreater"
+            | "__cboxes_isunordered" => {
                 self.check_math_binary_real_call(function_name, args, evaluated)
             }
             "acos" | "acosf" | "acosl" | "asin" | "asinf" | "asinl" | "atan" | "atanf"
@@ -4118,7 +4117,7 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        if function_name != "__codex_errno_location" {
+        if function_name != "__cboxes_errno_location" {
             self.sync_host_errno_to_host(objects)?;
         }
         let _host_runtime_guard = DepthGuard::enter(&mut self.host_library_runtime_depth);
@@ -4213,8 +4212,8 @@ impl<'a> Interpreter<'a> {
             "feof" => self.eval_feof_call(evaluated, args, span),
             "ferror" => self.eval_ferror_call(evaluated, args, span),
             "perror" => self.eval_perror_call(evaluated, args, span, objects),
-            "__codex_assert_fail" => self.eval_assert_fail_call(evaluated, args, span, objects),
-            "__codex_errno_location" => self.eval_errno_location_call(span, objects),
+            "__cboxes_assert_fail" => self.eval_assert_fail_call(evaluated, args, span, objects),
+            "__cboxes_errno_location" => self.eval_errno_location_call(span, objects),
             "isalnum" | "isalpha" | "isblank" | "iscntrl" | "isdigit" | "isgraph" | "islower"
             | "isprint" | "ispunct" | "isspace" | "isupper" | "isxdigit" | "tolower"
             | "toupper" => self.eval_ctype_call(function_name, evaluated, span),
@@ -4250,7 +4249,7 @@ impl<'a> Interpreter<'a> {
                 };
                 Ok(TypedValue::integer(CType::LongLong, result))
             }
-            "__codex_mb_cur_max" => Ok(TypedValue::integer(
+            "__cboxes_mb_cur_max" => Ok(TypedValue::integer(
                 CType::UnsignedLong,
                 host_mb_cur_max() as i128,
             )),
@@ -4420,7 +4419,7 @@ impl<'a> Interpreter<'a> {
             "localeconv" => self.eval_localeconv_call(span, objects),
             "signal" => self.eval_signal_call(evaluated, span),
             "raise" => self.eval_raise_call(evaluated, span, objects),
-            "__codex_sig_dfl" | "__codex_sig_ign" | "__codex_sig_err" => Ok(TypedValue::void()),
+            "__cboxes_sig_dfl" | "__cboxes_sig_ign" | "__cboxes_sig_err" => Ok(TypedValue::void()),
             "clock" => Ok(TypedValue::integer(CType::UnsignedLong, unsafe {
                 clock() as i128
             })),
@@ -4464,14 +4463,14 @@ impl<'a> Interpreter<'a> {
             "feupdateenv" => {
                 self.eval_fesetenv_like_call("feupdateenv", evaluated, args, span, objects)
             }
-            "__codex_fe_dfl_env" => self.eval_fe_dfl_env_call(span, objects),
+            "__cboxes_fe_dfl_env" => self.eval_fe_dfl_env_call(span, objects),
             "memcpy" | "memmove" => {
                 self.eval_memory_copy_call(function_name, evaluated, args, frame, objects)
             }
             "memset" => self.eval_memset_call(evaluated, args, span, objects),
             "memchr" => self.eval_memchr_call(evaluated, args, span, objects),
             "memcmp" => self.eval_memcmp_call(evaluated, args, span, objects),
-            "__codex_setjmp" => self.eval_setjmp_call(evaluated, span, frame, objects),
+            "__cboxes_setjmp" => self.eval_setjmp_call(evaluated, span, frame, objects),
             "longjmp" => self.eval_longjmp_call(evaluated, span, objects),
             "strlen" => self.eval_strlen_call(evaluated, args, span, objects),
             "strcmp" => self.eval_strcmp_call(evaluated, args, span, objects),
@@ -4494,26 +4493,28 @@ impl<'a> Interpreter<'a> {
             _ if Self::is_host_complex_function(function_name) => {
                 self.eval_complex_call(function_name, evaluated, span)
             }
-            "__codex_math_errhandling"
-            | "__codex_huge_val"
-            | "__codex_huge_valf"
-            | "__codex_huge_vall" => self.eval_math_helper_nullary_call(function_name, span),
-            "__codex_fpclassify"
-            | "__codex_fpclassifyf"
-            | "__codex_fpclassifyl"
-            | "__codex_isfinite"
-            | "__codex_isinf"
-            | "__codex_isnan"
-            | "__codex_isnormal"
-            | "__codex_isnormalf"
-            | "__codex_isnormall"
-            | "__codex_signbit" => self.eval_math_unary_helper_call(function_name, evaluated, span),
-            "__codex_isgreater"
-            | "__codex_isgreaterequal"
-            | "__codex_isless"
-            | "__codex_islessequal"
-            | "__codex_islessgreater"
-            | "__codex_isunordered" => {
+            "__cboxes_math_errhandling"
+            | "__cboxes_huge_val"
+            | "__cboxes_huge_valf"
+            | "__cboxes_huge_vall" => self.eval_math_helper_nullary_call(function_name, span),
+            "__cboxes_fpclassify"
+            | "__cboxes_fpclassifyf"
+            | "__cboxes_fpclassifyl"
+            | "__cboxes_isfinite"
+            | "__cboxes_isinf"
+            | "__cboxes_isnan"
+            | "__cboxes_isnormal"
+            | "__cboxes_isnormalf"
+            | "__cboxes_isnormall"
+            | "__cboxes_signbit" => {
+                self.eval_math_unary_helper_call(function_name, evaluated, span)
+            }
+            "__cboxes_isgreater"
+            | "__cboxes_isgreaterequal"
+            | "__cboxes_isless"
+            | "__cboxes_islessequal"
+            | "__cboxes_islessgreater"
+            | "__cboxes_isunordered" => {
                 self.eval_math_binary_helper_call(function_name, evaluated, span)
             }
             "acos" | "acosf" | "acosl" | "asin" | "asinf" | "asinl" | "atan" | "atanf"
@@ -4568,7 +4569,7 @@ impl<'a> Interpreter<'a> {
                 span,
             )),
         };
-        if function_name != "__codex_errno_location" {
+        if function_name != "__cboxes_errno_location" {
             self.sync_host_errno_from_host(objects, span)?;
         }
         result
@@ -4670,6 +4671,7 @@ impl<'a> Interpreter<'a> {
             TypedValue::integer(CType::UnsignedLong, value as i128),
             span,
         )
+        .map(|_| ())
     }
 
     fn check_setjmp_call(
@@ -4680,7 +4682,7 @@ impl<'a> Interpreter<'a> {
         frame: &Frame,
         objects: &ObjectFrames,
     ) -> Result<(), Diagnostic> {
-        self.require_exact_call_args("__codex_setjmp", args, evaluated, 1, span)?;
+        self.require_exact_call_args("__cboxes_setjmp", args, evaluated, 1, span)?;
         let value = &evaluated[0];
         self.check_library_argument_value(value, args[0].span(), "setjmp")?;
         let pointer = self.setjmp_buffer_pointer("setjmp", value, args[0].span())?;

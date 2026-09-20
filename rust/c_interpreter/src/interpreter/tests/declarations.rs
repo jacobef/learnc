@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn multidimensional_parameters_keep_inner_bounds_with_an_unsized_outer_dimension() {
+    for parameter in [
+        "int a[][n]",
+        "int a[2][n]",
+        "int a[n][n]",
+        "int a[static 2][n]",
+        "int (*a)[n]",
+    ] {
+        for optimized in [false, true] {
+            let source = format!(
+                "int f(int n, {parameter}) {{ return a[1][n-1] + sizeof *a; }}\nint main(void) {{ int a[2][3]={{{{0}},{{1,2,3}}}}; return f(3,a)!=15; }}\n"
+            );
+            let result = run_source_with_options(
+                "test.c",
+                &source,
+                &RunOptions {
+                    optimizing_precomputations: optimized,
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+            assert_eq!(result.exit_status, 0, "{source}");
+        }
+    }
+    assert_exit_status(
+        "int f(int n, int m, int a[][n][m]) { return a[1][n-1][m-1]; }\nint main(void) { int a[2][2][3]={0}; a[1][1][2]=9; return f(2,3,a)!=9; }\n",
+        0,
+    );
+}
+
+#[test]
 fn cboxes_state_addresses_follow_x86_64_alignment_and_keep_objects_disjoint() {
     let source = r#"
             int main(void) {

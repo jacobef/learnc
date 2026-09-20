@@ -3,6 +3,15 @@
 use super::*;
 
 impl<'a> Interpreter<'a> {
+    pub(super) fn stdin_position(&self) -> usize {
+        self.host_capture_streams
+            .get(&CaptureStream::Stdin)
+            .and_then(|id| self.host_streams.get(id))
+            .map_or(0, |stream| {
+                stream.position.saturating_sub(stream.pushback.len())
+            })
+    }
+
     pub(super) fn capture_cboxes_main_state_if_needed(
         &mut self,
         block: &Block,
@@ -20,6 +29,15 @@ impl<'a> Interpreter<'a> {
         }
         self.cboxes_main_state = self.cboxes_frame_state(frame, objects, block.span)?;
         Ok(())
+    }
+
+    pub(super) fn trace_cboxes_loop_event(
+        &mut self,
+        span: Span,
+        frame: &Frame,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        self.trace_cboxes_main_event_with_kind(span, frame, objects, "loop")
     }
 
     pub(super) fn trace_cboxes_main_event(
@@ -70,20 +88,7 @@ impl<'a> Interpreter<'a> {
         }
         let (path, start_line, end_line) = self.sources.span_location(span);
         let trace_index = self.cboxes_trace.len();
-        if self.cboxes_expression_result.is_none()
-            && self
-                .cboxes_expression_request
-                .as_ref()
-                .is_some_and(|request| request.event_index == trace_index)
-        {
-            let request = self
-                .cboxes_expression_request
-                .as_ref()
-                .expect("expression request was checked")
-                .clone();
-            self.cboxes_expression_result =
-                Some(self.evaluate_cboxes_expression(&request, frame, objects)?);
-        }
+        self.evaluate_cboxes_expression_at(trace_index, frame, objects)?;
         let skipped_range = skipped_span.map(|skipped_span| {
             let (file, start_line, start_column, end_line, end_column) =
                 self.sources.span_display_range(skipped_span);
@@ -96,6 +101,9 @@ impl<'a> Interpreter<'a> {
             }
         });
         self.cboxes_trace.push(ProgramTraceEvent {
+            stdout_length: self.capture_stream_bytes(CaptureStream::Stdout).len(),
+            stderr_length: self.capture_stream_bytes(CaptureStream::Stderr).len(),
+            stdin_position: self.stdin_position(),
             file: path.display().to_string(),
             start_line: start_line.saturating_sub(1),
             end_line: end_line.saturating_sub(1),
@@ -103,6 +111,37 @@ impl<'a> Interpreter<'a> {
             state: self.cboxes_frame_state(frame, objects, span)?,
             skipped_range,
         });
+        if self
+            .run_options
+            .execution_trace_limit
+            .is_some_and(|limit| self.cboxes_trace.len() >= limit)
+        {
+            return Err(Diagnostic::execution_trace_limit(span));
+        }
+        Ok(())
+    }
+
+    pub(super) fn evaluate_cboxes_expression_at(
+        &mut self,
+        event_index: usize,
+        frame: &Frame,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        if self.cboxes_expression_result.is_none()
+            && self
+                .cboxes_expression_request
+                .as_ref()
+                .is_some_and(|request| request.event_index == event_index)
+        {
+            let request = self
+                .cboxes_expression_request
+                .as_ref()
+                .expect("expression request was checked")
+                .clone();
+            self.cboxes_expression_result =
+                Some(self.evaluate_cboxes_expression(&request, frame, objects)?);
+            return Err(Diagnostic::expression_complete(request.expr.span()));
+        }
         Ok(())
     }
 
@@ -290,9 +329,18 @@ impl<'a> Interpreter<'a> {
         if function.name != "main" || function.body.span == block.span {
             return Ok(());
         }
-        let close = block.span.end.saturating_sub(1).max(block.span.start);
+        self.trace_cboxes_main_scope_close(block.span, frame, objects)
+    }
+
+    pub(super) fn trace_cboxes_main_scope_close(
+        &mut self,
+        span: Span,
+        frame: &Frame,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        let close = span.end.saturating_sub(1).max(span.start);
         self.trace_cboxes_main_event_with_kind(
-            Span::new(block.span.file, close, close.saturating_add(1)),
+            Span::new(span.file, close, close.saturating_add(1)),
             frame,
             objects,
             "block-close",
@@ -311,7 +359,9 @@ impl<'a> Interpreter<'a> {
                 .bindings
                 .iter()
                 .filter(|(name, _)| {
-                    !name.is_empty() && name.as_str() != "__func__" && !name.starts_with("__codex_")
+                    !name.is_empty()
+                        && name.as_str() != "__func__"
+                        && !name.starts_with("__cboxes_")
                 })
                 .map(|(name, object)| (*object, name.as_str())),
         );
@@ -348,7 +398,7 @@ impl<'a> Interpreter<'a> {
             .iter()
             .filter(|definition| {
                 !definition.name.is_empty()
-                    && !definition.name.starts_with("__codex_")
+                    && !definition.name.starts_with("__cboxes_")
                     && !frame.bindings.contains_key(&definition.name)
                     && visible.get(&definition.name).is_some_and(|declaration| {
                         if definition.linkage == Some(Linkage::Internal) {

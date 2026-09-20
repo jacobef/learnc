@@ -245,6 +245,9 @@ function decodeTrace(value: unknown, path: string): CProgramTraceEvent[] {
       "endLine",
       "state",
       "skippedRange",
+      "stdinPosition",
+      "stdoutLength",
+      "stderrLength",
     ]);
     return {
       kind: stringAt(event.kind, `${eventPath}.kind`),
@@ -252,6 +255,9 @@ function decodeTrace(value: unknown, path: string): CProgramTraceEvent[] {
       startLine: nonnegativeIntegerAt(event.startLine, `${eventPath}.startLine`),
       endLine: nonnegativeIntegerAt(event.endLine, `${eventPath}.endLine`),
       state: decodeState(event.state, `${eventPath}.state`),
+      stdinPosition: nonnegativeIntegerAt(event.stdinPosition, `${eventPath}.stdinPosition`),
+      stdoutLength: nonnegativeIntegerAt(event.stdoutLength, `${eventPath}.stdoutLength`),
+      stderrLength: nonnegativeIntegerAt(event.stderrLength, `${eventPath}.stderrLength`),
       skippedRange: decodeSourceRange(
         event.skippedRange,
         `${eventPath}.skippedRange`,
@@ -303,8 +309,16 @@ function decodeExecutionLimit(
     "startLine",
     "endLine",
     "tracePosition",
+    "reason",
+    "executedSteps",
   ]);
+  const reason = stringAt(limit.reason, `${path}.reason`);
+  if (reason !== "repeating-loop" && reason !== "unreachable-loop-exit" && reason !== "step-limit" && reason !== "trace-limit") {
+    return schemaError(`${path}.reason`, "a known execution stop reason");
+  }
   return {
+    reason,
+    executedSteps: nonnegativeIntegerAt(limit.executedSteps, `${path}.executedSteps`),
     file: stringAt(limit.file, `${path}.file`),
     startLine: nonnegativeIntegerAt(limit.startLine, `${path}.startLine`),
     endLine: nonnegativeIntegerAt(limit.endLine, `${path}.endLine`),
@@ -482,7 +496,10 @@ function normalizeProgramResult(
   const keys = [
     "ok",
     "stdout",
+    "stdoutBytes",
+    "stderrBytes",
     "stderr",
+    "stdinPosition",
     "exitStatus",
     "state",
     "trace",
@@ -503,6 +520,9 @@ function normalizeProgramResult(
     executionLimit: decodeExecutionLimit(root.executionLimit, "$.executionLimit"),
     stdout: stringAt(root.stdout, "$.stdout"),
     stderr: stringAt(root.stderr, "$.stderr"),
+    stdinPosition: nonnegativeIntegerAt(root.stdinPosition, "$.stdinPosition"),
+    stdoutBytes: decodeBytes(root.stdoutBytes, "$.stdoutBytes"),
+    stderrBytes: decodeBytes(root.stderrBytes, "$.stderrBytes"),
     exitStatus: numberAt(root.exitStatus, "$.exitStatus"),
     ...implicit,
   };
@@ -595,3 +615,11 @@ export {
   normalizeExpressionResult,
   normalizeProgramResult,
 };
+
+function decodeBytes(value: unknown, path: string): Uint8Array {
+  return Uint8Array.from(arrayAt(value, path).map((byte, index) => {
+    const number = nonnegativeIntegerAt(byte, `${path}[${index}]`);
+    if (number > 255) throw new Error(`Invalid byte at ${path}[${index}]`);
+    return number;
+  }));
+}

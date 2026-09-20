@@ -1,5 +1,5 @@
-#ifndef __CODEX_LOCALE_H
-#define __CODEX_LOCALE_H
+#ifndef __CBOXES_LOCALE_H
+#define __CBOXES_LOCALE_H
 
 #include <stddef.h>
 

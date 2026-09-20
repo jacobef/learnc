@@ -27,10 +27,10 @@ function loadAddressSlots(type, count) {
     const cached = addressSlotsByType.get(type) ?? [];
     if (cached.length >= count)
         return cached;
-    const declarations = Array.from({ length: count }, (_, index) => `${type} __cboxes_address_slot_${index};`).join("\n");
+    const declarations = Array.from({ length: count }, (_, index) => `${type} cboxes_address_slot_${index};`).join("\n");
     const run = runCProgram(declarations);
     const slots = run.kind === "ok"
-        ? run.state.filter((box) => box.name.startsWith("__cboxes_address_slot_"))
+        ? run.state.filter((box) => box.name.startsWith("cboxes_address_slot_"))
         : [];
     addressSlotsByType.set(type, slots);
     return slots;

@@ -20,16 +20,22 @@ mod tests;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SourceDisplay {
-    pub(crate) line_offset: usize,
+    pub(crate) wrapper_line: Option<usize>,
     pub(crate) line_count: usize,
     pub(crate) eof_column: usize,
     pub(crate) normalized_final_newline: bool,
 }
 
 impl SourceDisplay {
+    pub(crate) fn source_line(&self, generated_line: usize) -> usize {
+        generated_line.saturating_sub(usize::from(
+            self.wrapper_line.is_some_and(|line| generated_line > line),
+        ))
+    }
+
     pub(crate) fn unbounded() -> Self {
         Self {
-            line_offset: 0,
+            wrapper_line: None,
             line_count: usize::MAX,
             eof_column: 0,
             normalized_final_newline: false,
@@ -56,9 +62,9 @@ fn cboxes_source_line_count(source: &str) -> usize {
     source.split('\n').count().max(1)
 }
 
-fn cboxes_source_display(source: &str, line_offset: usize) -> SourceDisplay {
+fn cboxes_source_display(source: &str, wrapper_line: Option<usize>) -> SourceDisplay {
     SourceDisplay {
-        line_offset,
+        wrapper_line,
         line_count: cboxes_source_line_count(source),
         eof_column: source.rsplit('\n').next().unwrap_or("").len(),
         normalized_final_newline: !source.is_empty() && !source.ends_with('\n'),
@@ -162,10 +168,21 @@ fn cboxes_prepare_virtual_sources(
     if c_files.is_empty() {
         return Err("the project needs at least one .c file".to_owned());
     }
+    if implicit_main_requested && c_files.len() > 1 {
+        return Err(
+            "Implicit main requires a single .c file. Turn it off to use multiple .c files."
+                .to_owned(),
+        );
+    }
 
     let mut source_display = files
         .iter()
-        .map(|(path, source)| (path.display().to_string(), cboxes_source_display(source, 0)))
+        .map(|(path, source)| {
+            (
+                path.display().to_string(),
+                cboxes_source_display(source, None),
+            )
+        })
         .collect::<HashMap<_, _>>();
 
     for (_, source) in &mut files {
@@ -186,9 +203,10 @@ fn cboxes_prepare_virtual_sources(
     }
     let entry_index = c_files[0];
     let entry_path = files[entry_index].0.display().to_string();
-    files[entry_index].1 = cboxes_wrap_entire_program_in_main(&files[entry_index].1);
+    let (wrapped, wrapper_line) = cboxes_wrap_implicit_main(&files[entry_index].1);
+    files[entry_index].1 = wrapped;
     if let Some(display) = source_display.get_mut(&entry_path) {
-        display.line_offset = 1;
+        display.wrapper_line = Some(wrapper_line);
     }
     Ok((
         files,
@@ -293,8 +311,8 @@ pub extern "C" fn cboxes_last_result_len() -> usize {
     CBOXES_LAST_RESULT_LEN.load(Ordering::Relaxed)
 }
 
-const CBOXES_BRIDGE_SCHEMA_ID: u32 = 1;
-const CBOXES_BRIDGE_HEADER_WORDS: usize = 10;
+const CBOXES_BRIDGE_SCHEMA_ID: u32 = 2;
+const CBOXES_BRIDGE_HEADER_WORDS: usize = 11;
 const CBOXES_BRIDGE_FLAG_IMPLICIT_MAIN: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -333,6 +351,7 @@ struct CboxesBridgeRequest<'a> {
     event_index: usize,
     execution_step_limit: usize,
     execution_trace_following_limit: usize,
+    execution_trace_limit: Option<usize>,
     primary: &'a [u8],
     expression: &'a str,
     stdin: &'a str,
@@ -391,6 +410,7 @@ impl<'a> CboxesBridgeRequest<'a> {
             event_index: word(4) as usize,
             execution_step_limit: word(5).max(1) as usize,
             execution_trace_following_limit: word(6).max(1) as usize,
+            execution_trace_limit: (word(10) != 0).then_some(word(10) as usize),
             primary,
             expression,
             stdin,
@@ -409,6 +429,7 @@ impl<'a> CboxesBridgeRequest<'a> {
             synthetic_address_base: self.synthetic_address_base.into(),
             execution_step_limit: Some(self.execution_step_limit),
             execution_trace_following_limit: self.execution_trace_following_limit,
+            execution_trace_limit: self.execution_trace_limit,
             ..RunOptions::default()
         }
     }
@@ -455,21 +476,22 @@ fn cboxes_execute_source_request(request: &CboxesBridgeRequest<'_>) -> String {
         Err(_) => return cboxes_error_json("compile", "source is not valid UTF-8"),
     };
     let mut source = input.to_owned();
-    let line_offset = if cboxes_has_explicit_main(&source) {
+    let wrapper_line = if cboxes_has_explicit_main(&source) {
         if !source.is_empty() && !source.ends_with('\n') {
             source.push('\n');
         }
-        0
+        None
     } else {
-        source = cboxes_wrap_implicit_main(&source);
-        1
+        let (wrapped, line) = cboxes_wrap_implicit_main(&source);
+        source = wrapped;
+        Some(line)
     };
     let options = request.run_options();
     let result =
         std::panic::catch_unwind(|| run_source_with_options("program.c", source, &options));
     let source_display = HashMap::from([(
         "program.c".to_owned(),
-        cboxes_source_display(input, line_offset),
+        cboxes_source_display(input, wrapper_line),
     )]);
     match result {
         Ok(Ok(result)) => cboxes_bridge_success_json(
@@ -611,39 +633,110 @@ fn cboxes_has_explicit_main(source: &str) -> bool {
     false
 }
 
-fn cboxes_wrap_implicit_main(source: &str) -> String {
-    let mut wrapped = String::with_capacity(source.len() + 32);
-    let mut body_start = 0;
-    for line in source.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            wrapped.push_str(line);
-            body_start += line.len();
-        } else {
+/// Keep complete leading directives/comments at file scope, without splitting
+/// a block comment, a continued directive, or a conditional preprocessing group.
+fn cboxes_preamble_end(source: &str) -> usize {
+    let mut lines = source.split_inclusive('\n');
+    let mut consumed = 0;
+    let mut preamble_end = 0;
+    let mut block_comment = false;
+    let mut conditional_depth = 0usize;
+    while let Some(line) = lines.next() {
+        let mut logical = String::new();
+        let mut physical = line;
+        loop {
+            consumed += physical.len();
+            if let Some(prefix) = physical
+                .strip_suffix("\\\n")
+                .or_else(|| physical.strip_suffix("\\\r\n"))
+            {
+                logical.push_str(prefix);
+                if let Some(next) = lines.next() {
+                    physical = next;
+                    continue;
+                }
+            } else {
+                logical.push_str(physical);
+            }
             break;
         }
+        let bytes = logical.as_bytes();
+        let mut visible = String::new();
+        let mut quote = None;
+        let mut index = 0;
+        while index < bytes.len() {
+            if block_comment {
+                if bytes[index..].starts_with(b"*/") {
+                    block_comment = false;
+                    index += 2;
+                    visible.push(' ');
+                } else {
+                    index += 1;
+                }
+            } else if let Some(delimiter) = quote {
+                if bytes[index] == b'\\' {
+                    index += 2;
+                } else {
+                    if bytes[index] == delimiter {
+                        quote = None;
+                    }
+                    index += 1;
+                }
+            } else if bytes[index..].starts_with(b"//") {
+                break;
+            } else if bytes[index..].starts_with(b"/*") {
+                block_comment = true;
+                index += 2;
+                visible.push(' ');
+            } else {
+                let byte = bytes[index];
+                visible.push(byte as char);
+                if matches!(byte, b'"' | b'\'') {
+                    quote = Some(byte);
+                }
+                index += 1;
+            }
+        }
+        let visible = visible.trim();
+        if let Some(directive) = visible
+            .strip_prefix('#')
+            .or_else(|| visible.strip_prefix("%:"))
+        {
+            let keyword = directive
+                .trim_start()
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or("");
+            match keyword {
+                "if" | "ifdef" | "ifndef" => conditional_depth += 1,
+                "endif" => conditional_depth = conditional_depth.saturating_sub(1),
+                _ => {}
+            }
+        } else if !visible.is_empty() {
+            break;
+        }
+        if !block_comment && conditional_depth == 0 {
+            preamble_end = consumed;
+        }
     }
+    preamble_end
+}
+
+fn cboxes_wrap_implicit_main(source: &str) -> (String, usize) {
+    let body_start = cboxes_preamble_end(source);
+    let mut wrapped = String::with_capacity(source.len() + 32);
+    wrapped.push_str(&source[..body_start]);
     if body_start != 0 && !wrapped.ends_with('\n') {
         wrapped.push('\n');
     }
+    let wrapper_line = wrapped.bytes().filter(|byte| *byte == b'\n').count();
     wrapped.push_str("int main(void) {\n");
     wrapped.push_str(&source[body_start..]);
     if !wrapped.ends_with('\n') {
         wrapped.push('\n');
     }
     wrapped.push_str("return 0;\n}\n");
-    wrapped
-}
-
-fn cboxes_wrap_entire_program_in_main(source: &str) -> String {
-    let mut wrapped = String::with_capacity(source.len() + 32);
-    wrapped.push_str("int main(void) {\n");
-    wrapped.push_str(source);
-    if !wrapped.ends_with('\n') {
-        wrapped.push('\n');
-    }
-    wrapped.push_str("return 0;\n}\n");
-    wrapped
+    (wrapped, wrapper_line)
 }
 
 fn cboxes_store_json(json: String) -> *mut u8 {

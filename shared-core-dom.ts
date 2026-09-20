@@ -26,6 +26,7 @@ export interface NavItem {
   label: string;
 }
 interface RenderCodePaneOptions {
+  nextRange?: { start: number; end: number };
   progress?: boolean;
   progressIndex?: number;
   progressRange?: [number, number] | { start: number; end: number };
@@ -348,6 +349,7 @@ function renderCodePane(
 ) {
   clearNode(root);
   const code = el('<div class="codecol"></div>');
+  const nextRange = opts.nextRange ? normalizeLineRange(opts.nextRange, Math.max(0, lines.length - 1)) : null;
   if (opts.progress) code.classList.add("has-progress");
   if (opts.boundaryTargets) code.classList.add("boundary-targets");
   root.appendChild(code);
@@ -486,6 +488,7 @@ function renderCodePane(
       src.textContent = rawLine;
     }
     if (i < doneBoundary) lr.classList.add("done");
+    if (nextRange && i >= nextRange[0] && i <= nextRange[1]) lr.classList.add("is-next");
     const inProgressRange =
       progressRangeStart !== null &&
       progressRangeEnd !== null &&

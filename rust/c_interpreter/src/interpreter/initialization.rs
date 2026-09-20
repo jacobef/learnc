@@ -100,9 +100,9 @@ impl<'a> Interpreter<'a> {
         &mut self,
         objects: &mut ObjectFrames,
     ) -> Result<(), Diagnostic> {
-        self.initialize_standard_stream_binding("__codex_stdin", CaptureStream::Stdin, objects)?;
-        self.initialize_standard_stream_binding("__codex_stdout", CaptureStream::Stdout, objects)?;
-        self.initialize_standard_stream_binding("__codex_stderr", CaptureStream::Stderr, objects)?;
+        self.initialize_standard_stream_binding("__cboxes_stdin", CaptureStream::Stdin, objects)?;
+        self.initialize_standard_stream_binding("__cboxes_stdout", CaptureStream::Stdout, objects)?;
+        self.initialize_standard_stream_binding("__cboxes_stderr", CaptureStream::Stderr, objects)?;
         Ok(())
     }
 
@@ -111,12 +111,12 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<(), Diagnostic> {
         if self
-            .lookup_global_binding("__codex_signgam", FileId(0))
+            .lookup_global_binding("__cboxes_signgam", FileId(0))
             .is_some()
         {
             return Ok(());
         }
-        let Some(decl) = self.declared_globals.get("__codex_signgam").cloned() else {
+        let Some(decl) = self.declared_globals.get("__cboxes_signgam").cloned() else {
             return Ok(());
         };
         let object = self.allocate_object(
@@ -134,7 +134,7 @@ impl<'a> Interpreter<'a> {
             state.value = zero;
         }
         self.global_bindings
-            .insert("__codex_signgam".to_owned(), object);
+            .insert("__cboxes_signgam".to_owned(), object);
         self.signgam_binding = Some(object);
         Ok(())
     }
@@ -777,17 +777,11 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    pub(super) fn capture_stream_contents(
-        &mut self,
-        capture: CaptureStream,
-    ) -> Result<String, Diagnostic> {
-        let Some(object) = self.host_capture_streams.get(&capture).copied() else {
-            return Ok(String::new());
-        };
-        let Some(stream) = self.host_streams.get(&object) else {
-            return Ok(String::new());
-        };
-        Ok(String::from_utf8_lossy(&stream.captured).into_owned())
+    pub(super) fn capture_stream_bytes(&self, capture: CaptureStream) -> &[u8] {
+        self.host_capture_streams
+            .get(&capture)
+            .and_then(|object| self.host_streams.get(object))
+            .map_or(&[], |stream| stream.captured.as_slice())
     }
 
     pub(super) fn initialize_declared_object(
@@ -961,7 +955,7 @@ impl<'a> Interpreter<'a> {
             },
             Expr::Call {
                 callee, args, span, ..
-            } if matches!(callee.as_ref(), Expr::Variable(name, _) if matches!(name.as_str(), "__codex_cmplxf" | "__codex_cmplx" | "__codex_cmplxl"))
+            } if matches!(callee.as_ref(), Expr::Variable(name, _) if matches!(name.as_str(), "__cboxes_cmplxf" | "__cboxes_cmplx" | "__cboxes_cmplxl"))
                 && args.len() == 2 =>
             {
                 for argument in args {
@@ -2657,21 +2651,14 @@ impl<'a> Interpreter<'a> {
                     for (index, slot) in dst.iter_mut().enumerate() {
                         let mask = ((field_mask >> (index * 8)) & 0xff) as u8;
                         let bits = ((encoded >> (index * 8)) & 0xff) as u8;
-                        *slot = match *slot {
-                            ByteCell::Known(existing) => {
-                                ByteCell::Known((existing & !mask) | (bits & mask))
-                            }
-                            ByteCell::Indeterminate if mask == 0xff => ByteCell::Known(bits),
-                            ByteCell::Indeterminate => ByteCell::Indeterminate,
-                        };
+                        *slot = slot.write_bits(bits, mask);
                     }
                 }
                 _ => {
                     let field_mask = self.integer_mask(width as u32) << member.bit_offset;
                     for (index, slot) in dst.iter_mut().enumerate() {
-                        if ((field_mask >> (index * 8)) & 0xff) != 0 {
-                            *slot = ByteCell::Indeterminate;
-                        }
+                        let mask = ((field_mask >> (index * 8)) & 0xff) as u8;
+                        *slot = slot.forget_bits(mask);
                     }
                 }
             }
@@ -3195,7 +3182,7 @@ impl<'a> Interpreter<'a> {
         bytes.iter()
             .map(|byte| match byte {
                 ByteCell::Known(byte) => Ok(*byte),
-                ByteCell::Indeterminate => Err(Diagnostic::ub(
+                ByteCell::Indeterminate | ByteCell::Partial { .. } => Err(Diagnostic::ub(
                     "read of an indeterminate value with a potentially invalid object representation",
                     span,
                     Some("6.2.6.1p5-6"),
@@ -3314,28 +3301,39 @@ impl<'a> Interpreter<'a> {
         let Some(width) = member.bit_width else {
             return self.deserialize_stored_value(&member.ty, bytes, span);
         };
+        self.deserialize_bit_field_value(
+            &member.ty,
+            width,
+            usize::from(member.bit_offset),
+            bytes,
+            span,
+        )
+    }
+
+    pub(super) fn deserialize_bit_field_value(
+        &self,
+        ty: &CType,
+        width: u8,
+        bit_offset: usize,
+        bytes: &[ByteCell],
+        span: Span,
+    ) -> Result<StoredValue, Diagnostic> {
         if width == 0 {
-            return Ok(StoredValue::Scalar(TypedValue::integer(
-                member.ty.clone(),
-                0,
-            )));
-        }
-        if bytes
-            .iter()
-            .any(|byte| matches!(byte, ByteCell::Indeterminate))
-        {
-            return Ok(StoredValue::Indeterminate);
+            return Ok(StoredValue::Scalar(TypedValue::integer(ty.clone(), 0)));
         }
         let mut raw = 0u128;
+        let field_mask = self.integer_mask(width as u32) << bit_offset;
         for (index, byte) in bytes.iter().enumerate() {
-            let ByteCell::Known(byte) = byte else {
-                unreachable!();
-            };
-            raw |= (*byte as u128) << (index * 8);
+            let (value, known) = byte.parts();
+            let needed = ((field_mask >> (index * 8)) & 0xff) as u8;
+            if known & needed != needed {
+                return Ok(StoredValue::Indeterminate);
+            }
+            raw |= (value as u128) << (index * 8);
         }
         let mask = self.integer_mask(width as u32);
-        let field_bits = (raw >> member.bit_offset) & mask;
-        let value = if matches!(member.ty.unqualified(), CType::Bool) {
+        let field_bits = (raw >> bit_offset) & mask;
+        let value = if matches!(ty.unqualified(), CType::Bool) {
             if field_bits > 1 {
                 return Err(Diagnostic::ub(
                     "read of an indeterminate _Bool with a potentially invalid object representation",
@@ -3344,7 +3342,7 @@ impl<'a> Interpreter<'a> {
                 ));
             }
             field_bits as i128
-        } else if member.ty.is_unsigned_integer() {
+        } else if ty.is_unsigned_integer() {
             field_bits as i128
         } else {
             let sign_bit = 1u128 << (width - 1);
@@ -3354,10 +3352,7 @@ impl<'a> Interpreter<'a> {
                 field_bits as i128
             }
         };
-        Ok(StoredValue::Scalar(TypedValue::integer(
-            member.ty.clone(),
-            value,
-        )))
+        Ok(StoredValue::Scalar(TypedValue::integer(ty.clone(), value)))
     }
 
     fn deserialize_scalar_value(
@@ -3366,10 +3361,7 @@ impl<'a> Interpreter<'a> {
         bytes: &[ByteCell],
         span: Span,
     ) -> Result<StoredValue, Diagnostic> {
-        if bytes
-            .iter()
-            .any(|byte| matches!(byte, ByteCell::Indeterminate))
-        {
+        if bytes.iter().any(|byte| !matches!(byte, ByteCell::Known(_))) {
             return Ok(StoredValue::Scalar(TypedValue::object_representation(
                 ty.clone(),
                 bytes.to_vec(),
@@ -3379,7 +3371,7 @@ impl<'a> Interpreter<'a> {
             CType::Bool => {
                 let byte = match bytes[0] {
                     ByteCell::Known(byte) => byte,
-                    ByteCell::Indeterminate => unreachable!(),
+                    ByteCell::Indeterminate | ByteCell::Partial { .. } => unreachable!(),
                 };
                 if byte > 1 {
                     return Ok(StoredValue::Scalar(TypedValue::object_representation(

@@ -12,6 +12,7 @@ export interface CSourceFile {
 export interface CExecutionBudget {
   stepLimit: number;
   followingTraceLimit: number;
+  traceLimit?: number;
 }
 
 interface CImplicitMainResult {
@@ -28,7 +29,10 @@ export type CProgramResult = (
       blocked: CProgramBlocked | null;
       executionLimit: CProgramExecutionLimit | null;
       stdout: string;
+      stdoutBytes: Uint8Array;
+      stderrBytes: Uint8Array;
       stderr: string;
+      stdinPosition: number;
       exitStatus: number;
     }
   | { kind: "compile" | "ub"; diagnostic: ProgramDiagnostic }
@@ -36,6 +40,9 @@ export type CProgramResult = (
   CImplicitMainResult;
 
 export interface CProgramTraceEvent {
+  stdoutLength: number;
+  stderrLength: number;
+  stdinPosition: number;
   kind: string;
   file: string;
   startLine: number;
@@ -66,6 +73,8 @@ export interface CProgramBlocked {
 }
 
 export interface CProgramExecutionLimit {
+  reason: "repeating-loop" | "unreachable-loop-exit" | "step-limit" | "trace-limit";
+  executedSteps: number;
   file: string;
   startLine: number;
   endLine: number;

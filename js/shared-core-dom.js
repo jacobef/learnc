@@ -223,6 +223,7 @@ function normalizeLineRange(range, maxIndex) {
 function renderCodePane(root, lines, boundary, opts = {}) {
     clearNode(root);
     const code = el('<div class="codecol"></div>');
+    const nextRange = opts.nextRange ? normalizeLineRange(opts.nextRange, Math.max(0, lines.length - 1)) : null;
     if (opts.progress)
         code.classList.add("has-progress");
     if (opts.boundaryTargets)
@@ -359,6 +360,8 @@ function renderCodePane(root, lines, boundary, opts = {}) {
         }
         if (i < doneBoundary)
             lr.classList.add("done");
+        if (nextRange && i >= nextRange[0] && i <= nextRange[1])
+            lr.classList.add("is-next");
         const inProgressRange = progressRangeStart !== null &&
             progressRangeEnd !== null &&
             i >= progressRangeStart &&

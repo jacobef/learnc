@@ -76,6 +76,8 @@ pub struct DiagnosticDisplayRange {
 enum DiagnosticControl {
     Blocked(&'static str),
     ExecutionStepLimit,
+    ExecutionTraceLimit,
+    ExpressionComplete,
 }
 
 impl Diagnostic {
@@ -120,7 +122,7 @@ impl Diagnostic {
     pub fn blocked_info(&self) -> Option<(&'static str, Span)> {
         match self.data.control? {
             DiagnosticControl::Blocked(function_name) => Some((function_name, self.data.span?)),
-            DiagnosticControl::ExecutionStepLimit => None,
+            _ => None,
         }
     }
 
@@ -136,6 +138,33 @@ impl Diagnostic {
             Some(DiagnosticControl::ExecutionStepLimit)
         )
         .then_some(self.data.span?)
+    }
+
+    pub fn execution_trace_limit(span: Span) -> Self {
+        let mut diagnostic = Self::error("execution trace page complete", span);
+        diagnostic.data.control = Some(DiagnosticControl::ExecutionTraceLimit);
+        diagnostic
+    }
+
+    pub fn execution_trace_limit_span(&self) -> Option<Span> {
+        matches!(
+            self.data.control,
+            Some(DiagnosticControl::ExecutionTraceLimit)
+        )
+        .then_some(self.data.span?)
+    }
+
+    pub fn expression_complete(span: Span) -> Self {
+        let mut diagnostic = Self::error("expression evaluation complete", span);
+        diagnostic.data.control = Some(DiagnosticControl::ExpressionComplete);
+        diagnostic
+    }
+
+    pub fn is_expression_complete(&self) -> bool {
+        matches!(
+            self.data.control,
+            Some(DiagnosticControl::ExpressionComplete)
+        )
     }
 
     #[cfg(test)]

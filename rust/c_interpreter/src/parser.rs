@@ -186,13 +186,14 @@ pub struct Parser<'a> {
     block_scopes: Vec<HashMap<String, ScopeEntry>>,
     block_linkage_declarations: Vec<ExternalDeclaration>,
     allow_undeclared_identifiers: bool,
+    suggest_system_headers: bool,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(sources: &'a SourceManager, tokens: Vec<Token>) -> Self {
         let mut file_scope = HashMap::new();
         file_scope.insert(
-            "va_list".to_owned(),
+            "__cboxes_va_list".to_owned(),
             ScopeEntry {
                 ordinary: None,
                 ordinary_ty: None,
@@ -219,19 +220,63 @@ impl<'a> Parser<'a> {
             block_scopes: Vec::new(),
             block_linkage_declarations: Vec::new(),
             allow_undeclared_identifiers: false,
+            suggest_system_headers: true,
+        }
+    }
+
+    fn parse_externals(&mut self) -> Result<Vec<ExternalDeclaration>, Diagnostic> {
+        let mut externals = Vec::new();
+        while !self.at(TokenKind::Eof) {
+            let start = self.current_span();
+            let parsed = if self.at_keyword(Keyword::StaticAssert) {
+                self.parse_static_assertion()
+            } else {
+                self.parse_external_declaration(&mut externals)
+            };
+            let end = if parsed.is_ok() {
+                self.prev_span().end
+            } else {
+                self.current_span().end
+            };
+            let includes = &self.sources.file(start.file).standard_header_includes;
+            let next_include = includes.partition_point(|include| include.offset <= start.start);
+            if let Some(include) = includes
+                .get(next_include)
+                .filter(|include| include.offset < end)
+            {
+                return Err(Diagnostic::error(
+                    format!("include <{}> outside functions and other declarations", include.name),
+                    include.directive,
+                ).with_note("C11 7.1.2p4 requires standard library headers to be included outside any external declaration or definition. Move this #include to the top of the file."));
+            }
+            parsed?;
+        }
+        externals.append(&mut self.block_linkage_declarations);
+        Ok(externals)
+    }
+
+    pub(crate) fn parse_header_identifiers(mut self) -> Result<Vec<String>, Diagnostic> {
+        // Do not recursively build the suggestion inventory if a bundled header
+        // itself has an error. Inventory completeness is checked separately.
+        self.suggest_system_headers = false;
+        self.parse_externals()?;
+        Ok(self
+            .file_scope
+            .into_keys()
+            .chain(self.file_tags.into_keys())
+            .collect())
+    }
+
+    fn undeclared_identifier(&self, name: &str, span: Span) -> Diagnostic {
+        if self.suggest_system_headers {
+            crate::standard_headers::undeclared_identifier(name, span)
+        } else {
+            Diagnostic::error(format!("use of undeclared identifier {name}"), span)
         }
     }
 
     pub fn parse_translation_unit(mut self) -> Result<TranslationUnit, Diagnostic> {
-        let mut externals = Vec::new();
-        while !self.at(TokenKind::Eof) {
-            if self.at_keyword(Keyword::StaticAssert) {
-                self.parse_static_assertion()?;
-                continue;
-            }
-            self.parse_external_declaration(&mut externals)?;
-        }
-        externals.append(&mut self.block_linkage_declarations);
+        let externals = self.parse_externals()?;
         Ok(TranslationUnit {
             externals,
             functions: Vec::new(),
@@ -253,10 +298,17 @@ impl<'a> Parser<'a> {
     }
 
     fn is_builtin_identifier(&self, name: &str) -> bool {
-        matches!(
-            name,
-            "va_start" | "va_end" | "va_copy" | "va_arg" | "__builtin_offsetof"
-        )
+        name == "__builtin_offsetof"
+            || (matches!(name, "va_start" | "va_end" | "va_copy" | "va_arg")
+                && self.stdarg_is_available(self.current_span()))
+    }
+
+    fn stdarg_is_available(&self, span: Span) -> bool {
+        self.sources
+            .file(span.file)
+            .standard_header_includes
+            .iter()
+            .any(|include| include.name == "stdarg.h" && include.offset <= span.start)
     }
 
     fn is_attribute_name(kind: Option<&TokenKind>) -> bool {
@@ -473,94 +525,25 @@ impl<'a> Parser<'a> {
         self.peek_kind(0) == Some(&TokenKind::LParen) && self.starts_type_name_at(1)
     }
 
-    fn starts_declaration_specifier_at(&self, mut offset: usize) -> bool {
-        offset = self.skip_gnu_attributes_at_offset(offset);
-        loop {
-            if self.peek_kind(offset) == Some(&TokenKind::Keyword(Keyword::Atomic))
-                && self.peek_kind(offset + 1) == Some(&TokenKind::LParen)
-            {
-                break;
-            }
-            if matches!(
-                self.peek_kind(offset),
-                Some(TokenKind::Keyword(
-                    Keyword::Auto
-                        | Keyword::Atomic
-                        | Keyword::Const
-                        | Keyword::Extern
-                        | Keyword::Inline
-                        | Keyword::Noreturn
-                        | Keyword::Register
-                        | Keyword::Restrict
-                        | Keyword::Static
-                        | Keyword::Typedef
-                        | Keyword::Volatile
-                ))
-            ) {
-                offset += 1;
-                continue;
-            }
-            if self.peek_kind(offset) == Some(&TokenKind::Keyword(Keyword::Alignas))
-                && self.peek_kind(offset + 1) == Some(&TokenKind::LParen)
-            {
-                offset += 2;
-                let mut depth = 1usize;
-                while let Some(kind) = self.peek_kind(offset) {
-                    match kind {
-                        TokenKind::LParen => depth += 1,
-                        TokenKind::RParen => {
-                            depth -= 1;
-                            if depth == 0 {
-                                offset += 1;
-                                break;
-                            }
-                        }
-                        TokenKind::Eof => break,
-                        _ => {}
-                    }
-                    offset += 1;
-                }
-                continue;
-            }
-            break;
-        }
+    fn starts_declaration_specifier_at(&self, offset: usize) -> bool {
+        let offset = self.skip_gnu_attributes_at_offset(offset);
         matches!(
             self.peek_kind(offset),
             Some(TokenKind::Keyword(
-                Keyword::Bool
-                    | Keyword::Atomic
-                    | Keyword::Complex
-                    | Keyword::Double
-                    | Keyword::Char
-                    | Keyword::Enum
-                    | Keyword::Float
-                    | Keyword::Int
-                    | Keyword::Long
-                    | Keyword::Short
-                    | Keyword::Signed
-                    | Keyword::Struct
-                    | Keyword::Unsigned
-                    | Keyword::Union
-                    | Keyword::Void
+                Keyword::Auto
+                    | Keyword::Extern
+                    | Keyword::Inline
+                    | Keyword::Noreturn
+                    | Keyword::Register
+                    | Keyword::Static
+                    | Keyword::Typedef
+                    | Keyword::Alignas
             ))
-        ) || matches!(
-            self.peek_kind(offset),
-            Some(TokenKind::Identifier(name)) if self.lookup_typedef_name(name).is_some()
-        )
+        ) || self.starts_type_name_at(offset)
     }
 
-    fn starts_type_name_at(&self, mut offset: usize) -> bool {
-        offset = self.skip_gnu_attributes_at_offset(offset);
-        while matches!(
-            self.peek_kind(offset),
-            Some(TokenKind::Keyword(
-                Keyword::Atomic | Keyword::Const | Keyword::Restrict | Keyword::Volatile
-            ))
-        ) && !(self.peek_kind(offset) == Some(&TokenKind::Keyword(Keyword::Atomic))
-            && self.peek_kind(offset + 1) == Some(&TokenKind::LParen))
-        {
-            offset += 1;
-        }
+    fn starts_type_name_at(&self, offset: usize) -> bool {
+        let offset = self.skip_gnu_attributes_at_offset(offset);
         matches!(
             self.peek_kind(offset),
             Some(TokenKind::Keyword(
@@ -579,11 +562,12 @@ impl<'a> Parser<'a> {
                     | Keyword::Unsigned
                     | Keyword::Union
                     | Keyword::Void
+                    | Keyword::Const
+                    | Keyword::Restrict
+                    | Keyword::Volatile
             ))
-        ) || matches!(
-            self.peek_kind(offset),
-            Some(TokenKind::Identifier(name)) if self.lookup_typedef_name(name).is_some()
-        )
+        ) || matches!(self.peek_kind(offset),
+            Some(TokenKind::Identifier(name)) if self.lookup_typedef_name(name).is_some())
     }
 
     fn validate_decl_specifier_context(
@@ -1068,6 +1052,13 @@ impl<'a> Parser<'a> {
             Ok(token)
         } else {
             let token = &self.tokens[self.index];
+            if self.suggest_system_headers
+                && let TokenKind::Identifier(name) = &token.kind
+                && !self.identifier_is_visible(name)
+                && crate::standard_headers::header_for(name).is_some()
+            {
+                return Err(self.undeclared_identifier(name, token.span));
+            }
             if kind == TokenKind::Semicolon
                 && let Some(previous) = self.tokens.get(self.index.saturating_sub(1))
             {

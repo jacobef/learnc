@@ -615,7 +615,7 @@ fn printf_requires_stdio_header() {
             }
 
         "#;
-    assert_diagnostic_contains(source, "use of undeclared identifier printf");
+    assert_diagnostic_contains(source, "#include <stdio.h>");
 }
 
 #[test]
@@ -1460,4 +1460,26 @@ fn printf_percent_s_accepts_all_three_character_types() {
             }
         "#;
     assert_stdout(source, "plain signed unsigned\n");
+}
+
+#[test]
+fn bounded_string_copies_still_reject_invalid_accesses() {
+    for body in [
+        "char s[3]; strncpy(s, \"a\", 4);",
+        "char s[8]; char t[2]={'a','b'}; strncpy(s,t,4);",
+        "char s[8]=\"ab\"; strncpy(s+1,s,4);",
+        "char s[2]=\"a\"; strncat(s,\"b\",4);",
+        "char s[8]=\"a\"; char t[2]={'b','c'}; strncat(s,t,4);",
+        "wchar_t s[3]; wcsncpy(s,L\"a\",4);",
+        "wchar_t s[8]; wchar_t t[2]={L'a',L'b'}; wcsncpy(s,t,4);",
+        "wchar_t s[8]=L\"ab\"; wcsncpy(s+1,s,4);",
+        "wchar_t s[2]=L\"a\"; wcsncat(s,L\"b\",4);",
+    ] {
+        let source = format!("#include <string.h>\n#include <wchar.h>\nint main(void){{{body}}}\n");
+        let rendered = rendered_diagnostic(&source);
+        assert!(
+            rendered.contains("undefined behavior"),
+            "{body}: {rendered}"
+        );
+    }
 }

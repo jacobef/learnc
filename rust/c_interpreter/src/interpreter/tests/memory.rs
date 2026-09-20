@@ -2761,7 +2761,7 @@ fn malloc_requires_stdlib_header() {
             }
 
         "#;
-    assert_diagnostic_contains(source, "use of undeclared identifier malloc");
+    assert_diagnostic_contains(source, "#include <stdlib.h>");
 }
 
 #[test]
@@ -2775,7 +2775,7 @@ fn memcpy_requires_string_header() {
             }
 
         "#;
-    assert_diagnostic_contains(source, "use of undeclared identifier memcpy");
+    assert_diagnostic_contains(source, "#include <string.h>");
 }
 
 #[test]
@@ -2787,7 +2787,7 @@ fn free_requires_stdlib_header() {
             }
 
         "#;
-    assert_diagnostic_contains(source, "use of undeclared identifier free");
+    assert_diagnostic_contains(source, "#include <stdlib.h>");
 }
 
 #[test]

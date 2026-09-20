@@ -2,13 +2,14 @@ import { pageSyntheticAddressBase } from "./shared-c-address-space.js";
 import { encodeSourceFiles, invokeCInterpreter, resetCInterpreterBridge, } from "./shared-c-wasm-bridge.js";
 import { crashExpressionDiagnostic, crashProgramDiagnostic, interpreterDiagnosticFile, normalizeExpressionResult, normalizeProgramResult, } from "./shared-c-result-normalization.js";
 const DEFAULT_EXECUTION_BUDGET = {
-    stepLimit: 10000,
+    stepLimit: 100000,
     followingTraceLimit: 256,
 };
 function normalizeExecutionBudget(budget) {
     return {
         stepLimit: Math.max(1, Math.floor(budget.stepLimit)),
         followingTraceLimit: Math.max(1, Math.floor(budget.followingTraceLimit)),
+        traceLimit: budget.traceLimit == null ? undefined : Math.max(1, Math.floor(budget.traceLimit)),
     };
 }
 export function runCProgram(source, addressBase = pageSyntheticAddressBase, stdin = "") {
@@ -60,7 +61,7 @@ export function evaluateCExpression(source, eventIndex, expression, addressBase 
             expression,
             stdin,
             syntheticAddressBase: addressBase,
-            eventIndex: Math.max(0, Math.floor(eventIndex)),
+            eventIndex: Math.max(-1, Math.floor(eventIndex)),
             executionBudget: DEFAULT_EXECUTION_BUDGET,
         });
         return normalizeExpressionResult(parsed, expression);
@@ -80,7 +81,7 @@ export function evaluateCExpressionFiles(files, eventIndex, expression, addressB
             expression,
             stdin,
             syntheticAddressBase: addressBase,
-            eventIndex: Math.max(0, Math.floor(eventIndex)),
+            eventIndex: Math.max(-1, Math.floor(eventIndex)),
             implicitMain,
             executionBudget: budget,
         });

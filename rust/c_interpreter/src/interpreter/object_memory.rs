@@ -1439,25 +1439,7 @@ impl<'a> Interpreter<'a> {
             {
                 let effective_ty = lvalue.ty.clone();
                 self.record_restrict_access(&lvalue, &effective_ty, false, span, objects)?;
-                let mut loaded = self.load_raw_byte_lvalue(&lvalue, span, objects)?;
-                if let Some(width) = lvalue.bit_field_width {
-                    let bit_offset = self.lvalue_bit_field_offset(&lvalue, objects).unwrap_or(0);
-                    let mask = self.integer_mask(width as u32);
-                    let bits = ((loaded.to_int()? as u128) >> bit_offset) & mask;
-                    let value = if matches!(lvalue.ty.unqualified(), CType::Bool)
-                        || lvalue.ty.is_unsigned_integer()
-                    {
-                        bits as i128
-                    } else {
-                        let sign_bit = 1u128 << (width - 1);
-                        if bits & sign_bit != 0 {
-                            (bits as i128) - ((mask + 1) as i128)
-                        } else {
-                            bits as i128
-                        }
-                    };
-                    loaded = TypedValue::integer(lvalue.ty.clone(), value);
-                }
+                let loaded = self.load_raw_byte_lvalue(&lvalue, span, objects)?;
                 self.reject_potentially_invalid_object_representation(
                     &loaded,
                     &effective_ty,
@@ -1765,6 +1747,26 @@ impl<'a> Interpreter<'a> {
         lvalue: &LValue,
         value: TypedValue,
         span: Span,
+    ) -> Result<TypedValue, Diagnostic> {
+        let mut converted = self.convert_value(value, &lvalue.ty, span)?;
+        if let Some(width) = lvalue.bit_field_width {
+            converted = TypedValue::integer(
+                lvalue.ty.clone(),
+                self.normalize_bit_field_value(converted.to_int()?, &lvalue.ty, width),
+            );
+        }
+        // Assignment expressions yield the value actually stored, including bit-field
+        // truncation. Do not load it back: that would add a spurious (possibly volatile) read.
+        self.store_converted_lvalue(objects, lvalue, converted.clone(), span)?;
+        Ok(converted)
+    }
+
+    fn store_converted_lvalue(
+        &mut self,
+        objects: &mut ObjectFrames,
+        lvalue: &LValue,
+        converted: TypedValue,
+        span: Span,
     ) -> Result<(), Diagnostic> {
         self.validate_atomic_member_access(lvalue, objects, span)?;
         let (
@@ -1814,7 +1816,7 @@ impl<'a> Interpreter<'a> {
             || byte_backed_storage
             || (lvalue.byte_offset_override.is_some() && lvalue.bit_field_width.is_none())
         {
-            return self.store_raw_byte_lvalue(objects, lvalue, value, span);
+            return self.store_raw_byte_lvalue(objects, lvalue, converted, span);
         }
         if !alive {
             return Err(Diagnostic::ub(
@@ -1829,13 +1831,12 @@ impl<'a> Interpreter<'a> {
             && self.compatible_object_layout_types(&object_ty, &lvalue.ty)
         {
             self.record_restrict_access(lvalue, &lvalue.ty, true, span, objects)?;
-            return self.store_value(objects, lvalue.object, value, span);
+            return self.store_value(objects, lvalue.object, converted, span);
         }
         self.record_restrict_access(lvalue, &lvalue.ty, true, span, objects)?;
         let access_region =
             self.lvalue_access_region_from_range(lvalue, access_start, access_size, objects, span)?;
         self.record_write(access_region, span)?;
-        let converted = self.convert_value(value, &lvalue.ty, span)?;
         if readonly {
             return Err(Diagnostic::ub(
                 "attempt to modify a string literal or other read-only object",
@@ -1857,14 +1858,6 @@ impl<'a> Interpreter<'a> {
                 Some("6.7.3"),
             ));
         }
-        let converted = if let Some(width) = lvalue.bit_field_width {
-            TypedValue::integer(
-                lvalue.ty.clone(),
-                self.normalize_bit_field_value(converted.to_int()?, &lvalue.ty, width),
-            )
-        } else {
-            converted
-        };
         let stored = self.stored_value_from_typed_value(converted, &lvalue.ty, span)?;
         {
             let object = self
@@ -1961,16 +1954,36 @@ impl<'a> Interpreter<'a> {
             )));
         }
         if let StoredValue::ObjectRepresentation(bytes) = &object.value {
-            let stored = self.deserialize_stored_value(&lvalue.ty, &bytes[start..end], span)?;
+            let stored = self.deserialize_raw_lvalue(lvalue, &bytes[start..end], span, objects)?;
             let value = self.typed_value_from_stored(&lvalue.ty, &stored);
             return Ok(self.specialize_dynamic_raw_storage_pointer(value, &lvalue.ty, objects));
         }
         let object_ty = object.ty.clone();
         let object_value = object.value.clone();
         let all_bytes = self.serialize_stored_value(&object_ty, &object_value, span)?;
-        let stored = self.deserialize_stored_value(&lvalue.ty, &all_bytes[start..end], span)?;
+        let stored = self.deserialize_raw_lvalue(lvalue, &all_bytes[start..end], span, objects)?;
         let value = self.typed_value_from_stored(&lvalue.ty, &stored);
         Ok(self.specialize_dynamic_raw_storage_pointer(value, &lvalue.ty, objects))
+    }
+
+    fn deserialize_raw_lvalue(
+        &self,
+        lvalue: &LValue,
+        bytes: &[ByteCell],
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<StoredValue, Diagnostic> {
+        if let Some(width) = lvalue.bit_field_width {
+            self.deserialize_bit_field_value(
+                &lvalue.ty,
+                width,
+                self.lvalue_bit_field_offset(lvalue, objects).unwrap_or(0),
+                bytes,
+                span,
+            )
+        } else {
+            self.deserialize_stored_value(&lvalue.ty, bytes, span)
+        }
     }
 
     fn store_raw_byte_lvalue(
@@ -2073,13 +2086,7 @@ impl<'a> Interpreter<'a> {
             for (index, byte) in bytes.iter_mut().enumerate() {
                 let mask = ((field_mask >> (index * 8)) & 0xff) as u8;
                 let bits = ((encoded >> (index * 8)) & 0xff) as u8;
-                *byte = match *byte {
-                    ByteCell::Known(existing) => {
-                        ByteCell::Known((existing & !mask) | (bits & mask))
-                    }
-                    ByteCell::Indeterminate if mask == 0xff => ByteCell::Known(bits),
-                    ByteCell::Indeterminate => ByteCell::Indeterminate,
-                };
+                *byte = byte.write_bits(bits, mask);
             }
             bytes
         } else {
@@ -2115,7 +2122,7 @@ impl<'a> Interpreter<'a> {
                     .unwrap_or_else(|| match &object.value {
                         StoredValue::ObjectRepresentation(bytes) => bytes
                             .iter()
-                            .filter(|byte| matches!(byte, ByteCell::Indeterminate))
+                            .filter(|byte| !matches!(byte, ByteCell::Known(_)))
                             .count(),
                         _ => unreachable!(),
                     });
@@ -2137,10 +2144,16 @@ impl<'a> Interpreter<'a> {
                 }
                 for (destination, source) in destination.iter_mut().zip(&new_bytes) {
                     match (*destination, *source) {
-                        (ByteCell::Indeterminate, ByteCell::Known(_)) => {
+                        (
+                            ByteCell::Indeterminate | ByteCell::Partial { .. },
+                            ByteCell::Known(_),
+                        ) => {
                             indeterminate_bytes = indeterminate_bytes.saturating_sub(1);
                         }
-                        (ByteCell::Known(_), ByteCell::Indeterminate) => {
+                        (
+                            ByteCell::Known(_),
+                            ByteCell::Indeterminate | ByteCell::Partial { .. },
+                        ) => {
                             indeterminate_bytes = indeterminate_bytes.saturating_add(1);
                         }
                         _ => {}

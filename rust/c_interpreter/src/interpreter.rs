@@ -408,6 +408,9 @@ fn host_mb_cur_max() -> usize {
 
 #[derive(Debug)]
 pub struct ProgramOutput {
+    pub stdout_bytes: Vec<u8>,
+    pub stderr_bytes: Vec<u8>,
+    pub stdin_position: usize,
     pub stdout: String,
     pub stderr: String,
     pub exit_status: c_int,
@@ -440,6 +443,8 @@ pub struct ProgramBlocked {
 
 #[derive(Debug, Clone)]
 pub struct ProgramExecutionLimit {
+    pub reason: &'static str,
+    pub executed_steps: usize,
     pub file: String,
     pub start_line: usize,
     pub end_line: usize,
@@ -493,6 +498,9 @@ pub struct ProgramTypeHelpChild {
 
 #[derive(Debug, Clone)]
 pub struct ProgramTraceEvent {
+    pub stdout_length: usize,
+    pub stderr_length: usize,
+    pub stdin_position: usize,
     pub file: String,
     pub start_line: usize,
     pub end_line: usize,
@@ -512,6 +520,7 @@ pub struct ProgramSourceRange {
 
 #[derive(Debug, Clone)]
 pub struct ProgramExpressionEvalRequest {
+    /// u32::MAX selects main's initial state, before its first statement.
     pub event_index: usize,
     pub expr: Expr,
     pub value_literal_text: Option<String>,
@@ -645,6 +654,7 @@ pub struct Interpreter<'a> {
     cboxes_expression_result: Option<ProgramExpressionResult>,
     execution_steps_remaining: Option<usize>,
     execution_steps_completed: usize,
+    detected_loop: Option<loop_detection::DetectedLoop>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1260,7 +1270,39 @@ enum StoredValueView<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ByteCell {
     Known(u8),
+    Partial { value: u8, known_mask: u8 },
     Indeterminate,
+}
+
+impl ByteCell {
+    fn parts(self) -> (u8, u8) {
+        match self {
+            Self::Known(value) => (value, 0xff),
+            Self::Partial { value, known_mask } => (value, known_mask),
+            Self::Indeterminate => (0, 0),
+        }
+    }
+
+    fn from_parts(value: u8, known_mask: u8) -> Self {
+        match known_mask {
+            0 => Self::Indeterminate,
+            0xff => Self::Known(value),
+            _ => Self::Partial {
+                value: value & known_mask,
+                known_mask,
+            },
+        }
+    }
+
+    fn write_bits(self, value: u8, mask: u8) -> Self {
+        let (old, known) = self.parts();
+        Self::from_parts((old & !mask) | (value & mask), known | mask)
+    }
+
+    fn forget_bits(self, mask: u8) -> Self {
+        let (value, known) = self.parts();
+        Self::from_parts(value, known & !mask)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1802,6 +1844,10 @@ mod formatted_io;
 mod initialization;
 mod library_dispatch;
 mod lifetimes;
+mod loop_detection;
+mod loop_float_progress;
+mod loop_progress;
+mod loop_state;
 mod math;
 mod object_memory;
 mod pointers;
@@ -2275,7 +2321,7 @@ fn expr_contains_setjmp(expr: &Expr) -> bool {
                 || expr_contains_setjmp(else_expr)
         }
         Expr::Call { callee, args, .. } => {
-            matches!(callee.as_ref(), Expr::Variable(name, _) if name == "__codex_setjmp")
+            matches!(callee.as_ref(), Expr::Variable(name, _) if name == "__cboxes_setjmp")
                 || expr_contains_setjmp(callee)
                 || args.iter().any(expr_contains_setjmp)
         }

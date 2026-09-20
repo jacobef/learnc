@@ -1,5 +1,5 @@
-#ifndef __CODEX_LIMITS_H
-#define __CODEX_LIMITS_H
+#ifndef __CBOXES_LIMITS_H
+#define __CBOXES_LIMITS_H
 
 #define CHAR_BIT 8
 #define SCHAR_MIN (-127 - 1)

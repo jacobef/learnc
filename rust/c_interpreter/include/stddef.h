@@ -1,18 +1,18 @@
-#ifndef __CODEX_STDDEF_H
-#define __CODEX_STDDEF_H
+#ifndef __CBOXES_STDDEF_H
+#define __CBOXES_STDDEF_H
 
-#ifndef __CODEX_PTRDIFF_T_DEFINED
-#define __CODEX_PTRDIFF_T_DEFINED
+#ifndef __CBOXES_PTRDIFF_T_DEFINED
+#define __CBOXES_PTRDIFF_T_DEFINED
 typedef long ptrdiff_t;
 #endif
 
-#ifndef __CODEX_SIZE_T_DEFINED
-#define __CODEX_SIZE_T_DEFINED
+#ifndef __CBOXES_SIZE_T_DEFINED
+#define __CBOXES_SIZE_T_DEFINED
 typedef unsigned long size_t;
 #endif
 
-#ifndef __CODEX_WCHAR_T_DEFINED
-#define __CODEX_WCHAR_T_DEFINED
+#ifndef __CBOXES_WCHAR_T_DEFINED
+#define __CBOXES_WCHAR_T_DEFINED
 typedef int wchar_t;
 #endif
 

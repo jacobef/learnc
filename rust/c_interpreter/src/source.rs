@@ -31,6 +31,14 @@ pub struct SourceFile {
     text: String,
     line_starts: Vec<usize>,
     line_origins: Option<Vec<LineOrigin>>,
+    pub(crate) standard_header_includes: Vec<StandardHeaderInclude>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StandardHeaderInclude {
+    pub offset: usize,
+    pub name: String,
+    pub directive: Span,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,6 +60,7 @@ impl SourceFile {
             text,
             line_starts,
             line_origins,
+            standard_header_includes: Vec::new(),
         }
     }
 
@@ -112,15 +121,17 @@ impl SourceManager {
         id
     }
 
-    pub fn add_generated_file(
+    pub(crate) fn add_generated_file(
         &mut self,
         path: PathBuf,
         text: String,
         line_origins: Vec<LineOrigin>,
+        standard_header_includes: Vec<StandardHeaderInclude>,
     ) -> FileId {
         let id = FileId(self.files.len());
-        self.files
-            .push(SourceFile::new(path, text, Some(line_origins)));
+        let mut source = SourceFile::new(path, text, Some(line_origins));
+        source.standard_header_includes = standard_header_includes;
+        self.files.push(source);
         id
     }
 

@@ -1,16 +1,16 @@
-#ifndef __CODEX_SIGNAL_H
-#define __CODEX_SIGNAL_H
+#ifndef __CBOXES_SIGNAL_H
+#define __CBOXES_SIGNAL_H
 
 typedef int sig_atomic_t;
-typedef void __codex_sighandler_t(int);
+typedef void __cboxes_sighandler_t(int);
 
-extern void __codex_sig_dfl(int);
-extern void __codex_sig_ign(int);
-extern void __codex_sig_err(int);
+extern void __cboxes_sig_dfl(int);
+extern void __cboxes_sig_ign(int);
+extern void __cboxes_sig_err(int);
 
-#define SIG_DFL ((__codex_sighandler_t *)0)
-#define SIG_IGN ((__codex_sighandler_t *)1)
-#define SIG_ERR ((__codex_sighandler_t *)2)
+#define SIG_DFL ((__cboxes_sighandler_t *)0)
+#define SIG_IGN ((__cboxes_sighandler_t *)1)
+#define SIG_ERR ((__cboxes_sighandler_t *)2)
 
 #define SIGABRT 6
 #define SIGFPE 8
@@ -19,7 +19,7 @@ extern void __codex_sig_err(int);
 #define SIGSEGV 11
 #define SIGTERM 15
 
-__codex_sighandler_t *signal(int sig, __codex_sighandler_t *func);
+__cboxes_sighandler_t *signal(int sig, __cboxes_sighandler_t *func);
 int raise(int sig);
 
 #endif

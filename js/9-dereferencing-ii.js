@@ -7,11 +7,11 @@ createProgramTemplate({
         { code: "int* wolf;\n" },
         {
             code: "wolf = &deer;\n",
-            instructions: "When $n{wolf} is assigned to $c{&deer}, $n{deer} gains an additional name. Use the $showAliasesButton button under $n{deer} to reveal this name.",
+            instructions: "When $c{&deer} is assigned to $n{wolf}, $n{deer} gains an additional name. Use the $showAliasesButton button under $n{deer} to reveal this name.",
         },
         {
             code: "wolf = &hare;\n",
-            instructions: "When $n{wolf} is assigned to $c{&hare}, the $n{*wolf} name moves from $n{deer} to $n{hare}.",
+            instructions: "When $c{&hare} is assigned to $n{wolf}, the $n{*wolf} name moves from $n{deer} to $n{hare}.",
         },
         { code: "int** bear;\n" },
         {

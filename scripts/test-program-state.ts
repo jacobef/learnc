@@ -44,3 +44,30 @@ test("hints distinguish removed variables from missing new variables", () => {
     kind: "count", variable: "y", message: "You need to add the $n{y} variable.",
   });
 });
+
+const { normalizeChallengeInput } = await import("../js/shared-code-challenge-input.js");
+const { allocateCWorkspaceObject } = await import("../js/shared-c-workspace-model.js");
+
+test("challenge inputs preserve scalar values across internal naming changes", () => {
+  for (const [literal, type, expected] of [
+    [" -10 ", "int", "-10"], ["0", "int", "0"], ["2147483647", "int", "2147483647"],
+    ["3.5", "double", "3.5"], ["257", "unsigned char", "1"], ["0.5", "_Bool", "1"],
+  ]) {
+    assert.deepEqual(normalizeChallengeInput(literal, type), { runtime: expected, literal: literal.trim() });
+  }
+  assert.throws(() => normalizeChallengeInput("missing", "int"), /not valid C/);
+});
+
+test("lesson objects receive distinct interpreter-backed addresses", () => {
+  const boxes: BoxState[] = [];
+  for (const type of ["int", "double", "char", "int *", "int"]) {
+    const allocation = allocateCWorkspaceObject(boxes, type);
+    assert.ok(allocation, type);
+    const start = Number(allocation.address);
+    assert.ok(Number.isFinite(start));
+    for (const box of boxes) {
+      assert.ok(start >= Number(box.address) + box.typeInfo!.size!);
+    }
+    boxes.push({ name: `v${boxes.length}`, type, value: "", address: allocation.address, typeInfo: allocation.typeInfo });
+  }
+});

@@ -98,3 +98,11 @@ fn standard_example_operator_precedence_and_associativity() {
     .unwrap();
     assert_eq!(result.exit_status, 0);
 }
+
+#[test]
+fn bounded_string_sources_stop_at_null() {
+    assert_exit_status(
+        include_str!("../../../tests/standard_examples/bounded_string_sources_stop_at_null.c"),
+        0,
+    );
+}

@@ -267,7 +267,7 @@ impl<'a> Interpreter<'a> {
     fn is_host_math_base_function(name: &str) -> bool {
         matches!(
             name,
-            "__codex_huge_val"
+            "__cboxes_huge_val"
                 | "acos"
                 | "asin"
                 | "atan"
@@ -331,23 +331,23 @@ impl<'a> Interpreter<'a> {
     fn is_host_math_function(name: &str) -> bool {
         matches!(
             name,
-            "__codex_math_errhandling"
-                | "__codex_fpclassify"
-                | "__codex_fpclassifyf"
-                | "__codex_fpclassifyl"
-                | "__codex_isfinite"
-                | "__codex_isinf"
-                | "__codex_isnan"
-                | "__codex_isnormal"
-                | "__codex_isnormalf"
-                | "__codex_isnormall"
-                | "__codex_signbit"
-                | "__codex_isgreater"
-                | "__codex_isgreaterequal"
-                | "__codex_isless"
-                | "__codex_islessequal"
-                | "__codex_islessgreater"
-                | "__codex_isunordered"
+            "__cboxes_math_errhandling"
+                | "__cboxes_fpclassify"
+                | "__cboxes_fpclassifyf"
+                | "__cboxes_fpclassifyl"
+                | "__cboxes_isfinite"
+                | "__cboxes_isinf"
+                | "__cboxes_isnan"
+                | "__cboxes_isnormal"
+                | "__cboxes_isnormalf"
+                | "__cboxes_isnormall"
+                | "__cboxes_signbit"
+                | "__cboxes_isgreater"
+                | "__cboxes_isgreaterequal"
+                | "__cboxes_isless"
+                | "__cboxes_islessequal"
+                | "__cboxes_islessgreater"
+                | "__cboxes_isunordered"
         ) || Self::is_host_math_base_function(name)
             || name
                 .strip_suffix(['f', 'l'])
@@ -358,7 +358,7 @@ impl<'a> Interpreter<'a> {
         name: &str,
     ) -> Option<(ComplexFunctionKind, CType, &str)> {
         let classify = |base: &str| match base {
-            "__codex_cmplx" => Some(ComplexFunctionKind::Constructor),
+            "__cboxes_cmplx" => Some(ComplexFunctionKind::Constructor),
             "cacos" | "casin" | "catan" | "ccos" | "csin" | "ctan" | "cacosh" | "casinh"
             | "catanh" | "ccosh" | "csinh" | "ctanh" | "cexp" | "clog" | "conj" | "cproj"
             | "csqrt" => Some(ComplexFunctionKind::UnaryComplex),
@@ -435,8 +435,8 @@ impl<'a> Interpreter<'a> {
                 | "feof"
                 | "ferror"
                 | "perror"
-                | "__codex_assert_fail"
-                | "__codex_errno_location"
+                | "__cboxes_assert_fail"
+                | "__cboxes_errno_location"
                 | "isalnum"
                 | "isalpha"
                 | "isblank"
@@ -472,7 +472,7 @@ impl<'a> Interpreter<'a> {
                 | "abs"
                 | "labs"
                 | "llabs"
-                | "__codex_mb_cur_max"
+                | "__cboxes_mb_cur_max"
                 | "atof"
                 | "atoi"
                 | "atol"
@@ -580,9 +580,9 @@ impl<'a> Interpreter<'a> {
                 | "localeconv"
                 | "signal"
                 | "raise"
-                | "__codex_sig_dfl"
-                | "__codex_sig_ign"
-                | "__codex_sig_err"
+                | "__cboxes_sig_dfl"
+                | "__cboxes_sig_ign"
+                | "__cboxes_sig_err"
                 | "clock"
                 | "difftime"
                 | "mktime"
@@ -604,13 +604,13 @@ impl<'a> Interpreter<'a> {
                 | "feholdexcept"
                 | "fesetenv"
                 | "feupdateenv"
-                | "__codex_fe_dfl_env"
+                | "__cboxes_fe_dfl_env"
                 | "memcpy"
                 | "memmove"
                 | "memset"
                 | "memchr"
                 | "memcmp"
-                | "__codex_setjmp"
+                | "__cboxes_setjmp"
                 | "longjmp"
                 | "strlen"
                 | "strcmp"
@@ -841,6 +841,7 @@ impl<'a> Interpreter<'a> {
             cboxes_expression_result: None,
             execution_steps_remaining: run_options.execution_step_limit,
             execution_steps_completed: 0,
+            detected_loop: None,
         }
     }
 
@@ -890,6 +891,7 @@ impl<'a> Interpreter<'a> {
                 &mut objects,
             )
         }));
+        let mut trace_page_complete = false;
         let (exit_status, blocked, execution_limit_span) = match entry {
             Ok(Ok(result)) => {
                 let exit_status = if main.return_type == CType::Void {
@@ -911,7 +913,12 @@ impl<'a> Interpreter<'a> {
                 )?
             }
             Ok(Err(diag)) => {
-                if let Some(span) = diag.execution_step_limit_span() {
+                if diag.is_expression_complete() {
+                    (0, None, None)
+                } else if let Some(span) = diag.execution_trace_limit_span() {
+                    trace_page_complete = true;
+                    (0, None, Some(span))
+                } else if let Some(span) = diag.execution_step_limit_span() {
                     (0, None, Some(span))
                 } else {
                     let Some((function_name, span)) = diag.blocked_info() else {
@@ -944,7 +951,32 @@ impl<'a> Interpreter<'a> {
             main_close_offset.saturating_add(1),
         ));
         let (execution_limit, execution_limit_state) = if let Some(span) = execution_limit_span {
-            let (limit, state) = self.rewind_cboxes_trace_before_repeated_execution(span);
+            let (limit, state) = if trace_page_complete
+                || (self.run_options.execution_trace_limit.is_some()
+                    && self.detected_loop.is_none())
+            {
+                let (file, start_line, end_line) = self.sources.span_location(span);
+                (
+                    ProgramExecutionLimit {
+                        reason: if trace_page_complete {
+                            "trace-limit"
+                        } else {
+                            "step-limit"
+                        },
+                        executed_steps: self.execution_steps_completed,
+                        file: file.display().to_string(),
+                        start_line: start_line.saturating_sub(1),
+                        end_line: end_line.saturating_sub(1),
+                        trace_position: self.cboxes_trace.len(),
+                    },
+                    self.cboxes_trace
+                        .last()
+                        .map(|event| event.state.clone())
+                        .unwrap_or_default(),
+                )
+            } else {
+                self.rewind_cboxes_trace_before_repeated_execution(span)
+            };
             (Some(limit), Some(state))
         } else {
             (None, None)
@@ -956,15 +988,14 @@ impl<'a> Interpreter<'a> {
         } else {
             self.cboxes_main_state.clone()
         };
-        let stdout = self
-            .capture_stream_contents(CaptureStream::Stdout)
-            .map_err(|diag| self.with_cboxes_runtime_context(diag))?;
-        let stderr = self
-            .capture_stream_contents(CaptureStream::Stderr)
-            .map_err(|diag| self.with_cboxes_runtime_context(diag))?;
+        let stdout_bytes = self.capture_stream_bytes(CaptureStream::Stdout).to_vec();
+        let stderr_bytes = self.capture_stream_bytes(CaptureStream::Stderr).to_vec();
         Ok(ProgramOutput {
-            stdout,
-            stderr,
+            stdin_position: self.stdin_position(),
+            stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+            stdout_bytes,
+            stderr_bytes,
             exit_status,
             state,
             trace: self.cboxes_trace.clone(),
@@ -1071,7 +1102,9 @@ impl<'a> Interpreter<'a> {
         &mut self,
         fallback_span: Span,
     ) -> (ProgramExecutionLimit, Vec<ProgramStateBox>) {
-        let repeated_start = {
+        let repeated_start = if let Some(detected) = &self.detected_loop {
+            Some(detected.trace_position)
+        } else {
             let mut locations: HashMap<(&str, usize, usize, &str), (usize, usize)> =
                 HashMap::default();
             for (index, event) in self.cboxes_trace.iter().enumerate() {
@@ -1108,7 +1141,11 @@ impl<'a> Interpreter<'a> {
             .and_then(|index| self.cboxes_trace.get(index))
             .map(|event| event.state.clone())
             .unwrap_or_default();
-        let trace_position = if stop_index > CBOXES_STEP_LIMIT_TRACE_PREFIX_CAP {
+        let trace_position = if self.run_options.execution_trace_limit.is_some() {
+            // Paged execution must retain an exact prefix: trace indices are also
+            // used to replay expressions and navigate earlier pages.
+            stop_index
+        } else if stop_index > CBOXES_STEP_LIMIT_TRACE_PREFIX_CAP {
             let immediately_before = self.cboxes_trace[stop_index - 1].clone();
             let following_end = self
                 .cboxes_trace
@@ -1140,6 +1177,11 @@ impl<'a> Interpreter<'a> {
         });
         (
             ProgramExecutionLimit {
+                reason: self
+                    .detected_loop
+                    .as_ref()
+                    .map_or("step-limit", |detected| detected.reason),
+                executed_steps: self.execution_steps_completed,
                 file,
                 start_line,
                 end_line,
@@ -1217,14 +1259,15 @@ impl<'a> Interpreter<'a> {
                     continue;
                 }
                 if let Some(name) = &param.name {
+                    let (_, retained_bounds) = Self::parameter_bound_slices(param);
                     let parameter_ty =
-                        Self::resolve_vla_type_for_constraints(&param.ty, &param.vla_bounds).0;
+                        Self::resolve_vla_type_for_constraints(&param.ty, retained_bounds).0;
                     frame.object_decls.insert(
                         name.clone(),
                         Declaration {
                             name: name.clone(),
                             ty: parameter_ty,
-                            vla_bounds: param.vla_bounds.clone(),
+                            vla_bounds: retained_bounds.to_vec(),
                             storage_class: param.storage_class,
                             linkage: None,
                             alignment: None,
@@ -2211,8 +2254,14 @@ impl<'a> Interpreter<'a> {
             ));
         }
         if decl.storage_class != Some(StorageClass::Extern) && !self.type_is_complete(&decl.ty) {
+            let hint = match decl.ty.unqualified() {
+                CType::Struct(_, Some(name)) | CType::Union(_, Some(name)) =>
+                    crate::standard_headers::header_for(name).map(|header|
+                        format!(" For the standard {0}, add #include <{header}> at the top of the file.", decl.ty)),
+                _ => None,
+            }.unwrap_or_default();
             return Err(Diagnostic::error(
-                format!("object definition has incomplete type {}", decl.ty),
+                format!("object definition has incomplete type {}{}", decl.ty, hint),
                 decl.declarator_span,
             ));
         }
@@ -2404,6 +2453,11 @@ impl<'a> Interpreter<'a> {
             }
             _ => (false, 0),
         }
+    }
+
+    pub(super) fn parameter_bound_slices(param: &Parameter) -> (&[Option<Expr>], &[Option<Expr>]) {
+        let (_, retained) = Self::resolve_vla_type_for_constraints(&param.ty, &param.vla_bounds);
+        param.vla_bounds.split_at(param.vla_bounds.len() - retained)
     }
 
     pub(super) fn resolve_vla_type_for_constraints(

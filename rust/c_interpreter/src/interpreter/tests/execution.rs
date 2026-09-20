@@ -1941,3 +1941,98 @@ fn muse_goto_within_for_scope_preserves_the_existing_for_object() {
         "#;
     assert_exit_status(source, 7);
 }
+
+#[test]
+fn expression_evaluation_expands_the_programs_header_and_user_macros() {
+    let source = "#include <stdio.h>\n#include <limits.h>\n#define TWICE(x) ((x)*2)\n#define REMOVED 1\n#undef REMOVED\nint main(void) { int a=3; }\n";
+    for (expression, expected) in [
+        ("stdin != 0", "1"),
+        ("stdout != 0", "1"),
+        ("EOF", "-1"),
+        ("INT_MAX", "2147483647"),
+        ("TWICE(a)", "6"),
+    ] {
+        let result = crate_run_source_with_options(
+            "test.c",
+            source,
+            &RunOptions {
+                expression_eval: Some(RunExpressionEvalRequest {
+                    expression: expression.into(),
+                    event_index: 0,
+                }),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{expression}: {}", error.render()));
+        assert_eq!(result.expression.unwrap().value, expected, "{expression}");
+    }
+    for (source, expression) in [
+        (source, "REMOVED"),
+        ("int main(void) { int a=3; }\n", "stdin"),
+    ] {
+        assert!(
+            crate_run_source_with_options(
+                "test.c",
+                source,
+                &RunOptions {
+                    expression_eval: Some(RunExpressionEvalRequest {
+                        expression: expression.into(),
+                        event_index: 0
+                    }),
+                    ..RunOptions::default()
+                }
+            )
+            .is_err(),
+            "unexpected definition for {expression}"
+        );
+    }
+}
+
+#[test]
+fn expression_evaluation_before_mains_first_statement_has_only_initial_bindings() {
+    for (source, expression, expected) in [
+        ("int main(void) {}\n", "3+4", "7"),
+        (
+            "#include <limits.h>\nint main(void) { int a=3; }\n",
+            "INT_MAX",
+            "2147483647",
+        ),
+        (
+            "#include <stdio.h>\nint main(void) { int a=3; }\n",
+            "stdin != 0",
+            "1",
+        ),
+        ("int g=9; int main(void) { int a=3; }\n", "g", "9"),
+    ] {
+        let result = crate_run_source_with_options(
+            "test.c",
+            source,
+            &RunOptions {
+                expression_eval: Some(RunExpressionEvalRequest {
+                    expression: expression.into(),
+                    event_index: u32::MAX as usize,
+                }),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{expression}: {}", error.render()));
+        assert_eq!(result.expression.unwrap().value, expected, "{expression}");
+    }
+    let result = crate_run_source_with_options(
+        "test.c",
+        "int main(void) { int a=3; }\n",
+        &RunOptions {
+            expression_eval: Some(RunExpressionEvalRequest {
+                expression: "a".into(),
+                event_index: u32::MAX as usize,
+            }),
+            ..RunOptions::default()
+        },
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .render()
+            .contains("undeclared identifier a")
+    );
+}

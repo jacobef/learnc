@@ -1,5 +1,5 @@
-#ifndef __CODEX_STDBOOL_H
-#define __CODEX_STDBOOL_H
+#ifndef __CBOXES_STDBOOL_H
+#define __CBOXES_STDBOOL_H
 
 #define bool _Bool
 #define true 1

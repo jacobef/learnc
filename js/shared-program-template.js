@@ -766,7 +766,9 @@ function createProgramTemplate(config) {
             resolvedTraceEnd = Math.max(resolvedTraceEnd, runtimeStages[index]?.traceEndIndex ?? -1);
         }
         const strikeFragments = strikeFragmentsForTrace(lineList, trace, resolvedTraceEnd);
+        const nextStage = solving ? null : nextLabelStage();
         renderCodePane(codeEl, lineList, displayBoundary, {
+            nextRange: nextStage ? { start: nextStage.runLine, end: nextStage.runEndLine } : undefined,
             progress: solving,
             progressRange: solving && stage ? { start: stage.runLine, end: stage.runEndLine } : undefined,
             progressIndex: solving && stage?.editableMode === "state" ? stage.runEndLine : undefined,

@@ -387,6 +387,9 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Generic) => self.parse_generic_selection(token.span),
             TokenKind::Identifier(name) => {
                 if name == "va_arg" && self.at(TokenKind::LParen) {
+                    if !self.stdarg_is_available(token.span) {
+                        return Err(self.undeclared_identifier(&name, token.span));
+                    }
                     self.expect(TokenKind::LParen)?;
                     let ap = self.parse_assignment()?;
                     self.expect(TokenKind::Comma)?;
@@ -435,10 +438,7 @@ impl<'a> Parser<'a> {
                     && !self.identifier_is_visible(&name)
                     && !self.is_builtin_identifier(&name)
                 {
-                    return Err(Diagnostic::error(
-                        format!("use of undeclared identifier {}", name),
-                        token.span,
-                    ));
+                    return Err(self.undeclared_identifier(&name, token.span));
                 }
                 Ok(Expr::Variable(name, token.span))
             }

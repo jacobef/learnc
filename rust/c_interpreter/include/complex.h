@@ -1,18 +1,18 @@
-#ifndef __CODEX_COMPLEX_H
-#define __CODEX_COMPLEX_H
+#ifndef __CBOXES_COMPLEX_H
+#define __CBOXES_COMPLEX_H
 
 #define complex _Complex
 
-float _Complex __codex_cmplxf(float real, float imag);
-double _Complex __codex_cmplx(double real, double imag);
-long double _Complex __codex_cmplxl(long double real, long double imag);
+float _Complex __cboxes_cmplxf(float real, float imag);
+double _Complex __cboxes_cmplx(double real, double imag);
+long double _Complex __cboxes_cmplxl(long double real, long double imag);
 
-#define _Complex_I (__codex_cmplxf(0.0f, 1.0f))
+#define _Complex_I (__cboxes_cmplxf(0.0f, 1.0f))
 #define I _Complex_I
 
-#define CMPLXF(real, imag) (__codex_cmplxf((float)(real), (float)(imag)))
-#define CMPLX(real, imag) (__codex_cmplx((double)(real), (double)(imag)))
-#define CMPLXL(real, imag) (__codex_cmplxl((long double)(real), (long double)(imag)))
+#define CMPLXF(real, imag) (__cboxes_cmplxf((float)(real), (float)(imag)))
+#define CMPLX(real, imag) (__cboxes_cmplx((double)(real), (double)(imag)))
+#define CMPLXL(real, imag) (__cboxes_cmplxl((long double)(real), (long double)(imag)))
 
 float _Complex cacosf(float _Complex z);
 double _Complex cacos(double _Complex z);

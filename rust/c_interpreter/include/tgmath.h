@@ -1,5 +1,5 @@
-#ifndef __CODEX_TGMATH_H
-#define __CODEX_TGMATH_H
+#ifndef __CBOXES_TGMATH_H
+#define __CBOXES_TGMATH_H
 
 #include <complex.h>
 #include <math.h>

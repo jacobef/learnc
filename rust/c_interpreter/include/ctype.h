@@ -1,5 +1,5 @@
-#ifndef __CODEX_CTYPE_H
-#define __CODEX_CTYPE_H
+#ifndef __CBOXES_CTYPE_H
+#define __CBOXES_CTYPE_H
 
 int isalnum(int c);
 int isalpha(int c);

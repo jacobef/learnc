@@ -1,14 +1,14 @@
-#ifndef __CODEX_STDIO_H
-#define __CODEX_STDIO_H
+#ifndef __CBOXES_STDIO_H
+#define __CBOXES_STDIO_H
 
 #include <stddef.h>
 
 typedef long fpos_t;
-#ifndef __CODEX_SSIZE_T_DEFINED
-#define __CODEX_SSIZE_T_DEFINED
+#ifndef __CBOXES_SSIZE_T_DEFINED
+#define __CBOXES_SSIZE_T_DEFINED
 typedef long ssize_t;
 #endif
-typedef struct __codex_FILE FILE;
+typedef struct __cboxes_FILE FILE;
 
 #include <stdarg.h>
 
@@ -26,13 +26,13 @@ typedef struct __codex_FILE FILE;
 #define SEEK_SET 0
 #define TMP_MAX 308915776
 
-extern FILE *const __codex_stdin;
-extern FILE *const __codex_stdout;
-extern FILE *const __codex_stderr;
+extern FILE *const __cboxes_stdin;
+extern FILE *const __cboxes_stdout;
+extern FILE *const __cboxes_stderr;
 
-#define stdin (__codex_stdin)
-#define stdout (__codex_stdout)
-#define stderr (__codex_stderr)
+#define stdin (__cboxes_stdin)
+#define stdout (__cboxes_stdout)
+#define stderr (__cboxes_stderr)
 
 int remove(const char *filename);
 int rename(const char *oldname, const char *newname);

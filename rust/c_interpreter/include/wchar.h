@@ -1,5 +1,5 @@
-#ifndef __CODEX_WCHAR_H
-#define __CODEX_WCHAR_H
+#ifndef __CBOXES_WCHAR_H
+#define __CBOXES_WCHAR_H
 
 #include <stddef.h>
 #include <stdarg.h>

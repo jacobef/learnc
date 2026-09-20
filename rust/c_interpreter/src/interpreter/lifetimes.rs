@@ -744,7 +744,7 @@ impl<'a> Interpreter<'a> {
                 if *span == call_span
                     && matches!(
                         callee.as_ref(),
-                        Expr::Variable(name, _) if name == "__codex_setjmp"
+                        Expr::Variable(name, _) if name == "__cboxes_setjmp"
                     )
         )
     }

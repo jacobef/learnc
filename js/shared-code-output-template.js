@@ -4,6 +4,7 @@ import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } f
 import { ensureCodeLessonLayout } from "./shared-code-lesson-layout.js";
 import { diagnosticDecorations, diagnosticMessageText, offsetDiagnosticLines, } from "./shared-diagnostics.js";
 import { runCProgram } from "./shared-c-interpreter.js";
+import { normalizeChallengeInput } from "./shared-code-challenge-input.js";
 import { codeRuntimeIssue, renderCodeDiagnostic, diagnosticRuntimeContextText, offsetCodeRuntimeIssue, renderCodeRuntimeIssue, } from "./shared-code-runtime-issues.js";
 import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
 import { createButtonTokenReplacer, createHintPresenter, createLevelProgressController, invalidTemplateConfig, nextLessonLabel, resetLevelAfterConfirmation, } from "./shared-lesson-runtime.js";
@@ -73,18 +74,12 @@ function createCodeOutputChallengeTemplate(config) {
             : `${normalized}\n`;
     }
     function normalizeInputLiteral(value, type, label) {
-        const literal = value.trim();
-        const run = runCProgram(`${type} __cboxes_input = ${literal};\n`);
-        if (run.kind !== "ok") {
-            return invalidTemplateConfig(`${label} is not valid C: ${diagnosticMessageText(run.diagnostic)}`);
+        try {
+            return normalizeChallengeInput(value, type);
         }
-        const stored = run.state.find((box) => box.name === "__cboxes_input");
-        if (!stored)
-            return invalidTemplateConfig(`${label} did not create a scalar C value.`);
-        return {
-            runtime: stored.value,
-            literal,
-        };
+        catch (error) {
+            return invalidTemplateConfig(`${label} ${error instanceof Error ? error.message : String(error)}`);
+        }
     }
     const preludeLineCount = inputSpecs.length;
     const targetOutputNameSet = new Set(outputSpecs.map((spec) => spec.name));

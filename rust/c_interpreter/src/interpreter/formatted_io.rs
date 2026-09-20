@@ -3334,6 +3334,7 @@ impl<'a> Interpreter<'a> {
         )?;
         let lvalue = self.pointer_lvalue(function_name, &pointer, &pointee, span, "7.24.2.2")?;
         self.store_lvalue(objects, &lvalue, TypedValue::integer(pointee, value), span)
+            .map(|_| ())
     }
 
     pub(super) fn store_scan_float(
@@ -3363,6 +3364,7 @@ impl<'a> Interpreter<'a> {
         )?;
         let lvalue = self.pointer_lvalue(function_name, &pointer, &pointee, span, "7.24.2.2")?;
         self.store_lvalue(objects, &lvalue, TypedValue::floating(pointee, value), span)
+            .map(|_| ())
     }
 
     pub(super) fn store_scan_pointer(
@@ -3388,6 +3390,7 @@ impl<'a> Interpreter<'a> {
             self.pointer_value_with_type(self.void_ptr_type(), pointer_value),
             span,
         )
+        .map(|_| ())
     }
 
     pub(super) fn store_scan_narrow_buffer(

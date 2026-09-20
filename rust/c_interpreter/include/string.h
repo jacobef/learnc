@@ -1,5 +1,5 @@
-#ifndef __CODEX_STRING_H
-#define __CODEX_STRING_H
+#ifndef __CBOXES_STRING_H
+#define __CBOXES_STRING_H
 
 #include <stddef.h>
 

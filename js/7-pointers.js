@@ -21,11 +21,7 @@ createProgramTemplate({
             editable: true,
             hints: (ctx) => {
                 if (ctx.basicHintTopicIs("value", "bear")) {
-                    const [bear, wolf] = ctx.boxesNamed("bear", "wolf");
-                    if (bear.value === wolf.value) {
-                        return "$n{bear} is being initialized with $c{&wolf}, not $c{wolf}. Set $n{bear}'s value to $n{wolf}'s address, not $n{wolf}'s value.";
-                    }
-                    return "Set $n{bear}'s value to $n{wolf}'s address.";
+                    return "$c{int** bear;} declares $n{bear} without initializing it. Its value should remain empty.";
                 }
                 return ctx.basicHint;
             },
@@ -51,7 +47,7 @@ createProgramTemplate({
                 if (ctx.basicHintTopicIs("value", "fox")) {
                     const [fox, wolf] = ctx.boxesNamed("fox", "wolf");
                     if (fox.value === wolf.address) {
-                        return "$n{fox} is being assigned to $c{wolf}, not $c{&wolf}. Set $n{fox}'s value to $n{wolf}'s value, not $n{wolf}'s address.";
+                        return "$n{fox} is being initialized with $c{wolf}, not $c{&wolf}. Set $n{fox}'s value to $n{wolf}'s value, not $n{wolf}'s address.";
                     }
                     return "Set $n{fox}'s value to $n{wolf}'s value.";
                 }

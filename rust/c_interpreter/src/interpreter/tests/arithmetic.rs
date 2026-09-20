@@ -943,7 +943,7 @@ fn math_requires_math_header() {
                 return sin(0.0) != 0.0;
             }
         "#;
-    assert_diagnostic_contains(source, "undeclared identifier sin");
+    assert_diagnostic_contains(source, "#include <math.h>");
 }
 
 #[test]
@@ -1006,7 +1006,7 @@ fn complex_library_requires_complex_header() {
                 return cabs(0.0 + 0.0);
             }
         "#;
-    assert_diagnostic_contains(source, "undeclared identifier cabs");
+    assert_diagnostic_contains(source, "#include <complex.h>");
 }
 
 #[test]

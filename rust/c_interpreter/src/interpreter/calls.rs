@@ -116,20 +116,13 @@ impl<'a> Interpreter<'a> {
                     // Array-to-pointer adjustment removes only the outer array
                     // dimension. Evaluate that bound for its side effects, then
                     // retain the remaining dimensions in the parameter object.
-                    let (_, retained) =
-                        Self::resolve_vla_type_for_constraints(&param.ty, &param.vla_bounds);
-                    let discarded = param.vla_bounds.len() - retained;
-                    for bound in param.vla_bounds[..discarded].iter().flatten() {
+                    let (discarded, retained) = Self::parameter_bound_slices(param);
+                    for bound in discarded.iter().flatten() {
                         let _ = self.evaluate_vla_bound(bound, &mut frame, objects)?;
                     }
                     let mut resolved_param = param.clone();
-                    resolved_param.ty = self.resolve_decl_type(
-                        &param.ty,
-                        &param.vla_bounds[discarded..],
-                        &mut frame,
-                        objects,
-                        param.span,
-                    )?;
+                    resolved_param.ty = self
+                        .resolve_decl_type(&param.ty, retained, &mut frame, objects, param.span)?;
                     self.check_static_array_parameter(&resolved_param, &arg, &mut frame, objects)?;
                     let arg = self.convert_value(arg, &resolved_param.ty, call_span)?;
                     let object = self.allocate_object(
@@ -146,6 +139,9 @@ impl<'a> Interpreter<'a> {
                         .insert(param.name.clone().unwrap_or_default(), object);
                 }
 
+                if function.name == "main" {
+                    self.evaluate_cboxes_expression_at(u32::MAX as usize, &frame, objects)?;
+                }
                 let needs_longjmp_catch =
                     function_may_setjmp || !self.live_setjmp_frames.is_empty();
                 let flow = if needs_longjmp_catch {

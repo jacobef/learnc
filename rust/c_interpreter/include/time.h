@@ -1,5 +1,5 @@
-#ifndef __CODEX_TIME_H
-#define __CODEX_TIME_H
+#ifndef __CBOXES_TIME_H
+#define __CBOXES_TIME_H
 
 #include <stddef.h>
 

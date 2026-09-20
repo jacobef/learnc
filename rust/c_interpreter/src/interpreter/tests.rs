@@ -137,7 +137,7 @@ impl Drop for TestProject {
 fn assert_user_code_library_diag(rendered: &str, expected: &str) {
     assert!(rendered.contains("test.c"), "{rendered}");
     assert!(rendered.contains(expected), "{rendered}");
-    assert!(!rendered.contains("__codex"), "{rendered}");
+    assert!(!rendered.contains("__cboxes"), "{rendered}");
 }
 
 fn state_address(result: &ProgramOutput, name: &str) -> u64 {

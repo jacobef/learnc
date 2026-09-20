@@ -12,6 +12,8 @@
     --edit-line: #b59b00;
     --focus: #1e77ff;
     --done: #19a974;
+    --next-run: #155dc1;
+    --next-run-bg: #e8f0ff;
     --ui-font: "Times New Roman", Times, serif;
 }
 
@@ -309,6 +311,21 @@ h2 {
 [data-role="sandbox-instructions"].sandbox-finished {
     min-height: 0;
 }
+.sandbox-introduction {
+    position: relative;
+}
+.sandbox-introduction .intro {
+    padding-right: 52px;
+}
+[data-role="sandbox-dismiss-introduction"] {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    font: 22px/1 sans-serif;
+}
 .mobile-note {
     margin: 0 0 16px;
     display: none;
@@ -389,7 +406,6 @@ h2 {
     gap: 7px;
     min-height: 36px;
     color: #334155;
-    font: 700 13px var(--ui-font);
     cursor: pointer;
 }
 .sandbox-implicit-main input {
@@ -478,7 +494,15 @@ h2 {
     color: #172033;
     font: 700 13px var(--ui-font);
 }
+.sandbox-file-error {
+    flex-basis: 100%;
+    color: #7a271a;
+    font: 14px/1.4 var(--ui-font);
+}
 .sandbox-terminal {
+    flex: 0 0 auto;
+    max-height: 40dvh;
+    overflow: auto;
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 12px;
@@ -520,6 +544,47 @@ h2 {
 }
 .sandbox-terminal-stderr {
     margin-top: 8px;
+}
+.sandbox-stdin-surface {
+    position: relative;
+    background: #fff;
+    border-radius: 6px;
+}
+.sandbox-stdin-surface textarea {
+    display: block;
+    position: relative;
+    background: transparent;
+    color: transparent;
+    caret-color: #111;
+}
+.sandbox-stdin-surface textarea::selection {
+    background: #bfdbfe80;
+    color: transparent;
+}
+.sandbox-stdin-highlight {
+    position: absolute;
+    inset: 0;
+    height: 100%;
+    max-height: none;
+    border-color: transparent;
+    pointer-events: none;
+    overflow: hidden;
+    resize: none;
+}
+.sandbox-stdin-consumed {
+    color: #64748b;
+    background: #e2e8f080;
+}
+.sandbox-stdin-cursor {
+    border-left: 2px solid #b45309;
+    margin-left: -2px;
+}
+.sandbox-stdin-position {
+    margin-top: 5px;
+    min-height: 1.4em;
+    color: #71400a;
+    font: 12px/1.4 var(--ui-font);
+    overflow-wrap: anywhere;
 }
 .sandbox-blocked-notice {
     margin: 8px 8px 14px;
@@ -656,16 +721,19 @@ h2 {
     display: flex;
     align-items: flex-end;
     gap: 16px;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
 }
 .sandbox-expr-input-wrap {
     display: flex;
     flex-direction: column;
     justify-content: flex-end;
-    flex: 0 0 auto;
+    flex: 0 1 240px;
+    min-width: 0;
+    max-width: 100%;
 }
 .sandbox-expr-input-wrap .expr-input {
-    width: 240px;
+    width: 100%;
+    box-sizing: border-box;
     height: auto;
     min-height: 0;
     margin-bottom: 0;
@@ -674,7 +742,7 @@ h2 {
     margin: 0 0 6px 0;
 }
 .sandbox-expr-row [data-role="sandbox-expr-result"] {
-    flex: 1 1 auto;
+    flex: 1 1 200px;
     max-width: 100%;
     min-width: 0;
     min-height: 0;
@@ -703,13 +771,11 @@ h2 {
 .sandbox-expr-error-message {
     overflow-wrap: anywhere;
 }
-@media (max-width: 900px) {
-    .sandbox-expr-row {
-        flex-wrap: wrap;
-    }
-    .sandbox-expr-row [data-role="sandbox-expr-result"] {
-        min-height: 0;
-    }
+.sandbox-state-panel > .expr-panel {
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: 50%;
+    overflow: auto;
 }
 
 .vbox.no-addr .vbox-address-row {
@@ -1165,6 +1231,7 @@ body.panel-layout .sandbox-shell .panel-controls.controls-main {
     box-sizing: border-box;
 }
 .codepane-row .code-line-number {
+    position: relative;
     height: var(--code-line-height);
     padding: 0 8px;
     box-sizing: border-box;
@@ -1393,8 +1460,10 @@ body.panel-layout .sandbox-shell .panel-controls.controls-main {
 .line.progress-mid {
     position: relative;
 }
-.line.progress-range .src {
+.line.progress-range .src,
+.line.progress-mid .src {
     color: var(--edit-line);
+    background: var(--edit-bg);
 }
 .line.progress-range .ln {
     color: #999;
@@ -1431,9 +1500,6 @@ body.panel-layout .sandbox-shell .panel-controls.controls-main {
 .line.progress-mid > * {
     position: relative;
     z-index: 1;
-}
-.line.progress-mid .src {
-    color: var(--edit-line);
 }
 .line.progress-mid .ln {
     color: #999;
@@ -2838,8 +2904,16 @@ nav.tabs a.active:hover {
         overflow: auto;
         flex: 0 0 auto;
     }
+    .sandbox-state-panel > .expr-panel {
+        flex: 0 0 auto;
+        max-height: none;
+        overflow: visible;
+    }
     .sandbox-terminal {
         grid-template-columns: 1fr;
+    }
+    .sandbox-shell .code-panel-shell > .panel-body.codepane {
+        max-height: 45dvh;
     }
     .panel-body.codepane,
     .codepane {
@@ -2894,4 +2968,144 @@ nav.tabs a.active:hover {
     .grid > .aggregatebox {
         width: 100%;
     }
+}
+
+/* Reachable execution boundaries in the sandbox gutter. */
+.sandbox-line-jump {
+    position: absolute;
+    z-index: 3;
+    top: -8px;
+    left: 0;
+    width: 100%;
+    height: 16px;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 3px;
+    background: transparent;
+    cursor: pointer;
+}
+.sandbox-line-jump::after {
+    content: "";
+    display: block;
+    height: 2px;
+    margin: 0 4px;
+    background: var(--focus);
+    opacity: .5;
+}
+.sandbox-line-jump.is-end { top: auto; bottom: -8px; }
+.sandbox-line-jump:hover, .sandbox-line-jump:focus-visible { background: var(--panel); outline: 2px solid var(--focus); }
+.sandbox-line-jump:hover::after, .sandbox-line-jump:focus-visible::after { opacity: 1; }
+.sandbox-jump-setting { display: flex; align-items: center; gap: 6px; }
+.sandbox-jump-setting input { flex: 0 0 auto; }
+.sandbox-jump-dialog {
+    box-sizing: border-box;
+    width: min(460px, calc(100% - 24px));
+    max-height: calc(100% - 24px);
+    overflow: auto;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--panel);
+    color: var(--text);
+    font: 16px/1.5 sans-serif;
+}
+.sandbox-jump-dialog::backdrop { background: rgb(0 0 0 / 40%); }
+.sandbox-jump-dialog h2 { margin: 0; font-size: 20px; }
+.sandbox-jump-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.sandbox-jump-dialog button { min-height: 44px; white-space: normal; }
+.sandbox-jump-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0; }
+.sandbox-jump-form input { width: 64px; min-height: 36px; font: inherit; }
+
+.sandbox-shell .controls-main { flex-wrap: wrap; }
+.sandbox-shell .controls-main .controls-right {
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    max-width: 100%;
+}
+.sandbox-jump-setting { max-width: 100%; }
+.sandbox-step-limit { display: flex; align-items: center; gap: 6px; }
+.sandbox-jump-setting, .sandbox-implicit-main, .sandbox-step-limit { font: 700 13px/1.4 var(--ui-font); }
+.sandbox-step-limit input { width: 100px; padding: 6px; font: inherit; box-sizing: border-box; }
+
+.sandbox-panel-row {
+    grid-template-columns: minmax(0, var(--code-column, 1fr)) 8px minmax(0, var(--state-column, 1.3fr));
+    column-gap: 8px;
+}
+.sandbox-panel-divider {
+    position: relative;
+    cursor: col-resize;
+    touch-action: none;
+    border-radius: 8px;
+    outline-offset: 2px;
+}
+.sandbox-panel-divider::before {
+    content: "";
+    position: absolute;
+    inset: 0 -4px;
+}
+.sandbox-panel-divider::after {
+    content: "";
+    position: absolute;
+    width: 4px;
+    height: 48px;
+    top: calc(50% - 24px);
+    left: 2px;
+    border-radius: 4px;
+    background: #a7b5c7;
+}
+.sandbox-panel-divider:hover { background: #e4ecff; }
+.is-resizing-panels .sandbox-panel-divider::after { background: var(--focus); }
+.is-resizing-panels, .is-resizing-panels * { cursor: col-resize !important; user-select: none !important; }
+@media (max-width: 900px) {
+    .sandbox-panel-row { grid-template-columns: minmax(0, 1fr); }
+    .sandbox-panel-divider { display: none; }
+}
+
+/* Two disjoint hit areas around a loop-header gap: first above, nearest below. */
+.sandbox-line-jump.is-loop-first { top: -20px; height: 20px; }
+.sandbox-line-jump.is-loop-nearest { top: 0; height: 20px; }
+.sandbox-line-jump.is-loop-first::after { height: 3px; }
+.sandbox-line-jump.is-loop-nearest::after { margin-left: 10px; }
+.sandbox-line-jump::before {
+    content: attr(data-tooltip);
+    display: none;
+    position: absolute;
+    left: calc(100% + 8px);
+    top: 50%;
+    transform: translateY(-50%);
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--panel);
+    color: var(--text);
+    font: 13px/1.4 var(--ui-font);
+    width: max-content;
+    max-width: min(340px, calc(100vw - 100px));
+    white-space: normal;
+    text-align: left;
+    pointer-events: none;
+    box-shadow: 0 2px 6px rgb(0 0 0 / .12);
+}
+.sandbox-line-jump:hover, .sandbox-line-jump:focus-visible { z-index: 5; }
+.sandbox-line-jump:hover::before, .sandbox-line-jump:focus-visible::before { display: block; }
+
+/* Keep target labels visible over the editor and leave room above its first line. */
+.sandbox-shell .code-gutter { overflow: visible; }
+.sandbox-shell .codepane-row { margin-top: 12px; }
+
+/* The next executable step takes precedence over the green execution history. */
+.code-textarea-highlight .code-highlight-line.is-next,
+.line.is-next .src {
+    color: var(--next-run);
+    background: var(--next-run-bg);
+}
+
+.line.progress-range .src,
+.line.progress-mid .src,
+.code-textarea-highlight .code-highlight-line.is-next,
+.line.is-next .src {
+    border-radius: 3px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
 }
