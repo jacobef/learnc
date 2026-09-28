@@ -1,6 +1,28 @@
 import { normalizeZeroDisplay, type BoxState } from "./shared-core-utils.js";
 import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
 
+/** Give inaccessible objects distinct display names without changing source-level names. */
+export function memoryDisplayState(boxes: BoxState[]): BoxState[] {
+  const roots = new Map<number, string>();
+  for (const box of boxes) {
+    if (box.objectId !== undefined && !roots.has(box.objectId)) {
+      roots.set(box.objectId, box.aggregateRoot || box.arrayRoot || box.name);
+    }
+  }
+  return boxes.map(box => {
+    if (box.nameAccessible !== false || box.objectId === undefined || box.name.includes(" (out of scope · ")) return box;
+    const root = roots.get(box.objectId)!;
+    const label = `${root} (out of scope · ${box.scope || "object"} #${box.objectId})`;
+    const rename = (name: string) => name.startsWith(root) ? label + name.slice(root.length) : name;
+    return {
+      ...box,
+      name: rename(box.name),
+      arrayRoot: box.arrayRoot ? rename(box.arrayRoot) : box.arrayRoot,
+      aggregateRoot: box.aggregateRoot ? rename(box.aggregateRoot) : box.aggregateRoot,
+    };
+  });
+}
+
 export interface BasicProgramHint {
   kind: "count" | "removed" | "not-removed" | "name" | "type" | "value";
   variable?: string;

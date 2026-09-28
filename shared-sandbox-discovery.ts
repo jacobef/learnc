@@ -4,7 +4,7 @@ import { executionBoundaries, type LineBoundary } from "./shared-sandbox-navigat
 
 /** Runs in a worker: only source locations cross back to the interactive page. */
 export function discoverSandboxBoundaries(files: CSourceFile[], stdin: string, implicitMain: boolean, stepLimit: number, traceLimit: number, addressBase = pageSyntheticAddressBase): { boundaries: (LineBoundary | null)[]; more: boolean } {
-  const result = runCFiles(files, addressBase, stdin, implicitMain, {stepLimit, traceLimit, followingTraceLimit: 256});
+  const result = runCFiles(files, addressBase, stdin, implicitMain, {stepLimit, traceLimit, followingTraceLimit: 256, traceFunctions: true});
   if (result.kind !== "ok") return {boundaries: [], more: false};
   const endFile = files.find(file => file.path === result.mainClose?.file) ?? files[0]!;
   return {

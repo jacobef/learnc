@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
 
-use crate::interpreter::ProgramStateBox;
+use crate::interpreter::{ProgramStateBox, ProgramTraceEvent};
 use crate::source::{Snippet, SourceManager, Span};
 
 #[derive(Debug, Clone)]
@@ -11,6 +11,10 @@ pub struct DiagnosticRuntimeContext {
     pub executed_steps: usize,
     pub line_execution_count: Option<usize>,
     pub state: Vec<ProgramStateBox>,
+    pub trace: Vec<ProgramTraceEvent>,
+    pub stdout_bytes: Vec<u8>,
+    pub stderr_bytes: Vec<u8>,
+    pub stdin_position: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

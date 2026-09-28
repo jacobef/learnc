@@ -1,5 +1,4 @@
 import type {
-  BoxState,
   ProgramDiagnostic,
   ProgramDiagnosticMessagePart,
   ProgramDiagnosticRange,
@@ -22,11 +21,7 @@ export type CInterpreterError = {
     endLine?: number | null;
     endColumn?: number | null;
   }>;
-  runtimeContext: {
-    executedSteps: number;
-    lineExecutionCount: number | null;
-    state: BoxState[];
-  } | null;
+  runtimeContext: ProgramDiagnostic["runtimeContext"];
   implicitMainApplied?: boolean;
   implicitMainNotice?: string | null;
 };
@@ -886,15 +881,23 @@ function declarationDiagnostic(context: FriendlyDiagnosticContext): FriendlyDiag
     };
   }
 
+  if (message === "expected ';' after struct, union, or enum definition") {
+    return { message: "Missing semicolon (;). Add ; after this closing brace to end the declaration." };
+  }
+
   const directAndBuiltinType = /^(.+) cannot be combined with a built-in type specifier$/.exec(message);
   if (directAndBuiltinType) {
-    if (/}\s*$/.test(text)) {
-      return {
-        message: "A struct, union, or enum definition must end with a semicolon. Add ; after the closing brace.",
-        col: lineEndColumn(lines, safeLine),
-      };
-    }
     return { message: `${directAndBuiltinType[1]} is already a complete type specifier, so it cannot be combined with a built-in type such as int or double.` };
+  }
+
+  const arrayParameterDimensions = /^array dimensions for parameter (.+) require (.+), but the argument has type (.+)$/.exec(message);
+  if (arrayParameterDimensions) {
+    return { message: `The array passed to ${arrayParameterDimensions[1]} has the wrong dimensions: this parameter needs ${arrayParameterDimensions[2]}, but the argument is ${arrayParameterDimensions[3]}. Check the size arguments passed to the function.` };
+  }
+
+  const runtimeArrayOperands = /^array dimensions differ at runtime: (.+) and (.+)$/.exec(message);
+  if (runtimeArrayOperands) {
+    return { message: `The array dimensions do not match: these pointers have types ${runtimeArrayOperands[1]} and ${runtimeArrayOperands[2]}. Check the values used for the array sizes.` };
   }
 
   if (/^type specifier cannot be both signed and unsigned$/.test(message)) {
@@ -1196,7 +1199,7 @@ function executionDiagnostic(context: FriendlyDiagnosticContext): FriendlyDiagno
 
   const byteAccess = /^requested byte access of (\d+) byte\(s\) starting at offset (\d+) exceeds the (\d+)-byte object$/.exec(message);
   if (byteAccess) {
-    return { message: `This operation needs ${byteAccess[1]} bytes starting at offset ${byteAccess[2]}, but the destination object holds only ${byteAccess[3]} bytes. Increase the buffer size or copy less data.` };
+    return { message: `This operation accesses ${byteAccess[1]} bytes starting at offset ${byteAccess[2]}, but the object holds only ${byteAccess[3]} bytes. Keep the entire access within this object's bounds.` };
   }
 
   if (/^string is not terminated within the bounds of its object$/.test(message)) {

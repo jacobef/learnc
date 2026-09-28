@@ -182,6 +182,11 @@ fn runtime_ub_reports_when_it_happened_and_the_pre_failure_state() {
 
     assert!(context.executed_steps > 0);
     assert_eq!(context.line_execution_count, Some(4));
+    assert!(!context.trace.is_empty());
+    assert_eq!(
+        context.trace.last().unwrap().state.len(),
+        context.state.len()
+    );
     assert!(
         context
             .state
@@ -198,6 +203,7 @@ fn runtime_ub_reports_when_it_happened_and_the_pre_failure_state() {
     assert!(json.contains("\"runtimeContext\":{"), "{json}");
     assert!(json.contains("\"lineExecutionCount\":4"), "{json}");
     assert!(json.contains("\"name\":\"x\""), "{json}");
+    assert!(json.contains("\"trace\":[{"), "{json}");
 }
 
 #[test]
@@ -941,7 +947,7 @@ fn browser_state_includes_visible_program_globals() {
 }
 
 #[test]
-fn browser_state_uses_locals_instead_of_shadowed_globals() {
+fn browser_state_retains_shadowed_globals_with_inaccessible_names() {
     let source = "int value = 1; int main(void) { int value = 2; }\n";
     let result = run_source("program.c", source).unwrap();
     let values = result
@@ -950,8 +956,12 @@ fn browser_state_uses_locals_instead_of_shadowed_globals() {
         .filter(|item| item.name == "value")
         .collect::<Vec<_>>();
 
-    assert_eq!(values.len(), 1);
-    assert_eq!(values[0].value, "2");
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0].value, "1");
+    assert!(!values[0].name_accessible);
+    assert_eq!(values[1].value, "2");
+    assert!(values[1].name_accessible);
+    assert_ne!(values[0].object_id, values[1].object_id);
 }
 
 #[test]
@@ -976,7 +986,13 @@ fn browser_state_includes_cross_file_globals_visible_to_main() {
             .map(|item| item.value.as_str()),
         Some("42")
     );
-    assert!(result.state.iter().all(|item| item.name != "hidden"));
+    let hidden = result
+        .state
+        .iter()
+        .find(|item| item.name == "hidden")
+        .unwrap();
+    assert_eq!(hidden.value, "9");
+    assert!(!hidden.name_accessible);
 }
 
 #[test]
@@ -1435,7 +1451,7 @@ fn input_position_reports_partial_blocked_reads_and_utf8_bytes() {
 }
 
 #[test]
-fn for_headers_record_counter_updates_before_the_body() {
+fn for_headers_test_the_condition_and_false_exits_the_scope() {
     let source = "#include <stdio.h>\nint main(void) {\nfor (int i = 0; i < 3; i++) {\nprintf(\"%d\", i);\n}\n}\n";
     let output = run_source("program.c", source).unwrap();
     let headers = output
@@ -1444,7 +1460,7 @@ fn for_headers_record_counter_updates_before_the_body() {
         .filter(|event| event.start_line == 2)
         .collect::<Vec<_>>();
     assert_eq!(headers.len(), 4);
-    for (i, event) in headers.iter().enumerate() {
+    for (i, event) in headers.iter().take(3).enumerate() {
         assert_eq!(
             event
                 .state
@@ -1455,6 +1471,25 @@ fn for_headers_record_counter_updates_before_the_body() {
             i.to_string()
         );
         assert_eq!(event.stdout_length, i);
+    }
+    assert!(headers[3].state.iter().all(|item| item.name != "i"));
+    assert_eq!(headers[3].stdout_length, 3);
+    let closes = output
+        .trace
+        .iter()
+        .filter(|event| event.start_line == 4)
+        .collect::<Vec<_>>();
+    assert_eq!(closes.len(), 3);
+    for (i, event) in closes.iter().enumerate() {
+        assert_eq!(
+            event
+                .state
+                .iter()
+                .find(|item| item.name == "i")
+                .unwrap()
+                .value,
+            (i + 1).to_string()
+        );
     }
     for (i, event) in output
         .trace

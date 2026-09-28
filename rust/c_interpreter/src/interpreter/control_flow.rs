@@ -28,7 +28,7 @@ impl<'a> Interpreter<'a> {
                                 .pop_active_block_scope(frame.id, block.span)
                                 .expect("active block scope must exist");
                             self.restore_block_scope(scope, frame, objects);
-                            self.trace_cboxes_main_block_close(block, frame, objects)?;
+                            self.trace_cboxes_main_block_close(block, frame, objects, &flow)?;
                             return Ok(flow);
                         } else {
                             self.capture_cboxes_main_state_if_needed(block, frame, objects)?;
@@ -36,7 +36,12 @@ impl<'a> Interpreter<'a> {
                                 .pop_active_block_scope(frame.id, block.span)
                                 .expect("active block scope must exist");
                             self.restore_block_scope(scope, frame, objects);
-                            self.trace_cboxes_main_block_close(block, frame, objects)?;
+                            self.trace_cboxes_main_block_close(
+                                block,
+                                frame,
+                                objects,
+                                &Flow::Goto(label.clone(), span),
+                            )?;
                             return Ok(Flow::Goto(label, span));
                         }
                     }
@@ -46,7 +51,7 @@ impl<'a> Interpreter<'a> {
                             .pop_active_block_scope(frame.id, block.span)
                             .expect("active block scope must exist");
                         self.restore_block_scope(scope, frame, objects);
-                        self.trace_cboxes_main_block_close(block, frame, objects)?;
+                        self.trace_cboxes_main_block_close(block, frame, objects, &flow)?;
                         return Ok(flow);
                     }
                 },
@@ -57,7 +62,7 @@ impl<'a> Interpreter<'a> {
             .pop_active_block_scope(frame.id, block.span)
             .expect("active block scope must exist");
         self.restore_block_scope(scope, frame, objects);
-        self.trace_cboxes_main_block_close(block, frame, objects)?;
+        self.trace_cboxes_main_block_close(block, frame, objects, &Flow::Continue)?;
         Ok(Flow::Continue)
     }
 
@@ -157,9 +162,25 @@ impl<'a> Interpreter<'a> {
             )
         };
         self.ensure_object_alignment(object, &resolved_ty, decl.alignment);
-        frame.object_decls.remove(&decl.name);
+        if has_variably_modified_type {
+            let mut symbolic_decl = decl.clone();
+            symbolic_decl.ty = Self::resolve_vla_type_for_constraints(&decl.ty, &decl.vla_bounds).0;
+            frame.object_decls.insert(decl.name.clone(), symbolic_decl);
+        } else {
+            frame.object_decls.remove(&decl.name);
+        }
         frame.function_decls.remove(&decl.name);
         frame.bindings.insert(decl.name.clone(), object);
+        if self.run_options.capture_visualization {
+            let scope = self
+                .current_functions
+                .last()
+                .map(|function| function.name.clone())
+                .unwrap_or_default();
+            if let Some(state) = self.lookup_object_mut(objects, object) {
+                state.display_binding = Some((decl.name.clone(), scope));
+            }
+        }
         if decl.storage_class != Some(StorageClass::Static)
             || !self
                 .lookup_object(objects, object)
@@ -282,9 +303,25 @@ impl<'a> Interpreter<'a> {
                     } else {
                         TypedValue::void()
                     };
+                    if let Some(function) = self.current_functions.last()
+                        && let Some(error) = self.runtime_array_dimension_mismatch(
+                            &function.return_type,
+                            &value.ty,
+                            *span,
+                        )
+                    {
+                        return Err(error);
+                    }
                     self.end_full_expression();
-                    self.trace_cboxes_main_event(*span, frame, objects)?;
-                    Ok(Flow::Return(value.with_span(*span)))
+                    let kind = if self.run_options.trace_function_calls
+                        && self.current_frame_ids.len() > 1
+                    {
+                        "function-exit"
+                    } else {
+                        "statement"
+                    };
+                    self.trace_cboxes_main_event_with_kind(*span, frame, objects, kind)?;
+                    Ok(Flow::Return(value))
                 }
                 Statement::If {
                     condition,
@@ -669,7 +706,8 @@ impl<'a> Interpreter<'a> {
                 body,
                 span,
             } if self.statement_contains_label(body, label) => {
-                self.push_scope_info(frame, *span, true, true, true, objects);
+                self.push_for_scope(frame, *span, step.as_ref(), body, objects);
+                let mut false_condition_span = None;
                 let result = (|| -> Result<Flow, Diagnostic> {
                     if let Some(ForInit::Declarations(declarations)) = init {
                         for declaration in declarations {
@@ -693,12 +731,7 @@ impl<'a> Interpreter<'a> {
                             Flow::LoopBreak => break Ok(Flow::Continue),
                             other => break Ok(other),
                         }
-                        if let Some(step) = step {
-                            self.begin_full_expression_for(step);
-                            let value = self.eval_rvalue(step, frame, objects);
-                            self.end_full_expression();
-                            let _ = value?;
-                        }
+                        self.exec_for_step(step.as_ref(), body, frame, objects)?;
                         if let Some(condition) = condition {
                             let cond = self.eval_in_setjmp_context(
                                 condition,
@@ -708,13 +741,15 @@ impl<'a> Interpreter<'a> {
                                 objects,
                             )?;
                             if !self.scalar_truthy(&cond, condition.span())? {
+                                false_condition_span = Some(condition.span());
                                 break Ok(Flow::Continue);
                             }
+                            self.trace_cboxes_loop_event(condition.span(), frame, objects)?;
                         }
                         flow = self.exec_controlled_substatement(body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, frame, objects, result)?
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result)?
             }
             Statement::If { then_branch, .. }
                 if self.statement_contains_label(then_branch, label) =>
@@ -1046,6 +1081,7 @@ impl<'a> Interpreter<'a> {
                 span,
                 ..
             } if self.statement_contains_span(body, site.stmt_span) => {
+                let mut false_condition_span = None;
                 let result = (|| -> Result<Flow, Diagnostic> {
                     let mut flow = self
                         .resume_controlled_substatement_after_longjmp(body, site, frame, objects)?;
@@ -1055,12 +1091,7 @@ impl<'a> Interpreter<'a> {
                             Flow::LoopBreak => break Ok(Flow::Continue),
                             other => break Ok(other),
                         }
-                        if let Some(step) = step {
-                            self.begin_full_expression_for(step);
-                            let value = self.eval_rvalue(step, frame, objects);
-                            self.end_full_expression();
-                            let _ = value?;
-                        }
+                        self.exec_for_step(step.as_ref(), body, frame, objects)?;
                         if let Some(condition) = condition {
                             let cond = self.eval_in_setjmp_context(
                                 condition,
@@ -1070,13 +1101,15 @@ impl<'a> Interpreter<'a> {
                                 objects,
                             )?;
                             if !self.scalar_truthy(&cond, condition.span())? {
+                                false_condition_span = Some(condition.span());
                                 break Ok(Flow::Continue);
                             }
+                            self.trace_cboxes_loop_event(condition.span(), frame, objects)?;
                         }
                         flow = self.exec_controlled_substatement(body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, frame, objects, result)
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result)
             }
             Statement::If { then_branch, .. }
                 if self.statement_contains_span(then_branch, site.stmt_span) =>
@@ -1268,6 +1301,7 @@ impl<'a> Interpreter<'a> {
                         site.stmt_span,
                     ));
                 };
+                let mut false_condition_span = None;
                 let result = (|| -> Result<Flow, Diagnostic> {
                     loop {
                         let cond = self.eval_in_setjmp_context(
@@ -1278,22 +1312,19 @@ impl<'a> Interpreter<'a> {
                             objects,
                         )?;
                         if !self.scalar_truthy(&cond, condition.span())? {
+                            false_condition_span = Some(condition.span());
                             break Ok(Flow::Continue);
                         }
+                        self.trace_cboxes_loop_event(condition.span(), frame, objects)?;
                         match self.exec_controlled_substatement(body, frame, objects)? {
                             Flow::Continue | Flow::LoopContinue => {}
                             Flow::LoopBreak => break Ok(Flow::Continue),
                             flow => break Ok(flow),
                         }
-                        if let Some(step) = step {
-                            self.begin_full_expression_for(step);
-                            let value = self.eval_rvalue(step, frame, objects);
-                            self.end_full_expression();
-                            let _ = value?;
-                        }
+                        self.exec_for_step(step.as_ref(), body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, frame, objects, result)
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result)
             }
             (
                 Statement::Switch {
@@ -1663,7 +1694,8 @@ impl<'a> Interpreter<'a> {
                 body,
                 span,
             } if Self::statement_contains_switch_label(body, target) => {
-                self.push_scope_info(frame, *span, true, true, true, objects);
+                self.push_for_scope(frame, *span, step.as_ref(), body, objects);
+                let mut false_condition_span = None;
                 let result = (|| -> Result<Flow, Diagnostic> {
                     if let Some(ForInit::Declarations(declarations)) = init {
                         for declaration in declarations {
@@ -1693,11 +1725,7 @@ impl<'a> Interpreter<'a> {
                             Flow::LoopBreak => break Ok(Flow::Continue),
                             other => break Ok(other),
                         }
-                        if let Some(step) = step {
-                            self.begin_full_expression_for(step);
-                            let _ = self.eval_rvalue(step, frame, objects)?;
-                            self.end_full_expression();
-                        }
+                        self.exec_for_step(step.as_ref(), body, frame, objects)?;
                         if let Some(condition) = condition {
                             let condition_value = self.eval_in_setjmp_context(
                                 condition,
@@ -1707,13 +1735,15 @@ impl<'a> Interpreter<'a> {
                                 objects,
                             )?;
                             if !self.scalar_truthy(&condition_value, condition.span())? {
+                                false_condition_span = Some(condition.span());
                                 break Ok(Flow::Continue);
                             }
+                            self.trace_cboxes_loop_event(condition.span(), frame, objects)?;
                         }
                         flow = self.exec_controlled_substatement(body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, frame, objects, result)?
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result)?
             }
             Statement::If { then_branch, .. }
                 if Self::statement_contains_switch_label(then_branch, target) =>
@@ -1794,6 +1824,44 @@ impl<'a> Interpreter<'a> {
         result
     }
 
+    fn push_for_scope(
+        &mut self,
+        frame: &Frame,
+        span: Span,
+        step: Option<&Expr>,
+        body: &Statement,
+        objects: &ObjectFrames,
+    ) {
+        self.push_scope_info(frame, span, true, true, true, objects);
+        if self.run_options.capture_visualization
+            && let (Some(step), Statement::Block(block)) = (step, body)
+        {
+            self.active_block_scopes.last_mut().unwrap().for_step_trace =
+                Some((step.span(), block.span));
+        }
+    }
+
+    fn exec_for_step(
+        &mut self,
+        step: Option<&Expr>,
+        body: &Statement,
+        frame: &mut Frame,
+        objects: &mut ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        let Some(step) = step else {
+            return Ok(());
+        };
+        self.begin_full_expression_for(step);
+        let value = self.eval_rvalue(step, frame, objects);
+        self.end_full_expression();
+        let _ = value?;
+        if let Statement::Block(block) = body {
+            self.trace_cboxes_main_scope_close(block.span, frame, objects)
+        } else {
+            self.trace_cboxes_main_event(step.span(), frame, objects)
+        }
+    }
+
     fn exec_for(
         &mut self,
         init: Option<&ForInit>,
@@ -1804,7 +1872,8 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<Flow, Diagnostic> {
-        self.push_scope_info(frame, span, true, true, true, objects);
+        self.push_for_scope(frame, span, step, body, objects);
+        let mut false_condition_span = None;
         let result = (|| -> Result<Flow, Diagnostic> {
             if let Some(init) = init {
                 match init {
@@ -1831,10 +1900,11 @@ impl<'a> Interpreter<'a> {
                         frame,
                         objects,
                     )?;
-                    self.trace_cboxes_loop_event(condition.span(), frame, objects)?;
                     if !self.scalar_truthy(&cond, condition.span())? {
+                        false_condition_span = Some(condition.span());
                         break Ok(Flow::Continue);
                     }
+                    self.trace_cboxes_loop_event(condition.span(), frame, objects)?;
                 } else {
                     self.trace_cboxes_loop_event(
                         Span::new(span.file, span.start, body.span().start),
@@ -1855,20 +1925,16 @@ impl<'a> Interpreter<'a> {
                     Flow::LoopBreak => break Ok(Flow::Continue),
                     flow => break Ok(flow),
                 }
-                if let Some(step) = step {
-                    self.begin_full_expression_for(step);
-                    let value = self.eval_rvalue(step, frame, objects);
-                    self.end_full_expression();
-                    let _ = value?;
-                }
+                self.exec_for_step(step, body, frame, objects)?;
             }
         })();
-        self.finish_for_scope(span, frame, objects, result)
+        self.finish_for_scope(span, false_condition_span, frame, objects, result)
     }
 
     fn finish_for_scope(
         &mut self,
         span: Span,
+        false_condition_span: Option<Span>,
         frame: &mut Frame,
         objects: &mut ObjectFrames,
         result: Result<Flow, Diagnostic>,
@@ -1877,9 +1943,12 @@ impl<'a> Interpreter<'a> {
             self.restore_block_scope(scope, frame, objects);
         }
         if matches!(&result, Ok(Flow::Continue)) {
-            // The final condition snapshot still contains the for-init bindings.
-            // Record their lifetime ending before the next statement runs.
-            self.trace_cboxes_main_scope_close(span, frame, objects)?;
+            if let Some(condition_span) = false_condition_span {
+                // Testing false and leaving the for-init scope are one step.
+                self.trace_cboxes_loop_event(condition_span, frame, objects)?;
+            } else {
+                self.trace_cboxes_main_scope_close(span, frame, objects)?;
+            }
         }
         result
     }

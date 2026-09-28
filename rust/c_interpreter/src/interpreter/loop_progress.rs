@@ -296,13 +296,8 @@ impl<'a> Interpreter<'a> {
                 let lhs_value = value(lhs)?;
                 let rhs_value = value(rhs)?;
                 let result = if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
-                    let ValueCategory::RValue(value) = self
-                        .eval_equality(*op, lhs_value, rhs_value, lhs, rhs, *span, frame, objects)
+                    self.eval_equality(*op, lhs_value, rhs_value, lhs, rhs, *span, frame, objects)
                         .ok()?
-                    else {
-                        return None;
-                    };
-                    value
                 } else {
                     self.compute_binary_value(*op, lhs_value, rhs_value, *span, objects)
                         .ok()?

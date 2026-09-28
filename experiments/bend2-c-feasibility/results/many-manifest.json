@@ -1,0 +1,12 @@
+{
+  "name": "many",
+  "files": 16384,
+  "bytes": 1949025,
+  "functions": 16384,
+  "lex": 2324718473,
+  "fold": 1672363547,
+  "sha256": {
+    "clustered": "15386b171e9d7a837366c41f02b541bd4372b36b1cfbc52816f26eb88619ee00"
+  },
+  "clang_sample_expected": 2945813786
+}

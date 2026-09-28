@@ -16,4 +16,5 @@ node scripts/test-c-interpreter-wasm.ts
 node scripts/test-program-state.ts
 node scripts/test-lessons.ts
 node scripts/test-sandbox-execution.ts
+node scripts/test-function-stepping.ts
 git diff --check

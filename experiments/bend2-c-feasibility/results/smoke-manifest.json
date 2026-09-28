@@ -1,0 +1,12 @@
+{
+  "name": "smoke",
+  "files": 16,
+  "bytes": 11582,
+  "functions": 64,
+  "lex": 4117135590,
+  "fold": 1944642570,
+  "sha256": {
+    "clustered": "e30d40a0571f00e1015f3f8286c5101b136d8a59efa1eda4dbe275bd71024e8b"
+  },
+  "clang_sample_expected": 1640951805
+}

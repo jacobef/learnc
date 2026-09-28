@@ -38,6 +38,7 @@ function normalizeExecutionBudget(
   budget: CExecutionBudget,
 ): CExecutionBudget {
   return {
+    traceFunctions: budget.traceFunctions ?? false,
     stepLimit: Math.max(1, Math.floor(budget.stepLimit)),
     followingTraceLimit: Math.max(1, Math.floor(budget.followingTraceLimit)),
     traceLimit: budget.traceLimit == null ? undefined : Math.max(1, Math.floor(budget.traceLimit)),

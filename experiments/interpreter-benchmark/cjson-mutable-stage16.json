@@ -1,0 +1,44 @@
+{
+  "date": "2026-09-28T09:12:38.509Z",
+  "cpu": "Apple M4",
+  "node": "v26.7.0",
+  "wasmPayloadSha256": "4f3e82c75da5c9494aae48b8b5f81ff456fc129442cd33fd0f820ece696adb3a",
+  "wasmSha256": "67846ddede90ad7f3e1804a829b7759415ac9b967d1d9aa5aa8e493e8e53a272",
+  "wasmBytes": 2551294,
+  "rows": [
+    {
+      "name": "cJSON",
+      "version": "v1.7.18",
+      "n": 8,
+      "documentRecords": 8,
+      "sourceSha256": "8f40f641ec0d207d2dda5baceb3cda34fde9b192f8d14d7f94a49058a02c6f8e",
+      "native": {
+        "output": 17733,
+        "checksum": 36299451,
+        "repeats": 1024,
+        "ms": [
+          0.063774414,
+          0.063608398,
+          0.063294922,
+          0.063393555,
+          0.064078125,
+          0.065621094,
+          0.063689453
+        ],
+        "finalChecksum": 163409595
+      },
+      "wasm": {
+        "ms": [
+          231.23458400000004,
+          229.27483299999994,
+          230.25195799999983,
+          230.04575000000023,
+          228.5267920000001
+        ],
+        "medianMs": 230.04575000000023,
+        "traceEvents": 5
+      },
+      "slowdown": 3611.9912978370257
+    }
+  ]
+}

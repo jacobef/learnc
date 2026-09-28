@@ -33,7 +33,7 @@ pub(super) fn loop_read_path(expr: &Expr) -> Option<(&str, Vec<LoopPathPart>)> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) enum LoopValue {
     UncreatedStatic,
     Stdin(LoopInputState),
@@ -49,7 +49,7 @@ pub(super) enum LoopValue {
     Bytes(Vec<ByteCell>),
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) struct LoopInputState {
     position: usize,
     pushback: Vec<u8>,
@@ -175,6 +175,7 @@ impl<'a> Interpreter<'a> {
         }
         let object = self.lookup_object(objects, id)?;
         if !object.alive
+            || !object.initialized
             || object.has_volatile_subobject
             || object.ty.top_level_qualifiers().is_atomic
         {

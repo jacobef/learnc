@@ -3,18 +3,15 @@
 use super::*;
 
 impl<'a> Interpreter<'a> {
-    pub(super) fn default_argument_promotion_for_expr(
+    pub(super) fn default_argument_promotion(
         &self,
         value: TypedValue,
-        expr: &Expr,
-        frame: &Frame,
-        objects: &ObjectFrames,
+        span: Span,
     ) -> Result<TypedValue, Diagnostic> {
         if matches!(value.ty.unqualified(), CType::Float) {
-            self.convert_value(value, &CType::Double, expr.span())
+            self.convert_value(value, &CType::Double, span)
         } else if value.ty.is_integer() {
-            let promoted = self.promoted_integer_expr_type(expr, frame, objects)?;
-            self.convert_value(value, &promoted, expr.span())
+            self.integer_promotion(value, span)
         } else {
             Ok(value)
         }
@@ -31,12 +28,9 @@ impl<'a> Interpreter<'a> {
                 span,
             )
         })?;
-        let size = self.ensure_int_range(
-            size as i128,
-            span,
-            "sizeof result is outside the supported int range",
-        )?;
-        Ok(TypedValue::integer(CType::UnsignedLong, size))
+        // The interpreted size_t is unsigned long, not int. Every host usize
+        // fits this value representation, including sizes above INT_MAX.
+        Ok(TypedValue::integer(CType::UnsignedLong, size as i128))
     }
 
     pub(super) fn eval_offsetof_type(
@@ -97,12 +91,7 @@ impl<'a> Interpreter<'a> {
                 },
             }
         }
-        let offset = self.ensure_int_range(
-            offset as i128,
-            span,
-            "offsetof result is outside the supported int range",
-        )?;
-        Ok(TypedValue::integer(CType::UnsignedLong, offset))
+        Ok(TypedValue::integer(CType::UnsignedLong, offset as i128))
     }
 
     pub(super) fn eval_sizeof_type_name(
@@ -697,18 +686,18 @@ impl<'a> Interpreter<'a> {
         self.usual_arithmetic_type(&lhs_ty, &rhs_ty, span)
     }
 
-    pub(super) fn promote_integer_expr_value(
+    pub(super) fn promote_integer_value(
         &self,
-        expr: &Expr,
         value: TypedValue,
-        frame: &Frame,
-        objects: &ObjectFrames,
+        span: Span,
     ) -> Result<TypedValue, Diagnostic> {
-        if !value.ty.is_integer() {
-            return Ok(value);
+        // Bit-fields are promoted when their values are loaded. Evaluating
+        // their expression's type again here repeats member lookup and layout.
+        if value.ty.is_integer() {
+            self.integer_promotion(value, span)
+        } else {
+            Ok(value)
         }
-        let promoted = self.promoted_integer_expr_type(expr, frame, objects)?;
-        self.convert_value(value, &promoted, expr.span())
     }
 
     pub(super) fn promoted_integer_type(
@@ -1026,7 +1015,7 @@ impl<'a> Interpreter<'a> {
                 .filter(|record| record.complete)
                 .map(|record| record.size),
             CType::Array(inner, len) => {
-                if *len == 0 {
+                if *len == 0 || *len == CONSTRAINT_VLA_BOUND {
                     None
                 } else {
                     self.type_size_of(inner)

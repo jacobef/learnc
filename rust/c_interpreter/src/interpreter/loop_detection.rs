@@ -6,7 +6,9 @@
 
 use super::loop_state::{LoopPathPart, LoopReadPaths, LoopSnapshot, LoopValue, loop_read_path};
 use super::*;
+use crate::fast_hash::FastHasher;
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 
 #[derive(Default)]
 pub(super) struct LoopAnalysis {
@@ -402,10 +404,37 @@ enum LoopVariable {
     Static(Span),
 }
 
+#[derive(PartialEq, Eq)]
+struct LoopState {
+    fingerprint: u64,
+    values: Vec<LoopValue>,
+}
+
+impl LoopState {
+    fn new(values: Vec<LoopValue>) -> Self {
+        let mut hasher = FastHasher::default();
+        values.hash(&mut hasher);
+        Self {
+            fingerprint: hasher.finish(),
+            values,
+        }
+    }
+}
+
+impl Hash for LoopState {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // The recent-state table hashes on lookup, insertion, and eviction.
+        // Traverse the snapshot once; equality still checks every value so
+        // hash collisions can never report a false infinite loop.
+        self.fingerprint.hash(state);
+    }
+}
+
 pub(super) struct LoopDetector {
     variables: Vec<LoopVariable>,
-    seen: VecDeque<Vec<LoopValue>>,
-    checkpoint: Option<Vec<LoopValue>>,
+    seen: VecDeque<Rc<LoopState>>,
+    seen_set: HashSet<Rc<LoopState>>,
+    checkpoint: Option<Rc<LoopState>>,
     checkpoint_period: usize,
     checkpoint_distance: usize,
     trace_start: usize,
@@ -432,26 +461,11 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
     ) -> Option<LoopDetector> {
         self.execution_steps_remaining?;
-        let mut analysis = LoopAnalysis::default();
-        if let Some(condition) = condition {
-            analysis.control(condition)?;
-        }
-        if let Some(step) = step {
-            analysis.expression(step)?;
-        }
-        analysis.statement(body)?;
+        let analysis = self.analyze_loop(condition, step, body)?;
         let mut external_objects = HashSet::default();
         let mut static_objects = analysis.static_locals.clone();
         let mut reads_stdin = false;
         for call in &analysis.calls {
-            if self.lookup_function(&call.name, call.span.file).is_some() {
-                analysis
-                    .controls
-                    .extend(call.argument_reads.iter().cloned());
-                for name in &call.argument_reads {
-                    analysis.read_paths.insert(name.clone(), None);
-                }
-            }
             if frame.bindings.contains_key(&call.name)
                 || (call.uses_stdin_argument && frame.bindings.contains_key("__cboxes_stdin"))
             {
@@ -466,20 +480,6 @@ impl<'a> Interpreter<'a> {
                 0,
             )?;
         }
-        loop {
-            let before = analysis.controls.len();
-            for name in analysis.controls.clone() {
-                if let Some(reads) = analysis.assignments.get(&name) {
-                    analysis.controls.extend(reads.iter().cloned());
-                }
-            }
-            if analysis.controls.len() == before {
-                break;
-            }
-        }
-        if analysis.controls.len() > 32 {
-            return None;
-        }
         // A freshly initialized automatic local is a function of its initializer's
         // dependencies, already closed above. It need not exist at the loop boundary.
         // Reject shadowing: the same spelling could otherwise denote two objects.
@@ -491,21 +491,26 @@ impl<'a> Interpreter<'a> {
                 return None;
             }
         }
-        analysis
-            .controls
-            .retain(|name| !analysis.locals.contains(name));
         let mut variables = external_objects
             .into_iter()
             .map(|id| (id, None))
             .collect::<HashMap<ObjectId, LoopReadPaths>>();
-        for name in analysis.controls {
+        for name in analysis
+            .controls
+            .iter()
+            .filter(|name| !analysis.locals.contains(*name))
+        {
             let Some(id) = frame
                 .bindings
-                .get(&name)
+                .get(name)
                 .copied()
-                .or_else(|| self.lookup_global_binding(&name, span.file))
+                .or_else(|| self.lookup_global_binding(name, span.file))
             else {
-                if self.program.enum_constants.contains_key(&(span.file, name)) {
+                if self
+                    .program
+                    .enum_constants
+                    .contains_key(&(span.file, name.clone()))
+                {
                     continue;
                 }
                 return None;
@@ -514,7 +519,7 @@ impl<'a> Interpreter<'a> {
             if object.ty.is_volatile_qualified() || object.ty.top_level_qualifiers().is_atomic {
                 return None;
             }
-            let paths = analysis.read_paths.remove(&name).flatten();
+            let paths = analysis.read_paths.get(name).cloned().flatten();
             variables
                 .entry(id)
                 .and_modify(|existing| match (existing.as_mut(), paths.as_ref()) {
@@ -551,6 +556,7 @@ impl<'a> Interpreter<'a> {
         Some(LoopDetector {
             variables,
             seen: VecDeque::new(),
+            seen_set: HashSet::default(),
             checkpoint: None,
             checkpoint_period: 1,
             checkpoint_distance: 0,
@@ -574,6 +580,81 @@ impl<'a> Interpreter<'a> {
             iterations: 0,
             reads_stdin,
         })
+    }
+
+    fn analyze_loop(
+        &self,
+        condition: Option<&Expr>,
+        step: Option<&Expr>,
+        body: &Statement,
+    ) -> Option<Rc<LoopAnalysis>> {
+        // These nodes belong to the program's retained function bodies. Cache
+        // only syntax/dependency analysis: object IDs and shadowing are resolved
+        // afresh for every invocation and loop scope.
+        let key = (
+            body as *const Statement as usize,
+            condition.map_or(0, |expr| expr as *const Expr as usize),
+            step.map_or(0, |expr| expr as *const Expr as usize),
+        );
+        if let Some(cached) = self.loop_analysis_cache.borrow().get(&key) {
+            return cached.clone();
+        }
+        let result = (|| {
+            let mut analysis = LoopAnalysis::default();
+            if let Some(condition) = condition {
+                analysis.control(condition)?;
+            }
+            if let Some(step) = step {
+                analysis.expression(step)?;
+            }
+            analysis.statement(body)?;
+            for call in &analysis.calls {
+                if self.lookup_function(&call.name, call.span.file).is_some() {
+                    analysis
+                        .controls
+                        .extend(call.argument_reads.iter().cloned());
+                    for name in &call.argument_reads {
+                        analysis.read_paths.insert(name.clone(), None);
+                    }
+                }
+            }
+            loop {
+                let before = analysis.controls.len();
+                for name in analysis.controls.clone() {
+                    if let Some(reads) = analysis.assignments.get(&name) {
+                        analysis.controls.extend(reads.iter().cloned());
+                    }
+                }
+                if analysis.controls.len() == before {
+                    break;
+                }
+            }
+            if analysis.controls.len() > 32 {
+                return None;
+            }
+            Some(Rc::new(analysis))
+        })();
+        let mut cache = self.loop_analysis_cache.borrow_mut();
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        cache.insert(key, result.clone());
+        result
+    }
+
+    fn analyze_loop_function(&self, function: &Rc<FunctionDef>) -> Option<Rc<LoopAnalysis>> {
+        let key = Rc::as_ptr(function) as usize;
+        if let Some(cached) = self.loop_function_analysis_cache.borrow().get(&key) {
+            return cached.clone();
+        }
+        let mut analysis = LoopAnalysis::default();
+        let result = analysis.block(&function.body).map(|()| Rc::new(analysis));
+        let mut cache = self.loop_function_analysis_cache.borrow_mut();
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        cache.insert(key, result.clone());
+        result
     }
 
     fn loop_call_objects(
@@ -608,8 +689,7 @@ impl<'a> Interpreter<'a> {
         if !visiting.insert(key.clone()) {
             return None;
         }
-        let mut analysis = LoopAnalysis::default();
-        analysis.block(&function.body)?;
+        let analysis = self.analyze_loop_function(function)?;
         statics.extend(analysis.static_locals.iter().copied());
         let parameters = function
             .params
@@ -692,6 +772,7 @@ impl<'a> Interpreter<'a> {
             // A buffer may become initialized by the first input operation. Never
             // compare across an incomplete snapshot, but allow later complete states.
             active.seen.clear();
+            active.seen_set.clear();
             active.checkpoint = None;
             active.checkpoint_period = 1;
             active.checkpoint_distance = 0;
@@ -706,24 +787,28 @@ impl<'a> Interpreter<'a> {
             };
             snapshot.values.push(input);
         }
-        let snapshot = snapshot.values;
+        let snapshot = LoopState::new(snapshot.values);
         // Recent states catch short cycles immediately. Brent's expanding checkpoint
         // also catches arbitrarily long periods without keeping every past state.
         active.checkpoint_distance += 1;
-        if active.seen.contains(&snapshot) || active.checkpoint.as_ref() == Some(&snapshot) {
+        if active.seen_set.contains(&snapshot) || active.checkpoint.as_deref() == Some(&snapshot) {
             active
                 .detected_at_step
                 .get_or_insert(self.execution_steps_completed);
         } else {
+            let snapshot = Rc::new(snapshot);
             if active.checkpoint.is_none() || active.checkpoint_distance >= active.checkpoint_period
             {
                 active.checkpoint = Some(snapshot.clone());
                 active.checkpoint_distance = 0;
                 active.checkpoint_period = active.checkpoint_period.saturating_mul(2);
             }
-            if active.seen.len() == 64 {
-                active.seen.pop_front();
+            if active.seen.len() == 64
+                && let Some(oldest) = active.seen.pop_front()
+            {
+                active.seen_set.remove(&oldest);
             }
+            active.seen_set.insert(snapshot.clone());
             active.seen.push_back(snapshot);
         }
         if active.iterations > 1
@@ -753,5 +838,26 @@ impl<'a> Interpreter<'a> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_collisions_do_not_merge_distinct_loop_states() {
+        let mut states = HashSet::default();
+        states.insert(Rc::new(LoopState {
+            fingerprint: 7,
+            values: vec![LoopValue::Object(ObjectId(1))],
+        }));
+        let other = LoopState {
+            fingerprint: 7,
+            values: vec![LoopValue::Object(ObjectId(2))],
+        };
+        assert!(!states.contains(&other));
+        assert!(states.insert(Rc::new(other)));
+        assert_eq!(states.len(), 2);
     }
 }

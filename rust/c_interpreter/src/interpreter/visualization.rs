@@ -49,7 +49,7 @@ impl<'a> Interpreter<'a> {
         self.trace_cboxes_main_event_with_details(span, frame, objects, "statement", None)
     }
 
-    fn trace_cboxes_main_event_with_kind(
+    pub(super) fn trace_cboxes_main_event_with_kind(
         &mut self,
         span: Span,
         frame: &Frame,
@@ -83,10 +83,23 @@ impl<'a> Interpreter<'a> {
         let Some(function) = self.current_functions.last() else {
             return Ok(());
         };
-        if function.name != "main" {
+        if function.name != "main" && !self.run_options.trace_function_calls {
             return Ok(());
         }
-        let (path, start_line, end_line) = self.sources.span_location(span);
+        let function_name = function.name.clone();
+        // A braced for-loop's update executes at the closing brace in the
+        // stepper, including calls made by the update expression.
+        let display_span = self
+            .active_block_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| {
+                let (step, body) = scope.for_step_trace?;
+                (span.file == step.file && span.start >= step.start && span.end <= step.end)
+                    .then(|| Span::new(body.file, body.end.saturating_sub(1), body.end))
+            })
+            .unwrap_or(span);
+        let (path, start_line, end_line) = self.sources.span_location(display_span);
         let trace_index = self.cboxes_trace.len();
         self.evaluate_cboxes_expression_at(trace_index, frame, objects)?;
         let skipped_range = skipped_span.map(|skipped_span| {
@@ -101,6 +114,9 @@ impl<'a> Interpreter<'a> {
             }
         });
         self.cboxes_trace.push(ProgramTraceEvent {
+            call_depth: self.current_frame_ids.len().saturating_sub(1),
+            frame_id: frame.id,
+            function: function_name,
             stdout_length: self.capture_stream_bytes(CaptureStream::Stdout).len(),
             stderr_length: self.capture_stream_bytes(CaptureStream::Stderr).len(),
             stdin_position: self.stdin_position(),
@@ -322,11 +338,25 @@ impl<'a> Interpreter<'a> {
         block: &Block,
         frame: &Frame,
         objects: &ObjectFrames,
+        flow: &Flow,
     ) -> Result<(), Diagnostic> {
         let Some(function) = self.current_functions.last() else {
             return Ok(());
         };
-        if function.name != "main" || function.body.span == block.span {
+        if (!self.run_options.trace_function_calls && function.name != "main")
+            || function.body.span == block.span
+        {
+            return Ok(());
+        }
+        if matches!(flow, Flow::Continue | Flow::LoopContinue)
+            && self.active_block_scopes.iter().any(|scope| {
+                scope.frame_id == frame.id
+                    && scope
+                        .for_step_trace
+                        .is_some_and(|(_, body)| body == block.span)
+            })
+        {
+            // The update snapshot also records the body locals leaving scope.
             return Ok(());
         }
         self.trace_cboxes_main_scope_close(block.span, frame, objects)
@@ -353,30 +383,55 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
         span: Span,
     ) -> Result<Vec<ProgramStateBox>, Diagnostic> {
-        let mut bindings = self.cboxes_visible_global_bindings(frame);
-        bindings.extend(
+        let mut visible: HashMap<ObjectId, &str> = self
+            .cboxes_visible_global_bindings(frame)
+            .into_iter()
+            .collect();
+        visible.extend(
             frame
                 .bindings
                 .iter()
-                .filter(|(name, _)| {
-                    !name.is_empty()
-                        && name.as_str() != "__func__"
-                        && !name.starts_with("__cboxes_")
-                })
                 .map(|(name, object)| (*object, name.as_str())),
         );
-        bindings.sort_by_key(|(object, _)| object.0);
-
+        let mut bindings: BTreeMap<usize, (String, String)> = BTreeMap::new();
+        for definition in &self.program.global_definitions {
+            if let Some(object) = self.lookup_global_binding(&definition.name, definition.span.file)
+            {
+                bindings.insert(object.0, (definition.name.clone(), "global".to_owned()));
+            }
+        }
+        // Walk current storage frames, not the historical object-ID slots left
+        // behind by earlier calls and loop iterations.
+        for id in objects.frames.iter().flatten() {
+            if let Some((name, scope)) = objects
+                .get(*id)
+                .and_then(|object| object.display_binding.as_ref())
+            {
+                bindings.insert(id.0, (name.clone(), scope.clone()));
+            }
+        }
         let mut state = Vec::new();
-        for (object_id, name) in bindings {
-            let Some(object) = self.lookup_object(objects, object_id) else {
-                continue;
-            };
-            if !object.alive {
+        for (id, (name, scope)) in bindings {
+            if name.is_empty() || name == "__func__" || name.starts_with("__cboxes_") {
                 continue;
             }
+            let object_id = ObjectId(id);
+            let Some(object) = self
+                .lookup_object(objects, object_id)
+                .filter(|object| object.alive)
+            else {
+                continue;
+            };
+            let start = state.len();
             let base_address = self.object_base_addresses.get(&object_id).copied();
-            self.cboxes_push_object_state(&mut state, name, object, base_address, span)?;
+            self.cboxes_push_object_state(&mut state, &name, object, base_address, span)?;
+            for item in &mut state[start..] {
+                item.object_id = id;
+                item.name_accessible = visible
+                    .get(&object_id)
+                    .is_some_and(|visible_name| **visible_name == name);
+                item.scope = scope.clone();
+            }
         }
         self.cboxes_add_aliases(&mut state);
         Ok(state)
@@ -478,6 +533,9 @@ impl<'a> Interpreter<'a> {
         if matches!(ty.unqualified(), CType::Array(_, _)) {
             let shape = cboxes_array_shape(ty);
             state.push(ProgramStateBox {
+                object_id: 0,
+                name_accessible: true,
+                scope: String::new(),
                 name: name.to_owned(),
                 ty: cboxes_type_string(ty),
                 value: String::new(),
@@ -531,6 +589,9 @@ impl<'a> Interpreter<'a> {
         let value = self.cboxes_stored_value_string(ty, value, span)?;
         let (display_value, exact_value) = self.cboxes_value_display_strings(&value, ty);
         state.push(ProgramStateBox {
+            object_id: 0,
+            name_accessible: true,
+            scope: String::new(),
             name: name.to_owned(),
             ty: cboxes_type_string(ty),
             value,
@@ -579,6 +640,9 @@ impl<'a> Interpreter<'a> {
             ""
         };
         state.push(ProgramStateBox {
+            object_id: 0,
+            name_accessible: true,
+            scope: String::new(),
             name: name.to_owned(),
             ty: cboxes_type_string(ty),
             value: status.to_owned(),
@@ -741,6 +805,9 @@ impl<'a> Interpreter<'a> {
             let value = self.cboxes_stored_value_string(ty, value, span)?;
             let (display_value, exact_value) = self.cboxes_value_display_strings(&value, ty);
             state.push(ProgramStateBox {
+                object_id: 0,
+                name_accessible: true,
+                scope: String::new(),
                 name: cboxes_array_element_name(root_name, indices),
                 ty: cboxes_type_string(ty),
                 value,
@@ -784,8 +851,11 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    pub(super) fn cboxes_type_info(&self, ty: &CType) -> ProgramTypeInfo {
-        ProgramTypeInfo {
+    pub(super) fn cboxes_type_info(&self, ty: &CType) -> Arc<ProgramTypeInfo> {
+        if let Some(info) = self.type_info_cache.borrow().get(ty) {
+            return info.clone();
+        }
+        let info = Arc::new(ProgramTypeInfo {
             kind: cboxes_type_kind(ty).to_owned(),
             help: cboxes_type_help(ty),
             help_type_names: cboxes_type_help_type_names(ty),
@@ -795,7 +865,12 @@ impl<'a> Interpreter<'a> {
             pointee_array_shape: cboxes_pointee_array_shape(ty),
             size: self.type_size_of(ty),
             align: self.type_align_of(ty),
+        });
+        let mut cache = self.type_info_cache.borrow_mut();
+        if cache.len() < 4096 {
+            cache.insert(ty.clone(), info.clone());
         }
+        info
     }
 
     fn cboxes_value_display_strings(&self, value: &str, ty: &CType) -> (String, String) {
@@ -824,9 +899,19 @@ impl<'a> Interpreter<'a> {
     }
 
     fn cboxes_add_aliases(&self, state: &mut [ProgramStateBox]) {
+        let mut addresses = HashMap::default();
+        for (index, item) in state.iter().enumerate() {
+            if let Some(address) = item.address {
+                addresses.entry(address).or_insert(index);
+            }
+        }
         let pointers = state
             .iter()
-            .filter(|item| item.array_root.is_none() && item.type_info.pointer_depth > 0)
+            .filter(|item| {
+                item.name_accessible
+                    && item.array_root.is_none()
+                    && item.type_info.pointer_depth > 0
+            })
             .map(|item| {
                 (
                     item.name.clone(),
@@ -837,10 +922,11 @@ impl<'a> Interpreter<'a> {
             .collect::<Vec<_>>();
         for (name, mut address, depth) in pointers {
             for level in 1..=depth {
-                let Some(index) = state.iter().position(|item| {
-                    item.address
-                        .is_some_and(|candidate| candidate.to_string() == address)
-                }) else {
+                let Some(&index) = address
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|key| addresses.get(&key))
+                else {
                     break;
                 };
                 let alias = format!("{}{}", "*".repeat(level), name);

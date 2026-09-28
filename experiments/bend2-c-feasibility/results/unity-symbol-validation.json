@@ -1,0 +1,10 @@
+[
+  {
+    "case": "uniform",
+    "unity_defined_functions": 16384
+  },
+  {
+    "case": "many",
+    "unity_defined_functions": 16384
+  }
+]

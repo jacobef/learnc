@@ -683,6 +683,22 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    fn stored_indeterminate_count(value: &StoredValue) -> usize {
+        match value {
+            StoredValue::Scalar(value) => usize::from(value.indeterminate),
+            StoredValue::Indeterminate => 1,
+            StoredValue::Array(values) => values.iter().map(Self::stored_indeterminate_count).sum(),
+            StoredValue::Record(values) => values
+                .iter()
+                .map(|(_, value)| Self::stored_indeterminate_count(value))
+                .sum(),
+            StoredValue::ObjectRepresentation(bytes) | StoredValue::Union { bytes, .. } => bytes
+                .iter()
+                .filter(|byte| !matches!(byte, ByteCell::Known(_)))
+                .count(),
+        }
+    }
+
     pub(super) fn typed_value_from_stored(&self, ty: &CType, stored: &StoredValue) -> TypedValue {
         let value_ty = Self::unqualified_value_type(ty);
         match stored {
@@ -1277,6 +1293,114 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    pub(super) fn scalar_lvalue_read(
+        &self,
+        lvalue: &LValue,
+        objects: &ObjectFrames,
+    ) -> Option<(TypedValue, AccessRegion)> {
+        if self.restrict_tracking_required
+            || self.configured_stream_buffers != 0
+            || !lvalue.member_path.is_empty()
+            || lvalue.byte_offset_override.is_some()
+            || lvalue.bit_field_width.is_some()
+            || lvalue.ty.top_level_qualifiers().is_restrict
+        {
+            return None;
+        }
+        let object = self.lookup_object(objects, lvalue.object)?;
+        if !object.alive
+            || object.storage_duration == StorageDuration::Dynamic
+            || object.has_volatile_subobject
+        {
+            return None;
+        }
+        let (stored, byte_start, byte_size) = match (&object.value, object.ty.unqualified()) {
+            (StoredValue::Scalar(stored), _)
+                if lvalue.base_offset == 0
+                    && lvalue.offset == 0
+                    && lvalue.designated_root_ty.is_none()
+                    && object.ty == lvalue.ty =>
+            {
+                (stored, 0, object.byte_size)
+            }
+            (StoredValue::Array(values), CType::Array(inner, len))
+                if inner.as_ref() == &lvalue.ty
+                    && lvalue.object_representation_domain.is_none()
+                    && lvalue
+                        .designated_root_ty
+                        .as_deref()
+                        .is_none_or(|ty| ty == &object.ty) =>
+            {
+                // A direct scalar array element has no member layout to resolve.
+                // Bounds and qualifiers are still checked before reading its slot.
+                let index = usize::try_from(lvalue.base_offset.checked_add(lvalue.offset)?).ok()?;
+                if index >= *len {
+                    return None;
+                }
+                let StoredValue::Scalar(stored) = values.get(index)? else {
+                    return None;
+                };
+                let size = self.type_size_of(inner)?;
+                let start = index.checked_mul(size)?;
+                if start.checked_add(size)? > object.byte_size {
+                    return None;
+                }
+                (stored, start, size)
+            }
+            _ => return None,
+        };
+        if stored.indeterminate
+            || stored.missing_return
+            || !matches!(
+                stored.data,
+                ValueData::Int(_)
+                    | ValueData::Float(_)
+                    | ValueData::Complex(_)
+                    | ValueData::Pointer(_)
+            )
+        {
+            return None;
+        }
+        Some((
+            TypedValue {
+                ty: Self::unqualified_value_type(&lvalue.ty),
+                data: stored.data.clone(),
+                restrict_source: stored.restrict_source.clone(),
+                indeterminate: false,
+                missing_return: false,
+            },
+            AccessRegion {
+                object: lvalue.object,
+                bit_start: byte_start.saturating_mul(8),
+                bit_size: byte_size.saturating_mul(8),
+            },
+        ))
+    }
+
+    pub(super) fn finish_scalar_lvalue_read(
+        &mut self,
+        read: (TypedValue, AccessRegion),
+        span: Span,
+        objects: &ObjectFrames,
+    ) -> Result<TypedValue, Diagnostic> {
+        let (value, region) = read;
+        if self.expr_state.track_unsequenced_accesses {
+            self.record_read(region, span)?;
+        }
+        if matches!(value.data, ValueData::Pointer(_))
+            && self.pointer_value_has_ended_lifetime(&value, objects)
+        {
+            return Err(Diagnostic::ub(
+                "read of a pointer value whose referent's lifetime has ended",
+                span,
+                Some("6.2.4"),
+            ).with_note(
+                "the pointer value became indeterminate when the pointed-to object's lifetime ended",
+            ));
+        }
+        Ok(value)
+    }
+
     pub(super) fn load_lvalue(
         &mut self,
         lvalue: LValue,
@@ -1284,78 +1408,8 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
         self.validate_atomic_member_access(&lvalue, objects, span)?;
-        // Ordinary scalar variables dominate interpreted code.  Keep that case out of the
-        // aggregate/member/raw-storage machinery below while retaining every check that can
-        // apply to a live, non-volatile object with declared scalar type.
-        let fast_scalar = (!self.restrict_tracking_required
-            && self.configured_stream_buffers == 0
-            && lvalue.base_offset == 0
-            && lvalue.offset == 0
-            && lvalue.member_path.is_empty()
-            && lvalue.designated_root_ty.is_none()
-            && lvalue.byte_offset_override.is_none()
-            && lvalue.bit_field_width.is_none())
-        .then(|| self.lookup_object(objects, lvalue.object))
-        .flatten()
-        .and_then(|object| match &object.value {
-            StoredValue::Scalar(stored)
-                if object.alive
-                    && object.storage_duration != StorageDuration::Dynamic
-                    && !object.ty.is_volatile_qualified()
-                    && object.ty == lvalue.ty
-                    && !stored.indeterminate
-                    && !stored.missing_return
-                    && matches!(
-                        stored.data,
-                        ValueData::Int(_)
-                            | ValueData::Float(_)
-                            | ValueData::Complex(_)
-                            | ValueData::Pointer(_)
-                    ) =>
-            {
-                Some((
-                    stored.data.clone(),
-                    stored.restrict_source.clone(),
-                    object.byte_size,
-                ))
-            }
-            _ => None,
-        });
-        if let Some((data, restrict_source, byte_size)) = fast_scalar {
-            if self.expr_state.track_unsequenced_accesses {
-                self.record_read(
-                    AccessRegion {
-                        object: lvalue.object,
-                        bit_start: 0,
-                        bit_size: byte_size.saturating_mul(8),
-                    },
-                    span,
-                )?;
-            }
-            let ty = match lvalue.ty {
-                CType::Qualified(inner, _) => inner.unqualified().clone(),
-                ty => ty,
-            };
-            let value = TypedValue {
-                ty,
-                data,
-                restrict_source,
-                indeterminate: false,
-                missing_return: false,
-            };
-            if matches!(value.data, ValueData::Pointer(_))
-                && self.pointer_value_has_ended_lifetime(&value, objects)
-            {
-                return Err(Diagnostic::ub(
-                    "read of a pointer value whose referent's lifetime has ended",
-                    span,
-                    Some("6.2.4"),
-                )
-                .with_note(
-                    "the pointer value became indeterminate when the pointed-to object's lifetime ended",
-                ));
-            }
-            return Ok(value);
+        if let Some(read) = self.scalar_lvalue_read(&lvalue, objects) {
+            return self.finish_scalar_lvalue_read(read, span, objects);
         }
         let (_, access_start, access_size) = self
             .lvalue_byte_range(&lvalue, &lvalue.ty, objects)
@@ -1769,6 +1823,49 @@ impl<'a> Interpreter<'a> {
         span: Span,
     ) -> Result<(), Diagnostic> {
         self.validate_atomic_member_access(lvalue, objects, span)?;
+        // Match the scalar load shortcut: direct, declared scalar storage does
+        // not need aggregate traversal or effective-type/byte reconstruction.
+        // The general path retains all exceptional lifetime and qualifier checks.
+        let scalar_size = (!self.restrict_tracking_required
+            && self.configured_stream_buffers == 0
+            && lvalue.base_offset == 0
+            && lvalue.offset == 0
+            && lvalue.member_path.is_empty()
+            && lvalue.designated_root_ty.is_none()
+            && lvalue.byte_offset_override.is_none()
+            && lvalue.bit_field_width.is_none())
+        .then(|| self.lookup_object(objects, lvalue.object))
+        .flatten()
+        .filter(|object| {
+            object.alive
+                && object.storage_duration != StorageDuration::Dynamic
+                && !object.readonly
+                && !object.has_const_subobject
+                && !object.has_volatile_subobject
+                && object.ty == lvalue.ty
+                && matches!(
+                    object.value,
+                    StoredValue::Scalar(_) | StoredValue::Indeterminate
+                )
+                && (lvalue.ty.is_arithmetic() || lvalue.ty.is_pointer())
+        })
+        .map(|object| object.byte_size);
+        if let Some(byte_size) = scalar_size {
+            self.record_write(
+                AccessRegion {
+                    object: lvalue.object,
+                    bit_start: 0,
+                    bit_size: byte_size.saturating_mul(8),
+                },
+                span,
+            )?;
+            let object = self.lookup_object_mut(objects, lvalue.object).unwrap();
+            object.initialized = !converted.indeterminate;
+            object.value = StoredValue::Scalar(converted);
+            object.indeterminate_reason = None;
+            object.modification_count = object.modification_count.saturating_add(1);
+            return Ok(());
+        }
         let (
             object_ty,
             readonly,
@@ -1859,20 +1956,7 @@ impl<'a> Interpreter<'a> {
             ));
         }
         let stored = self.stored_value_from_typed_value(converted, &lvalue.ty, span)?;
-        {
-            let object = self
-                .lookup_active_object_mut(objects, lvalue.object)
-                .ok_or_else(|| {
-                    Diagnostic::ub(
-                        "write through a pointer to an object whose lifetime has ended",
-                        span,
-                        Some("6.2.4"),
-                    )
-                })?;
-            let slot =
-                self.resolve_lvalue_storage_mut(&mut object.value, &object_ty, lvalue, span)?;
-            *slot = stored;
-        }
+        let contains_union = self.type_contains_union(&object_ty);
         let object = self
             .lookup_active_object_mut(objects, lvalue.object)
             .ok_or_else(|| {
@@ -1882,10 +1966,37 @@ impl<'a> Interpreter<'a> {
                     Some("6.2.4"),
                 )
             })?;
-        if self.type_contains_union(&object_ty) {
+        // Updating one token in an incompletely initialized token array must
+        // not rescan the whole array. Count unknown leaves once, then adjust
+        // only for the replaced subtree. Other writes invalidate by version.
+        let previous_count = if contains_union {
+            0
+        } else if object.initialized {
+            0
+        } else {
+            object
+                .indeterminate_count
+                .filter(|(version, _)| *version == object.modification_count)
+                .map(|(_, count)| count)
+                .unwrap_or_else(|| Self::stored_indeterminate_count(&object.value))
+        };
+        let slot = self.resolve_lvalue_storage_mut(&mut object.value, &object_ty, lvalue, span)?;
+        let next_count = if contains_union {
+            0
+        } else {
+            previous_count - Self::stored_indeterminate_count(slot)
+                + Self::stored_indeterminate_count(&stored)
+        };
+        *slot = stored;
+        if contains_union {
             self.refresh_all_union_bytes(&mut object.value, &object_ty, span)?;
+            object.initialized = self.stored_value_is_determinate(&object.value);
+            object.indeterminate_count = None;
+        } else {
+            object.initialized = next_count == 0;
+            object.indeterminate_count =
+                Some((object.modification_count.saturating_add(1), next_count));
         }
-        object.initialized = self.stored_value_is_determinate(&object.value);
         object.indeterminate_reason = None;
         object.modification_count = object.modification_count.saturating_add(1);
         Ok(())
@@ -1958,10 +2069,38 @@ impl<'a> Interpreter<'a> {
             let value = self.typed_value_from_stored(&lvalue.ty, &stored);
             return Ok(self.specialize_dynamic_raw_storage_pointer(value, &lvalue.ty, objects));
         }
-        let object_ty = object.ty.clone();
-        let object_value = object.value.clone();
-        let all_bytes = self.serialize_stored_value(&object_ty, &object_value, span)?;
-        let stored = self.deserialize_raw_lvalue(lvalue, &all_bytes[start..end], span, objects)?;
+        // A byte access inside one array element only needs that element's
+        // representation. Serializing the enclosing array for each character
+        // makes parsers that cast a writable input buffer quadratic in its size.
+        let mut storage_ty = &object.ty;
+        let mut storage = &object.value;
+        let mut relative_start = start;
+        while let (CType::Array(inner, _), StoredValue::Array(values)) =
+            (storage_ty.unqualified(), storage)
+        {
+            let Some(stride) = self.type_size_of(inner).filter(|stride| *stride > 0) else {
+                break;
+            };
+            let index = relative_start / stride;
+            if size == 0 || (relative_start + size - 1) / stride != index {
+                break;
+            }
+            let Some(element) = values.get(index) else {
+                break;
+            };
+            relative_start %= stride;
+            storage_ty = inner;
+            storage = element;
+        }
+        let storage_ty = storage_ty.clone();
+        let storage = storage.clone();
+        let bytes = self.serialize_stored_value(&storage_ty, &storage, span)?;
+        let stored = self.deserialize_raw_lvalue(
+            lvalue,
+            &bytes[relative_start..relative_start + size],
+            span,
+            objects,
+        )?;
         let value = self.typed_value_from_stored(&lvalue.ty, &stored);
         Ok(self.specialize_dynamic_raw_storage_pointer(value, &lvalue.ty, objects))
     }
@@ -2092,7 +2231,7 @@ impl<'a> Interpreter<'a> {
         } else {
             self.serialize_stored_value(&lvalue.ty, stored.as_ref().unwrap(), span)?
         };
-        let wrote_dynamic_raw_storage = {
+        let wrote_byte_storage = {
             let object = self
                 .lookup_active_object_mut(objects, lvalue.object)
                 .ok_or_else(|| {
@@ -2102,13 +2241,15 @@ impl<'a> Interpreter<'a> {
                         Some("6.2.4"),
                     )
                 })?;
-            if object.storage_duration == StorageDuration::Dynamic
-                && matches!(
-                    &object.value,
-                    StoredValue::Indeterminate | StoredValue::ObjectRepresentation(_)
-                )
+            // A declared object can also become byte-backed after memcpy or a
+            // character-pointer write. Update its affected range in place just
+            // like malloc storage, rather than copying the entire object.
+            if matches!(&object.value, StoredValue::ObjectRepresentation(_))
+                || (object.storage_duration == StorageDuration::Dynamic
+                    && matches!(&object.value, StoredValue::Indeterminate))
             {
                 if matches!(&object.value, StoredValue::Indeterminate) {
+                    object.indeterminate_count = None;
                     object.value = StoredValue::ObjectRepresentation(vec![
                         ByteCell::Indeterminate;
                         object.byte_size
@@ -2116,7 +2257,7 @@ impl<'a> Interpreter<'a> {
                 }
                 let current_version = object.modification_count;
                 let mut indeterminate_bytes = object
-                    .raw_indeterminate_bytes
+                    .indeterminate_count
                     .filter(|(version, _)| *version == current_version)
                     .map(|(_, count)| count)
                     .unwrap_or_else(|| match &object.value {
@@ -2163,8 +2304,7 @@ impl<'a> Interpreter<'a> {
                 object.initialized = indeterminate_bytes == 0;
                 object.indeterminate_reason = None;
                 object.modification_count = object.modification_count.saturating_add(1);
-                object.raw_indeterminate_bytes =
-                    Some((object.modification_count, indeterminate_bytes));
+                object.indeterminate_count = Some((object.modification_count, indeterminate_bytes));
                 Self::replace_pointer_slots_for_write(object, access_start, access_size, None);
                 object
                     .pointer_slots
@@ -2174,7 +2314,7 @@ impl<'a> Interpreter<'a> {
                 false
             }
         };
-        if wrote_dynamic_raw_storage {
+        if wrote_byte_storage {
             self.update_object_effective_types_after_store(
                 objects,
                 lvalue.object,

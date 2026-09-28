@@ -2855,6 +2855,9 @@ nav.tabs a.active:hover {
         line-height: 1.4;
         overflow-wrap: anywhere;
     }
+    .sandbox-shell .controls-row > [data-stepper] {
+        flex: 0 1 auto;
+    }
     .controls-row [data-role$="reset-level"] {
         font-size: 12px;
         min-height: 44px;
@@ -3258,4 +3261,11 @@ nav.tabs a.active:hover {
     border-radius: 3px;
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
+}
+.name-inaccessible {
+    color: #666;
+    overflow-wrap: anywhere;
+    display: inline-block;
+    max-width: 140px;
+    white-space: normal;
 }

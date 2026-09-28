@@ -802,6 +802,7 @@ impl<'a> Interpreter<'a> {
             quick_exit_handlers: Vec::new(),
             running_quick_exit: false,
             func_name_bindings: HashMap::default(),
+            literal_bindings: std::array::from_fn(|_| HashMap::default()),
             mbrtoc16_pending: HashMap::default(),
             mbrtoc16_null_pending: None,
             c16rtomb_pending: HashMap::default(),
@@ -827,9 +828,12 @@ impl<'a> Interpreter<'a> {
             switch_dispatch_cache: HashMap::default(),
             switch_entry_index_cache: HashMap::default(),
             type_contains_union_cache: HashMap::default(),
+            loop_analysis_cache: RefCell::new(HashMap::default()),
+            loop_function_analysis_cache: RefCell::new(HashMap::default()),
             variable_cache: HashMap::default(),
             member_access_cache: RefCell::new(HashMap::default()),
             float_display_cache: RefCell::new(HashMap::default()),
+            type_info_cache: RefCell::new(HashMap::default()),
             pending_longjmp_return: None,
             host_library_runtime_depth: 0,
             active_switch_dispatch_depth: 0,
@@ -1095,6 +1099,10 @@ impl<'a> Interpreter<'a> {
             executed_steps: self.execution_steps_completed,
             line_execution_count,
             state,
+            trace: self.cboxes_trace.clone(),
+            stdout_bytes: self.capture_stream_bytes(CaptureStream::Stdout).to_vec(),
+            stderr_bytes: self.capture_stream_bytes(CaptureStream::Stderr).to_vec(),
+            stdin_position: self.stdin_position(),
         })
     }
 
@@ -2398,27 +2406,22 @@ impl<'a> Interpreter<'a> {
         frame: &Frame,
         objects: &ObjectFrames,
     ) -> bool {
-        match expr {
-            Expr::Variable(name, _) => {
-                frame
-                    .bindings
-                    .get(name)
-                    .and_then(|object| self.lookup_object(objects, *object))
-                    .is_some_and(|state| state.variably_modified)
-                    || frame
-                        .object_decls
-                        .get(name)
-                        .is_some_and(|decl| decl.vla_bounds.iter().any(Option::is_some))
+        // Inspect the expression's resulting array type, not whether any operand
+        // mentions a VLA. A fixed-width row of int a[n][3] is not itself a VLA.
+        let mut symbolic_frame = frame.clone();
+        for (name, decl) in &frame.object_decls {
+            if decl.vla_bounds.iter().any(Option::is_some) {
+                symbolic_frame.bindings.remove(name);
             }
-            Expr::Unary { expr, .. }
-            | Expr::Postfix { expr, .. }
-            | Expr::SizeofExpr { expr, .. }
-            | Expr::Cast { expr, .. } => self.expr_refers_to_vla(expr, frame, objects),
-            Expr::Subscript { base, .. } | Expr::Member { base, .. } => {
-                self.expr_refers_to_vla(base, frame, objects)
-            }
-            _ => false,
         }
+        fn is_vla(ty: &CType) -> bool {
+            match ty.unqualified() {
+                CType::Array(inner, len) => *len == CONSTRAINT_VLA_BOUND || is_vla(inner),
+                _ => false,
+            }
+        }
+        self.expr_type(expr, &symbolic_frame, objects)
+            .is_ok_and(|ty| is_vla(&ty))
     }
 
     fn array_element_type_is_incomplete(&self, ty: &CType, vla_bounds: &[Option<Expr>]) -> bool {
@@ -2467,7 +2470,14 @@ impl<'a> Interpreter<'a> {
         match ty {
             CType::Array(inner, len) => {
                 let (resolved_len, used_here) = if *len == 0 && !vla_bounds.is_empty() {
-                    (if vla_bounds[0].is_some() { 1 } else { 0 }, 1)
+                    (
+                        if vla_bounds[0].is_some() {
+                            CONSTRAINT_VLA_BOUND
+                        } else {
+                            0
+                        },
+                        1,
+                    )
                 } else {
                     (*len, 0)
                 };

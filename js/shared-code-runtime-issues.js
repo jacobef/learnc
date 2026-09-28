@@ -45,9 +45,9 @@ function lineRange(startLine, endLine) {
 export function executionLimitExplanation(limit) {
     if (limit.reason === "repeating-loop") {
         return {
-            title: "Loop cannot reach its stopping condition",
-            status: "non-terminating loop detected",
-            message: "The values that control this loop's exits are repeating, so the loop cannot reach its stopping condition. Check for a missing increment, a value reset inside the loop, or the wrong variable being updated. The stepper is rewound to just before the loop.",
+            title: "Infinite loop",
+            status: "infinite loop detected",
+            message: "This loop runs forever.",
         };
     }
     if (limit.reason === "unreachable-loop-exit") {

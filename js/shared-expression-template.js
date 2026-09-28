@@ -15,6 +15,7 @@ function collectExpressionElements(root = document) {
         exerciseStack: root.querySelector(".expr-eval-stack"),
         expressionEl: role("expr-expression"),
         answerPanel: role("expr-answer-panel"),
+        answerActions: role("expr-answer-actions"),
         answerSlot: role("expr-answer-slot"),
         answerResult: role("expr-answer-result"),
         toggleWrap: role("expr-answer-toggle"),
@@ -157,6 +158,7 @@ function ensureExpressionLayout() {
     stack.appendChild(row);
     const answerActions = document.createElement("div");
     answerActions.className = "controls expression-mobile-actions";
+    answerActions.dataset.role = "expr-answer-actions";
     answerPanel.appendChild(answerActions);
     const placeActions = () => {
         const mobile = isMobileViewport();
@@ -196,7 +198,7 @@ function createExpressionEvalTemplate(config) {
         return addressBase;
     });
     const addressBaseByStep = new Map(normalizedSteps.map((step, index) => [step, addressBases[index]]));
-    const { instructionsEl, previousBtn, nextBtn, continueBtn, levelResetBtn, sectionEl, exerciseStack, expressionEl, answerPanel, answerSlot, answerResult, toggleWrap, hintPanel, hintBtn, useSelectedBtn, useEnteredBtn, checkBtn, statusEl, stageEl, statePanel, } = ensureExpressionLayout();
+    const { instructionsEl, previousBtn, nextBtn, continueBtn, levelResetBtn, sectionEl, exerciseStack, expressionEl, answerPanel, answerActions, answerSlot, answerResult, toggleWrap, hintPanel, hintBtn, useSelectedBtn, useEnteredBtn, checkBtn, statusEl, stageEl, statePanel, } = ensureExpressionLayout();
     bindBtnRefPulse(sectionEl || document);
     let pager = null;
     let selectedName = null;
@@ -696,6 +698,10 @@ function createExpressionEvalTemplate(config) {
         setControlVisible(sectionEl, true);
         setControlVisible(levelResetBtn, true);
         setControlVisible(answerPanel, showExprResultPane);
+        // Selection-only lessons hide the answer panel, but still need mobile actions.
+        const actionsPanel = showExprResultPane ? answerPanel : expressionEl?.parentElement;
+        if (answerActions && actionsPanel)
+            actionsPanel.appendChild(answerActions);
         const instructionText = step.instructions ?? null;
         renderInstructions(instructionText);
         if (expressionEl)

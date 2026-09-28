@@ -97,6 +97,7 @@ impl<'a> Interpreter<'a> {
             target_frame_index,
             id,
             ObjectState {
+                display_binding: None,
                 ty: ty.clone(),
                 storage_duration,
                 alive: true,
@@ -112,7 +113,7 @@ impl<'a> Interpreter<'a> {
                 value: initial_value,
                 declaration_span,
                 modification_count: 0,
-                raw_indeterminate_bytes: None,
+                indeterminate_count: None,
                 variably_modified,
                 effective_types: Vec::new(),
                 pointer_slots: BTreeMap::default(),
@@ -286,7 +287,7 @@ impl<'a> Interpreter<'a> {
         }
         object.alive = false;
         object.value = StoredValue::Indeterminate;
-        object.raw_indeterminate_bytes = None;
+        object.indeterminate_count = None;
         object.effective_types.clear();
         object.pointer_slots.clear();
         self.retired_objects.insert(id, object);
@@ -316,6 +317,7 @@ impl<'a> Interpreter<'a> {
         self.active_block_scopes.push(ActiveBlockScope {
             frame_id: frame.id,
             block_span: span,
+            for_step_trace: None,
             saved_bindings: saves_ordinary_bindings.then(|| frame.bindings.clone()),
             saved_object_decls: saves_ordinary_bindings.then(|| frame.object_decls.clone()),
             saved_function_decls: saves_ordinary_bindings.then(|| frame.function_decls.clone()),
@@ -624,6 +626,7 @@ impl<'a> Interpreter<'a> {
             };
 
             if current_active_missing {
+                restored.indeterminate_count = None;
                 restored.value = snapshot.value.clone();
                 restored.initialized = snapshot.initialized;
                 restored.address_taken |= snapshot.address_taken;
@@ -634,6 +637,7 @@ impl<'a> Interpreter<'a> {
                 && changed
                 && !changed_bytes_only_volatile
             {
+                restored.indeterminate_count = None;
                 restored.value = self.indeterminate_stored_value(&restored.ty);
                 restored.initialized = false;
                 restored.indeterminate_reason = Some(

@@ -140,6 +140,11 @@ impl<'a> Interpreter<'a> {
                     unreachable!();
                 };
                 if !self.pointer_targets_are_compatible_object_types(lhs_inner, rhs_inner, true) {
+                    if let Some(error) =
+                        self.runtime_array_dimension_mismatch(&lhs.ty, &rhs.ty, span)
+                    {
+                        return Err(error);
+                    }
                     return Err(Diagnostic::error(
                         "pointer subtraction requires pointers to compatible complete object types",
                         span,
@@ -234,6 +239,9 @@ impl<'a> Interpreter<'a> {
             ));
         };
         if !self.pointer_targets_are_compatible_object_types(lhs_inner, rhs_inner, false) {
+            if let Some(error) = self.runtime_array_dimension_mismatch(&lhs.ty, &rhs.ty, span) {
+                return Err(error);
+            }
             return Err(Diagnostic::error(
                 "relational comparison requires pointers to compatible object types",
                 span,

@@ -1,0 +1,7 @@
+{
+  "workload": "array updates, 64 iterations, full tracing",
+  "events": 466,
+  "beforeTypePoolingBytes": 8514575,
+  "afterTypePoolingBytes": 5860622,
+  "distinctTypeDescriptions": 2
+}

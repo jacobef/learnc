@@ -1,13 +1,13 @@
 use crate::source::Span;
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LiteralUnit {
     Character(char),
     NumericEscape(u32),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StringLiteralValue {
     pub units: Vec<LiteralUnit>,
 }

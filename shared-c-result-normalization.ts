@@ -19,6 +19,41 @@ import type {
 type JsonObject = Record<string, unknown>;
 type InterpreterSubject = "program" | "expression";
 
+const BOX_KEYS: ReadonlySet<string> = new Set([
+  "objectId",
+  "nameAccessible",
+  "scope",
+  "name",
+  "type",
+  "value",
+  "displayValue",
+  "exactValue",
+  "address",
+  "arrayRoot",
+  "arrayShape",
+  "arrayIndices",
+  "aggregateRoot",
+  "aggregatePath",
+  "aggregateKind",
+  "aliases",
+  "typeInfo",
+]);
+
+const TRACE_EVENT_KEYS: ReadonlySet<string> = new Set([
+  "callDepth",
+  "frameId",
+  "function",
+  "kind",
+  "file",
+  "startLine",
+  "endLine",
+  "state",
+  "skippedRange",
+  "stdinPosition",
+  "stdoutLength",
+  "stderrLength",
+]);
+
 function schemaError(path: string, expected: string): never {
   throw new Error(`invalid interpreter response at ${path}: expected ${expected}`);
 }
@@ -33,9 +68,11 @@ function objectAt(value: unknown, path: string): JsonObject {
 function exactKeysAt(
   object: JsonObject,
   path: string,
-  allowedKeys: readonly string[],
+  allowedKeys: readonly string[] | ReadonlySet<string>,
 ): void {
-  const allowed = new Set(allowedKeys);
+  const allowed = Array.isArray(allowedKeys)
+    ? new Set(allowedKeys)
+    : allowedKeys as ReadonlySet<string>;
   for (const key of Object.keys(object)) {
     if (!allowed.has(key)) {
       schemaError(`${path}.${key}`, "no unexpected field");
@@ -169,29 +206,17 @@ function decodeTypeInfo(value: unknown, path: string): CTypeInfo {
   };
 }
 
-function decodeBox(value: unknown, path: string): BoxState {
+function decodeBox(value: unknown, path: string, types?: readonly CTypeInfo[]): BoxState {
   const box = objectAt(value, path);
-  exactKeysAt(box, path, [
-    "name",
-    "type",
-    "value",
-    "displayValue",
-    "exactValue",
-    "address",
-    "arrayRoot",
-    "arrayShape",
-    "arrayIndices",
-    "aggregateRoot",
-    "aggregatePath",
-    "aggregateKind",
-    "aliases",
-    "typeInfo",
-  ]);
+  exactKeysAt(box, path, BOX_KEYS);
   const aggregateKind = nullableStringAt(box.aggregateKind, `${path}.aggregateKind`);
   if (aggregateKind !== null && aggregateKind !== "struct" && aggregateKind !== "union") {
     return schemaError(`${path}.aggregateKind`, '"struct", "union", or null');
   }
   return {
+    objectId: nonnegativeIntegerAt(box.objectId, `${path}.objectId`),
+    nameAccessible: booleanAt(box.nameAccessible, `${path}.nameAccessible`),
+    scope: stringAt(box.scope, `${path}.scope`),
     name: stringAt(box.name, `${path}.name`),
     type: stringAt(box.type, `${path}.type`),
     value: stringAt(box.value, `${path}.value`),
@@ -205,13 +230,20 @@ function decodeBox(value: unknown, path: string): BoxState {
     aggregatePath: stringArrayAt(box.aggregatePath, `${path}.aggregatePath`),
     aggregateKind,
     aliases: stringArrayAt(box.aliases, `${path}.aliases`),
-    typeInfo: decodeTypeInfo(box.typeInfo, `${path}.typeInfo`),
+    typeInfo: types === undefined
+      ? decodeTypeInfo(box.typeInfo, `${path}.typeInfo`)
+      : decodeTypeReference(box.typeInfo, `${path}.typeInfo`, types),
   };
 }
 
-function decodeState(value: unknown, path: string): BoxState[] {
+function decodeTypeReference(value: unknown, path: string, types: readonly CTypeInfo[]): CTypeInfo {
+  const index = nonnegativeIntegerAt(value, path);
+  return types[index] ?? schemaError(path, "a valid trace type reference");
+}
+
+function decodeState(value: unknown, path: string, types?: readonly CTypeInfo[]): BoxState[] {
   return arrayAt(value, path).map((item, index) =>
-    decodeBox(item, `${path}[${index}]`)
+    decodeBox(item, `${path}[${index}]`, types)
   );
 }
 
@@ -234,27 +266,20 @@ function decodeSourceRange(value: unknown, path: string): CProgramSourceRange | 
   };
 }
 
-function decodeTrace(value: unknown, path: string): CProgramTraceEvent[] {
+function decodeTrace(value: unknown, path: string, types: readonly CTypeInfo[]): CProgramTraceEvent[] {
   return arrayAt(value, path).map((rawEvent, index) => {
     const eventPath = `${path}[${index}]`;
     const event = objectAt(rawEvent, eventPath);
-    exactKeysAt(event, eventPath, [
-      "kind",
-      "file",
-      "startLine",
-      "endLine",
-      "state",
-      "skippedRange",
-      "stdinPosition",
-      "stdoutLength",
-      "stderrLength",
-    ]);
+    exactKeysAt(event, eventPath, TRACE_EVENT_KEYS);
     return {
+      callDepth: nonnegativeIntegerAt(event.callDepth, `${eventPath}.callDepth`),
+      frameId: nonnegativeIntegerAt(event.frameId, `${eventPath}.frameId`),
+      function: stringAt(event.function, `${eventPath}.function`),
       kind: stringAt(event.kind, `${eventPath}.kind`),
       file: stringAt(event.file, `${eventPath}.file`),
       startLine: nonnegativeIntegerAt(event.startLine, `${eventPath}.startLine`),
       endLine: nonnegativeIntegerAt(event.endLine, `${eventPath}.endLine`),
-      state: decodeState(event.state, `${eventPath}.state`),
+      state: decodeState(event.state, `${eventPath}.state`, types),
       stdinPosition: nonnegativeIntegerAt(event.stdinPosition, `${eventPath}.stdinPosition`),
       stdoutLength: nonnegativeIntegerAt(event.stdoutLength, `${eventPath}.stdoutLength`),
       stderrLength: nonnegativeIntegerAt(event.stderrLength, `${eventPath}.stderrLength`),
@@ -414,7 +439,15 @@ function decodeError(
             "executedSteps",
             "lineExecutionCount",
             "state",
+            "trace",
+            "traceTypeInfos",
+            "stdoutBytes",
+            "stderrBytes",
+            "stdinPosition",
           ]);
+          const traceTypes = arrayAt(context.traceTypeInfos, "$.runtimeContext.traceTypeInfos").map((info, index) =>
+            decodeTypeInfo(info, `$.runtimeContext.traceTypeInfos[${index}]`)
+          );
           return {
             executedSteps: nonnegativeIntegerAt(
               context.executedSteps,
@@ -428,6 +461,10 @@ function decodeError(
                     "$.runtimeContext.lineExecutionCount",
                   ),
             state: decodeState(context.state, "$.runtimeContext.state"),
+            trace: decodeTrace(context.trace, "$.runtimeContext.trace", traceTypes),
+            stdoutBytes: decodeBytes(context.stdoutBytes, "$.runtimeContext.stdoutBytes"),
+            stderrBytes: decodeBytes(context.stderrBytes, "$.runtimeContext.stderrBytes"),
+            stdinPosition: nonnegativeIntegerAt(context.stdinPosition, "$.runtimeContext.stdinPosition"),
           };
         })();
   return {
@@ -503,6 +540,7 @@ function normalizeProgramResult(
     "exitStatus",
     "state",
     "trace",
+    "traceTypeInfos",
     "mainClose",
     "blocked",
     "executionLimit",
@@ -511,10 +549,13 @@ function normalizeProgramResult(
     keys.push("implicitMainApplied", "implicitMainNotice");
   }
   exactKeysAt(root, "$", keys);
+  const traceTypes = arrayAt(root.traceTypeInfos, "$.traceTypeInfos").map((info, index) =>
+    decodeTypeInfo(info, `$.traceTypeInfos[${index}]`)
+  );
   return {
     kind: "ok",
     state: decodeState(root.state, "$.state"),
-    trace: decodeTrace(root.trace, "$.trace"),
+    trace: decodeTrace(root.trace, "$.trace", traceTypes),
     mainClose: decodeSourceLocation(root.mainClose, "$.mainClose"),
     blocked: decodeBlocked(root.blocked, "$.blocked"),
     executionLimit: decodeExecutionLimit(root.executionLimit, "$.executionLimit"),

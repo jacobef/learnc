@@ -876,7 +876,7 @@ impl<'a> Interpreter<'a> {
             object_state.indeterminate_reason = None;
             object_state.value = stored;
             object_state.modification_count = object_state.modification_count.saturating_add(1);
-            object_state.raw_indeterminate_bytes = None;
+            object_state.indeterminate_count = None;
             object_state.pointer_slots.clear();
         }
         if let Some(object_state) = self.lookup_object(objects, object) {
@@ -933,6 +933,7 @@ impl<'a> Interpreter<'a> {
                     .enum_constants
                     .contains_key(&(span.file, name.clone()))
                     || self.lookup_function(name, span.file).is_some()
+                    || self.lookup_function_declaration(name, span.file).is_some()
                     || self
                         .lookup_global_declaration(name, span.file)
                         .is_some_and(|declaration| {
@@ -1675,6 +1676,11 @@ impl<'a> Interpreter<'a> {
                 let result = (|| -> Result<(), Diagnostic> {
                     match ty.unqualified() {
                         CType::Array(_, _) | CType::Struct(_, _) | CType::Union(_, _) => {
+                            // A brace-enclosed initializer replaces this whole
+                            // subobject, including implicitly zeroed members.
+                            // Leaf designators still update only their selected
+                            // subobject (C11 6.7.9p19-21).
+                            *stored = self.zero_stored_value(ty);
                             let used = self.consume_initializer_sequence(
                                 stored,
                                 ty,

@@ -25,11 +25,10 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 [profile.release]
 codegen-units = 1
 lto = "thin"
-opt-level = "z"
+opt-level = 3
 strip = "symbols"
 
-# Native profiling and long-running analysis favor evaluator throughput. The tutorial Wasm build
-# deliberately continues to use the size-optimized `release` profile above.
+# Native profiling and long-running analysis additionally use whole-program LTO.
 [profile.analysis]
 inherits = "release"
 lto = "fat"

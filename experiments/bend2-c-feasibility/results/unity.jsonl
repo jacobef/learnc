@@ -1,0 +1,12 @@
+{"case": "uniform", "mode": "syntax", "repeat": 0, "seconds": 0.09486241702688858}
+{"case": "uniform", "mode": "syntax", "repeat": 1, "seconds": 0.09530399995855987}
+{"case": "uniform", "mode": "syntax", "repeat": 2, "seconds": 0.09330766601487994}
+{"case": "uniform", "mode": "object", "repeat": 0, "seconds": 0.47467720799613744}
+{"case": "uniform", "mode": "object", "repeat": 1, "seconds": 0.4784453749889508}
+{"case": "uniform", "mode": "object", "repeat": 2, "seconds": 0.4866127079585567}
+{"case": "many", "mode": "syntax", "repeat": 0, "seconds": 0.06646495795575902}
+{"case": "many", "mode": "syntax", "repeat": 1, "seconds": 0.06582274998072535}
+{"case": "many", "mode": "syntax", "repeat": 2, "seconds": 0.06588683399604633}
+{"case": "many", "mode": "object", "repeat": 0, "seconds": 0.40578245802316815}
+{"case": "many", "mode": "object", "repeat": 1, "seconds": 0.4100145840202458}
+{"case": "many", "mode": "object", "repeat": 2, "seconds": 0.42374645901145414}

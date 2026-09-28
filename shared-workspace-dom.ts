@@ -2,6 +2,21 @@ import type { BoxState, BoxValue, CTypeInfo } from "./shared-core-utils.js";
 import { normalizeZeroDisplay } from "./shared-core-utils.js";
 import { disableAutoText, el, txt } from "./shared-dom-utils.js";
 import { attachTypeHelp } from "./shared-type-help.js";
+import { memoryDisplayState } from "./shared-program-state.js";
+
+export function markInaccessibleName(node: HTMLElement, box: BoxState | null | undefined) {
+  if (box?.nameAccessible !== false) return;
+  node.dataset.nameAccessible = "false";
+  node.dataset.stateName ||= box.name;
+  node.querySelectorAll<HTMLElement>(".name-text, .array-name, .aggregate-name").forEach(name => {
+    name.classList.add("name-inaccessible");
+    name.title = "This name is not accessible in the current scope. The object is still alive and can be accessed through a pointer.";
+    const parts = /^(.*?) \(out of scope · (.*?)\)(.*)$/.exec(name.textContent || "");
+    if (parts) {
+      name.textContent = parts[1] + parts[3];
+    }
+  });
+}
 
 export function vbox({
   address = "—",
@@ -806,7 +821,7 @@ export function findArrayObjectBoxesForResult(
   const baseAddress =
     String(result.value ?? "").trim() || String(result.address ?? "").trim();
   if (!baseAddress) return null;
-  const grouped = groupStateObjects(state);
+  const grouped = groupStateObjects(memoryDisplayState(state));
   const expectedType = String(result.type || "").trim();
   const withResultTypeInfo = (boxes: BoxState[]) =>
     boxes.map((box) => ({ ...box, typeInfo: result.typeInfo ?? box.typeInfo ?? null }));
@@ -979,6 +994,7 @@ function appendScalarStateBox(
     typeInfo: box.typeInfo ?? null,
     aliases: box.aliases ?? [],
   });
+  markInaccessibleName(node, box);
   if (allowDelete) node.dataset.allowDelete = "true";
   if (box.dynamicAddress) node.dataset.dynamicAddress = "true";
   if (box.defaultAddressType) node.dataset.defaultAddressType = box.defaultAddressType;
@@ -1032,6 +1048,7 @@ function makeAggregateBox(
   node.dataset.aggregateName = root.name;
   node.querySelector(".aggregate-address")!.textContent = String(root.address ?? "—");
   node.querySelector(".aggregate-name")!.textContent = displayName;
+  markInaccessibleName(node, root);
   node.querySelector(".aggregate-type")!.textContent = root.type;
   attachTypeHelp(node, ".aggregate-type", root.typeInfo);
   node.querySelector(".aggregate-label")!.textContent =
@@ -1108,7 +1125,7 @@ export function appendStateObjects(
     allowNameEdit = null,
     allowTypeEdit = null,
   } = opts;
-  const source = Array.isArray(boxes) ? boxes : [];
+  const source = Array.isArray(boxes) ? (editable ? boxes : memoryDisplayState(boxes)) : [];
   const originalIndex = new Map(source.map((box, index) => [box, index] as const));
   const aggregateRoots = source.filter(
     (box) => !!box.aggregateKind && !box.aggregateRoot,
@@ -1161,12 +1178,12 @@ export function appendStateObjects(
         allowTypeEdit,
       });
     } else {
-      container.appendChild(
-        makeArrayBox(item.object, {
+      const node = makeArrayBox(item.object, {
           editable,
           deletable,
-        }),
-      );
+        });
+      markInaccessibleName(node, item.object.entries[0]?.box);
+      container.appendChild(node);
     }
   }
 }

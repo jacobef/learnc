@@ -3,12 +3,14 @@ use crate::diag::{
     Diagnostic, DiagnosticDisplayAnnotation, DiagnosticDisplayRange, DiagnosticRuntimeContext,
     Severity,
 };
+use crate::fast_hash::FastHashMap;
 use crate::interpreter::{
     ProgramBlocked, ProgramExecutionLimit, ProgramExpressionResult, ProgramOutput,
     ProgramSourceLocation, ProgramSourceRange, ProgramStateBox, ProgramTraceEvent,
     ProgramTypeHelpNode, ProgramTypeInfo, ProgramValueLiteral,
 };
 use crate::token;
+use std::sync::Arc;
 
 pub(super) fn cboxes_implicit_main_json(
     mut json: String,
@@ -36,8 +38,9 @@ pub(super) fn cboxes_success_json(
     result: &ProgramOutput,
     source_display: &SourceDisplayMap,
 ) -> String {
+    let (trace, trace_types) = cboxes_trace_json(&result.trace, source_display);
     format!(
-        "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"stdoutBytes\":{:?},\"stderrBytes\":{:?},\"stdinPosition\":{},\"exitStatus\":{},\"state\":{},\"trace\":{},\"mainClose\":{},\"blocked\":{},\"executionLimit\":{}}}",
+        "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"stdoutBytes\":{:?},\"stderrBytes\":{:?},\"stdinPosition\":{},\"exitStatus\":{},\"state\":{},\"trace\":{},\"traceTypeInfos\":{},\"mainClose\":{},\"blocked\":{},\"executionLimit\":{}}}",
         cboxes_json_string(&result.stdout),
         cboxes_json_string(&result.stderr),
         result.stdout_bytes,
@@ -45,7 +48,8 @@ pub(super) fn cboxes_success_json(
         result.stdin_position,
         result.exit_status,
         cboxes_state_json(&result.state),
-        cboxes_trace_json(&result.trace, source_display),
+        trace,
+        trace_types,
         cboxes_source_location_json(&result.main_close, source_display),
         cboxes_blocked_json(result.blocked.as_ref(), source_display),
         cboxes_execution_limit_json(result.execution_limit.as_ref(), source_display),
@@ -218,7 +222,13 @@ pub(super) fn cboxes_diagnostic_json(
             })
         })
         .collect::<Vec<_>>();
-    cboxes_error_json_with_annotations(kind, &rendered, range, &annotations, diag.runtime_context())
+    cboxes_error_json_with_annotations(
+        kind,
+        &rendered,
+        range,
+        &annotations,
+        &cboxes_runtime_context_json(diag.runtime_context(), source_display),
+    )
 }
 
 fn cboxes_display_range(
@@ -255,7 +265,7 @@ fn cboxes_display_range(
 }
 
 pub(super) fn cboxes_error_json(kind: &str, message: &str) -> String {
-    cboxes_error_json_with_annotations(kind, message, None, &[], None)
+    cboxes_error_json_with_annotations(kind, message, None, &[], "null")
 }
 
 fn cboxes_error_json_with_annotations(
@@ -263,7 +273,7 @@ fn cboxes_error_json_with_annotations(
     message: &str,
     range: Option<DiagnosticDisplayRange>,
     annotations: &[DiagnosticDisplayAnnotation],
-    runtime_context: Option<&DiagnosticRuntimeContext>,
+    runtime_context_json: &str,
 ) -> String {
     let (file, line, col, end_line, end_col) = range
         .map(|range| {
@@ -301,7 +311,6 @@ fn cboxes_error_json_with_annotations(
         ));
     }
     annotations_json.push(']');
-    let runtime_context_json = cboxes_runtime_context_json(runtime_context);
     format!(
         "{{\"ok\":false,\"kind\":{},\"message\":{},\"file\":{},\"line\":{},\"column\":{},\"endLine\":{},\"endColumn\":{},\"annotations\":{},\"runtimeContext\":{}}}",
         cboxes_json_string(kind),
@@ -316,7 +325,10 @@ fn cboxes_error_json_with_annotations(
     )
 }
 
-fn cboxes_runtime_context_json(context: Option<&DiagnosticRuntimeContext>) -> String {
+fn cboxes_runtime_context_json(
+    context: Option<&DiagnosticRuntimeContext>,
+    source_display: &SourceDisplayMap,
+) -> String {
     let Some(context) = context else {
         return "null".to_owned();
     };
@@ -324,22 +336,66 @@ fn cboxes_runtime_context_json(context: Option<&DiagnosticRuntimeContext>) -> St
         .line_execution_count
         .map(|count| count.to_string())
         .unwrap_or_else(|| "null".to_owned());
+    let (trace, trace_types) = cboxes_trace_json(&context.trace, source_display);
     format!(
-        "{{\"executedSteps\":{},\"lineExecutionCount\":{},\"state\":{}}}",
+        "{{\"executedSteps\":{},\"lineExecutionCount\":{},\"state\":{},\"trace\":{},\"traceTypeInfos\":{},\"stdoutBytes\":{:?},\"stderrBytes\":{:?},\"stdinPosition\":{}}}",
         context.executed_steps,
         line_execution_count,
         cboxes_state_json(&context.state),
+        trace,
+        trace_types,
+        context.stdout_bytes,
+        context.stderr_bytes,
+        context.stdin_position,
     )
 }
 
+#[derive(Default)]
+struct StateTypeEncoder {
+    references: bool,
+    encoded: FastHashMap<usize, String>,
+    definitions: Vec<String>,
+}
+
+impl StateTypeEncoder {
+    fn json(&mut self, info: &Arc<ProgramTypeInfo>) -> &str {
+        self.encoded
+            .entry(Arc::as_ptr(info) as usize)
+            .or_insert_with(|| {
+                let json = cboxes_type_info_json(info);
+                if self.references {
+                    let index = self.definitions.len();
+                    self.definitions.push(json);
+                    index.to_string()
+                } else {
+                    json
+                }
+            })
+    }
+}
+
 fn cboxes_state_json(state: &[ProgramStateBox]) -> String {
+    cboxes_state_json_with_types(state, &mut StateTypeEncoder::default())
+}
+
+fn cboxes_state_json_with_types(state: &[ProgramStateBox], types: &mut StateTypeEncoder) -> String {
     let mut out = String::from("[");
     for (index, item) in state.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
         out.push('{');
-        out.push_str("\"name\":");
+        out.push_str("\"objectId\":");
+        out.push_str(&item.object_id.to_string());
+        out.push_str(",\"nameAccessible\":");
+        out.push_str(if item.name_accessible {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"scope\":");
+        out.push_str(&cboxes_json_string(&item.scope));
+        out.push_str(",\"name\":");
         out.push_str(&cboxes_json_string(&item.name));
         out.push_str(",\"type\":");
         out.push_str(&cboxes_json_string(&item.ty));
@@ -382,7 +438,7 @@ fn cboxes_state_json(state: &[ProgramStateBox]) -> String {
         out.push_str(",\"aliases\":");
         out.push_str(&cboxes_string_array_json(&item.aliases));
         out.push_str(",\"typeInfo\":");
-        out.push_str(&cboxes_type_info_json(&item.type_info));
+        out.push_str(types.json(&item.type_info));
         out.push('}');
     }
     out.push(']');
@@ -410,8 +466,15 @@ fn cboxes_display_lines(
     })
 }
 
-fn cboxes_trace_json(trace: &[ProgramTraceEvent], source_display: &SourceDisplayMap) -> String {
+fn cboxes_trace_json(
+    trace: &[ProgramTraceEvent],
+    source_display: &SourceDisplayMap,
+) -> (String, String) {
     let mut out = String::from("[");
+    let mut types = StateTypeEncoder {
+        references: true,
+        ..Default::default()
+    };
     let mut wrote_event = false;
     for event in trace {
         let Some((start_line, end_line)) = cboxes_display_lines(
@@ -427,7 +490,13 @@ fn cboxes_trace_json(trace: &[ProgramTraceEvent], source_display: &SourceDisplay
         }
         wrote_event = true;
         out.push('{');
-        out.push_str("\"kind\":");
+        out.push_str("\"callDepth\":");
+        out.push_str(&event.call_depth.to_string());
+        out.push_str(",\"frameId\":");
+        out.push_str(&event.frame_id.to_string());
+        out.push_str(",\"function\":");
+        out.push_str(&cboxes_json_string(&event.function));
+        out.push_str(",\"kind\":");
         out.push_str(&cboxes_json_string(&event.kind));
         out.push_str(",\"file\":");
         out.push_str(&cboxes_json_string(&event.file));
@@ -436,7 +505,7 @@ fn cboxes_trace_json(trace: &[ProgramTraceEvent], source_display: &SourceDisplay
         out.push_str(",\"endLine\":");
         out.push_str(&end_line.to_string());
         out.push_str(",\"state\":");
-        out.push_str(&cboxes_state_json(&event.state));
+        out.push_str(&cboxes_state_json_with_types(&event.state, &mut types));
         out.push_str(",\"stdinPosition\":");
         out.push_str(&event.stdin_position.to_string());
         out.push_str(",\"stdoutLength\":");
@@ -451,7 +520,7 @@ fn cboxes_trace_json(trace: &[ProgramTraceEvent], source_display: &SourceDisplay
         out.push('}');
     }
     out.push(']');
-    out
+    (out, format!("[{}]", types.definitions.join(",")))
 }
 
 fn cboxes_source_range_json(

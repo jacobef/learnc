@@ -25,8 +25,36 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        let category = self.eval(expr, frame, objects)?;
-        self.value_category_to_rvalue(category, expr, objects)
+        if matches!(expr, Expr::Variable(..)) {
+            let key = expr as *const Expr as usize;
+            let read = self.variable_cache.get(&key).and_then(|entry| {
+                if entry.frame_id.is_some_and(|id| id != frame.id) {
+                    return None;
+                }
+                let ValueCategory::LValue(lvalue) = &entry.value else {
+                    return None;
+                };
+                self.scalar_lvalue_read(lvalue, objects)
+            });
+            if let Some(read) = read {
+                // Loading a cached scalar needs its value and access region,
+                // not a copy of all its lvalue/provenance metadata.
+                return self.finish_scalar_lvalue_read(read, expr.span(), objects);
+            }
+        }
+        // These expressions always produce values. Avoid routing their results
+        // through the larger enum that also carries complete lvalue metadata.
+        match expr {
+            Expr::Number(literal, _) => Ok(self.eval_number_literal(literal)),
+            Expr::CharLiteral(value, _) => Ok(TypedValue::integer(CType::Int, *value as i128)),
+            Expr::Binary { op, lhs, rhs, span } => {
+                self.eval_binary(*op, lhs, rhs, *span, frame, objects)
+            }
+            _ => {
+                let category = self.eval(expr, frame, objects)?;
+                self.value_category_to_rvalue(category, expr, objects)
+            }
+        }
     }
 
     fn value_category_to_rvalue(
@@ -174,9 +202,9 @@ impl<'a> Interpreter<'a> {
             Expr::Variable(name, span) => self.eval_variable(name, *span, expr_key, frame, objects),
             Expr::Unary { op, expr, span } => self.eval_unary(*op, expr, *span, frame, objects),
             Expr::Postfix { op, expr, span } => self.eval_postfix(*op, expr, *span, frame, objects),
-            Expr::Binary { op, lhs, rhs, span } => {
-                self.eval_binary(*op, lhs, rhs, *span, frame, objects)
-            }
+            Expr::Binary { op, lhs, rhs, span } => self
+                .eval_binary(*op, lhs, rhs, *span, frame, objects)
+                .map(ValueCategory::RValue),
             Expr::Subscript { base, index, span } => {
                 self.eval_subscript(base, index, *span, frame, objects)
             }
@@ -269,15 +297,11 @@ impl<'a> Interpreter<'a> {
                 self.pop_assignment_target();
                 let computed =
                     self.compute_binary_value(*op, old_value, rhs_value, *span, objects)?;
-                let binary = Expr::Binary {
-                    op: *op,
-                    lhs: lhs.clone(),
-                    rhs: rhs.clone(),
-                    span: *span,
-                };
-                let stored = self.convert_value_in_context(
-                    &binary, computed, &lvalue.ty, *span, frame, objects,
-                )?;
+                // A compound assignment is never a null pointer constant. Its
+                // computed value already carries the binary operation's type;
+                // do not copy both operand trees just to check the conversion.
+                let stored = self
+                    .convert_value_in_context(expr, computed, &lvalue.ty, *span, frame, objects)?;
                 Ok(ValueCategory::RValue(
                     self.store_lvalue(objects, &lvalue, stored, *span)?,
                 ))
@@ -296,7 +320,7 @@ impl<'a> Interpreter<'a> {
                         *span,
                     ));
                 }
-                let ty = self.expr_type(expr, frame, objects)?;
+                let mut ty = self.expr_type(expr, frame, objects)?;
                 if matches!(ty.unqualified(), CType::Array(..))
                     && self.expr_refers_to_vla(expr, frame, objects)
                 {
@@ -304,7 +328,10 @@ impl<'a> Interpreter<'a> {
                     // evaluated.  Keep its value category intact: evaluation is
                     // required for side effects, but an array lvalue must not be
                     // converted to an rvalue here.
-                    let _ = self.eval(expr, frame, objects)?;
+                    ty = match self.eval(expr, frame, objects)? {
+                        ValueCategory::LValue(value) => value.ty,
+                        ValueCategory::RValue(value) => value.ty,
+                    };
                 }
                 Ok(ValueCategory::RValue(self.eval_sizeof_type(&ty, *span)?))
             }
@@ -648,7 +675,7 @@ impl<'a> Interpreter<'a> {
                 if value.ty.is_floating() || value.ty.is_complex() {
                     Ok(ValueCategory::RValue(value))
                 } else {
-                    let value = self.promote_integer_expr_value(expr, value, frame, objects)?;
+                    let value = self.promote_integer_value(value, expr.span())?;
                     Ok(ValueCategory::RValue(value))
                 }
             }
@@ -668,7 +695,7 @@ impl<'a> Interpreter<'a> {
                         -value.to_float()?,
                     )))
                 } else {
-                    let value = self.promote_integer_expr_value(expr, value, frame, objects)?;
+                    let value = self.promote_integer_value(value, expr.span())?;
                     let int = value.to_int()?;
                     let ty = value.ty.clone();
                     let negated = self.integer_sub_for_type(0, int, &ty, span, "6.5.3.3")?;
@@ -684,7 +711,7 @@ impl<'a> Interpreter<'a> {
             UnaryOp::BitNot => {
                 let value = self.eval_rvalue(expr, frame, objects)?;
                 self.reject_missing_return_value(&value, span)?;
-                let value = self.promote_integer_expr_value(expr, value, frame, objects)?;
+                let value = self.promote_integer_value(value, expr.span())?;
                 let ty = value.ty.clone();
                 let int = value.to_int()?;
                 let result = self.integer_bitwise_for_type(int, 0, &ty, |operand, _| !operand)?;
@@ -1215,7 +1242,7 @@ impl<'a> Interpreter<'a> {
         span: Span,
         frame: &mut Frame,
         objects: &mut ObjectFrames,
-    ) -> Result<ValueCategory, Diagnostic> {
+    ) -> Result<TypedValue, Diagnostic> {
         match op {
             BinaryOp::Comma => {
                 let sequencing = self.sequencing_snapshot();
@@ -1223,7 +1250,7 @@ impl<'a> Interpreter<'a> {
                 let lhs_footprint = self.finish_sequenced_operand(sequencing);
                 let result = self.eval_rvalue(rhs, frame, objects)?;
                 self.merge_sequenced_footprint(lhs_footprint);
-                return Ok(ValueCategory::RValue(result));
+                return Ok(result);
             }
             BinaryOp::LogicalAnd => {
                 let sequencing = self.sequencing_snapshot();
@@ -1232,12 +1259,12 @@ impl<'a> Interpreter<'a> {
                 let lhs_footprint = self.finish_sequenced_operand(sequencing);
                 if !truthy {
                     self.merge_sequenced_footprint(lhs_footprint);
-                    return Ok(ValueCategory::RValue(TypedValue::int(0)));
+                    return Ok(TypedValue::int(0));
                 }
                 let rhs_value = self.eval_rvalue(rhs, frame, objects)?;
                 let result = TypedValue::int(self.scalar_truthy(&rhs_value, rhs.span())? as i128);
                 self.merge_sequenced_footprint(lhs_footprint);
-                return Ok(ValueCategory::RValue(result));
+                return Ok(result);
             }
             BinaryOp::LogicalOr => {
                 let sequencing = self.sequencing_snapshot();
@@ -1246,25 +1273,23 @@ impl<'a> Interpreter<'a> {
                 let lhs_footprint = self.finish_sequenced_operand(sequencing);
                 if truthy {
                     self.merge_sequenced_footprint(lhs_footprint);
-                    return Ok(ValueCategory::RValue(TypedValue::int(1)));
+                    return Ok(TypedValue::int(1));
                 }
                 let rhs_value = self.eval_rvalue(rhs, frame, objects)?;
                 let result = TypedValue::int(self.scalar_truthy(&rhs_value, rhs.span())? as i128);
                 self.merge_sequenced_footprint(lhs_footprint);
-                return Ok(ValueCategory::RValue(result));
+                return Ok(result);
             }
             _ => {}
         }
         let lhs_value = self.eval_rvalue(lhs, frame, objects)?;
         let rhs_value = self.eval_rvalue(rhs, frame, objects)?;
-        let lhs_value = self.promote_integer_expr_value(lhs, lhs_value, frame, objects)?;
-        let rhs_value = self.promote_integer_expr_value(rhs, rhs_value, frame, objects)?;
+        let lhs_value = self.promote_integer_value(lhs_value, lhs.span())?;
+        let rhs_value = self.promote_integer_value(rhs_value, rhs.span())?;
         if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
             return self.eval_equality(op, lhs_value, rhs_value, lhs, rhs, span, frame, objects);
         }
-        Ok(ValueCategory::RValue(self.compute_binary_value(
-            op, lhs_value, rhs_value, span, objects,
-        )?))
+        self.compute_binary_value(op, lhs_value, rhs_value, span, objects)
     }
 
     pub(super) fn eval_equality(
@@ -1277,7 +1302,7 @@ impl<'a> Interpreter<'a> {
         span: Span,
         frame: &Frame,
         objects: &ObjectFrames,
-    ) -> Result<ValueCategory, Diagnostic> {
+    ) -> Result<TypedValue, Diagnostic> {
         if lhs.ty.is_pointer() || rhs.ty.is_pointer() {
             if lhs.ty.is_pointer() && rhs.ty.is_pointer() {
                 let common_ty = if self.is_null_pointer_constant(lhs_expr, frame, objects)? {
@@ -1294,10 +1319,10 @@ impl<'a> Interpreter<'a> {
                     self.composite_pointer_target_type(lhs_inner, rhs_inner)
                         .map(CType::pointer_to)
                         .ok_or_else(|| {
-                            Diagnostic::error(
+                            self.runtime_array_dimension_mismatch(&lhs.ty, &rhs.ty, span).unwrap_or_else(|| Diagnostic::error(
                                 "equality comparison requires compatible pointer operand types",
                                 span,
-                            )
+                            ))
                         })?
                 };
                 lhs = self.convert_value(lhs, &common_ty, span)?;
@@ -1311,7 +1336,7 @@ impl<'a> Interpreter<'a> {
                 BinaryOp::NotEqual => !equal,
                 _ => unreachable!(),
             };
-            return Ok(ValueCategory::RValue(TypedValue::int(value as i128)));
+            return Ok(TypedValue::int(value as i128));
         }
         let (lhs, rhs, common_ty) = self.usual_arithmetic_operands(lhs, rhs, span)?;
         let equal = if common_ty.is_complex() {
@@ -1328,7 +1353,7 @@ impl<'a> Interpreter<'a> {
             BinaryOp::NotEqual => !equal,
             _ => unreachable!(),
         };
-        Ok(ValueCategory::RValue(TypedValue::int(value as i128)))
+        Ok(TypedValue::int(value as i128))
     }
 
     fn eval_increment(
@@ -1447,6 +1472,7 @@ impl<'a> Interpreter<'a> {
                 let ResolvedMemberAccess {
                     path: member_path,
                     ty: member_ty,
+                    bit_field_width,
                     ..
                 } = self.resolve_member_access(&value.ty, member, span)?;
                 let ValueData::Aggregate(stored) = value.data else {
@@ -1463,9 +1489,12 @@ impl<'a> Interpreter<'a> {
                     return self
                         .materialize_full_expression_temporary(member_ty, stored, span, objects);
                 }
+                let result_ty = bit_field_width
+                    .map(|width| self.promoted_bit_field_type(&member_ty, width))
+                    .unwrap_or(member_ty);
                 Ok(ValueCategory::RValue(self.convert_value(
                     member_value,
-                    &member_ty,
+                    &result_ty,
                     span,
                 )?))
             }
@@ -1495,6 +1524,7 @@ impl<'a> Interpreter<'a> {
         self.insert_live_retired_object(
             object,
             ObjectState {
+                display_binding: None,
                 ty: ty.clone(),
                 storage_duration: StorageDuration::Automatic,
                 alive: true,
@@ -1510,7 +1540,7 @@ impl<'a> Interpreter<'a> {
                 value: stored,
                 declaration_span: span,
                 modification_count: 1,
-                raw_indeterminate_bytes: None,
+                indeterminate_count: None,
                 variably_modified: false,
                 effective_types: Vec::new(),
                 pointer_slots: BTreeMap::default(),

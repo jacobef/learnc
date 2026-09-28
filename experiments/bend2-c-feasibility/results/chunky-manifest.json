@@ -1,0 +1,12 @@
+{
+  "name": "chunky",
+  "files": 1024,
+  "bytes": 6003910,
+  "functions": 32768,
+  "lex": 1999392502,
+  "fold": 1410182065,
+  "sha256": {
+    "clustered": "1b88070a155e2d7ba6c8e872c79ef5c9f08c4b5d4443f528d0e76941fd7a80d1"
+  },
+  "clang_sample_expected": 1477644741
+}

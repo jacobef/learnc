@@ -3820,3 +3820,76 @@ fn audit_compound_literals_obey_selection_and_iteration_block_lifetimes() {
         "#;
     assert_diagnostic_contains(switch_entry_into_loop, "lifetime has ended");
 }
+
+#[test]
+fn character_reads_of_typed_arrays_preserve_element_offsets_and_updates() {
+    assert_stdout(
+        r#"
+        #include <stdio.h>
+        #include <string.h>
+        int main(void) {
+            unsigned int words[2][2] = {{0x01020304u, 0x05060708u}, {9, 10}};
+            unsigned char *bytes = (unsigned char *)&words;
+            char text[] = "a writable buffer";
+            const unsigned char *input = (unsigned char *)text;
+            printf("%u %u %u %u %u %u %c\n",
+                   bytes[0], bytes[3], bytes[4], bytes[7], bytes[8], bytes[12], input[2]);
+            words[1][0] = 17;
+            text[2] = 'X';
+            printf("%u %c\n", bytes[8], input[2]);
+            memset(words, 0, sizeof words);
+            printf("%u %u\n", bytes[0], bytes[8]);
+            return 0;
+        }
+        "#,
+        "4 1 8 5 9 10 w\n17 X\n0 0\n",
+    );
+}
+
+#[test]
+fn partial_aggregate_initialization_survives_whole_and_byte_writes() {
+    assert_stdout(
+        r#"
+        #include <stdio.h>
+        #include <string.h>
+        struct Pair { int a, b; };
+        int main(void) {
+            struct Pair pairs[8];
+            for (int i = 0; i < 8; i++) { pairs[i].a = i; pairs[i].b = 2 * i; }
+            struct Pair replacement = {30, 40};
+            pairs[2] = replacement;
+            memset(&pairs[3], 0, sizeof pairs[3]);
+            pairs[3].b = 5;
+            int sum = 0;
+            for (int i = 0; i < 8; i++) sum += pairs[i].a + pairs[i].b;
+            printf("%d\n", sum);
+            return 0;
+        }
+        "#,
+        "144\n",
+    );
+}
+
+#[test]
+fn repeated_string_literal_evaluation_reuses_static_storage() {
+    assert_exit_status(
+        r#"
+        #include <wchar.h>
+        #include <uchar.h>
+        const char *narrow(void) { return "same literal"; }
+        const wchar_t *wide(void) { return L"same literal"; }
+        const char16_t *utf16(void) { return u"same literal"; }
+        const char32_t *utf32(void) { return U"same literal"; }
+        int main(void) {
+            const char *a = narrow();
+            const wchar_t *b = wide();
+            const char16_t *c = utf16();
+            const char32_t *d = utf32();
+            for (int i = 0; i < 20; i++)
+                if (a != narrow() || b != wide() || c != utf16() || d != utf32()) return 1;
+            return 0;
+        }
+        "#,
+        0,
+    );
+}

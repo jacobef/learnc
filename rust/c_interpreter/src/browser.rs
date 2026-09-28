@@ -314,6 +314,7 @@ pub extern "C" fn cboxes_last_result_len() -> usize {
 const CBOXES_BRIDGE_SCHEMA_ID: u32 = 2;
 const CBOXES_BRIDGE_HEADER_WORDS: usize = 11;
 const CBOXES_BRIDGE_FLAG_IMPLICIT_MAIN: u32 = 1;
+const CBOXES_BRIDGE_FLAG_TRACE_FUNCTIONS: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CboxesBridgeOperation {
@@ -347,6 +348,7 @@ impl CboxesBridgeOperation {
 struct CboxesBridgeRequest<'a> {
     operation: CboxesBridgeOperation,
     implicit_main: bool,
+    trace_function_calls: bool,
     synthetic_address_base: u32,
     event_index: usize,
     execution_step_limit: usize,
@@ -375,7 +377,7 @@ impl<'a> CboxesBridgeRequest<'a> {
         }
         let operation = CboxesBridgeOperation::decode(word(1))?;
         let flags = word(2);
-        if flags & !CBOXES_BRIDGE_FLAG_IMPLICIT_MAIN != 0 {
+        if flags & !(CBOXES_BRIDGE_FLAG_IMPLICIT_MAIN | CBOXES_BRIDGE_FLAG_TRACE_FUNCTIONS) != 0 {
             return Err(format!("unsupported interpreter request flags 0x{flags:x}"));
         }
         let lengths = [word(7) as usize, word(8) as usize, word(9) as usize];
@@ -406,6 +408,7 @@ impl<'a> CboxesBridgeRequest<'a> {
         Ok(Self {
             operation,
             implicit_main: flags & CBOXES_BRIDGE_FLAG_IMPLICIT_MAIN != 0,
+            trace_function_calls: flags & CBOXES_BRIDGE_FLAG_TRACE_FUNCTIONS != 0,
             synthetic_address_base: word(3),
             event_index: word(4) as usize,
             execution_step_limit: word(5).max(1) as usize,
@@ -430,6 +433,8 @@ impl<'a> CboxesBridgeRequest<'a> {
             execution_step_limit: Some(self.execution_step_limit),
             execution_trace_following_limit: self.execution_trace_following_limit,
             execution_trace_limit: self.execution_trace_limit,
+            trace_function_calls: self.trace_function_calls,
+            optimizing_precomputations: true,
             ..RunOptions::default()
         }
     }

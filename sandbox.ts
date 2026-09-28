@@ -1,8 +1,10 @@
 import { pageSyntheticAddressBase } from "./shared-c-address-space.js";
-import { boundaryTargets, canJumpToBoundary, defaultOccurrence, executionBoundaries, nearestOccurrence, type LineBoundary } from "./shared-sandbox-navigation.js";
+import { memoryDisplayState } from "./shared-program-state.js";
+import { markInaccessibleName } from "./shared-workspace-dom.js";
+import { boundaryTargets, canJumpToBoundary, defaultOccurrence, executionBoundaries, nearestOccurrence, previousVisibleStepPosition, stepDepth, stepDestination, type StepMode, type LineBoundary } from "./shared-sandbox-navigation.js";
 import { stdinReadPosition } from "./shared-stdin-position.js";
 import { bindPanelSplit } from "./shared-panel-split.js";
-import { SandboxExecution, sandboxStepLimit, DEFAULT_SANDBOX_STEP_LIMIT } from "./shared-sandbox-execution.js";
+import { SandboxExecution, sandboxStepLimit, sandboxTimeline, sandboxDiagnosticAt, DEFAULT_SANDBOX_STEP_LIMIT, type SandboxTimeline } from "./shared-sandbox-execution.js";
 import { executionLimitExplanation, renderCodeDiagnostic } from "./shared-code-runtime-issues.js";
 import { readSandboxProgress, writeSandboxProgress } from "./shared-progress.js";
 import {
@@ -82,6 +84,9 @@ const stage = requiredRole<HTMLElement>("sandbox-stage");
 const codePane = requiredRole<HTMLElement>("sandbox-code");
 const prevButtons = [requiredRole<HTMLButtonElement>("sandbox-prev")];
 const nextButtons = [requiredRole<HTMLButtonElement>("sandbox-next")];
+const intoButton = requiredRole<HTMLButtonElement>("sandbox-into");
+const outButton = requiredRole<HTMLButtonElement>("sandbox-out");
+let stepping = false;
 const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
 bindCodeEditorTabKey(editor);
 
@@ -503,7 +508,7 @@ requiredRole<HTMLButtonElement>("sandbox-dismiss-introduction").addEventListener
 });
 
 function outcomeForPosition(
-  result: CProgramResult,
+  result: SandboxTimeline,
   position: number,
   files: CSourceFile[],
 ) {
@@ -520,6 +525,7 @@ function outcomeForPosition(
   }
   const trace = result.trace || [];
   const safePosition = clampStepPosition(position, trace.length);
+  const diagnostic = sandboxDiagnosticAt(result, safePosition);
   const current = safePosition > 0 ? trace[safePosition - 1] : undefined;
   const blocked = safePosition >= trace.length ? result.blocked : null;
   const executionLimit =
@@ -530,14 +536,14 @@ function outcomeForPosition(
       ? result.executionLimit
       : null;
   return {
-    kind: "ok" as const,
-    globalKind: blocked
+    kind: diagnostic?.kind ?? "ok" as const,
+    globalKind: diagnostic?.kind ?? (blocked
       ? ("blocked" as const)
       : executionLimit
         ? ("execution-limit" as const)
-        : ("ok" as const),
+        : ("ok" as const)),
     state:
-      blocked?.state ??
+      diagnostic ? null : blocked?.state ??
       (current ? current.state : executionLimit ? result.state : []),
     files,
     eventIndex: current ? safePosition - 1 : null,
@@ -633,7 +639,9 @@ function renderState(
     const msg = document.createElement("div");
     msg.className = "muted state-status";
     msg.style.padding = "8px";
-    msg.textContent = "(the program does not currently run)";
+    msg.textContent = status === "ub"
+      ? "Execution stopped here: undefined behavior."
+      : "(the program does not currently run)";
     grid.appendChild(msg);
   } else if (!boxes || boxes.length === 0) {
     const msg = document.createElement("div");
@@ -699,16 +707,14 @@ function renderExpression(outcome: {
   }
   const resultName = String((result as { name?: unknown }).name ?? "").trim();
   const resultIsArray = result.typeInfo.kind === "array";
+  const displayedState = memoryDisplayState(outcome.state || []);
   const match =
     result.kind === "lvalue"
-      ? (resultName
-          ? (outcome.state || []).find((box) => box.name === resultName)
-          : null) ||
-        (outcome.state || []).find((box) => {
+      ? displayedState.find((box) => {
           if (String(box.address) !== String(result.address)) return false;
           const boxIsArrayRoot = !box.arrayRoot && box.typeInfo?.kind === "array";
           return resultIsArray || !boxIsArrayRoot;
-        })
+        }) || displayedState.find(box => box.nameAccessible !== false && box.name === resultName)
       : null;
   const node = match
     ? vbox({
@@ -735,6 +741,7 @@ function renderExpression(outcome: {
   if (match && (match.value ?? "") === "") {
     node.querySelector(".value")?.classList.add("placeholder", "muted");
   }
+  markInaccessibleName(node, match);
   if (!match && !result.address) node.classList.add("no-addr");
   if (!match) node.classList.add("no-name");
   exprResult.appendChild(node);
@@ -854,7 +861,7 @@ function renderStage() {
   const runFiles = filesForRun();
   const programIsBlank = runFiles.every((file) => file.source.trim() === "");
   const implicitMainRequested = implicitMainForRun();
-  const result = execution.run(runFiles, stdinForRun(), implicitMainRequested);
+  const result = sandboxTimeline(execution.run(runFiles, stdinForRun(), implicitMainRequested));
   discoverJumpTargets(runFiles, stdinForRun(), implicitMainRequested, result);
   sandbox.effectiveImplicitMain =
     result.implicitMainApplied ?? implicitMainRequested;
@@ -863,7 +870,6 @@ function renderStage() {
   } else if (implicitMainRequested) {
     sandbox.implicitMainNotice = "";
   }
-  sandbox.diagnostic = result.kind === "ok" ? null : result.diagnostic;
   if (result.kind === "ok") {
     sandbox.trace = result.trace;
     sandbox.mainClose = result.mainClose;
@@ -916,6 +922,9 @@ function renderStage() {
   }
   if (result.kind === "ok") {
     pendingStepAnchor = null;
+    if (sandbox.stepPosition < sandbox.traceLength) {
+      sandbox.stepPosition = previousVisibleStepPosition(sandbox.trace, sandbox.stepPosition + 1);
+    }
   }
   if (
     shouldInferInitialEndPin &&
@@ -925,6 +934,7 @@ function renderStage() {
     keepStepperAtEnd = sandbox.stepPosition >= sandbox.traceLength;
     shouldInferInitialEndPin = false;
   }
+  sandbox.diagnostic = sandboxDiagnosticAt(result, sandbox.stepPosition);
   const outcome = outcomeForPosition(result, sandbox.stepPosition, runFiles);
   stdoutOutput.textContent = outcome.stdout;
   stderrOutput.textContent = outcome.stderr;
@@ -947,7 +957,7 @@ function renderStage() {
     sandbox.trace,
     outcome.blocked ?? null,
     sandbox.executionLimit,
-    result.kind !== "ok",
+    !!sandbox.diagnostic,
   );
   renderFileTabs();
   renderInterfaceControls();
@@ -974,23 +984,27 @@ function updateStepperControls(
   executionLimit: CProgramExecutionLimit | null,
   hasError = false,
 ) {
+  const entersFunction = trace[position]?.kind === "call";
+  const canExtendTrace = !!executionLimit && executionLimit.reason !== "step-limit" && position >= trace.length;
+  intoButton.classList.toggle("hidden", !entersFunction);
+  outButton.classList.toggle("hidden", stepDepth(trace, position) === 0);
+  intoButton.disabled = stepping || hasError || !entersFunction;
+  outButton.disabled = stepping || hasError || (position >= trace.length && !canExtendTrace);
   prevButtons.forEach((btn) => {
-    btn.disabled = position <= 0;
+    btn.disabled = stepping || position <= 0;
   });
   nextButtons.forEach((btn) => {
     btn.textContent =
-      blocked && position >= trace.length
+      hasError && sandbox.diagnostic?.kind === "ub"
+        ? "Stopped"
+        : blocked && position >= trace.length
         ? `Waiting for ${blocked.function}`
         : executionLimit &&
             position >= trace.length
           ? executionLimit.reason === "step-limit" ? "Step limit reached"
             : executionLimit.reason === "trace-limit" ? "Continue execution ▶" : "Continue loop ▶"
-        : runLabelForPosition(position, trace);
-    const canExtendTrace =
-      !!executionLimit &&
-      executionLimit.reason !== "step-limit" &&
-      position >= trace.length;
-    btn.disabled = hasError || (position >= trace.length && !canExtendTrace);
+        : entersFunction ? "Step over ▶" : runLabelForPosition(position, trace);
+    btn.disabled = stepping || hasError || (position >= trace.length && !canExtendTrace);
   });
 }
 
@@ -1144,6 +1158,15 @@ function updateLineGutters(linesOverride?: string[]) {
 function scrollEventIntoView(event: CProgramTraceEvent | undefined) {
   if (!event || event.file !== sandbox.activePath) return;
   const scroller = codePane;
+  if (event.kind === "ub" && sandbox.diagnostic) {
+    const scrollerRect = scroller.getBoundingClientRect();
+    const diagnosticRect = diagnosticEl.getBoundingClientRect();
+    scroller.scrollTop += Math.max(0, Math.min(
+      diagnosticRect.top - scrollerRect.top - 8,
+      diagnosticRect.bottom - scrollerRect.bottom + 8,
+    ));
+    return;
+  }
   const startNode = lineNumbers.children[event.startLine] as HTMLElement | undefined;
   const endNode = lineNumbers.children[event.endLine] as HTMLElement | undefined;
   if (!startNode || !endNode) return;
@@ -1212,52 +1235,66 @@ prevButtons.forEach((btn) => {
   btn.addEventListener("click", () => {
     if (sandbox.executionLimit) executionLimitNoticeDismissed = true;
     keepStepperAtEnd = false;
-    sandbox.stepPosition = clampStepPosition(
-      sandbox.stepPosition - 1,
-      sandbox.traceLength,
-    );
+    sandbox.stepPosition = previousVisibleStepPosition(sandbox.trace, sandbox.stepPosition);
     saveSandboxState();
     renderStage();
     scrollEventIntoView(sandbox.trace[sandbox.stepPosition]);
   });
 });
 
-nextButtons.forEach((btn) => {
-  btn.addEventListener("click", () => {
-    if (sandbox.executionLimit) executionLimitNoticeDismissed = true;
-    const extendsLimitedTrace =
-      !!sandbox.executionLimit &&
-      sandbox.executionLimit.reason !== "step-limit" &&
-      sandbox.stepPosition >= sandbox.traceLength;
-    if (extendsLimitedTrace) {
+async function advanceStep(mode: StepMode) {
+  if (stepping) return;
+  const position = sandbox.stepPosition;
+  const depth = stepDepth(sandbox.trace, position);
+  const sourceKey = () => JSON.stringify([filesForRun(), stdinForRun(), implicitMainForRun(), execution.stepLimit]);
+  const key = sourceKey();
+  stepping = true;
+  keepStepperAtEnd = false;
+  executionLimitNoticeDismissed = true;
+  try {
+    if (position >= sandbox.traceLength && sandbox.executionLimit && sandbox.executionLimit.reason !== "step-limit") {
       execution.extend();
-      keepStepperAtEnd = false;
-      sandbox.stepPosition += 1;
       renderStage();
-      scrollEventIntoView(sandbox.trace[sandbox.stepPosition - 1]);
-      return;
     }
-    const event = sandbox.trace[sandbox.stepPosition];
+    while (true) {
+      const target = stepDestination(sandbox.trace, position, mode, depth);
+      if (target !== null) {
+        sandbox.stepPosition = target;
+        break;
+      }
+      if (sandbox.executionLimit?.reason !== "trace-limit") {
+        sandbox.stepPosition = sandbox.traceLength;
+        break;
+      }
+      const previousLength = sandbox.traceLength;
+      execution.extend();
+      renderStage();
+      // Keep editing responsive while a long function's trace is extended.
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      if (sourceKey() !== key) return;
+      if (sandbox.traceLength <= previousLength) break;
+    }
+    const event = sandbox.trace[sandbox.stepPosition] ?? sandbox.trace[sandbox.stepPosition - 1];
     if (event && event.file !== sandbox.activePath) {
-      const file = sandbox.files.find((candidate) => candidate.path === event.file);
+      const file = sandbox.files.find(candidate => candidate.path === event.file);
       if (file) {
         activeFile().source = editor.value;
         sandbox.activePath = file.path;
         editor.value = file.source;
-        saveSandboxState();
       }
     }
-    sandbox.stepPosition = clampStepPosition(
-      sandbox.stepPosition + 1,
-      sandbox.traceLength,
-    );
-    keepStepperAtEnd =
-      sandbox.traceLength > 0 && sandbox.stepPosition >= sandbox.traceLength;
+    keepStepperAtEnd = sandbox.traceLength > 0 && sandbox.stepPosition >= sandbox.traceLength;
     saveSandboxState();
+  } finally {
+    stepping = false;
     renderStage();
-    scrollEventIntoView(event);
-  });
-});
+    scrollEventIntoView(sandbox.trace[sandbox.stepPosition] ?? sandbox.trace[sandbox.stepPosition - 1]);
+  }
+}
+
+nextButtons.forEach(btn => btn.addEventListener("click", () => { void advanceStep("over"); }));
+intoButton.addEventListener("click", () => { void advanceStep("into"); });
+outButton.addEventListener("click", () => { void advanceStep("out"); });
 
 exprInput.addEventListener("input", () => {
   saveSandboxState();

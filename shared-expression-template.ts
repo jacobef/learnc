@@ -76,6 +76,7 @@ interface ExpressionTemplateElements {
   exerciseStack: HTMLElement | null;
   expressionEl: HTMLElement | null;
   answerPanel: HTMLElement | null;
+  answerActions: HTMLElement | null;
   answerSlot: HTMLElement | null;
   answerResult: HTMLElement | null;
   toggleWrap: HTMLElement | null;
@@ -117,6 +118,7 @@ function collectExpressionElements(
     exerciseStack: root.querySelector<HTMLElement>(".expr-eval-stack"),
     expressionEl: role<HTMLElement>("expr-expression"),
     answerPanel: role<HTMLElement>("expr-answer-panel"),
+    answerActions: role<HTMLElement>("expr-answer-actions"),
     answerSlot: role<HTMLElement>("expr-answer-slot"),
     answerResult: role<HTMLElement>("expr-answer-result"),
     toggleWrap: role<HTMLElement>("expr-answer-toggle"),
@@ -273,6 +275,7 @@ function ensureExpressionLayout(): ExpressionTemplateElements {
 
   const answerActions = document.createElement("div");
   answerActions.className = "controls expression-mobile-actions";
+  answerActions.dataset.role = "expr-answer-actions";
   answerPanel.appendChild(answerActions);
   const placeActions = () => {
     const mobile = isMobileViewport();
@@ -331,6 +334,7 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     exerciseStack,
     expressionEl,
     answerPanel,
+    answerActions,
     answerSlot,
     answerResult,
     toggleWrap,
@@ -920,6 +924,9 @@ function createExpressionEvalTemplate(config: ExpressionTemplateConfig): void {
     setControlVisible(sectionEl, true);
     setControlVisible(levelResetBtn, true);
     setControlVisible(answerPanel, showExprResultPane);
+    // Selection-only lessons hide the answer panel, but still need mobile actions.
+    const actionsPanel = showExprResultPane ? answerPanel : expressionEl?.parentElement;
+    if (answerActions && actionsPanel) actionsPanel.appendChild(answerActions);
     const instructionText = step.instructions ?? null;
     renderInstructions(instructionText);
     if (expressionEl) expressionEl.textContent = step.expression;

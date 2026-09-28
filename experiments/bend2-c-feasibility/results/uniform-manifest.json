@@ -1,0 +1,12 @@
+{
+  "name": "uniform",
+  "files": 4096,
+  "bytes": 3004080,
+  "functions": 16384,
+  "lex": 112971060,
+  "fold": 1790658097,
+  "sha256": {
+    "clustered": "445bac2dd1f35d9015756c5a672907e81d8b0e2a81ed1dab602cf478dbbe1efe"
+  },
+  "clang_sample_expected": 4167601016
+}

@@ -1,6 +1,56 @@
 use super::*;
 
 #[test]
+fn size_queries_use_size_t_range_without_allocating_the_queried_objects() {
+    assert_stdout(
+        r#"
+        #include <stdio.h>
+        #include <stddef.h>
+        struct Large { char bytes[2147483648ULL]; int tail; };
+        int main(void) {
+            printf("%zu %zu %zu", sizeof(char[2147483648ULL]),
+                sizeof(int[600000000]), offsetof(struct Large, tail));
+        }
+    "#,
+        "2147483648 2400000000 2147483648",
+    );
+}
+
+#[test]
+fn later_braced_initializers_replace_the_entire_selected_subaggregate() {
+    let source = r#"
+        #include <stdio.h>
+        int global[2][3] = {[0][1]=4, [0]={1}};
+        struct P { int x, y; };
+        struct S { struct P p; int z; };
+        int main(void) {
+            int a[2][3] = {[0][1]=4, [0]={1}};
+            int b[2][3] = {[0]={1,2,3}, [0][1]=4};
+            int deep[2][2][2] = {[1][1][1]=9, [1]={{2}}};
+            struct S s = {.p.y=9, .z=5, .p={2}};
+            union U { int a[2]; int b; } u = {.a={1,9}, .a={2}};
+            printf("%d %d %d; %d %d %d; %d %d; %d %d %d; %d %d; %d %d",
+                a[0][0], a[0][1], a[0][2],
+                b[0][0], b[0][1], b[0][2],
+                deep[1][0][0], deep[1][1][1], s.p.x, s.p.y, s.z,
+                u.a[0], u.a[1], global[0][0], global[0][1]);
+        }
+    "#;
+    for optimizing_precomputations in [false, true] {
+        let result = run_source_with_options(
+            "test.c",
+            source,
+            &RunOptions {
+                optimizing_precomputations,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.stdout, "1 0 0; 1 4 3; 2 0; 2 0 5; 2 0; 1 0");
+    }
+}
+
+#[test]
 fn bit_fields_preserve_known_bits_in_partially_initialized_storage() {
     let source = r#"
         #include <stdio.h>
@@ -804,16 +854,40 @@ fn empty_struct_is_rejected() {
 }
 
 #[test]
-fn record_type_cannot_silently_consume_a_following_builtin_type_specifier() {
+fn missing_semicolon_after_type_definition_points_to_its_closing_brace() {
+    for definition in [
+        "struct Point {\nint x;\n}",
+        "union Value {\nint x;\n}",
+        "enum Color {\nRED\n}",
+    ] {
+        let source = format!("{definition}\nint main(void) {{ return 0; }}\n");
+        let err = run_source("test.c", &source).unwrap_err();
+        assert!(
+            err.render()
+                .contains("expected ';' after struct, union, or enum definition")
+        );
+        assert!(err.render().contains("test.c:3:1"), "{}", err.render());
+        let fixed = source.replacen("}\nint", "};\nint", 1);
+        run_source("test.c", &fixed).unwrap();
+    }
+}
+
+#[test]
+fn record_reference_with_builtin_type_is_not_a_missing_semicolon() {
     let err = run_source(
         "test.c",
-        "struct Point { int x; }\nint main(void) { return 0; }\n",
+        "struct Point { int x; };\nstruct Point int p;\nint main(void) {}\n",
     )
     .unwrap_err();
     assert!(
         err.render()
             .contains("struct Point cannot be combined with a built-in type specifier")
     );
+}
+
+#[test]
+fn type_definitions_can_have_declarators_and_trailing_qualifiers() {
+    run_source("test.c", "struct S { int x; } const s = {1};\nunion U { int x; } u;\nenum E { A } e;\ntypedef struct T { int x; } T;\nint main(void) { return s.x - 1; }\n").unwrap();
 }
 
 #[test]
@@ -2210,4 +2284,23 @@ fn initial_member_cast_recovers_the_containing_array_element() {
         }
     "#;
     assert_exit_status(source, 0);
+}
+
+#[test]
+fn returned_aggregate_bit_fields_promote_like_lvalue_bit_fields() {
+    assert_stdout(
+        r#"
+        #include <stdio.h>
+        struct Bits { unsigned int value : 1; unsigned int wide : 32; };
+        struct Bits make(void) { struct Bits bits = {1, 4294967295u}; return bits; }
+        int main(void) {
+            struct Bits bits = make();
+            printf("%d %d %d %d %u %u\n", ~bits.value, ~make().value,
+                   make().value < -1, make().value + -2,
+                   make().wide, make().wide + 1);
+            return 0;
+        }
+        "#,
+        "-2 -2 0 -1 4294967295 0\n",
+    );
 }

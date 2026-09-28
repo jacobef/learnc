@@ -123,6 +123,21 @@ impl<'a> Interpreter<'a> {
                     let mut resolved_param = param.clone();
                     resolved_param.ty = self
                         .resolve_decl_type(&param.ty, retained, &mut frame, objects, param.span)?;
+                    if retained.iter().any(Option::is_some)
+                        && arg.ty.is_pointer()
+                        && !self.pointer_assignment_compatible(&resolved_param.ty, &arg.ty)
+                    {
+                        return Err(Diagnostic::ub(
+                            format!(
+                                "array dimensions for parameter {} require {}, but the argument has type {}",
+                                param.name.as_deref().unwrap_or("(unnamed)"),
+                                resolved_param.ty,
+                                arg.ty,
+                            ),
+                            call_span,
+                            Some("6.7.6.2p6"),
+                        ));
+                    }
                     self.check_static_array_parameter(&resolved_param, &arg, &mut frame, objects)?;
                     let arg = self.convert_value(arg, &resolved_param.ty, call_span)?;
                     let object = self.allocate_object(
@@ -134,11 +149,39 @@ impl<'a> Interpreter<'a> {
                         param.vla_bounds.iter().any(|bound| bound.is_some()),
                     )?;
                     self.initialize_object_value(objects, object, arg, param.span)?;
+                    if self.run_options.capture_visualization {
+                        if let Some(state) = self.lookup_object_mut(objects, object) {
+                            state.display_binding = Some((
+                                param.name.clone().unwrap_or_default(),
+                                function.name.clone(),
+                            ));
+                        }
+                    }
+                    if retained.iter().any(Option::is_some) {
+                        let name = param.name.clone().unwrap_or_default();
+                        frame.object_decls.insert(
+                            name.clone(),
+                            Declaration {
+                                name,
+                                ty: Self::resolve_vla_type_for_constraints(&param.ty, retained).0,
+                                vla_bounds: retained.to_vec(),
+                                storage_class: param.storage_class,
+                                linkage: None,
+                                alignment: None,
+                                init: None,
+                                declarator_span: param.span,
+                                span: param.span,
+                            },
+                        );
+                    }
                     frame
                         .bindings
                         .insert(param.name.clone().unwrap_or_default(), object);
                 }
 
+                if self.run_options.trace_function_calls && self.current_frame_ids.len() > 1 {
+                    self.trace_cboxes_main_event_with_kind(call_span, &frame, objects, "call")?;
+                }
                 if function.name == "main" {
                     self.evaluate_cboxes_expression_at(u32::MAX as usize, &frame, objects)?;
                 }
@@ -189,6 +232,18 @@ impl<'a> Interpreter<'a> {
                     self.exec_block(&function.body, &mut frame, objects)?
                 };
 
+                if self.run_options.trace_function_calls
+                    && self.current_frame_ids.len() > 1
+                    && matches!(flow, Flow::Continue)
+                {
+                    let close = function.body.span.end.saturating_sub(1);
+                    self.trace_cboxes_main_event_with_kind(
+                        Span::new(function.body.span.file, close, close.saturating_add(1)),
+                        &frame,
+                        objects,
+                        "function-exit",
+                    )?;
+                }
                 if function.is_noreturn && matches!(flow, Flow::Continue | Flow::Return(_)) {
                     return Err(Diagnostic::ub(
                         format!(
@@ -465,12 +520,15 @@ impl<'a> Interpreter<'a> {
                 Some("6.7.5.2"),
             ));
         }
-        usize::try_from(value).map_err(|_| {
-            Diagnostic::error(
-                "variable length array bound is out of supported range",
-                expr.span(),
-            )
-        })
+        usize::try_from(value)
+            .ok()
+            .filter(|bound| *bound != CONSTRAINT_VLA_BOUND)
+            .ok_or_else(|| {
+                Diagnostic::error(
+                    "variable length array bound is out of supported range",
+                    expr.span(),
+                )
+            })
     }
 
     pub(super) fn function_type(&self, function: &FunctionDef) -> CType {
@@ -631,6 +689,7 @@ impl<'a> Interpreter<'a> {
                 {
                     continue;
                 }
+                let argument_type = value.ty.clone();
                 *value = self.convert_value_in_context(
                     expr,
                     value.clone(),
@@ -639,25 +698,25 @@ impl<'a> Interpreter<'a> {
                     frame,
                     objects,
                 )?;
+                // Prototype-scope VLA bounds are unspecified. Retain the
+                // argument's concrete dimensions until the definition's bounds
+                // have been evaluated during parameter binding.
+                if argument_type.is_pointer()
+                    && param_ty
+                        .element_type()
+                        .is_some_and(Self::has_incomplete_array_dimension)
+                {
+                    value.ty = argument_type;
+                }
             }
             if is_variadic {
                 for (index, value) in evaluated.iter_mut().enumerate().skip(fixed_param_count) {
-                    *value = self.default_argument_promotion_for_expr(
-                        value.clone(),
-                        &args[index],
-                        frame,
-                        objects,
-                    )?;
+                    *value = self.default_argument_promotion(value.clone(), args[index].span())?;
                 }
             }
         } else if !has_prototype {
             for (index, value) in evaluated.iter_mut().enumerate() {
-                *value = self.default_argument_promotion_for_expr(
-                    value.clone(),
-                    &args[index],
-                    frame,
-                    objects,
-                )?;
+                *value = self.default_argument_promotion(value.clone(), args[index].span())?;
             }
         }
 
@@ -712,6 +771,9 @@ impl<'a> Interpreter<'a> {
             let _ = self.finish_sequenced_operand(call_snapshot);
             self.merge_sequenced_footprint(operand_footprint);
             let value = call_result?;
+            if self.run_options.trace_function_calls {
+                self.trace_cboxes_main_event_with_kind(span, frame, objects, "return")?;
+            }
             return Ok(ValueCategory::RValue(value));
         }
 

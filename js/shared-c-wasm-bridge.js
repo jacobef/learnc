@@ -135,7 +135,7 @@ function encodeBridgeRequest(request) {
     const word = (index, value) => view.setUint32(index * 4, Math.max(0, Math.floor(value)), true);
     word(0, BRIDGE_SCHEMA_ID);
     word(1, OPERATION_CODES[request.operation]);
-    word(2, request.implicitMain ? BRIDGE_FLAG_IMPLICIT_MAIN : 0);
+    word(2, (request.implicitMain ? BRIDGE_FLAG_IMPLICIT_MAIN : 0) | (request.executionBudget.traceFunctions ? 2 : 0));
     word(3, request.syntheticAddressBase);
     // -1 selects main's initial state, before any statement has executed.
     word(4, request.eventIndex === -1 ? 0xffffffff : request.eventIndex ?? 0);

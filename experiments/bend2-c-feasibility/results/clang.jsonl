@@ -1,0 +1,12 @@
+{"case": "uniform", "mode": "syntax", "workers": 10, "repeat": 0, "seconds": 13.254502709023654}
+{"case": "uniform", "mode": "syntax", "workers": 10, "repeat": 1, "seconds": 13.994974625005852}
+{"case": "uniform", "mode": "syntax", "workers": 10, "repeat": 2, "seconds": 14.406440708960872}
+{"case": "uniform", "mode": "object", "workers": 10, "repeat": 0, "seconds": 16.289216875040438}
+{"case": "uniform", "mode": "object", "workers": 10, "repeat": 1, "seconds": 16.4572757499991}
+{"case": "uniform", "mode": "object", "workers": 10, "repeat": 2, "seconds": 16.759763540991116}
+{"case": "many", "mode": "syntax", "workers": 10, "repeat": 0, "seconds": 59.720905792026315}
+{"case": "many", "mode": "syntax", "workers": 10, "repeat": 1, "seconds": 69.62405129196122}
+{"case": "many", "mode": "syntax", "workers": 10, "repeat": 2, "seconds": 74.48611716600135}
+{"case": "many", "mode": "object", "workers": 10, "repeat": 0, "seconds": 87.05018725001719}
+{"case": "many", "mode": "object", "workers": 10, "repeat": 1, "seconds": 91.80788874998689}
+{"case": "many", "mode": "object", "workers": 10, "repeat": 2, "seconds": 91.72635404195171}

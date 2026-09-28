@@ -167,6 +167,9 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        if lvalue.member_path.is_empty() {
+            return Ok(());
+        }
         let Some(object) = self.lookup_object(objects, lvalue.object) else {
             return Ok(());
         };
@@ -241,6 +244,21 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
         span: Span,
     ) -> Result<AccessRegion, Diagnostic> {
+        if lvalue.base_offset == 0
+            && lvalue.offset == 0
+            && lvalue.member_path.is_empty()
+            && lvalue.designated_root_ty.is_none()
+            && lvalue.byte_offset_override.is_none()
+            && lvalue.bit_field_width.is_none()
+            && let Some(object) = self.lookup_object(objects, lvalue.object)
+            && object.ty == lvalue.ty
+        {
+            return Ok(AccessRegion {
+                object: lvalue.object,
+                bit_start: 0,
+                bit_size: object.byte_size.saturating_mul(8),
+            });
+        }
         let (_, start, size) = self
             .lvalue_byte_range(lvalue, &lvalue.ty, objects)
             .ok_or_else(|| {

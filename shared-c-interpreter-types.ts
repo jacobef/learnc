@@ -10,6 +10,7 @@ export interface CSourceFile {
 }
 
 export interface CExecutionBudget {
+  traceFunctions?: boolean;
   stepLimit: number;
   followingTraceLimit: number;
   traceLimit?: number;
@@ -40,6 +41,9 @@ export type CProgramResult = (
   CImplicitMainResult;
 
 export interface CProgramTraceEvent {
+  callDepth: number;
+  frameId: number;
+  function: string;
   stdoutLength: number;
   stderrLength: number;
   stdinPosition: number;

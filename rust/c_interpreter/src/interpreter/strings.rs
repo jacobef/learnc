@@ -16,16 +16,13 @@ impl<'a> Interpreter<'a> {
                 Some("7.1.4"),
             ));
         };
-        let object = self
-            .lookup_object(objects, object_id)
-            .cloned()
-            .ok_or_else(|| {
-                Diagnostic::ub(
-                    "access through a pointer to an object whose lifetime has ended",
-                    span,
-                    Some("6.2.4"),
-                )
-            })?;
+        let object = self.lookup_object(objects, object_id).ok_or_else(|| {
+            Diagnostic::ub(
+                "access through a pointer to an object whose lifetime has ended",
+                span,
+                Some("6.2.4"),
+            )
+        })?;
         if !object.alive {
             return Err(Diagnostic::ub(
                 "access through a pointer to an object whose lifetime has ended",
@@ -42,7 +39,14 @@ impl<'a> Interpreter<'a> {
                     Some("7.1.4"),
                 )
             })?;
-        let mut all_bytes = self.serialize_stored_value(&object.ty, &object.value, span)?;
+        let object_size = object.byte_size;
+        let mut all_bytes = if let StoredValue::ObjectRepresentation(bytes) = &object.value {
+            bytes.clone()
+        } else {
+            let ty = object.ty.clone();
+            let value = object.value.clone();
+            self.serialize_stored_value(&ty, &value, span)?
+        };
         if start > all_bytes.len() {
             return Err(Diagnostic::ub(
                 "pointer does not designate a valid byte-addressable region of the object",
@@ -52,7 +56,7 @@ impl<'a> Interpreter<'a> {
         }
         if !pointer.member_path.is_empty() {
             let available = self
-                .pointer_member_byte_limit(pointer, start, object.byte_size, objects)
+                .pointer_member_byte_limit(pointer, start, object_size, objects)
                 .unwrap_or(0);
             all_bytes.truncate(start.saturating_add(available).min(all_bytes.len()));
         }
@@ -213,6 +217,7 @@ impl<'a> Interpreter<'a> {
         self.insert_live_retired_object(
             id,
             ObjectState {
+                display_binding: None,
                 ty: array_ty.clone(),
                 storage_duration: StorageDuration::Static,
                 alive: true,
@@ -225,20 +230,14 @@ impl<'a> Interpreter<'a> {
                 initialized: true,
                 indeterminate_reason: None,
                 byte_size: c_bytes.len(),
-                value: StoredValue::Array(
-                    c_bytes
-                        .into_iter()
-                        .map(|byte| {
-                            StoredValue::Scalar(TypedValue::from_data(
-                                CType::Char,
-                                ValueData::Int(CIntValue::new(byte as i8 as i128)),
-                            ))
-                        })
-                        .collect(),
+                // Character-pointer casts must not serialize the entire string
+                // for each byte read. Literal storage is already a byte sequence.
+                value: StoredValue::ObjectRepresentation(
+                    c_bytes.into_iter().map(ByteCell::Known).collect(),
                 ),
                 declaration_span: Span::new(crate::source::FileId(0), 0, 0),
                 modification_count: 1,
-                raw_indeterminate_bytes: None,
+                indeterminate_count: None,
                 variably_modified: false,
                 effective_types: Vec::new(),
                 pointer_slots: BTreeMap::default(),
@@ -306,7 +305,12 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(super) fn intern_string_literal(&mut self, text: &StringLiteralValue) -> PointerValue {
-        self.intern_readonly_c_bytes(&text.narrow_bytes())
+        if let Some(&id) = self.literal_bindings[0].get(text) {
+            return PointerValue::at_object(id);
+        }
+        let pointer = self.intern_readonly_c_bytes(&text.narrow_bytes());
+        self.literal_bindings[0].insert(text.clone(), pointer.object.unwrap());
+        pointer
     }
 
     pub(super) fn intern_wide_string_literal(
@@ -314,6 +318,9 @@ impl<'a> Interpreter<'a> {
         text: &StringLiteralValue,
         span: Span,
     ) -> Result<PointerValue, Diagnostic> {
+        if let Some(&id) = self.literal_bindings[1].get(text) {
+            return Ok(PointerValue::at_object(id));
+        }
         let mut units = self
             .wide_literal_units(text)
             .map_err(|_| Diagnostic::error("invalid wide string literal", span))?;
@@ -326,6 +333,7 @@ impl<'a> Interpreter<'a> {
         self.insert_live_retired_object(
             id,
             ObjectState {
+                display_binding: None,
                 ty: array_ty.clone(),
                 storage_duration: StorageDuration::Static,
                 alive: true,
@@ -341,13 +349,14 @@ impl<'a> Interpreter<'a> {
                 value,
                 declaration_span: Span::new(crate::source::FileId(0), 0, 0),
                 modification_count: 1,
-                raw_indeterminate_bytes: None,
+                indeterminate_count: None,
                 variably_modified: false,
                 effective_types: Vec::new(),
                 pointer_slots: BTreeMap::default(),
             },
         );
         self.object_type_registry.insert(id, array_ty);
+        self.literal_bindings[1].insert(text.clone(), id);
         Ok(PointerValue::at_object(id))
     }
 
@@ -358,6 +367,10 @@ impl<'a> Interpreter<'a> {
         span: Span,
         objects: &ObjectFrames,
     ) -> Result<ValueCategory, Diagnostic> {
+        let cache_index = if utf16 { 2 } else { 3 };
+        if let Some(&id) = self.literal_bindings[cache_index].get(text) {
+            return Ok(self.literal_lvalue(id, objects));
+        }
         let element_ty = if utf16 {
             CType::UnsignedShort
         } else {
@@ -375,6 +388,7 @@ impl<'a> Interpreter<'a> {
         self.insert_live_retired_object(
             id,
             ObjectState {
+                display_binding: None,
                 ty: array_ty.clone(),
                 storage_duration: StorageDuration::Static,
                 alive: true,
@@ -400,17 +414,21 @@ impl<'a> Interpreter<'a> {
                 ),
                 declaration_span: span,
                 modification_count: 1,
-                raw_indeterminate_bytes: None,
+                indeterminate_count: None,
                 variably_modified: false,
                 effective_types: Vec::new(),
                 pointer_slots: BTreeMap::default(),
             },
         );
-        self.object_type_registry.insert(id, array_ty.clone());
-        let _ = objects;
-        Ok(ValueCategory::LValue(LValue {
+        self.object_type_registry.insert(id, array_ty);
+        self.literal_bindings[cache_index].insert(text.clone(), id);
+        Ok(self.literal_lvalue(id, objects))
+    }
+
+    fn literal_lvalue(&self, id: ObjectId, objects: &ObjectFrames) -> ValueCategory {
+        ValueCategory::LValue(LValue {
             object: id,
-            ty: array_ty,
+            ty: self.lookup_object(objects, id).unwrap().ty.clone(),
             base_offset: 0,
             offset: 0,
             member_path: Rc::new(Vec::new()),
@@ -420,6 +438,6 @@ impl<'a> Interpreter<'a> {
             object_representation_domain: None,
             bit_field_width: None,
             restrict_source: None,
-        }))
+        })
     }
 }

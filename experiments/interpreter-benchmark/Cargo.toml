@@ -1,0 +1,16 @@
+[package]
+name = "interpreter-benchmark"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "interpreter-benchmark"
+path = "runner.rs"
+
+[dependencies]
+c_interpreter = { path = "../../rust/c_interpreter" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

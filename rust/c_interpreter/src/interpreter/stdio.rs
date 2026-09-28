@@ -1715,7 +1715,7 @@ impl<'a> Interpreter<'a> {
             state.value = value;
             state.initialized = zeroed;
             state.address_taken = true;
-            state.raw_indeterminate_bytes =
+            state.indeterminate_count =
                 Some((state.modification_count, usize::from(!zeroed) * size));
         }
         self.dynamic_allocations.insert(object);
@@ -1910,7 +1910,7 @@ impl<'a> Interpreter<'a> {
         };
         let current_version = object.modification_count;
         let mut indeterminate_bytes = object
-            .raw_indeterminate_bytes
+            .indeterminate_count
             .filter(|(version, _)| *version == current_version)
             .map(|(_, count)| count)
             .unwrap_or_else(|| {
@@ -1936,7 +1936,7 @@ impl<'a> Interpreter<'a> {
         object.initialized = indeterminate_bytes == 0;
         object.indeterminate_reason = None;
         object.modification_count = object.modification_count.saturating_add(1);
-        object.raw_indeterminate_bytes = Some((object.modification_count, indeterminate_bytes));
+        object.indeterminate_count = Some((object.modification_count, indeterminate_bytes));
         Self::replace_pointer_slots_for_write(object, start, byte_count, None);
         true
     }
@@ -1966,7 +1966,7 @@ impl<'a> Interpreter<'a> {
         object.initialized = indeterminate_bytes == 0;
         object.indeterminate_reason = None;
         object.modification_count = object.modification_count.saturating_add(1);
-        object.raw_indeterminate_bytes = Some((object.modification_count, indeterminate_bytes));
+        object.indeterminate_count = Some((object.modification_count, indeterminate_bytes));
         Self::replace_pointer_slots_for_write(object, start, bytes.len(), None);
         Ok(())
     }

@@ -2,6 +2,10 @@ use std::{fmt, sync::Arc};
 
 use crate::source::Span;
 
+// A complete VLA whose bound has not been evaluated during constraint checking.
+// It must not be used for storage allocation or size calculations.
+pub const CONSTRAINT_VLA_BOUND: usize = usize::MAX;
+
 pub const HOST_LONG_DOUBLE_SIZE: usize = if cfg!(all(target_os = "macos", target_arch = "aarch64"))
 {
     8
@@ -290,7 +294,7 @@ impl CType {
             CType::Function(_, _, _) => None,
             CType::Pointer(_) => Some(8),
             CType::Array(inner, len) => {
-                if *len == 0 {
+                if *len == 0 || *len == CONSTRAINT_VLA_BOUND {
                     None
                 } else {
                     inner.size_of().and_then(|size| size.checked_mul(*len))
@@ -438,6 +442,7 @@ impl fmt::Display for CType {
             }
             CType::Pointer(inner) => write!(f, "{}*", inner),
             CType::Array(inner, 0) => write!(f, "{}[]", inner),
+            CType::Array(inner, CONSTRAINT_VLA_BOUND) => write!(f, "{}[*]", inner),
             CType::Array(inner, len) => write!(f, "{}[{}]", inner, len),
         }
     }

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::panic::{AssertUnwindSafe, catch_unwind, panic_any, resume_unwind, set_hook, take_hook};
 use std::rc::Rc;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 use crate::ast::{
     BinaryOp, Block, BlockItem, Declaration, Designator, Expr, ExternalDeclaration, ForInit,
@@ -17,7 +17,9 @@ use crate::linker::composite_type;
 use crate::number::{NumberLiteral, NumberValue, parse_number_literal};
 use crate::source::{FileId, SourceManager, Span};
 use crate::token::StringLiteralValue;
-use crate::types::{CType, HOST_LONG_DOUBLE_ALIGN, RecordMember, RecordType, TypeQualifiers};
+use crate::types::{
+    CONSTRAINT_VLA_BOUND, CType, HOST_LONG_DOUBLE_ALIGN, RecordMember, RecordType, TypeQualifiers,
+};
 use crate::{RunOptions, UbDetectionMode};
 
 const INT_MIN: i128 = i32::MIN as i128;
@@ -453,6 +455,9 @@ pub struct ProgramExecutionLimit {
 
 #[derive(Debug, Clone)]
 pub struct ProgramStateBox {
+    pub object_id: usize,
+    pub name_accessible: bool,
+    pub scope: String,
     pub name: String,
     pub ty: String,
     pub value: String,
@@ -466,7 +471,7 @@ pub struct ProgramStateBox {
     pub aggregate_path: Vec<String>,
     pub aggregate_kind: Option<String>,
     pub aliases: Vec<String>,
-    pub type_info: ProgramTypeInfo,
+    pub type_info: Arc<ProgramTypeInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -498,6 +503,9 @@ pub struct ProgramTypeHelpChild {
 
 #[derive(Debug, Clone)]
 pub struct ProgramTraceEvent {
+    pub call_depth: usize,
+    pub frame_id: usize,
+    pub function: String,
     pub stdout_length: usize,
     pub stderr_length: usize,
     pub stdin_position: usize,
@@ -542,7 +550,7 @@ pub struct ProgramExpressionResult {
     pub value_literal: Option<ProgramValueLiteral>,
     pub display_value: String,
     pub exact_value: String,
-    pub type_info: ProgramTypeInfo,
+    pub type_info: Arc<ProgramTypeInfo>,
 }
 
 pub struct Interpreter<'a> {
@@ -615,6 +623,7 @@ pub struct Interpreter<'a> {
     quick_exit_handlers: Vec<String>,
     running_quick_exit: bool,
     func_name_bindings: HashMap<usize, ObjectId>,
+    literal_bindings: [HashMap<StringLiteralValue, ObjectId>; 4],
     mbrtoc16_pending: HashMap<PointerValue, u16>,
     mbrtoc16_null_pending: Option<u16>,
     c16rtomb_pending: HashMap<PointerValue, u16>,
@@ -640,9 +649,13 @@ pub struct Interpreter<'a> {
     switch_dispatch_cache: HashMap<(usize, CType), SwitchDispatch>,
     switch_entry_index_cache: HashMap<(usize, Span), Option<usize>>,
     type_contains_union_cache: HashMap<CType, bool>,
+    loop_analysis_cache:
+        RefCell<HashMap<(usize, usize, usize), Option<Rc<loop_detection::LoopAnalysis>>>>,
+    loop_function_analysis_cache: RefCell<HashMap<usize, Option<Rc<loop_detection::LoopAnalysis>>>>,
     variable_cache: HashMap<usize, VariableCacheEntry>,
     member_access_cache: RefCell<MemberAccessCache>,
     float_display_cache: RefCell<HashMap<u64, (String, String)>>,
+    type_info_cache: RefCell<HashMap<CType, Arc<ProgramTypeInfo>>>,
     pending_longjmp_return: Option<PendingLongjmpReturn>,
     host_library_runtime_depth: usize,
     active_switch_dispatch_depth: usize,
@@ -739,6 +752,7 @@ enum TrackedQualifier {
 
 #[derive(Debug, Clone)]
 struct ObjectState {
+    display_binding: Option<(String, String)>,
     ty: CType,
     storage_duration: StorageDuration,
     alive: bool,
@@ -754,7 +768,8 @@ struct ObjectState {
     value: StoredValue,
     declaration_span: Span,
     modification_count: u64,
-    raw_indeterminate_bytes: Option<(u64, usize)>,
+    // Cached unknown scalar leaves (or bytes for byte-backed storage), keyed by modification count.
+    indeterminate_count: Option<(u64, usize)>,
     variably_modified: bool,
     effective_types: Vec<EffectiveTypeRegion>,
     pointer_slots: BTreeMap<(usize, usize), StoredPointerValue>,
@@ -1039,7 +1054,7 @@ struct HostStreamMode {
     binary: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum StreamLastOperation {
     Input,
     Output,
@@ -1267,7 +1282,7 @@ enum StoredValueView<'a> {
     Owned(StoredValue),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ByteCell {
     Known(u8),
     Partial { value: u8, known_mask: u8 },
@@ -1339,7 +1354,7 @@ struct ComplexValue {
     imag: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CIntValue {
     low: u64,
     high: i64,
@@ -1518,6 +1533,7 @@ struct ActiveSetjmpContext {
 struct ActiveBlockScope {
     frame_id: usize,
     block_span: Span,
+    for_step_trace: Option<(Span, Span)>,
     saved_bindings: Option<HashMap<String, ObjectId>>,
     saved_object_decls: Option<HashMap<String, Declaration>>,
     saved_function_decls: Option<HashMap<String, FunctionDecl>>,
@@ -2006,10 +2022,6 @@ impl TypedValue {
                 span,
             )),
         }
-    }
-
-    fn with_span(self, _span: Span) -> Self {
-        self
     }
 }
 

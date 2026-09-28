@@ -1,3 +1,5 @@
+import type { CProgramTraceEvent } from "./shared-c-interpreter-types.js";
+
 export type CTypeKind =
   | "void"
   | "integer"
@@ -33,6 +35,9 @@ export interface CTypeInfo {
 }
 export type BoxValue = string;
 export interface BoxState {
+  objectId?: number;
+  nameAccessible?: boolean;
+  scope?: string;
   name: string;
   type: string;
   value: BoxValue;
@@ -89,6 +94,10 @@ export type ProgramDiagnostic = {
     executedSteps: number;
     lineExecutionCount: number | null;
     state: BoxState[];
+    trace: CProgramTraceEvent[];
+    stdoutBytes: Uint8Array;
+    stderrBytes: Uint8Array;
+    stdinPosition: number;
   } | null;
 };
 

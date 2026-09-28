@@ -1,0 +1,152 @@
+[
+  {
+    "case": "smoke",
+    "clang_sample": 1640951805
+  },
+  {
+    "case": "uniform",
+    "clang_sample": 4167601016
+  },
+  {
+    "case": "many",
+    "clang_sample": 2945813786
+  },
+  {
+    "case": "chunky",
+    "clang_sample": 1477644741
+  },
+  {
+    "case": "skew",
+    "clang_sample": 2133850492
+  },
+  {
+    "case": "smoke",
+    "mode": "lex",
+    "backend": "c",
+    "threads": 1,
+    "order": "clustered",
+    "checksum": 4117135590,
+    "load_ms": 0.023,
+    "kernel_ms": 0.04,
+    "wall_ms": 89.06937501160428,
+    "wall_passes": 2,
+    "stderr": ""
+  },
+  {
+    "case": "smoke",
+    "mode": "lex",
+    "backend": "c",
+    "threads": 10,
+    "order": "clustered",
+    "checksum": 4117135590,
+    "load_ms": 0.021,
+    "kernel_ms": 0.13,
+    "wall_ms": 3.9686670061200857,
+    "wall_passes": 2,
+    "stderr": ""
+  },
+  {
+    "case": "smoke",
+    "mode": "lex",
+    "backend": "bend",
+    "threads": 1,
+    "order": "clustered",
+    "checksum": 4117135590,
+    "load_ms": 0.069,
+    "kernel_ms": 0.128,
+    "wall_ms": 15.110749984160066,
+    "wall_passes": 2,
+    "stderr": ""
+  },
+  {
+    "case": "smoke",
+    "mode": "lex",
+    "backend": "bend",
+    "threads": 10,
+    "order": "clustered",
+    "checksum": 4117135590,
+    "load_ms": 0.061,
+    "kernel_ms": 0.183,
+    "wall_ms": 13.644833990838379,
+    "wall_passes": 2,
+    "stderr": ""
+  },
+  {
+    "case": "smoke",
+    "mode": "lex",
+    "backend": "gpu",
+    "threads": 10,
+    "order": "clustered",
+    "checksum": 4117135590,
+    "load_ms": 0.119,
+    "kernel_ms": 6.441,
+    "wall_ms": 138.24329199269414,
+    "wall_passes": 2,
+    "stderr": ""
+  },
+  {
+    "case": "smoke",
+    "mode": "fold",
+    "backend": "c",
+    "threads": 1,
+    "order": "clustered",
+    "checksum": 1944642570,
+    "load_ms": 0.009,
+    "kernel_ms": 0.016,
+    "wall_ms": 5.049999977927655,
+    "wall_passes": 2,
+    "stderr": ""
+  },
+  {
+    "case": "smoke",
+    "mode": "fold",
+    "backend": "c",
+    "threads": 10,
+    "order": "clustered",
+    "checksum": 1944642570,
+    "load_ms": 0.01,
+    "kernel_ms": 0.132,
+    "wall_ms": 2.474375010933727,
+    "wall_passes": 2,
+    "stderr": ""
+  },
+  {
+    "case": "smoke",
+    "mode": "fold",
+    "backend": "bend",
+    "threads": 1,
+    "order": "clustered",
+    "checksum": 1944642570,
+    "load_ms": 0.213,
+    "kernel_ms": 0.286,
+    "wall_ms": 15.757957997266203,
+    "wall_passes": 2,
+    "stderr": ""
+  },
+  {
+    "case": "smoke",
+    "mode": "fold",
+    "backend": "bend",
+    "threads": 10,
+    "order": "clustered",
+    "checksum": 1944642570,
+    "load_ms": 0.05,
+    "kernel_ms": 0.123,
+    "wall_ms": 19.16066702688113,
+    "wall_passes": 2,
+    "stderr": ""
+  },
+  {
+    "case": "smoke",
+    "mode": "fold",
+    "backend": "gpu",
+    "threads": 10,
+    "order": "clustered",
+    "checksum": 1944642570,
+    "load_ms": 0.161,
+    "kernel_ms": 9.237,
+    "wall_ms": 126.5000409912318,
+    "wall_passes": 2,
+    "stderr": ""
+  }
+]

@@ -81,6 +81,24 @@ assert.equal(misplacedHeader.kind, "compile");
 assert.ok(misplacedHeader.diagnostic.message.includes("outside functions"));
 console.log("PASS system-header placement and missing-header suggestions");
 
+for (const definition of [
+  "struct s {\n  int x;\n}",
+  "union u {\n  int x;\n}",
+  "enum e {\n  A\n}",
+  "struct outer {\n  struct { int x; } inner;\n} /* definition ends here */",
+]) {
+  const source = `${definition}\nint main(void) {\n}\n`;
+  const result = runCProgram(source, 4096, "");
+  assert.equal(result.kind, "compile", source);
+  assert.equal(result.diagnostic.message, "Missing semicolon (;). Add ; after this closing brace to end the declaration.");
+  assert.equal(result.diagnostic.range.startLine, 2);
+  assert.equal(result.diagnostic.range.startCol, 0);
+  const closingBrace = definition.lastIndexOf("}");
+  const fixed = source.slice(0, closingBrace + 1) + ";" + source.slice(closingBrace + 1);
+  assert.equal(runCProgram(fixed, 4096, "").kind, "ok", fixed);
+}
+console.log("PASS missing type-definition semicolons point to the closing brace with a direct fix");
+
 const chronological = runCProgram(`#include <stdio.h>
 int main(void) {
 puts("first");
@@ -118,3 +136,35 @@ for (const source of [
   assert.equal(result.exitStatus, 0, JSON.stringify(result));
 }
 console.log("PASS unsized multidimensional parameters and partially initialized bit-fields");
+
+{
+  const { invokeCInterpreter } = await import("../js/shared-c-wasm-bridge.js");
+  const { normalizeProgramResult } = await import("../js/shared-c-result-normalization.js");
+  const source = `int main(void) {
+    int items[3] = {1, 2, 3};
+    int *p = &items[1];
+    for (int i = 0; i < 4; i++) items[1] += i;
+    return *p != 8;
+  }`;
+  const raw = invokeCInterpreter({
+    operation: "run-source", primary: source, stdin: "", syntheticAddressBase: 4096,
+    executionBudget: { stepLimit: 10000, followingTraceLimit: 256, traceFunctions: true },
+  }) as Record<string, any>;
+  assert.equal(raw.ok, true);
+  const boxes = raw.trace.flatMap((event: any) => event.state);
+  assert.ok(boxes.length > raw.traceTypeInfos.length * 3);
+  assert.ok(boxes.every((box: any) => Number.isInteger(box.typeInfo)));
+  const result = normalizeProgramResult(raw, source);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") throw new Error("trace decoding failed");
+  assert.equal(result.exitStatus, 0);
+  const pointers = result.trace.flatMap(event => event.state).filter(box => box.name === "p");
+  assert.ok(pointers.length > 1);
+  assert.equal(pointers[0].typeInfo.kind, "pointer");
+  assert.equal(pointers[0].typeInfo.pointerDepth, 1);
+  assert.equal(pointers[0].typeInfo, pointers.at(-1)!.typeInfo);
+  const bad = structuredClone(raw);
+  bad.trace.find((event: any) => event.state.length).state[0].typeInfo = raw.traceTypeInfos.length;
+  assert.throws(() => normalizeProgramResult(bad, source), /valid trace type reference/);
+}
+console.log("PASS trace type pooling preserves metadata and rejects invalid references");

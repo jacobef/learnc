@@ -3409,7 +3409,7 @@ impl<'a> Interpreter<'a> {
             state.indeterminate_reason = None;
             state.effective_types = preserved_effective_types;
             state.pointer_slots.extend(preserved_pointer_slots);
-            state.raw_indeterminate_bytes = Some((state.modification_count, indeterminate_bytes));
+            state.indeterminate_count = Some((state.modification_count, indeterminate_bytes));
         }
         let _ = self.dynamic_allocations.remove(&old_object_id);
         self.retire_dynamic_object(old_object_id, objects)?;

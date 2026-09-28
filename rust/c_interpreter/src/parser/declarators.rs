@@ -271,6 +271,7 @@ impl<'a> Parser<'a> {
         let mut alignment = None;
         let mut qualifiers = TypeQualifiers::default();
         let mut direct_type = None;
+        let mut definition_end = None;
         let mut direct_vla_bounds = Vec::new();
         let mut saw_atomic_type_specifier = false;
         let mut declares_tag_or_enumerators = false;
@@ -278,6 +279,11 @@ impl<'a> Parser<'a> {
         let mut builtin = BuiltinTypeSpecifiers::default();
 
         loop {
+            // A following type keyword may belong to a new declaration whose
+            // preceding struct/union/enum definition is missing its semicolon.
+            if direct_type.is_some() && self.tokens[self.index - 1].kind == TokenKind::RBrace {
+                definition_end = Some(self.prev_span());
+            }
             self.skip_gnu_attributes()?;
             match self.peek_kind(0).cloned() {
                 Some(TokenKind::Keyword(Keyword::Auto)) => {
@@ -501,6 +507,12 @@ impl<'a> Parser<'a> {
         if let Some(ty) = direct_type.as_ref()
             && builtin.has_any()
         {
+            if let Some(end) = definition_end {
+                return Err(Diagnostic::error(
+                    "expected ';' after struct, union, or enum definition",
+                    end,
+                ));
+            }
             return Err(Diagnostic::error(
                 format!("{} cannot be combined with a built-in type specifier", ty),
                 start,
@@ -904,9 +916,13 @@ impl<'a> Parser<'a> {
                         expr.span(),
                     ));
                 }
-                Ok(ParsedArrayBound::Fixed(usize::try_from(value).map_err(
-                    |_| Diagnostic::error("array bound is out of supported range", expr.span()),
-                )?))
+                let bound = usize::try_from(value)
+                    .ok()
+                    .filter(|bound| *bound != crate::types::CONSTRAINT_VLA_BOUND)
+                    .ok_or_else(|| {
+                        Diagnostic::error("array bound is out of supported range", expr.span())
+                    })?;
+                Ok(ParsedArrayBound::Fixed(bound))
             }
             Err(_)
                 if matches!(

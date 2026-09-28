@@ -1,6 +1,173 @@
 use super::*;
 
 #[test]
+fn static_initializers_accept_standard_library_function_addresses() {
+    assert_exit_status(
+        "#include <stdlib.h>\n#include <string.h>\nstruct Hooks { void *(*alloc)(unsigned long); void (*release)(void *); }; static struct Hooks hooks = {malloc, free}; static unsigned long (*length)(const char *) = strlen; int main(void) { void *p = hooks.alloc(16); hooks.release(p); return length(\"hello\") != 5; }",
+        0,
+    );
+}
+
+#[test]
+fn sizeof_vla_cast_operands_uses_the_evaluated_type_once() {
+    for optimized in [false, true] {
+        let source = "int main(void) { int n=3,a[2][3]={{0}}; int (*p)[3]=a; unsigned long size=sizeof *(int (*)[n++])p; return size!=12 || n!=4; }";
+        let result = run_source_with_options(
+            "test.c",
+            source,
+            &RunOptions {
+                optimizing_precomputations: optimized,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.exit_status, 0);
+    }
+    assert_exit_status(
+        "int main(void) { int n=3,a[2][n],i=0; unsigned long size=sizeof *(++i,a); return size!=12 || i!=1; }",
+        0,
+    );
+    assert_exit_status(
+        "int main(void) { int n=3,a[2][n],i=0; unsigned long size=sizeof *(++i ? a : a); return size!=12 || i!=1; }",
+        0,
+    );
+    assert_exit_status(
+        "int main(void) { int n=2,a[n][3],i=0; unsigned long size=sizeof a[i++]; return size!=12 || i!=0; }",
+        0,
+    );
+    assert_exit_status(
+        "int main(void) { int n=3,a[2][n],i=0; unsigned long size=sizeof *(int (*)[3])(i++,a); return size!=12 || i!=0; }",
+        0,
+    );
+    assert_exit_status(
+        "int main(void) { int n=3,a[2][n],i=0; unsigned long size=sizeof *_Generic(0,int:(++i,a)); return size!=12 || i!=1; }",
+        0,
+    );
+}
+
+#[test]
+fn runtime_array_dimension_mismatches_are_ub_but_fixed_type_errors_are_not() {
+    assert_diagnostic_contains(
+        "int (*f(int n,int a[][n]))[2] {return a;} int main(void) {int a[2][3]; f(3,a); return 0;}",
+        "array dimensions differ at runtime",
+    );
+    let mismatches = [
+        "int n=2,m=3; int a[2][m]; int (*p)[n]=a;",
+        "int n=2; int a[2][3]; int (*p)[n]=a;",
+        "int n=3; int a[2][n]; int (*p)[2]=a;",
+        "int n=2; int a[2][3]; int (*p)[n]=0; p=a;",
+        "int n=2; typedef int Row[n]; int a[2][3]; Row *p=a;",
+        "int n=2; int a[2][3][4]; int (*p)[3][n]=a;",
+        "int n=2,m=3; int a[2][n],b[2][m]; (void)(1 ? a : b);",
+        "int n=2,m=3; int a[2][n],b[2][m]; (void)(a-b);",
+        "int n=2,m=3; int a[2][n],b[2][m]; (void)(a<b);",
+        "int n=2,m=3; int a[2][n],b[2][m]; (void)(a==b);",
+    ];
+    for optimized in [false, true] {
+        let options = RunOptions {
+            optimizing_precomputations: optimized,
+            ..RunOptions::default()
+        };
+        for body in mismatches {
+            let source = format!("int main(void) {{ {body} return 0; }}");
+            let error = run_source_with_options("test.c", &source, &options).unwrap_err();
+            assert!(
+                matches!(error.severity(), crate::diag::Severity::UndefinedBehavior),
+                "{source}: {}",
+                error.render()
+            );
+            assert!(
+                error
+                    .render()
+                    .contains("array dimensions differ at runtime"),
+                "{}",
+                error.render()
+            );
+
+            // A runtime-only mismatch in a branch that is not taken is harmless.
+            let source = format!("int main(void) {{ if (0) {{ {body} }} return 0; }}");
+            assert!(
+                run_source_with_options("test.c", &source, &options).is_ok(),
+                "{source}"
+            );
+        }
+        for body in [
+            "int a[2][3]; int (*p)[2]=a;",
+            "int n=3; double a[2][n]; int (*p)[n]=a;",
+            "const int a[2][3]={{0}}; int (*p)[3]=a;",
+            "int n=2; int a[2][3][n]; int (*p)[4][n]=a;",
+            "int a[2][2],b[2][3]; (void)(1 ? a : b);",
+            "int a[2][2],b[2][3]; (void)(a==b);",
+        ] {
+            for branch in [true, false] {
+                let source = format!(
+                    "int main(void) {{ if ({}) {{ {body} }} return 0; }}",
+                    u8::from(branch)
+                );
+                let error = run_source_with_options("test.c", &source, &options).unwrap_err();
+                assert!(
+                    matches!(error.severity(), crate::diag::Severity::Error),
+                    "{source}: {}",
+                    error.render()
+                );
+            }
+        }
+    }
+    assert_exit_status(
+        "int main(void) { int n=3,a[2][3]={{0}}; int (*p)[n]=a; p=a; return p[1][2]; }",
+        0,
+    );
+}
+
+#[test]
+fn vla_parameter_dimensions_are_checked_even_when_the_array_is_not_accessed() {
+    for invocation in ["f(2,a)", "((int (*)(int,int (*)[*]))f)(2,a)"] {
+        let source = format!(
+            "int f(int n,int a[][n]) {{ return 0; }}\nint main(void) {{ int a[2][3]={{0}}; return {invocation}; }}\n"
+        );
+        for optimizing_precomputations in [false, true] {
+            let error = run_source_with_options(
+                "test.c",
+                &source,
+                &RunOptions {
+                    optimizing_precomputations,
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap_err();
+            assert!(
+                error.render().contains("array dimensions for parameter a"),
+                "{}",
+                error.render()
+            );
+            assert!(
+                error.render().contains("undefined behavior"),
+                "{}",
+                error.render()
+            );
+        }
+    }
+    assert_exit_status(
+        "int f(int n,int m,int a[][n][m]) {return 0;}\nint main(void) {int a[2][3][4]={0};return f(3,4,a);}\n",
+        0,
+    );
+    assert_diagnostic_contains(
+        "int f(int n,int m,int a[][n][m]) {return 0;}\nint main(void) {int a[2][3][4]={0};return f(3,2,a);}\n",
+        "array dimensions for parameter a",
+    );
+    // The outermost bound is adjusted away and is not a minimum-length promise.
+    assert_exit_status(
+        "int f(int n,int a[n][3]) {return 0;}\nint main(void) {int a[2][3]={0};return f(7,a);}\n",
+        0,
+    );
+    // A void pointer carries no array-type compatibility promise.
+    assert_exit_status(
+        "int f(int n,int a[][n]) {return 0;}\nint main(void) {int a[2][3]={0};void *p=a;return f(2,p);}\n",
+        0,
+    );
+}
+
+#[test]
 fn multidimensional_parameters_keep_inner_bounds_with_an_unsized_outer_dimension() {
     for parameter in [
         "int a[][n]",

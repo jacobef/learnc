@@ -1,0 +1,13 @@
+{
+  "name": "skew",
+  "files": 4096,
+  "bytes": 3453760,
+  "functions": 20224,
+  "lex": 823842464,
+  "fold": 1454548287,
+  "sha256": {
+    "clustered": "1525369cbbfdb3d9afb921615e557f26ca5de1e8e7fd21b5c9863d6368e7eb28",
+    "interleaved": "31770b462164ee56e0d0b5b83d87d3523a98c2dbec577da4445ffc34d8199fb7"
+  },
+  "clang_sample_expected": 2133850492
+}

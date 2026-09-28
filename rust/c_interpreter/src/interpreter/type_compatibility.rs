@@ -42,10 +42,13 @@ impl<'a> Interpreter<'a> {
             self.composite_pointer_target_type(then_inner, else_inner)
                 .map(CType::pointer_to)
                 .ok_or_else(|| {
-                    Diagnostic::error(
-                        "conditional operator requires compatible pointer operand types",
-                        span,
-                    )
+                    self.runtime_array_dimension_mismatch(&then_ty, &else_ty, span)
+                        .unwrap_or_else(|| {
+                            Diagnostic::error(
+                                "conditional operator requires compatible pointer operand types",
+                                span,
+                            )
+                        })
                 })
         } else {
             Err(Diagnostic::error(
@@ -117,6 +120,12 @@ impl<'a> Interpreter<'a> {
             && !self.is_null_pointer_constant(expr, frame, objects)?
             && !self.pointer_assignment_compatible(target, &value.ty)
         {
+            // Validation already rejects incompatible constant dimensions. A
+            // dimension-only mismatch first exposed during execution therefore
+            // comes from evaluating variably modified types (C11 6.7.6.2p6).
+            if let Some(error) = self.runtime_array_dimension_mismatch(target, &value.ty, span) {
+                return Err(error);
+            }
             return Err(Diagnostic::error(
                 format!("cannot convert {} to {}", value.ty, target),
                 span,
@@ -218,6 +227,56 @@ impl<'a> Interpreter<'a> {
         self.pointer_target_compatible(target_inner, source_inner)
     }
 
+    fn without_array_bounds(ty: &CType) -> CType {
+        match ty {
+            CType::Array(inner, _) => CType::array_of(Self::without_array_bounds(inner), 0),
+            CType::Pointer(inner) => CType::pointer_to(Self::without_array_bounds(inner)),
+            CType::Qualified(inner, qualifiers) => {
+                CType::qualified(Self::without_array_bounds(inner), *qualifiers)
+            }
+            _ => ty.clone(),
+        }
+    }
+
+    fn array_bounds_compatible(lhs: usize, rhs: usize) -> bool {
+        lhs == rhs
+            || lhs == 0
+            || rhs == 0
+            || lhs == CONSTRAINT_VLA_BOUND
+            || rhs == CONSTRAINT_VLA_BOUND
+    }
+
+    pub(super) fn runtime_array_dimension_mismatch(
+        &self,
+        lhs: &CType,
+        rhs: &CType,
+        span: Span,
+    ) -> Option<Diagnostic> {
+        if self.current_frame_ids.is_empty() || !lhs.is_pointer() || !rhs.is_pointer() {
+            return None;
+        }
+        let lhs_inner = lhs.element_type()?;
+        let rhs_inner = rhs.element_type()?;
+        if self
+            .composite_pointer_target_type(lhs_inner, rhs_inner)
+            .is_none()
+            && self
+                .composite_pointer_target_type(
+                    &Self::without_array_bounds(lhs_inner),
+                    &Self::without_array_bounds(rhs_inner),
+                )
+                .is_some()
+        {
+            Some(Diagnostic::ub(
+                format!("array dimensions differ at runtime: {lhs} and {rhs}"),
+                span,
+                Some("6.7.6.2p6"),
+            ))
+        } else {
+            None
+        }
+    }
+
     pub(super) fn array_flatten_domain(&self, source: &CType, target: &CType) -> Option<CType> {
         let mut current = source;
         loop {
@@ -300,7 +359,7 @@ impl<'a> Interpreter<'a> {
                 self.cross_unit_tagged_type_compatible_inner(lhs_inner, rhs_inner, seen_records)
             }
             (CType::Array(lhs_inner, lhs_len), CType::Array(rhs_inner, rhs_len)) => {
-                (lhs_len == rhs_len || *lhs_len == 0 || *rhs_len == 0)
+                Self::array_bounds_compatible(*lhs_len, *rhs_len)
                     && self.cross_unit_tagged_type_compatible_inner(
                         lhs_inner,
                         rhs_inner,
@@ -490,7 +549,7 @@ impl<'a> Interpreter<'a> {
                 self.cross_unit_tagged_type_compatible(target_inner, source_inner)
             }
             (CType::Array(target_inner, target_len), CType::Array(source_inner, source_len))
-                if target_len == source_len || *target_len == 0 || *source_len == 0 =>
+                if Self::array_bounds_compatible(*target_len, *source_len) =>
             {
                 self.pointer_target_compatible_inner(target_inner, source_inner, false)
             }
@@ -511,7 +570,7 @@ impl<'a> Interpreter<'a> {
     pub(super) fn compatible_object_layout_types(&self, lhs: &CType, rhs: &CType) -> bool {
         match (lhs.unqualified(), rhs.unqualified()) {
             (CType::Array(lhs_inner, lhs_len), CType::Array(rhs_inner, rhs_len)) => {
-                (*lhs_len == 0 || *rhs_len == 0 || lhs_len == rhs_len)
+                Self::array_bounds_compatible(*lhs_len, *rhs_len)
                     && self.compatible_object_layout_types(lhs_inner, rhs_inner)
             }
             _ => {
@@ -596,7 +655,7 @@ impl<'a> Interpreter<'a> {
                 .composite_pointer_target_type_inner(lhs_inner, rhs_inner, false)
                 .map(CType::pointer_to)?,
             (CType::Array(lhs_inner, lhs_len), CType::Array(rhs_inner, rhs_len))
-                if (lhs_len == rhs_len || *lhs_len == 0 || *rhs_len == 0)
+                if Self::array_bounds_compatible(*lhs_len, *rhs_len)
                     && self
                         .composite_pointer_target_type_inner(lhs_inner, rhs_inner, false)
                         .is_some() =>
