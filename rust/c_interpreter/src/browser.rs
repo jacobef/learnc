@@ -434,7 +434,6 @@ impl<'a> CboxesBridgeRequest<'a> {
             execution_trace_following_limit: self.execution_trace_following_limit,
             execution_trace_limit: self.execution_trace_limit,
             trace_function_calls: self.trace_function_calls,
-            optimizing_precomputations: true,
             ..RunOptions::default()
         }
     }

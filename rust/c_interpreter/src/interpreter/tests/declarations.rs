@@ -10,19 +10,9 @@ fn static_initializers_accept_standard_library_function_addresses() {
 
 #[test]
 fn sizeof_vla_cast_operands_uses_the_evaluated_type_once() {
-    for optimized in [false, true] {
-        let source = "int main(void) { int n=3,a[2][3]={{0}}; int (*p)[3]=a; unsigned long size=sizeof *(int (*)[n++])p; return size!=12 || n!=4; }";
-        let result = run_source_with_options(
-            "test.c",
-            source,
-            &RunOptions {
-                optimizing_precomputations: optimized,
-                ..RunOptions::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(result.exit_status, 0);
-    }
+    let source = "int main(void) { int n=3,a[2][3]={{0}}; int (*p)[3]=a; unsigned long size=sizeof *(int (*)[n++])p; return size!=12 || n!=4; }";
+    let result = run_source("test.c", source).unwrap();
+    assert_eq!(result.exit_status, 0);
     assert_exit_status(
         "int main(void) { int n=3,a[2][n],i=0; unsigned long size=sizeof *(++i,a); return size!=12 || i!=1; }",
         0,
@@ -63,54 +53,49 @@ fn runtime_array_dimension_mismatches_are_ub_but_fixed_type_errors_are_not() {
         "int n=2,m=3; int a[2][n],b[2][m]; (void)(a<b);",
         "int n=2,m=3; int a[2][n],b[2][m]; (void)(a==b);",
     ];
-    for optimized in [false, true] {
-        let options = RunOptions {
-            optimizing_precomputations: optimized,
-            ..RunOptions::default()
-        };
-        for body in mismatches {
-            let source = format!("int main(void) {{ {body} return 0; }}");
+    let options = RunOptions::default();
+    for body in mismatches {
+        let source = format!("int main(void) {{ {body} return 0; }}");
+        let error = run_source_with_options("test.c", &source, &options).unwrap_err();
+        assert!(
+            matches!(error.severity(), crate::diag::Severity::UndefinedBehavior),
+            "{source}: {}",
+            error.render()
+        );
+        assert!(
+            error
+                .render()
+                .contains("array dimensions differ at runtime"),
+            "{}",
+            error.render()
+        );
+
+        // A runtime-only mismatch in a branch that is not taken is harmless.
+        let source = format!("int main(void) {{ if (0) {{ {body} }} return 0; }}");
+        assert!(
+            run_source_with_options("test.c", &source, &options).is_ok(),
+            "{source}"
+        );
+    }
+    for body in [
+        "int a[2][3]; int (*p)[2]=a;",
+        "int n=3; double a[2][n]; int (*p)[n]=a;",
+        "const int a[2][3]={{0}}; int (*p)[3]=a;",
+        "int n=2; int a[2][3][n]; int (*p)[4][n]=a;",
+        "int a[2][2],b[2][3]; (void)(1 ? a : b);",
+        "int a[2][2],b[2][3]; (void)(a==b);",
+    ] {
+        for branch in [true, false] {
+            let source = format!(
+                "int main(void) {{ if ({}) {{ {body} }} return 0; }}",
+                u8::from(branch)
+            );
             let error = run_source_with_options("test.c", &source, &options).unwrap_err();
             assert!(
-                matches!(error.severity(), crate::diag::Severity::UndefinedBehavior),
+                matches!(error.severity(), crate::diag::Severity::Error),
                 "{source}: {}",
                 error.render()
             );
-            assert!(
-                error
-                    .render()
-                    .contains("array dimensions differ at runtime"),
-                "{}",
-                error.render()
-            );
-
-            // A runtime-only mismatch in a branch that is not taken is harmless.
-            let source = format!("int main(void) {{ if (0) {{ {body} }} return 0; }}");
-            assert!(
-                run_source_with_options("test.c", &source, &options).is_ok(),
-                "{source}"
-            );
-        }
-        for body in [
-            "int a[2][3]; int (*p)[2]=a;",
-            "int n=3; double a[2][n]; int (*p)[n]=a;",
-            "const int a[2][3]={{0}}; int (*p)[3]=a;",
-            "int n=2; int a[2][3][n]; int (*p)[4][n]=a;",
-            "int a[2][2],b[2][3]; (void)(1 ? a : b);",
-            "int a[2][2],b[2][3]; (void)(a==b);",
-        ] {
-            for branch in [true, false] {
-                let source = format!(
-                    "int main(void) {{ if ({}) {{ {body} }} return 0; }}",
-                    u8::from(branch)
-                );
-                let error = run_source_with_options("test.c", &source, &options).unwrap_err();
-                assert!(
-                    matches!(error.severity(), crate::diag::Severity::Error),
-                    "{source}: {}",
-                    error.render()
-                );
-            }
         }
     }
     assert_exit_status(
@@ -125,27 +110,17 @@ fn vla_parameter_dimensions_are_checked_even_when_the_array_is_not_accessed() {
         let source = format!(
             "int f(int n,int a[][n]) {{ return 0; }}\nint main(void) {{ int a[2][3]={{0}}; return {invocation}; }}\n"
         );
-        for optimizing_precomputations in [false, true] {
-            let error = run_source_with_options(
-                "test.c",
-                &source,
-                &RunOptions {
-                    optimizing_precomputations,
-                    ..RunOptions::default()
-                },
-            )
-            .unwrap_err();
-            assert!(
-                error.render().contains("array dimensions for parameter a"),
-                "{}",
-                error.render()
-            );
-            assert!(
-                error.render().contains("undefined behavior"),
-                "{}",
-                error.render()
-            );
-        }
+        let error = run_source("test.c", &source).unwrap_err();
+        assert!(
+            error.render().contains("array dimensions for parameter a"),
+            "{}",
+            error.render()
+        );
+        assert!(
+            error.render().contains("undefined behavior"),
+            "{}",
+            error.render()
+        );
     }
     assert_exit_status(
         "int f(int n,int m,int a[][n][m]) {return 0;}\nint main(void) {int a[2][3][4]={0};return f(3,4,a);}\n",
@@ -176,21 +151,12 @@ fn multidimensional_parameters_keep_inner_bounds_with_an_unsized_outer_dimension
         "int a[static 2][n]",
         "int (*a)[n]",
     ] {
-        for optimized in [false, true] {
-            let source = format!(
-                "int f(int n, {parameter}) {{ return a[1][n-1] + sizeof *a; }}\nint main(void) {{ int a[2][3]={{{{0}},{{1,2,3}}}}; return f(3,a)!=15; }}\n"
-            );
-            let result = run_source_with_options(
-                "test.c",
-                &source,
-                &RunOptions {
-                    optimizing_precomputations: optimized,
-                    ..RunOptions::default()
-                },
-            )
-            .unwrap_or_else(|error| panic!("{source}: {error:?}"));
-            assert_eq!(result.exit_status, 0, "{source}");
-        }
+        let source = format!(
+            "int f(int n, {parameter}) {{ return a[1][n-1] + sizeof *a; }}\nint main(void) {{ int a[2][3]={{{{0}},{{1,2,3}}}}; return f(3,a)!=15; }}\n"
+        );
+        let result =
+            run_source("test.c", &source).unwrap_or_else(|error| panic!("{source}: {error:?}"));
+        assert_eq!(result.exit_status, 0, "{source}");
     }
     assert_exit_status(
         "int f(int n, int m, int a[][n][m]) { return a[1][n-1][m-1]; }\nint main(void) { int a[2][2][3]={0}; a[1][1][2]=9; return f(2,3,a)!=9; }\n",

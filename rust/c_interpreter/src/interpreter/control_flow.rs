@@ -298,7 +298,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Statement::Return(expr, span) => {
                     let value = if let Some(expr) = expr {
-                        self.begin_full_expression_for(expr);
+                        self.begin_full_expression();
                         self.eval_rvalue(expr, frame, objects)?
                     } else {
                         TypedValue::void()
@@ -1376,23 +1376,8 @@ impl<'a> Interpreter<'a> {
         objects: &mut ObjectFrames,
     ) -> Result<Flow, Diagnostic> {
         let control_value = control.to_int()?;
-        let target = if self.run_options.optimizing_precomputations {
-            let cache_key = (body as *const Block as usize, control.ty.clone());
-            if !self.switch_dispatch_cache.contains_key(&cache_key) {
-                let dispatch = self.build_switch_dispatch(body, &control.ty, frame, objects)?;
-                self.switch_dispatch_cache
-                    .insert(cache_key.clone(), dispatch);
-            }
-            Self::switch_dispatch_target(
-                self.switch_dispatch_cache
-                    .get(&cache_key)
-                    .expect("switch dispatch was cached"),
-                control_value,
-            )
-        } else {
-            let dispatch = self.build_switch_dispatch(body, &control.ty, frame, objects)?;
-            Self::switch_dispatch_target(&dispatch, control_value)
-        };
+        let dispatch = self.build_switch_dispatch(body, &control.ty, frame, objects)?;
+        let target = Self::switch_dispatch_target(&dispatch, control_value);
         let Some(target) = target else {
             return Ok(Flow::Continue);
         };
@@ -1851,7 +1836,7 @@ impl<'a> Interpreter<'a> {
         let Some(step) = step else {
             return Ok(());
         };
-        self.begin_full_expression_for(step);
+        self.begin_full_expression();
         let value = self.eval_rvalue(step, frame, objects);
         self.end_full_expression();
         let _ = value?;
@@ -1883,7 +1868,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     ForInit::Expression(expr) => {
-                        self.begin_full_expression_for(expr);
+                        self.begin_full_expression();
                         let value = self.eval_rvalue(expr, frame, objects);
                         self.end_full_expression();
                         let _ = value?;

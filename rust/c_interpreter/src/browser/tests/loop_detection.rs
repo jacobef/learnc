@@ -21,30 +21,27 @@ fn beginner_loop_mistakes_are_detected_without_spending_the_step_budget() {
         "int i = 0; while (i < 3) { int unused = i; i = 0; }",
     ];
     for body in bodies {
-        for optimizing_precomputations in [false, true] {
-            let source = format!("#include <stdio.h>\nint main(void) {{\n{body}\nreturn 7;\n}}\n");
-            let output = run_source_with_options(
-                "program.c",
-                source,
-                &RunOptions {
-                    execution_step_limit: Some(100_000),
-                    execution_trace_following_limit: 8,
-                    optimizing_precomputations,
-                    ..RunOptions::default()
-                },
-            )
-            .unwrap();
-            let limit = output
-                .execution_limit
-                .unwrap_or_else(|| panic!("not detected: {body}"));
-            assert_eq!(limit.reason, "repeating-loop", "{body}");
-            assert!(
-                limit.executed_steps < 500,
-                "{} steps: {body}",
-                limit.executed_steps
-            );
-            assert_ne!(output.exit_status, 7);
-        }
+        let source = format!("#include <stdio.h>\nint main(void) {{\n{body}\nreturn 7;\n}}\n");
+        let output = run_source_with_options(
+            "program.c",
+            source,
+            &RunOptions {
+                execution_step_limit: Some(100_000),
+                execution_trace_following_limit: 8,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        let limit = output
+            .execution_limit
+            .unwrap_or_else(|| panic!("not detected: {body}"));
+        assert_eq!(limit.reason, "repeating-loop", "{body}");
+        assert!(
+            limit.executed_steps < 500,
+            "{} steps: {body}",
+            limit.executed_steps
+        );
+        assert_ne!(output.exit_status, 7);
     }
 }
 
@@ -1367,26 +1364,23 @@ fn delayed_exits_have_identical_results_with_loop_detection_enabled_and_disabled
         let source = format!(
             "#include <stdio.h>\nvoid tick(int *p) {{ static int n; if(++n%97==0) ++*p; }}\nint next(void) {{ static int n; return ++n; }}\nint main(void) {{ {body} return 7; }}\n"
         );
-        for optimizing_precomputations in [false, true] {
-            let options = RunOptions {
-                stdin: "1\n2\n3\n4\n5\n\u{4}".into(),
-                optimizing_precomputations,
-                ..RunOptions::default()
-            };
-            let baseline = run_source_with_options("program.c", &source, &options).unwrap();
-            assert!(baseline.blocked.is_none(), "{body}");
-            let detected = run_source_with_options(
-                "program.c",
-                &source,
-                &RunOptions {
-                    execution_step_limit: Some(100_000),
-                    execution_trace_following_limit: 1,
-                    ..options
-                },
-            )
-            .unwrap();
-            assert!(detected.execution_limit.is_none(), "false positive: {body}");
-            assert_eq!(format!("{detected:?}"), format!("{baseline:?}"), "{body}");
-        }
+        let options = RunOptions {
+            stdin: "1\n2\n3\n4\n5\n\u{4}".into(),
+            ..RunOptions::default()
+        };
+        let baseline = run_source_with_options("program.c", &source, &options).unwrap();
+        assert!(baseline.blocked.is_none(), "{body}");
+        let detected = run_source_with_options(
+            "program.c",
+            &source,
+            &RunOptions {
+                execution_step_limit: Some(100_000),
+                execution_trace_following_limit: 1,
+                ..options
+            },
+        )
+        .unwrap();
+        assert!(detected.execution_limit.is_none(), "false positive: {body}");
+        assert_eq!(format!("{detected:?}"), format!("{baseline:?}"), "{body}");
     }
 }

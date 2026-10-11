@@ -179,6 +179,8 @@ impl<'a> Interpreter<'a> {
                         .insert(param.name.clone().unwrap_or_default(), object);
                 }
 
+                self.check_declared_static_array_contracts(function, &frame, objects)?;
+
                 if self.run_options.trace_function_calls && self.current_frame_ids.len() > 1 {
                     self.trace_cboxes_main_event_with_kind(call_span, &frame, objects, "call")?;
                 }
@@ -446,6 +448,85 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// DR 237: every declaration imposes its static minimum on every call,
+    /// although the composite function type discards array bounds entirely.
+    fn check_declared_static_array_contracts(
+        &mut self,
+        function: &Rc<FunctionDef>,
+        frame: &Frame,
+        objects: &mut ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        let key = Rc::as_ptr(function) as usize;
+        if !self.static_array_contracts.contains_key(&key) {
+            let contracts = self
+                .program
+                .externals
+                .iter()
+                .filter_map(|external| match external {
+                    ExternalDeclaration::FunctionDeclaration(decl) => Some(decl),
+                    _ => None,
+                })
+                .filter(|decl| {
+                    decl.name == function.name
+                        && self
+                            .lookup_function(&decl.name, decl.span.file)
+                            .is_some_and(|def| Rc::ptr_eq(def, function))
+                        && decl
+                            .params
+                            .iter()
+                            .any(|param| param.static_array_bound.is_some())
+                })
+                .map(|decl| decl.params.clone())
+                .collect();
+            self.static_array_contracts.insert(key, contracts);
+        }
+        let contracts = self.static_array_contracts[&key].clone();
+        for params in contracts {
+            let mut contract_frame = frame.clone();
+            // Parameter names have prototype scope. Bind by position using the
+            // definition's original frame, even when names are swapped.
+            for (declared, defined) in params.iter().zip(&function.params) {
+                if let (Some(name), Some(id)) = (
+                    &declared.name,
+                    defined
+                        .name
+                        .as_ref()
+                        .and_then(|name| frame.bindings.get(name)),
+                ) {
+                    contract_frame.bindings.insert(name.clone(), *id);
+                }
+            }
+            for (declared, defined) in params.iter().zip(&function.params) {
+                if declared.static_array_bound.is_none() {
+                    continue;
+                }
+                // Prototype-scope size expressions are not executed by the C
+                // program. Only check minima we can observe without executing
+                // their side effects; never synthesize a call or mutation.
+                if declared
+                    .static_array_bound
+                    .as_ref()
+                    .is_some_and(cboxes_expression_has_side_effects)
+                {
+                    continue;
+                }
+                let Some(object) = defined
+                    .name
+                    .as_ref()
+                    .and_then(|name| frame.bindings.get(name))
+                    .and_then(|&id| self.lookup_object(objects, id))
+                else {
+                    continue;
+                };
+                let arg = self.typed_value_from_stored(&object.ty, &object.value);
+                let mut param = declared.clone();
+                param.ty = arg.ty.clone();
+                self.check_static_array_parameter(&param, &arg, &mut contract_frame, objects)?;
+            }
+        }
+        Ok(())
+    }
+
     fn check_static_array_parameter(
         &mut self,
         param: &Parameter,
@@ -503,7 +584,7 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<usize, Diagnostic> {
-        self.begin_full_expression_for(expr);
+        self.begin_full_expression();
         let value = self.eval_rvalue(expr, frame, objects)?;
         self.end_full_expression();
         if !value.ty.is_integer() {

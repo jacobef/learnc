@@ -623,6 +623,7 @@ pub struct Interpreter<'a> {
     quick_exit_handlers: Vec<String>,
     running_quick_exit: bool,
     func_name_bindings: HashMap<usize, ObjectId>,
+    static_array_contracts: HashMap<usize, Vec<Vec<Parameter>>>,
     literal_bindings: [HashMap<StringLiteralValue, ObjectId>; 4],
     mbrtoc16_pending: HashMap<PointerValue, u16>,
     mbrtoc16_null_pending: Option<u16>,
@@ -645,10 +646,7 @@ pub struct Interpreter<'a> {
     next_setjmp_handle: u64,
     active_setjmp_contexts: Vec<ActiveSetjmpContext>,
     expr_setjmp_cache: HashMap<usize, bool>,
-    expr_side_effect_cache: HashMap<usize, bool>,
-    switch_dispatch_cache: HashMap<(usize, CType), SwitchDispatch>,
     switch_entry_index_cache: HashMap<(usize, Span), Option<usize>>,
-    type_contains_union_cache: HashMap<CType, bool>,
     loop_analysis_cache:
         RefCell<HashMap<(usize, usize, usize), Option<Rc<loop_detection::LoopAnalysis>>>>,
     loop_function_analysis_cache: RefCell<HashMap<usize, Option<Rc<loop_detection::LoopAnalysis>>>>,
@@ -1598,19 +1596,9 @@ enum InitSelector {
     Index(usize),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct ExprState {
     accesses: HashMap<AccessRegion, ObjectAccess>,
-    track_unsequenced_accesses: bool,
-}
-
-impl Default for ExprState {
-    fn default() -> Self {
-        Self {
-            accesses: HashMap::default(),
-            track_unsequenced_accesses: true,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

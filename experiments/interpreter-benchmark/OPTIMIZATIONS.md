@@ -5,6 +5,10 @@ All measurements use the actual app Wasm bridge, with function tracing disabled,
 and verify the result against optimized native C. The timing includes parsing,
 execution, main's five trace events, serialization, and JavaScript normalization.
 
+The saved measurements describe earlier versions. The expression side-effect,
+switch-dispatch, and union-type analysis caches were removed on October 4, 2026;
+the current interpreter always performs sequencing checks and recomputes those analyses.
+
 ## Verified results at the usage cutoff
 
 Stopped when account usage reached 15% used (85% remaining). These warm minimal-trace

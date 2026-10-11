@@ -302,7 +302,7 @@ impl<'a> Interpreter<'a> {
         region: AccessRegion,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        if !self.expr_state.track_unsequenced_accesses || self.in_host_library_runtime() {
+        if self.in_host_library_runtime() {
             return Ok(());
         }
         let is_target = self.is_assignment_target(region);
@@ -333,7 +333,7 @@ impl<'a> Interpreter<'a> {
         region: AccessRegion,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        if !self.expr_state.track_unsequenced_accesses || self.in_host_library_runtime() {
+        if self.in_host_library_runtime() {
             return Ok(());
         }
         if let Some(write_span) = self

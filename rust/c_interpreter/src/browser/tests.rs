@@ -1351,15 +1351,11 @@ fn external_performance_harness() {
     let allocation_limit_bytes = std::env::var("CBOXES_PROFILE_ALLOCATION_LIMIT_BYTES")
         .ok()
         .map(|limit| limit.parse().expect("allocation limit must be an integer"));
-    let optimizing_precomputations = std::env::var("CBOXES_PROFILE_PRECOMPUTE")
-        .map(|value| value != "0")
-        .unwrap_or(true);
     let options = RunOptions {
         include_dirs,
         capture_visualization: false,
         execution_step_limit,
         allocation_limit_bytes,
-        optimizing_precomputations,
         ..RunOptions::default()
     };
     let started = std::time::Instant::now();

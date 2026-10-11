@@ -36,18 +36,8 @@ fn later_braced_initializers_replace_the_entire_selected_subaggregate() {
                 u.a[0], u.a[1], global[0][0], global[0][1]);
         }
     "#;
-    for optimizing_precomputations in [false, true] {
-        let result = run_source_with_options(
-            "test.c",
-            source,
-            &RunOptions {
-                optimizing_precomputations,
-                ..RunOptions::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(result.stdout, "1 0 0; 1 4 3; 2 0; 2 0 5; 2 0; 1 0");
-    }
+    let result = run_source("test.c", source).unwrap();
+    assert_eq!(result.stdout, "1 0 0; 1 4 3; 2 0; 2 0 5; 2 0; 1 0");
 }
 
 #[test]
@@ -78,18 +68,8 @@ fn bit_fields_preserve_known_bits_in_partially_initialized_storage() {
             free(p);free(q);
         }
     "#;
-    for optimized in [false, true] {
-        let result = run_source_with_options(
-            "test.c",
-            source,
-            &RunOptions {
-                optimizing_precomputations: optimized,
-                ..RunOptions::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(result.stdout, "19 19 19 -3 19 1234 7 -1 0 4095");
-    }
+    let result = run_source("test.c", source).unwrap();
+    assert_eq!(result.stdout, "19 19 19 -3 19 1234 7 -1 0 4095");
 }
 
 #[test]
@@ -142,18 +122,8 @@ fn bit_field_assignment_expressions_return_the_stored_value() {
             return result;
         }
     "#;
-    for optimizing_precomputations in [false, true] {
-        let output = run_source_with_options(
-            "test.c",
-            source,
-            &RunOptions {
-                optimizing_precomputations,
-                ..RunOptions::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(output.exit_status, 0);
-    }
+    let output = run_source("test.c", source).unwrap();
+    assert_eq!(output.exit_status, 0);
 }
 
 #[test]
@@ -620,7 +590,7 @@ fn sizeof_handles_types_arrays_and_strings() {
 }
 
 #[test]
-fn optimizing_precomputations_preserve_switch_and_union_behavior() {
+fn repeated_switch_dispatch_preserves_nested_union_values() {
     let source = r#"
             union value { int integer; unsigned char bytes[4]; };
             struct state { union value value; int total; };
@@ -639,10 +609,7 @@ fn optimizing_precomputations_preserve_switch_and_union_behavior() {
                 return state.total != 30;
             }
         "#;
-    let options = RunOptions {
-        optimizing_precomputations: true,
-        ..RunOptions::default()
-    };
+    let options = RunOptions::default();
     let result = run_source_with_options("test.c", source, &options).unwrap();
     assert_eq!(result.exit_status, 0);
 }
@@ -1967,9 +1934,7 @@ fn cboxes_expression_eval_returns_array_lvalues() {
     if !normalized.ends_with('\n') {
         normalized.push('\n');
     }
-    let baseline =
-        crate_run_source_with_options("test.c", normalized.clone(), &RunOptions::default())
-            .unwrap();
+    let baseline = crate_run_source("test.c", normalized.clone()).unwrap();
     let event_index = baseline.trace.len().saturating_sub(1);
     let result = crate_run_source_with_options(
         "test.c",

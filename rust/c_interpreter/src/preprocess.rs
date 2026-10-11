@@ -7,7 +7,7 @@ use std::mem;
 use std::path::{Component, Path, PathBuf};
 
 use crate::diag::Diagnostic;
-use crate::integer::parse_integer_literal as parse_c_integer_literal;
+use crate::integer::parse_preprocessing_integer_literal;
 use crate::source::{FileId, LineOrigin, SourceManager, Span, StandardHeaderInclude};
 
 pub(crate) const STANDARD_HEADERS: &[(&str, &str)] = &[
@@ -1826,7 +1826,7 @@ fn same_token_kind(left: &IfToken, right: &IfToken) -> bool {
 
 fn parse_pp_integer_literal(text: &str, file_id: FileId) -> Result<PpInt, Diagnostic> {
     let span = Span::new(file_id, 0, 0);
-    let (ty, value, _) = parse_c_integer_literal(text, span)?;
+    let (ty, value, _) = parse_preprocessing_integer_literal(text, span)?;
     Ok(if ty.is_unsigned_integer() {
         PpInt::unsigned(value as u64)
     } else {

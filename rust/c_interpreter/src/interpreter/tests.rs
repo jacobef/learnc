@@ -1,6 +1,7 @@
 mod aggregates;
 mod arithmetic;
 mod declarations;
+mod defect_reports;
 mod execution;
 mod library;
 mod memory;

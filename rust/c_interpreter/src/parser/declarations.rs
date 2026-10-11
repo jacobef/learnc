@@ -306,53 +306,8 @@ impl<'a> Parser<'a> {
                 span,
                 DeclContext::FileScope,
             )?;
-            let declaration = if let Some(ParsedFunctionInfo {
-                params,
-                is_variadic,
-                old_style,
-                ..
-            }) = function_params
-            {
-                if old_style && !params.is_empty() {
-                    return Err(Diagnostic::error(
-                        "an identifier-list function declarator is only valid in a definition",
-                        span,
-                    ));
-                }
-                let return_type = match ty.unqualified() {
-                    CType::Function(return_type, _, _) => (**return_type).clone(),
-                    _ => unreachable!(),
-                };
-                match return_type.unqualified() {
-                    CType::Array(..) => {
-                        return Err(Diagnostic::error(
-                            "a function cannot return an array type",
-                            span,
-                        ));
-                    }
-                    CType::Function(..) => {
-                        return Err(Diagnostic::error(
-                            "a function cannot return a function type",
-                            span,
-                        ));
-                    }
-                    _ => {}
-                }
-                FunctionDecl {
-                    name,
-                    return_type,
-                    params,
-                    is_variadic,
-                    storage_class: specs.storage_class.and_then(ast_storage_class),
-                    linkage,
-                    is_inline: specs.is_inline,
-                    is_noreturn: specs.is_noreturn,
-                    has_prototype: !old_style,
-                    span,
-                }
-            } else {
-                self.build_function_declaration(name, ty, span, &specs, linkage)?
-            };
+            let declaration =
+                self.build_function_declaration(name, ty, function_params, span, specs, linkage)?;
             declarations.push(ExternalDeclaration::FunctionDeclaration(declaration));
             return Ok(());
         }
@@ -399,6 +354,7 @@ impl<'a> Parser<'a> {
         &self,
         name: String,
         ty: CType,
+        function_params: Option<ParsedFunctionInfo>,
         span: Span,
         specs: &DeclarationSpecifiers,
         linkage: Linkage,
@@ -430,19 +386,30 @@ impl<'a> Parser<'a> {
             }
             _ => {}
         }
-        let params = params
-            .into_iter()
-            .map(|ty| Parameter {
-                name: None,
-                ty,
-                vla_bounds: Vec::new(),
-                static_array_bound: None,
-                prototype_vla_star: false,
-                adjusted_from_array_or_function: false,
-                storage_class: None,
-                span,
-            })
-            .collect();
+        let (params, is_variadic, has_prototype) = if let Some(info) = function_params {
+            if info.old_style && !info.params.is_empty() {
+                return Err(Diagnostic::error(
+                    "an identifier-list function declarator is only valid in a definition",
+                    span,
+                ));
+            }
+            (info.params, info.is_variadic, !info.old_style)
+        } else {
+            let params = params
+                .into_iter()
+                .map(|ty| Parameter {
+                    name: None,
+                    ty,
+                    vla_bounds: Vec::new(),
+                    static_array_bound: None,
+                    prototype_vla_star: false,
+                    adjusted_from_array_or_function: false,
+                    storage_class: None,
+                    span,
+                })
+                .collect();
+            (params, is_variadic, true)
+        };
         Ok(FunctionDecl {
             name,
             return_type,
@@ -452,7 +419,7 @@ impl<'a> Parser<'a> {
             linkage,
             is_inline,
             is_noreturn,
-            has_prototype: true,
+            has_prototype,
             span,
         })
     }
@@ -999,7 +966,8 @@ impl<'a> Parser<'a> {
                 span,
                 DeclContext::BlockScope,
             )?;
-            let decl = self.build_function_declaration(name, ty, span, specs, linkage)?;
+            let decl =
+                self.build_function_declaration(name, ty, function_params, span, specs, linkage)?;
             self.block_linkage_declarations
                 .push(ExternalDeclaration::FunctionDeclaration(decl.clone()));
             items.push(BlockItem::FunctionDeclaration(decl));

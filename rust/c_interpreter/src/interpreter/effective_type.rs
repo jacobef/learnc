@@ -3,12 +3,7 @@
 use super::*;
 
 impl<'a> Interpreter<'a> {
-    pub(super) fn type_contains_union(&mut self, ty: &CType) -> bool {
-        if self.run_options.optimizing_precomputations
-            && let Some(&cached) = self.type_contains_union_cache.get(ty)
-        {
-            return cached;
-        }
+    pub(super) fn type_contains_union(&self, ty: &CType) -> bool {
         fn visit(interpreter: &Interpreter<'_>, ty: &CType, seen: &mut HashSet<usize>) -> bool {
             match ty.unqualified() {
                 CType::Union(_, _) => true,
@@ -31,11 +26,7 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        let result = visit(self, ty, &mut HashSet::default());
-        if self.run_options.optimizing_precomputations {
-            self.type_contains_union_cache.insert(ty.clone(), result);
-        }
-        result
+        visit(self, ty, &mut HashSet::default())
     }
 
     fn effective_type_alias_allowed(&self, access_ty: &CType, effective_ty: &CType) -> bool {
@@ -45,12 +36,10 @@ impl<'a> Interpreter<'a> {
             effective_ty: &CType,
             seen: &mut HashSet<usize>,
         ) -> bool {
-            if access_ty.is_character()
-                || interpreter.cross_unit_tagged_type_compatible(
-                    access_ty.unqualified(),
-                    effective_ty.unqualified(),
-                )
-                || Interpreter::corresponding_signed_unsigned_types(access_ty, effective_ty)
+            if interpreter.cross_unit_tagged_type_compatible(
+                access_ty.unqualified(),
+                effective_ty.unqualified(),
+            ) || Interpreter::corresponding_signed_unsigned_types(access_ty, effective_ty)
             {
                 return true;
             }
@@ -70,7 +59,7 @@ impl<'a> Interpreter<'a> {
             contains
         }
 
-        visit(self, access_ty, effective_ty, &mut HashSet::default())
+        access_ty.is_character() || visit(self, access_ty, effective_ty, &mut HashSet::default())
     }
 
     fn type_region_allows_effective_access(
@@ -123,30 +112,42 @@ impl<'a> Interpreter<'a> {
                     access_ty,
                 )
             }
-            CType::Struct(_, _) => self.record_type(parent_ty).is_some_and(|record| {
-                record.members.iter().any(|member| {
-                    member.bit_width != Some(0)
-                        && self.type_region_allows_effective_access(
+            CType::Struct(_, _) | CType::Union(_, _) => {
+                self.record_type(parent_ty).is_some_and(|record| {
+                    record.members.iter().any(|member| {
+                        if member.bit_width == Some(0) {
+                            return false;
+                        }
+                        // A scalar member does not make two enclosing records
+                        // compatible, even when all three have the same size.
+                        let mut member_ty = &member.ty;
+                        while let CType::Array(inner, _) = member_ty.unqualified() {
+                            member_ty = inner;
+                        }
+                        if matches!(
+                            access_ty.unqualified(),
+                            CType::Struct(..) | CType::Union(..)
+                        ) && !matches!(
+                            member_ty.unqualified(),
+                            CType::Struct(..) | CType::Union(..)
+                        ) {
+                            return false;
+                        }
+                        let member_start = if record.kind == crate::types::RecordKind::Union {
+                            parent_start
+                        } else {
+                            parent_start.saturating_add(member.offset)
+                        };
+                        self.type_region_allows_effective_access(
                             &member.ty,
-                            parent_start.saturating_add(member.offset),
+                            member_start,
                             access_start,
                             access_size,
                             access_ty,
                         )
+                    })
                 })
-            }),
-            CType::Union(_, _) => self.record_type(parent_ty).is_some_and(|record| {
-                record.members.iter().any(|member| {
-                    member.bit_width != Some(0)
-                        && self.type_region_allows_effective_access(
-                            &member.ty,
-                            parent_start,
-                            access_start,
-                            access_size,
-                            access_ty,
-                        )
-                })
-            }),
+            }
             _ => false,
         }
     }
@@ -327,6 +328,27 @@ impl<'a> Interpreter<'a> {
             return Ok(());
         }
         let end = start.saturating_add(size);
+        let mut member_containers = Vec::new();
+        let mut container_ty = access_root_ty;
+        for (index, member_name) in member_path.iter().enumerate() {
+            while let CType::Array(inner, _) = container_ty.unqualified() {
+                container_ty = inner;
+            }
+            if let Some(container_start) = self
+                .member_path_offset(container_ty, &member_path[index..])
+                .and_then(|offset| start.checked_sub(offset))
+                && let Some(container_size) = self.type_size_of(container_ty)
+                // Flexible array elements extend beyond their enclosing header;
+                // validate the element's own record type instead.
+                && end <= container_start.saturating_add(container_size)
+            {
+                member_containers.push((container_start, container_size, container_ty));
+            }
+            let Some(member) = self.direct_member_by_storage_name(container_ty, member_name) else {
+                break;
+            };
+            container_ty = &member.ty;
+        }
         let first = object
             .effective_types
             .partition_point(|region| region.start.saturating_add(region.size) <= start);
@@ -334,7 +356,33 @@ impl<'a> Interpreter<'a> {
             .iter()
             .take_while(|region| region.start < end)
         {
-            if !self.effective_region_allows_access(region, start, size, access_ty)
+            // Check only regions touched by the member read. Other members may
+            // have been overwritten with new effective types independently.
+            let mut stored_ty = region.coalesced_element_type.as_ref().unwrap_or(&region.ty);
+            while let CType::Array(inner, _) = stored_ty.unqualified() {
+                stored_ty = inner;
+            }
+            // Scalar stores establish member types independently; only an
+            // existing record type constrains the enclosing member access.
+            let incompatible_container = if matches!(
+                stored_ty.unqualified(),
+                CType::Struct(..) | CType::Union(..)
+            ) {
+                member_containers.iter().copied().find(
+                    |&(container_start, container_size, container_ty)| {
+                        !self.effective_region_allows_access(
+                            region,
+                            container_start,
+                            container_size,
+                            container_ty,
+                        )
+                    },
+                )
+            } else {
+                None
+            };
+            if (incompatible_container.is_some()
+                || !self.effective_region_allows_access(region, start, size, access_ty))
                 && !self.union_member_path_allows_effective_access(
                     access_root_ty,
                     member_path,
@@ -342,6 +390,7 @@ impl<'a> Interpreter<'a> {
                     access_ty,
                 )
             {
+                let access_ty = incompatible_container.map_or(access_ty, |(_, _, ty)| ty);
                 return Err(Diagnostic::ub(
                     format!(
                         "access through an lvalue of type {} is incompatible with the allocated object's effective type {}",
@@ -739,10 +788,8 @@ impl<'a> Interpreter<'a> {
         let mut candidates = Vec::new();
         self.collect_exact_subobject_types(ty, base, start, size, &mut candidates);
         if let Some(source_pointee) = source_pointee {
-            if source_pointee.is_character() {
-                return None;
-            }
             if !matches!(source_pointee.unqualified(), CType::Void)
+                && !source_pointee.is_character()
                 && let Some(candidate) = candidates.iter().find(|candidate| {
                     self.cross_unit_tagged_type_compatible(
                         candidate.unqualified(),
@@ -759,6 +806,74 @@ impl<'a> Interpreter<'a> {
             .map(|candidate| candidate.unqualified().clone())
     }
 
+    fn collect_copied_subobject_regions(
+        &self,
+        ty: &CType,
+        base: usize,
+        start: usize,
+        end: usize,
+        out: &mut Vec<EffectiveTypeRegion>,
+    ) {
+        let Some(size) = self.type_size_of(ty) else {
+            return;
+        };
+        let Some(ty_end) = base.checked_add(size) else {
+            return;
+        };
+        if size == 0 || ty_end <= start || base >= end {
+            return;
+        }
+        if start <= base && ty_end <= end {
+            out.push(EffectiveTypeRegion {
+                start: base,
+                size,
+                ty: ty.unqualified().clone(),
+                coalesced_element_type: None,
+            });
+            return;
+        }
+        match ty.unqualified() {
+            CType::Array(inner, len) => {
+                let Some(stride) = self.type_size_of(inner).filter(|&size| size != 0) else {
+                    return;
+                };
+                let first = start.saturating_sub(base) / stride;
+                let last = end
+                    .min(ty_end)
+                    .saturating_sub(base)
+                    .div_ceil(stride)
+                    .min(*len);
+                for index in first..last {
+                    self.collect_copied_subobject_regions(
+                        inner,
+                        base + index * stride,
+                        start,
+                        end,
+                        out,
+                    );
+                }
+            }
+            CType::Struct(_, _) => {
+                if let Some(record) = self.record_type(ty) {
+                    for member in &record.members {
+                        if member.bit_width.is_none() {
+                            self.collect_copied_subobject_regions(
+                                &member.ty,
+                                base.saturating_add(member.offset),
+                                start,
+                                end,
+                                out,
+                            );
+                        }
+                    }
+                }
+            }
+            // A partial union representation cannot identify which overlapping
+            // member supplied it. Exact copies are handled by the caller.
+            _ => {}
+        }
+    }
+
     pub(super) fn copied_effective_type_regions(
         &self,
         source: &ObjectState,
@@ -766,61 +881,71 @@ impl<'a> Interpreter<'a> {
         size: usize,
         source_pointee: Option<&CType>,
     ) -> Vec<EffectiveTypeRegion> {
-        if size == 0 || source_pointee.is_some_and(CType::is_character) {
+        if size == 0 {
             return Vec::new();
         }
         if source.storage_duration != StorageDuration::Dynamic {
-            return self
-                .choose_copied_effective_type(&source.ty, 0, start, size, source_pointee)
-                .map(|ty| {
-                    vec![EffectiveTypeRegion {
-                        start,
-                        size,
-                        ty,
-                        coalesced_element_type: None,
-                    }]
-                })
-                .unwrap_or_default();
+            if let Some(ty) =
+                self.choose_copied_effective_type(&source.ty, 0, start, size, source_pointee)
+            {
+                return vec![EffectiveTypeRegion {
+                    start,
+                    size,
+                    ty,
+                    coalesced_element_type: None,
+                }];
+            }
+            let mut copied = Vec::new();
+            // DR 219: even a copy through char* preserves the declared types of
+            // complete subobjects contained in the copied byte range.
+            self.collect_copied_subobject_regions(
+                &source.ty,
+                0,
+                start,
+                start.saturating_add(size),
+                &mut copied,
+            );
+            self.coalesce_effective_type_regions(&mut copied);
+            return copied;
         }
 
         let end = start.saturating_add(size);
-        let mut copied = source
-            .effective_types
-            .iter()
-            .filter(|region| {
-                region.start >= start && region.start.saturating_add(region.size) <= end
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if copied.is_empty()
-            && let Some(region) = source.effective_types.iter().find(|region| {
-                start >= region.start
-                    && end <= region.start.saturating_add(region.size)
-                    && self
-                        .choose_copied_effective_type(
-                            &region.ty,
-                            region.start,
-                            start,
-                            size,
-                            source_pointee,
-                        )
-                        .is_some()
-            })
-            && let Some(ty) = self.choose_copied_effective_type(
+        let mut copied = Vec::new();
+        for region in &source.effective_types {
+            let region_end = region.start.saturating_add(region.size);
+            if region_end <= start || region.start >= end {
+                continue;
+            }
+            if start <= region.start && region_end <= end {
+                copied.push(region.clone());
+                continue;
+            }
+            let copy_start = start.max(region.start);
+            let copy_end = end.min(region_end);
+            if let Some(ty) = self.choose_copied_effective_type(
                 &region.ty,
                 region.start,
-                start,
-                size,
+                copy_start,
+                copy_end - copy_start,
                 source_pointee,
-            )
-        {
-            copied.push(EffectiveTypeRegion {
-                start,
-                size,
-                ty,
-                coalesced_element_type: None,
-            });
+            ) {
+                copied.push(EffectiveTypeRegion {
+                    start: copy_start,
+                    size: copy_end - copy_start,
+                    ty,
+                    coalesced_element_type: None,
+                });
+            } else {
+                self.collect_copied_subobject_regions(
+                    &region.ty,
+                    region.start,
+                    copy_start,
+                    copy_end,
+                    &mut copied,
+                );
+            }
         }
+        self.coalesce_effective_type_regions(&mut copied);
         copied
     }
 

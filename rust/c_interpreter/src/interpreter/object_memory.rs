@@ -699,6 +699,24 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    fn stored_value_has_initialized_part(value: &StoredValue) -> bool {
+        match value {
+            // An assigned scalar can itself have an indeterminate value.
+            StoredValue::Scalar(_) => true,
+            StoredValue::Array(values) => {
+                values.iter().any(Self::stored_value_has_initialized_part)
+            }
+            StoredValue::Record(values) => values
+                .iter()
+                .any(|(_, value)| Self::stored_value_has_initialized_part(value)),
+            StoredValue::Union { active_member, .. } => active_member.is_some(),
+            StoredValue::ObjectRepresentation(bytes) => {
+                bytes.iter().any(|byte| matches!(byte, ByteCell::Known(_)))
+            }
+            StoredValue::Indeterminate => false,
+        }
+    }
+
     pub(super) fn typed_value_from_stored(&self, ty: &CType, stored: &StoredValue) -> TypedValue {
         let value_ty = Self::unqualified_value_type(ty);
         match stored {
@@ -1384,9 +1402,7 @@ impl<'a> Interpreter<'a> {
         objects: &ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
         let (value, region) = read;
-        if self.expr_state.track_unsequenced_accesses {
-            self.record_read(region, span)?;
-        }
+        self.record_read(region, span)?;
         if matches!(value.data, ValueData::Pointer(_))
             && self.pointer_value_has_ended_lifetime(&value, objects)
         {
@@ -1416,16 +1432,14 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| {
             Diagnostic::ub("pointer is not valid to access", span, Some("6.5.3.2"))
         })?;
-        if self.expr_state.track_unsequenced_accesses {
-            let access_region = self.lvalue_access_region_from_range(
-                &lvalue,
-                access_start,
-                access_size,
-                objects,
-                span,
-            )?;
-            self.record_read(access_region, span)?;
-        }
+        let access_region = self.lvalue_access_region_from_range(
+            &lvalue,
+            access_start,
+            access_size,
+            objects,
+            span,
+        )?;
+        self.record_read(access_region, span)?;
         let (
             mut element_value,
             effective_ty,
@@ -1587,7 +1601,15 @@ impl<'a> Interpreter<'a> {
         {
             return Err(Diagnostic::ub(reason, span, Some("7.13.2.1")));
         }
-        if element_value.indeterminate
+        // A partially initialized struct can be copied as an aggregate without
+        // reading its indeterminate members (WG14 DR 222, 6.2.6.1p6). Keep the
+        // unknown members in the copied value so later scalar reads still check
+        // them. The never-initialized automatic-object rule remains applicable
+        // to a wholly indeterminate aggregate.
+        let uninitialized_read = element_value.indeterminate
+            && !matches!(&element_value.data, ValueData::Aggregate(stored)
+                if Self::stored_value_has_initialized_part(stored));
+        if uninitialized_read
             && object_storage_duration == StorageDuration::Automatic
             && !object_address_taken
         {
@@ -1610,7 +1632,7 @@ impl<'a> Interpreter<'a> {
                 declaration.column
             )));
         }
-        if element_value.indeterminate
+        if uninitialized_read
             && object_storage_duration == StorageDuration::Automatic
             && object_address_taken
             && self.run_options.ub_detection_mode == UbDetectionMode::Simple

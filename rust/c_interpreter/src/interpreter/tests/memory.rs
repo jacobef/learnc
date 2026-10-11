@@ -1411,6 +1411,79 @@ fn self_referential_struct_with_pointer_member_is_allowed() {
 }
 
 #[test]
+fn partially_initialized_structs_can_be_copied_without_reading_unknown_members() {
+    for source in [
+        r#"
+            struct S { int a; int b; };
+            int main(void) {
+                struct S x;
+                x.a = 1;
+                struct S y = x;
+                return y.a;
+            }
+        "#,
+        r#"
+            struct S { int a; int *b; };
+            struct S copy(struct S x) { return x; }
+            int main(void) {
+                struct S x;
+                x.a = 1;
+                struct S y;
+                y = copy(x);
+                return y.a;
+            }
+        "#,
+        r#"
+            struct S { struct { int a[2]; int b; } inner; int *p; };
+            int main(void) {
+                struct S x;
+                x.inner.a[1] = 1;
+                struct S y = x;
+                return y.inner.a[1];
+            }
+        "#,
+    ] {
+        for ub_detection_mode in [UbDetectionMode::Standard, UbDetectionMode::Simple] {
+            let result = run_source_with_options(
+                "test.c",
+                source,
+                &RunOptions {
+                    ub_detection_mode,
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.exit_status, 1);
+        }
+    }
+}
+
+#[test]
+fn copied_struct_members_remain_indeterminate_until_written() {
+    for member in ["int b", "int *b"] {
+        let source = format!(
+            r#"
+            struct S {{ int a; {member}; }};
+            int main(void) {{
+                struct S x;
+                x.a = 1;
+                struct S y = x;
+                return y.b != 0;
+            }}
+        "#
+        );
+        assert_diagnostic_contains(&source, "uninitialized automatic object");
+    }
+    assert_diagnostic_contains(
+        r#"
+        struct S { int a; int b; };
+        int main(void) { struct S x; struct S y = x; return 0; }
+    "#,
+        "uninitialized automatic object struct S",
+    );
+}
+
+#[test]
 fn uninitialized_struct_member_without_address_taken_is_ub() {
     let source = r#"
             struct Pair { int x; int y; };
@@ -2278,6 +2351,130 @@ fn allocated_storage_enforces_effective_type_for_unmodified_reads() {
         let err = run_source("test.c", source).unwrap_err();
         assert!(err.render().contains("effective type"), "{}", err.render());
     }
+}
+
+#[test]
+fn allocated_struct_member_reads_preserve_the_enclosing_effective_type() {
+    for copy in [
+        "memcpy(p, &a, sizeof a);",
+        "memmove(p, &a, sizeof a);",
+        "*(struct A *)p = a;",
+    ] {
+        for read in ["b->x", "(*b).x", "*(&b->x)", "((struct B *)p)[0].x"] {
+            let source = format!(
+                r#"
+                #include <stdlib.h>
+                #include <string.h>
+                struct A {{ int x; }};
+                struct B {{ int x; }};
+                int main(void) {{
+                    struct A a = {{123}};
+                    void *p = malloc(sizeof a);
+                    {copy}
+                    struct B *b = p;
+                    return {read};
+                }}
+            "#
+            );
+            assert_diagnostic_contains(&source, "effective type");
+        }
+    }
+}
+
+#[test]
+fn allocated_struct_member_reads_allow_compatible_and_scalar_accesses() {
+    assert_exit_status(
+        r#"
+        #include <stdlib.h>
+        #include <string.h>
+        struct A { int x; };
+        struct Wrapper { struct A a; };
+        int main(void) {
+            struct Wrapper source = {{123}};
+            void *p = malloc(sizeof source);
+            memcpy(p, &source, sizeof source);
+            const struct A *a = p;
+            if (a->x != 123 || *(int *)p != 123) return 1;
+            int value = 123;
+            memcpy(p, &value, sizeof value);
+            return a->x != 123;
+        }
+    "#,
+        0,
+    );
+}
+
+#[test]
+fn copied_record_effective_types_survive_arrays_and_nested_member_access() {
+    for (definition, initial, read) in [
+        (
+            "struct A { int x[1]; };",
+            "struct A a = {{123}};",
+            "((struct B *)p)->x",
+        ),
+        (
+            "struct A { int x; };",
+            "struct A a[2] = {{123}, {456}};",
+            "((struct B *)p)[1].x",
+        ),
+        (
+            "struct A { int x; }; struct Outer { long prefix; struct A a; };",
+            "struct Outer a = {0, {123}};",
+            "((struct B *)((char *)p + sizeof(long)))->x",
+        ),
+        (
+            "struct A { int x; }; struct Outer { struct A a; };",
+            "struct Outer a = {{123}};",
+            "((struct Other *)p)->b.x",
+        ),
+    ] {
+        let source = format!(
+            r#"
+            #include <stdlib.h>
+            #include <string.h>
+            {definition}
+            struct B {{ int x; }};
+            struct Other {{ struct B b; }};
+            int main(void) {{
+                {initial}
+                void *p = malloc(sizeof a);
+                memcpy(p, &a, sizeof a);
+                return {read};
+            }}
+        "#
+        );
+        assert_diagnostic_contains(&source, "effective type");
+    }
+}
+
+#[test]
+fn copied_struct_member_access_preserves_union_and_store_exceptions() {
+    assert_exit_status(
+        r#"
+        #include <stdlib.h>
+        #include <string.h>
+        struct A { int x; int y; };
+        struct B { int x; int y; };
+        union U { struct A a; struct B b; };
+        int main(void) {
+            union U source = {.a = {123, 456}};
+            union U *u = malloc(sizeof source);
+            memcpy(u, &source, sizeof source);
+            if (u->b.x != 123) return 1;
+            struct A a = {123, 456};
+            struct A *p = malloc(sizeof a);
+            memcpy(p, &a, sizeof a);
+            *(float *)&p->y = 1.0f;
+            if (p->x != 123) return 2;
+            void *raw = malloc(sizeof a);
+            memcpy(raw, &a, sizeof a);
+            struct B b = {19, 23};
+            *(struct B *)raw = b;
+            return ((struct B *)raw)->x != 19;
+        }
+    "#,
+        0,
+    );
 }
 
 #[test]
@@ -3382,12 +3579,15 @@ fn old_style_parameters_accept_function_declarators_and_adjust_to_pointers() {
 }
 
 #[test]
-fn aligned_alloc_rejects_invalid_c11_preconditions() {
-    for expression in ["aligned_alloc(3, 6)", "aligned_alloc(8, 12)"] {
+fn aligned_alloc_returns_null_for_invalid_requests() {
+    for expression in [
+        "aligned_alloc(0, 16)",
+        "aligned_alloc(3, 6)",
+        "aligned_alloc(8, 12)",
+    ] {
         let source =
-            format!("#include <stdlib.h>\nint main(void) {{ (void){expression}; return 0; }}\n");
-        let rendered = run_source("test.c", &source).unwrap_err().render();
-        assert_user_code_library_diag(&rendered, "aligned_alloc");
+            format!("#include <stdlib.h>\nint main(void) {{ return {expression} != 0; }}\n");
+        assert_exit_status(&source, 0);
     }
 }
 

@@ -439,21 +439,11 @@ impl<'a> Interpreter<'a> {
 
     pub(super) fn begin_full_expression(&mut self) {
         self.expr_state.accesses.clear();
-        self.expr_state.track_unsequenced_accesses = true;
-        self.assignment_targets.clear();
-    }
-
-    pub(super) fn begin_full_expression_for(&mut self, expr: &Expr) {
-        self.expr_state.accesses.clear();
-        self.expr_state.track_unsequenced_accesses = !cfg!(feature = "pure-expression-precompute")
-            || !self.run_options.optimizing_precomputations
-            || self.expression_has_side_effects(expr);
         self.assignment_targets.clear();
     }
 
     pub(super) fn end_full_expression(&mut self) {
         self.expr_state.accesses.clear();
-        self.expr_state.track_unsequenced_accesses = true;
         self.assignment_targets.clear();
         for object in self.full_expression_temporaries.drain(..) {
             if let Some(state) = self.retired_objects.get_mut(&object)
@@ -703,7 +693,7 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
-        self.begin_full_expression_for(expr);
+        self.begin_full_expression();
         if !self.expr_requires_setjmp_context(expr) {
             let value = self.eval_rvalue(expr, frame, objects);
             self.end_full_expression();
@@ -729,16 +719,6 @@ impl<'a> Interpreter<'a> {
         let contains = expr_contains_setjmp(expr);
         self.expr_setjmp_cache.insert(key, contains);
         contains
-    }
-
-    fn expression_has_side_effects(&mut self, expr: &Expr) -> bool {
-        let key = expr as *const Expr as usize;
-        if let Some(&cached) = self.expr_side_effect_cache.get(&key) {
-            return cached;
-        }
-        let has_side_effects = cboxes_expression_has_side_effects(expr);
-        self.expr_side_effect_cache.insert(key, has_side_effects);
-        has_side_effects
     }
 
     fn setjmp_call_matches(&self, expr: &Expr, call_span: Span) -> bool {

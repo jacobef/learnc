@@ -12,9 +12,8 @@ name = "cboxes-sqlite"
 path = "src/bin/cboxes_sqlite.rs"
 
 [features]
-default = ["native-mimalloc", "pure-expression-precompute"]
+default = ["native-mimalloc"]
 native-mimalloc = ["dep:mimalloc"]
-pure-expression-precompute = []
 
 [dependencies]
 libc = "0.2"

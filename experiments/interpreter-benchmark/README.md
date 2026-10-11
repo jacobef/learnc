@@ -3,6 +3,9 @@
 This page records the original baseline. See [optimization results](OPTIMIZATIONS.md)
 for the subsequent real-project measurements and verified performance changes.
 
+The saved measurements predate the removal of runtime analysis caches on
+October 4, 2026. Rerunning the harness measures the current implementation.
+
 Measured September 28, 2026 on an Apple M4, macOS arm64, Node 26.7.0,
 Apple Clang 17. Raw samples and the bundled Wasm payload's SHA-256 are in
 [`results.json`](results.json).
@@ -70,8 +73,8 @@ The same approximate orders of magnitude remain after this subtraction.
   repository's size-optimized release profile. Node runs the actual app bridge
   and normalization code. This is not a measurement inside a browser tab.
 - The native Rust interpreter is freshly built from current workspace source
-  using opt-level 3, fat LTO, one codegen unit, the default allocator and default
-  optimizing precomputations. Browser and native timings therefore describe two
+  using opt-level 3, fat LTO, one codegen unit, and default execution settings.
+  Browser and native timings therefore describe two
   actual operating modes, not a controlled measurement of Wasm overhead alone.
 - `traceFunctions: false` records main's 9–10 events but skips the kernel's
   individual events. `traceFunctions: true` captures all kernel events, matching

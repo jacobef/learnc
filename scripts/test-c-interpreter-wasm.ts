@@ -26,6 +26,54 @@ for (const call of [
 }
 console.log("PASS invalid library calls still produce UB diagnostics");
 
+for (const copy of ["memcpy", "memmove"]) {
+  const result = runCProgram(`#include <stdlib.h>
+#include <string.h>
+struct A { int x; };
+struct B { int x; };
+int main(void) {
+  struct A a = {123};
+  void *p = malloc(sizeof a);
+  ${copy}(p, &a, sizeof a);
+  struct B *b = p;
+  return b->x;
+}\n`, 4096, "");
+  assert.equal(result.kind, "ub", JSON.stringify(result));
+  assert.match(result.diagnostic.message, /incompatible pointer type/);
+  assert.equal(result.diagnostic.range.startLine, 9);
+}
+console.log("PASS copied structs reject member reads through incompatible struct types");
+
+{
+  const source = `struct S { int a; int b; };
+int main(void) {
+  struct S x;
+  x.a = 1;
+  struct S y = x;
+  return y.a;
+}\n`;
+  const result = runCProgram(source, 4096, "");
+  assert.equal(result.kind, "ok", JSON.stringify(result));
+  assert.equal(result.exitStatus, 1);
+  assert.equal(result.state.find(box => box.name === "y.b")?.value, "");
+  const unknownMember = runCProgram(source.replace("return y.a", "return y.b"), 4096, "");
+  assert.equal(unknownMember.kind, "ub", JSON.stringify(unknownMember));
+  assert.equal(unknownMember.diagnostic.range.startLine, 5);
+}
+console.log("PASS partially initialized struct copies preserve known and unknown members");
+
+for (const [source, expected] of [
+  [`#include <stdlib.h>\n#include <string.h>\nstruct A { char c; }; struct B { char c; };\nint main(void) { struct A a = {1}; void *p = malloc(sizeof a); memcpy(p, (char *)&a, sizeof a); return (0, *(struct B *)p).c; }\n`, "ub"],
+  [`int f(int a[static 3]);\nint f(int *a) { return a[0]; }\nint main(void) { int a[1] = {0}; return f(a); }\n`, "ub"],
+  [`#if 0xffffffff < -1\n#error wrong preprocessor integer type\n#endif\nint main(void) { return 0; }\n`, "ok"],
+  [`#include <stdlib.h>\nint main(void) { return aligned_alloc(3, 12) != 0 || aligned_alloc(8, 9) != 0; }\n`, "ok"],
+] as const) {
+  const result = runCProgram(source, 4096, "");
+  assert.equal(result.kind, expected, JSON.stringify(result));
+  if (result.kind === "ok") assert.equal(result.exitStatus, 0);
+}
+console.log("PASS defect-report fixes survive the Wasm bridge");
+
 const expressionFiles = [
   { path: "values.h", source: "#define TWICE(x) ((x)*2)\n" },
   { path: "program.c", source: '#include <stdio.h>\n#include <limits.h>\n#include "values.h"\nint main(void) { int a=3; }\n' },

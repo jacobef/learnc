@@ -168,30 +168,8 @@ impl<'a> Interpreter<'a> {
                 ));
             }
         }
-        let alignment = self.checked_usize_from_unsigned_long(
-            &evaluated[0],
-            args[0].span(),
-            "aligned_alloc alignment",
-        )?;
-        let size = self.checked_usize_from_unsigned_long(
-            &evaluated[1],
-            args[1].span(),
-            "aligned_alloc size",
-        )?;
-        if alignment == 0 || !alignment.is_power_of_two() {
-            return Err(Diagnostic::ub(
-                "aligned_alloc alignment is not a supported valid alignment",
-                args[0].span(),
-                Some("7.22.3.1"),
-            ));
-        }
-        if size % alignment != 0 {
-            return Err(Diagnostic::ub(
-                "aligned_alloc size is not an integral multiple of its alignment",
-                args[1].span(),
-                Some("7.22.3.1"),
-            ));
-        }
+        // DR 460 makes invalid alignment/size requests allocation failures.
+        // eval_aligned_alloc_call returns null for those requests.
         Ok(())
     }
 

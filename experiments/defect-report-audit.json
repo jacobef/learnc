@@ -1,0 +1,954 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-04",
+  "baseline": "C11 interpreter; adopted corrections and committee responses, not rejected proposals",
+  "regressionFile": "rust/c_interpreter/src/interpreter/tests/defect_reports.rs",
+  "caseCount": 67,
+  "reportCount": 54,
+  "verification": {
+    "command": "./scripts/check.sh",
+    "rustTestsPassed": 977,
+    "rustTestsIgnored": 1,
+    "typescriptCompiler": "tsc -p .",
+    "wasm": "rebuilt; bridge and browser regression suites passed"
+  },
+  "scope": "Selected behavior from each report. These regressions are not an exhaustive C conformance suite or a claim to resolve every issue discussed in each DR.",
+  "additionalFix": "The character-type aliasing exception applies to a character access itself, not to an aggregate merely containing a character member.",
+  "limitations": [
+    "DR 237 prototype bounds containing side effects are not evaluated or checked; executing them would alter C program behavior.",
+    "The DR 340 regression covers recursive array composite types; unevaluated variable-length composite bounds remain outside this regression.",
+    "Partial union byte copies cannot identify one effective type among overlapping members; whole-object and exact typed-member copies are covered by the existing model.",
+    "Reports 423 and 481 discuss competing interpretations of qualified rvalues and generic selections. No proposed resolution was treated as an adopted requirement.",
+    "DR 451 coverage verifies direct indeterminate library arguments; it does not claim complete propagation coverage for every operator."
+  ],
+  "reports": [
+    {
+      "number": 208,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_208.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr208_overridden_initializers_have_optional_side_effects"
+      ]
+    },
+    {
+      "number": 215,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_215.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr215_scalar_objects_support_one_past_pointer_equality"
+      ]
+    },
+    {
+      "number": 219,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_219.htm",
+      "result": "fixed and covered",
+      "fix": "Byte copies through character pointers retain effective types, including complete subobjects inside partial copies and copies from allocated storage.",
+      "tests": [
+        "dr219_partial_copy_preserves_multiple_members_across_padding",
+        "dr219_character_pointer_whole_copy_preserves_the_record_type",
+        "dr219_partial_dynamic_copy_preserves_subobject_types",
+        "dr219_partial_copy_allows_compatible_scalar_accesses",
+        "dr219_declared_character_array_can_be_copied_to_raw_storage",
+        "dr219_character_pointer_copy_preserves_declared_subobject_type"
+      ]
+    },
+    {
+      "number": 222,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_222.htm",
+      "result": "fixed and covered",
+      "fix": "Copying a partially initialized aggregate preserves initialized members and the indeterminate state of other members without rejecting the aggregate copy.",
+      "tests": [
+        "dr222_aggregate_copy_preserves_partially_initialized_members"
+      ]
+    },
+    {
+      "number": 225,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_225.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr225_dr503_strtod_accepts_longest_valid_hex_and_infinity_prefixes"
+      ]
+    },
+    {
+      "number": 233,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_233.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr233_general_float_format_selects_style_after_rounding"
+      ]
+    },
+    {
+      "number": 236,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_236.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr236_incompatible_typed_aliases_of_allocated_storage"
+      ]
+    },
+    {
+      "number": 237,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_237.htm",
+      "result": "fixed and covered",
+      "fix": "Static array minima survive block and file prototypes and apply to all calls, across translation units and through function pointers. Prototype parameter names bind by position.",
+      "tests": [
+        "dr237_static_bounds_apply_to_later_and_hidden_declarations",
+        "dr237_renamed_prototype_parameters_bind_by_position",
+        "dr237_all_prototype_minima_apply_to_indirect_calls",
+        "dr237_static_minima_count_remaining_elements",
+        "dr237_sufficient_array_satisfies_every_prototype",
+        "dr237_static_array_bound_on_a_prototype_constrains_calls",
+        "dr237_prototype_scope_bounds_do_not_execute_side_effects",
+        "dr237_static_prototype_contracts_cross_translation_units_without_leaking_internal_names"
+      ]
+    },
+    {
+      "number": 253,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_253.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr253_braced_whole_object_initializer_overrides_previous_members"
+      ]
+    },
+    {
+      "number": 256,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_256.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr256_multiple_standard_header_inclusions_preserve_existing_use"
+      ]
+    },
+    {
+      "number": 257,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_257.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr257_common_initial_sequence_survives_different_trailing_members"
+      ]
+    },
+    {
+      "number": 259,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_259.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr259_empty_macro_invocations_distinguish_zero_and_one_parameter"
+      ]
+    },
+    {
+      "number": 260,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_260.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr260_memcpy_preserves_pointer_provenance",
+        "dr260_copied_pointer_becomes_indeterminate_at_the_end_of_lifetime"
+      ]
+    },
+    {
+      "number": 261,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_261.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr261_evaluated_comma_expression_is_not_a_null_pointer_constant"
+      ]
+    },
+    {
+      "number": 262,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_262.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr262_bitfield_width_cannot_exceed_its_type_width"
+      ]
+    },
+    {
+      "number": 263,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_263.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr263_all_zero_bits_represent_integer_zero"
+      ]
+    },
+    {
+      "number": 265,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_265.htm",
+      "result": "fixed and covered",
+      "fix": "Preprocessor literal type selection uses intmax_t/uintmax_t representations, rather than ordinary C integer widths.",
+      "tests": [
+        "dr265_unsigned_suffix_and_64_bit_boundary_stay_unsigned",
+        "dr265_preprocessor_literal_typing_uses_intmax_width"
+      ]
+    },
+    {
+      "number": 268,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_268.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr268_jump_into_while_body_still_repeats_the_loop"
+      ]
+    },
+    {
+      "number": 276,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_276.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr276_dr322_perror_on_unoriented_stderr_accepts_both_permitted_orientations"
+      ]
+    },
+    {
+      "number": 282,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_282.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr282_struct_assignment_does_not_copy_flexible_array_tail"
+      ]
+    },
+    {
+      "number": 283,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_283.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr283_union_type_punning_reinterprets_the_representation"
+      ]
+    },
+    {
+      "number": 289,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_289.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr289_abstract_array_parameters_accept_restrict"
+      ]
+    },
+    {
+      "number": 290,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_290.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr290_assignment_cast_and_register_stores_remove_extra_precision"
+      ]
+    },
+    {
+      "number": 296,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_296.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr296_exact_infinity_from_infinite_input_is_not_a_range_error"
+      ]
+    },
+    {
+      "number": 298,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_298.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr298_integer_constants_must_fit_a_supported_type"
+      ]
+    },
+    {
+      "number": 304,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_304.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr304_invalid_preprocessing_number_requires_a_diagnostic"
+      ]
+    },
+    {
+      "number": 305,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_305.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr305_dr344_keywords_are_identifiers_in_preprocessor_expressions"
+      ]
+    },
+    {
+      "number": 306,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_306.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr306_object_like_macro_replacements_are_rescanned"
+      ]
+    },
+    {
+      "number": 315,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_315.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr315_narrow_unsigned_bitfields_promote_using_their_width"
+      ]
+    },
+    {
+      "number": 317,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_317.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr317_empty_parentheses_definition_does_not_create_a_prototype",
+        "dr317_executed_extra_argument_to_empty_definition_is_ub"
+      ]
+    },
+    {
+      "number": 322,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_322.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr276_dr322_perror_on_unoriented_stderr_accepts_both_permitted_orientations"
+      ]
+    },
+    {
+      "number": 323,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_323.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr323_complex_and_i_macros_may_be_undefined_and_redefined"
+      ]
+    },
+    {
+      "number": 324,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_324.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr324_unknown_string_escapes_require_a_diagnostic"
+      ]
+    },
+    {
+      "number": 337,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_337.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr337_stdio_size_macros_meet_the_required_minima"
+      ]
+    },
+    {
+      "number": 338,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_338.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr338_never_addressed_uninitialized_unsigned_char_is_ub"
+      ]
+    },
+    {
+      "number": 340,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_340.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr340_array_composite_types_combine_element_types_recursively"
+      ]
+    },
+    {
+      "number": 344,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_344.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr305_dr344_keywords_are_identifiers_in_preprocessor_expressions"
+      ]
+    },
+    {
+      "number": 400,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_400.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr400_realloc_zero_size_has_an_implementation_defined_outcome"
+      ]
+    },
+    {
+      "number": 412,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_412.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr412_invalid_elif_after_a_taken_branch_is_skipped"
+      ]
+    },
+    {
+      "number": 413,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_413.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr413_implicit_initialization_does_not_override_explicit_nested_values"
+      ]
+    },
+    {
+      "number": 427,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_427.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr427_parameter_and_return_values_initialize_const_members"
+      ]
+    },
+    {
+      "number": 439,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_439.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr439_initializer_list_side_effects_are_indeterminately_sequenced",
+        "dr439_compound_literal_initializer_and_outer_read_are_unsequenced"
+      ]
+    },
+    {
+      "number": 446,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_446.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr446_memory_functions_count_bytes_including_embedded_nulls"
+      ]
+    },
+    {
+      "number": 447,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_447.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr447_complex_to_bool_tests_both_components"
+      ]
+    },
+    {
+      "number": 451,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_451.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr451_library_calls_reject_addressed_indeterminate_values"
+      ]
+    },
+    {
+      "number": 452,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_452.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr452_comma_rvalue_does_not_bypass_effective_type_checks"
+      ]
+    },
+    {
+      "number": 460,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_460.htm",
+      "result": "fixed and covered",
+      "fix": "Invalid aligned_alloc alignment or size returns null rather than a UB diagnostic.",
+      "tests": [
+        "dr460_invalid_aligned_alloc_requests_fail_with_null"
+      ]
+    },
+    {
+      "number": 463,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/dr_463.htm",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr463_signed_left_shift_into_the_sign_bit_remains_ub"
+      ]
+    },
+    {
+      "number": 466,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/summary.htm#dr_466",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr466_for_body_can_shadow_the_control_variable"
+      ]
+    },
+    {
+      "number": 483,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/summary.htm#dr_483",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr483_location_macros_in_replacement_lists_use_the_invocation_site"
+      ]
+    },
+    {
+      "number": 489,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/summary.htm#dr_489",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr489_unevaluated_division_does_not_break_a_constant_expression"
+      ]
+    },
+    {
+      "number": 499,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/summary.htm#dr_499",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr499_anonymous_struct_members_do_not_overlap_in_a_union"
+      ]
+    },
+    {
+      "number": 502,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/summary.htm#dr_502",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr502_anonymous_flexible_array_still_requires_another_named_member"
+      ]
+    },
+    {
+      "number": 503,
+      "source": "https://www.open-std.org/jtc1/sc22/wg14/www/docs/summary.htm#dr_503",
+      "result": "covered behavior passes",
+      "tests": [
+        "dr225_dr503_strtod_accepts_longest_valid_hex_and_infinity_prefixes"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "test": "dr208_overridden_initializers_have_optional_side_effects",
+      "reports": [
+        208
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr215_scalar_objects_support_one_past_pointer_equality",
+      "reports": [
+        215
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr219_character_pointer_copy_preserves_declared_subobject_type",
+      "reports": [
+        219
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr219_character_pointer_whole_copy_preserves_the_record_type",
+      "reports": [
+        219
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr219_declared_character_array_can_be_copied_to_raw_storage",
+      "reports": [
+        219
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr219_partial_copy_allows_compatible_scalar_accesses",
+      "reports": [
+        219
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr219_partial_copy_preserves_multiple_members_across_padding",
+      "reports": [
+        219
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr219_partial_dynamic_copy_preserves_subobject_types",
+      "reports": [
+        219
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr222_aggregate_copy_preserves_partially_initialized_members",
+      "reports": [
+        222
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr225_dr503_strtod_accepts_longest_valid_hex_and_infinity_prefixes",
+      "reports": [
+        225,
+        503
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr233_general_float_format_selects_style_after_rounding",
+      "reports": [
+        233
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr236_incompatible_typed_aliases_of_allocated_storage",
+      "reports": [
+        236
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr237_all_prototype_minima_apply_to_indirect_calls",
+      "reports": [
+        237
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr237_prototype_scope_bounds_do_not_execute_side_effects",
+      "reports": [
+        237
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr237_renamed_prototype_parameters_bind_by_position",
+      "reports": [
+        237
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr237_static_array_bound_on_a_prototype_constrains_calls",
+      "reports": [
+        237
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr237_static_bounds_apply_to_later_and_hidden_declarations",
+      "reports": [
+        237
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr237_static_minima_count_remaining_elements",
+      "reports": [
+        237
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr237_static_prototype_contracts_cross_translation_units_without_leaking_internal_names",
+      "reports": [
+        237
+      ],
+      "expectation": "cross-file UB rejection and internal-linkage isolation"
+    },
+    {
+      "test": "dr237_sufficient_array_satisfies_every_prototype",
+      "reports": [
+        237
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr253_braced_whole_object_initializer_overrides_previous_members",
+      "reports": [
+        253
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr256_multiple_standard_header_inclusions_preserve_existing_use",
+      "reports": [
+        256
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr257_common_initial_sequence_survives_different_trailing_members",
+      "reports": [
+        257
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr259_empty_macro_invocations_distinguish_zero_and_one_parameter",
+      "reports": [
+        259
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr260_copied_pointer_becomes_indeterminate_at_the_end_of_lifetime",
+      "reports": [
+        260
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr260_memcpy_preserves_pointer_provenance",
+      "reports": [
+        260
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr261_evaluated_comma_expression_is_not_a_null_pointer_constant",
+      "reports": [
+        261
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr262_bitfield_width_cannot_exceed_its_type_width",
+      "reports": [
+        262
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr263_all_zero_bits_represent_integer_zero",
+      "reports": [
+        263
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr265_preprocessor_literal_typing_uses_intmax_width",
+      "reports": [
+        265
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr265_unsigned_suffix_and_64_bit_boundary_stay_unsigned",
+      "reports": [
+        265
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr268_jump_into_while_body_still_repeats_the_loop",
+      "reports": [
+        268
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr276_dr322_perror_on_unoriented_stderr_accepts_both_permitted_orientations",
+      "reports": [
+        276,
+        322
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr282_struct_assignment_does_not_copy_flexible_array_tail",
+      "reports": [
+        282
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr283_union_type_punning_reinterprets_the_representation",
+      "reports": [
+        283
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr289_abstract_array_parameters_accept_restrict",
+      "reports": [
+        289
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr290_assignment_cast_and_register_stores_remove_extra_precision",
+      "reports": [
+        290
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr296_exact_infinity_from_infinite_input_is_not_a_range_error",
+      "reports": [
+        296
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr298_integer_constants_must_fit_a_supported_type",
+      "reports": [
+        298
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr304_invalid_preprocessing_number_requires_a_diagnostic",
+      "reports": [
+        304
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr305_dr344_keywords_are_identifiers_in_preprocessor_expressions",
+      "reports": [
+        305,
+        344
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr306_object_like_macro_replacements_are_rescanned",
+      "reports": [
+        306
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr315_narrow_unsigned_bitfields_promote_using_their_width",
+      "reports": [
+        315
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr317_empty_parentheses_definition_does_not_create_a_prototype",
+      "reports": [
+        317
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr317_executed_extra_argument_to_empty_definition_is_ub",
+      "reports": [
+        317
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr323_complex_and_i_macros_may_be_undefined_and_redefined",
+      "reports": [
+        323
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr324_unknown_string_escapes_require_a_diagnostic",
+      "reports": [
+        324
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr337_stdio_size_macros_meet_the_required_minima",
+      "reports": [
+        337
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr338_never_addressed_uninitialized_unsigned_char_is_ub",
+      "reports": [
+        338
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr340_array_composite_types_combine_element_types_recursively",
+      "reports": [
+        340
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr400_realloc_zero_size_has_an_implementation_defined_outcome",
+      "reports": [
+        400
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr412_invalid_elif_after_a_taken_branch_is_skipped",
+      "reports": [
+        412
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr413_implicit_initialization_does_not_override_explicit_nested_values",
+      "reports": [
+        413
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr427_parameter_and_return_values_initialize_const_members",
+      "reports": [
+        427
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr439_compound_literal_initializer_and_outer_read_are_unsequenced",
+      "reports": [
+        439
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr439_initializer_list_side_effects_are_indeterminately_sequenced",
+      "reports": [
+        439
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr446_memory_functions_count_bytes_including_embedded_nulls",
+      "reports": [
+        446
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr447_complex_to_bool_tests_both_components",
+      "reports": [
+        447
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr451_library_calls_reject_addressed_indeterminate_values",
+      "reports": [
+        451
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr452_comma_rvalue_does_not_bypass_effective_type_checks",
+      "reports": [
+        452
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr460_invalid_aligned_alloc_requests_fail_with_null",
+      "reports": [
+        460
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr463_signed_left_shift_into_the_sign_bit_remains_ub",
+      "reports": [
+        463
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    },
+    {
+      "test": "dr466_for_body_can_shadow_the_control_variable",
+      "reports": [
+        466
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr483_location_macros_in_replacement_lists_use_the_invocation_site",
+      "reports": [
+        483
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr489_unevaluated_division_does_not_break_a_constant_expression",
+      "reports": [
+        489
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr499_anonymous_struct_members_do_not_overlap_in_a_union",
+      "reports": [
+        499
+      ],
+      "expectation": "defined behavior; exit status 0"
+    },
+    {
+      "test": "dr502_anonymous_flexible_array_still_requires_another_named_member",
+      "reports": [
+        502
+      ],
+      "expectation": "required diagnostic (severity and message asserted in test)"
+    }
+  ],
+  "executionMode": "Runtime analyses are uncached; each regression runs once."
+}

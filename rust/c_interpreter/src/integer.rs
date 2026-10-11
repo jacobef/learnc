@@ -3,6 +3,21 @@ use crate::source::Span;
 use crate::types::CType;
 
 pub fn parse_integer_literal(text: &str, span: Span) -> Result<(CType, i128, bool), Diagnostic> {
+    parse_integer_literal_impl(text, span, false)
+}
+
+pub fn parse_preprocessing_integer_literal(
+    text: &str,
+    span: Span,
+) -> Result<(CType, i128, bool), Diagnostic> {
+    parse_integer_literal_impl(text, span, true)
+}
+
+fn parse_integer_literal_impl(
+    text: &str,
+    span: Span,
+    preprocessing: bool,
+) -> Result<(CType, i128, bool), Diagnostic> {
     let (digits, suffix, decimal_constant, radix) =
         if let Some(rest) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
             let digits_len = rest
@@ -83,9 +98,23 @@ pub fn parse_integer_literal(text: &str, span: Span) -> Result<(CType, i128, boo
     };
 
     for ty in candidates {
-        let (_, max) = ty.integer_bounds().unwrap();
+        // In phase 4 every signed/unsigned candidate has the representation of
+        // intmax_t/uintmax_t, including during literal type selection (DR 265).
+        let max = if preprocessing {
+            if ty.is_unsigned_integer() {
+                u64::MAX as i128
+            } else {
+                i64::MAX as i128
+            }
+        } else {
+            ty.integer_bounds().unwrap().1
+        };
         if value <= max as u128 {
-            let normalized = ty.normalize_integer_value(value as i128).unwrap();
+            let normalized = if preprocessing {
+                value as i128
+            } else {
+                ty.normalize_integer_value(value as i128).unwrap()
+            };
             return Ok((ty, normalized, has_suffix));
         }
     }

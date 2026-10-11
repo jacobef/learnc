@@ -16,7 +16,6 @@ pub struct NativeExecutionOptions {
     pub stream_io: Option<Arc<dyn NativeStreamIo>>,
     pub allocation_limit_bytes: Option<usize>,
     pub execution_step_limit: Option<usize>,
-    pub optimizing_precomputations: bool,
 }
 
 impl Default for NativeExecutionOptions {
@@ -26,7 +25,6 @@ impl Default for NativeExecutionOptions {
             stream_io: None,
             allocation_limit_bytes: Some(DEFAULT_ALLOCATION_LIMIT_BYTES),
             execution_step_limit: None,
-            optimizing_precomputations: true,
         }
     }
 }
@@ -52,7 +50,6 @@ pub fn run_native_source(
             native_stream_io: options.stream_io.clone(),
             allocation_limit_bytes: options.allocation_limit_bytes,
             execution_step_limit: options.execution_step_limit,
-            optimizing_precomputations: options.optimizing_precomputations,
             capture_visualization: false,
             ..RunOptions::default()
         },
