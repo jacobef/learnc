@@ -3,7 +3,9 @@ import { createExpressionEvalTemplate } from "./shared-expression-template.js";
 const setup = "char a = 'A';\nchar b = 2;\nshort s = 1000;\nunsigned int u = 3;\ndouble d = 2.5;";
 
 const typeHint = (type: string, why: string) => (ctx: { mode: string }) =>
-  ctx.mode === "entered" ? `${why} So the result is an $t{${type}}.` : "This is a value, not a variable. Click $typeBoxButton.";
+  ctx.mode === "entered"
+    ? `${why} So the result is ${/^[aeiou]/.test(type) ? "an" : "a"} $t{${type}}.`
+    : "This is a value, not a variable. Click $typeBoxButton.";
 
 createExpressionEvalTemplate({
   initialInstructions:

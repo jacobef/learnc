@@ -1,6 +1,8 @@
 import { createExpressionEvalTemplate } from "./shared-expression-template.js";
 const setup = "char a = 'A';\nchar b = 2;\nshort s = 1000;\nunsigned int u = 3;\ndouble d = 2.5;";
-const typeHint = (type, why) => (ctx) => ctx.mode === "entered" ? `${why} So the result is an $t{${type}}.` : "This is a value, not a variable. Click $typeBoxButton.";
+const typeHint = (type, why) => (ctx) => ctx.mode === "entered"
+    ? `${why} So the result is ${/^[aeiou]/.test(type) ? "an" : "a"} $t{${type}}.`
+    : "This is a value, not a variable. Click $typeBoxButton.";
 createExpressionEvalTemplate({
     initialInstructions: "C converts values automatically in calculations, following two rules. First, integer promotion: anything smaller than an $t{int}, like a $t{char} or a $t{short}, is converted to an $t{int} before any calculation. Second, when an operator's two sides have different types, both are converted to the larger type, which you've seen with $t{int}s and $t{double}s. (If one side is unsigned and the other isn't, and they're the same size, both become unsigned.)\nFor each expression, enter its type and value.",
     steps: [

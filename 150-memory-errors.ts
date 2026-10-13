@@ -26,8 +26,10 @@ createCompileQuizTemplate({
       hint: "How many bytes does $c{malloc(3)} give?",
     },
     {
-      code: program("  int *p = malloc(sizeof(int));\n  int x = *p + 1;\n"),
-      explanation: "Memory from $c{malloc} starts out without values, just like an uninitialized variable. ($c{calloc} gives memory where every byte is zero.)",
+      code: program("  int *p = malloc(4000000000u);\n  *p = 1;\n"),
+      explanation:
+        "That's 4 billion bytes, more memory than is available here, so $c{malloc} returns $c{NULL}, and following a $c{NULL} pointer is undefined behavior. Real programs check what $c{malloc} returns before using it.",
+      hint: "What does $c{malloc} return when it can't find enough memory?",
     },
     {
       code: program("  int x = 5;\n  int *p = &x;\n  free(p);\n"),
