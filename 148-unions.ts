@@ -3,7 +3,7 @@ import { createProgramTemplate } from "./shared-program-template.js";
 createProgramTemplate({
   implicitMain: false,
   initialInstructions:
-    "A union is written like a struct, but its members all share the same memory: it holds only one of them at a time. Its size is the size of its largest member. Unions are for saving memory when a value can be one of several types, but only one at a time.\nClick $runLineButton to continue.",
+    "A union is written like a struct, but its members all share the same memory: it holds only one of them at a time. It's big enough to hold its largest member. Unions are for saving memory when a value can be one of several types, but only one at a time.\nClick $runLineButton to continue.",
   steps: [
     { code: "union number {\n  int i;\n  double d;\n};\n\n" },
     { code: "int main(void) {\n" },
