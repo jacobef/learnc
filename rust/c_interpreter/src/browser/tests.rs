@@ -1768,6 +1768,37 @@ fn allocated_blocks_appear_as_the_type_pointing_into_them() {
 }
 
 #[test]
+fn jump_statements_are_traced_and_jumped_past_braces_are_not() {
+    let output = run_source_with_options(
+        "program.c",
+        "int main(void) {\n  int t = 0;\n  switch (t) {\n    case 0:\n      t = 1;\n      break;\n  }\n  for (int i = 0; i < 4; i++) {\n    if (i == 1) {\n      continue;\n    }\n    if (i == 2) {\n      break;\n    }\n  }\n  goto end;\n  t = 5;\nend:\n  return t;\n}\n",
+        &RunOptions::default(),
+    )
+    .unwrap();
+    let events = output
+        .trace
+        .iter()
+        .map(|event| (event.kind.as_str(), event.start_line))
+        .collect::<Vec<_>>();
+    // The switch chooses where to go, like an if.
+    assert!(events.contains(&("branch", 2)));
+    for line in [5, 9, 12, 15] {
+        assert!(
+            events.contains(&("statement", line)),
+            "line {line}: {events:?}"
+        );
+    }
+    // Neither the if blocks' braces nor the for loop's are reached by a jump.
+    assert!(!events.contains(&("block-close", 10)), "{events:?}");
+    assert!(!events.contains(&("block-close", 13)), "{events:?}");
+    let after_break = events
+        .iter()
+        .position(|event| *event == ("statement", 12))
+        .unwrap();
+    assert_eq!(events[after_break + 1], ("statement", 15), "{events:?}");
+}
+
+#[test]
 fn allocated_blocks_get_addresses_apart_from_declared_variables() {
     let output = run_source_with_options(
         "program.c",

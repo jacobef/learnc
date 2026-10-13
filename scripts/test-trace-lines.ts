@@ -146,3 +146,30 @@ int cube(int n) {
   // The second call starts cube over.
   assert.deepEqual(doneAt(source, run, "call", 5, 0), [2, 3, 4, 9]);
 });
+
+test("a switch header, break, and continue each count as done once they run", () => {
+  const source = `int day = 7;
+int w = 0;
+switch (day) {
+  case 1:
+    w = 1;
+    break;
+  case 7:
+    w = 2;
+    break;
+}
+int t = 0;
+for (int i = 0; i < 3; i++) {
+  if (i == 1) {
+    continue;
+  }
+  t += i;
+}
+`;
+  const run = runCProgram(source);
+  // Jumping to case 7 runs the switch header, but none of the other cases' code.
+  assert.deepEqual(doneAt(source, run, "branch", 2, 0), [0, 1, 2]);
+  assert.deepEqual(doneAt(source, run, "statement", 8, 0), [0, 1, 2, 7, 8]);
+  // The continue counts, and the if's closing brace it jumps past doesn't.
+  assert.deepEqual(doneAt(source, run, "statement", 13, 0), [0, 1, 2, 7, 8, 10, 11, 12, 13]);
+});

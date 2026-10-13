@@ -369,6 +369,11 @@ impl<'a> Interpreter<'a> {
         {
             return Ok(());
         }
+        // A block left by a jump (break, continue, goto, or return) never reaches
+        // its closing brace.
+        if !matches!(flow, Flow::Continue) {
+            return Ok(());
+        }
         if matches!(flow, Flow::Continue | Flow::LoopContinue)
             && self.active_block_scopes.iter().any(|scope| {
                 scope.frame_id == frame.id

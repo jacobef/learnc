@@ -157,11 +157,18 @@ test("for-init variables leave the displayed and expression scope before the nex
       const next = result.trace.findIndex(event => event.state.some(box => box.name === "j"));
       assert.ok(next > 0);
       const boundary = result.trace[next - 1];
-      assert.equal(boundary.kind, body.includes("break;") ? "block-close" : "loop");
-      assert.equal(boundary.state.find(box => box.name === "i")?.value, outer ? "99" : undefined, source);
-      const expression = evaluateCExpressionFiles(files, next - 1, "i", undefined, "", false);
-      assert.equal(expression.kind, outer ? "ok" : "compile", source);
-      if (expression.kind === "ok") assert.equal(expression.result.value, "99");
+      if (body.includes("break;")) {
+        // A break jumps straight past the loop, so the next step is the one that
+        // leaves the loop variable's scope; the brace it skips isn't a step.
+        assert.equal(boundary.kind, "statement");
+        assert.equal(result.trace[next].state.find(box => box.name === "i")?.value, outer ? "99" : undefined, source);
+      } else {
+        assert.equal(boundary.kind, "loop");
+        assert.equal(boundary.state.find(box => box.name === "i")?.value, outer ? "99" : undefined, source);
+        const expression = evaluateCExpressionFiles(files, next - 1, "i", undefined, "", false);
+        assert.equal(expression.kind, outer ? "ok" : "compile", source);
+        if (expression.kind === "ok") assert.equal(expression.result.value, "99");
+      }
       // A page ending precisely at scope exit must preserve that same state.
       const paged = runCFiles(files, undefined, "", false, {traceLimit: next, stepLimit: 100000});
       assert.equal(paged.kind, "ok");

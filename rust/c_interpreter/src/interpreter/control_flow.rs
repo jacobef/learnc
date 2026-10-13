@@ -225,8 +225,15 @@ impl<'a> Interpreter<'a> {
         let result = (|| -> Result<Flow, Diagnostic> {
             match stmt {
                 Statement::Block(block) => self.exec_block(block, frame, objects),
-                Statement::Break(_) => Ok(Flow::LoopBreak),
-                Statement::Continue(_) => Ok(Flow::LoopContinue),
+                // Jump statements run like any other statement, and then jump.
+                Statement::Break(span) => {
+                    self.trace_cboxes_main_event(*span, frame, objects)?;
+                    Ok(Flow::LoopBreak)
+                }
+                Statement::Continue(span) => {
+                    self.trace_cboxes_main_event(*span, frame, objects)?;
+                    Ok(Flow::LoopContinue)
+                }
                 Statement::DoWhile {
                     body,
                     condition,
@@ -283,7 +290,10 @@ impl<'a> Interpreter<'a> {
                     frame,
                     objects,
                 ),
-                Statement::Goto { label, span } => Ok(Flow::Goto(label.clone(), *span)),
+                Statement::Goto { label, span } => {
+                    self.trace_cboxes_main_event(*span, frame, objects)?;
+                    Ok(Flow::Goto(label.clone(), *span))
+                }
                 Statement::Labeled {
                     statement, span, ..
                 } => {
@@ -749,7 +759,7 @@ impl<'a> Interpreter<'a> {
                         flow = self.exec_controlled_substatement(body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, false_condition_span, frame, objects, result)?
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result, false)?
             }
             Statement::If { then_branch, .. }
                 if self.statement_contains_label(then_branch, label) =>
@@ -1109,7 +1119,7 @@ impl<'a> Interpreter<'a> {
                         flow = self.exec_controlled_substatement(body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, false_condition_span, frame, objects, result)
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result, false)
             }
             Statement::If { then_branch, .. }
                 if self.statement_contains_span(then_branch, site.stmt_span) =>
@@ -1324,7 +1334,7 @@ impl<'a> Interpreter<'a> {
                         self.exec_for_step(step.as_ref(), body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, false_condition_span, frame, objects, result)
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result, false)
             }
             (
                 Statement::Switch {
@@ -1365,6 +1375,13 @@ impl<'a> Interpreter<'a> {
             objects,
         )?;
         let control = self.integer_promotion(control, expr.span())?;
+        // Choosing where to jump is the switch's own step, like an if's condition.
+        self.trace_cboxes_main_branch_event(
+            Span::new(span.file, span.start, expr.span().end),
+            None,
+            frame,
+            objects,
+        )?;
         self.exec_switch_with_control(control, body, frame, objects)
     }
 
@@ -1728,7 +1745,7 @@ impl<'a> Interpreter<'a> {
                         flow = self.exec_controlled_substatement(body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, false_condition_span, frame, objects, result)?
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result, false)?
             }
             Statement::If { then_branch, .. }
                 if Self::statement_contains_switch_label(then_branch, target) =>
@@ -1859,6 +1876,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Flow, Diagnostic> {
         self.push_for_scope(frame, span, step, body, objects);
         let mut false_condition_span = None;
+        let mut ended_by_break = false;
         let result = (|| -> Result<Flow, Diagnostic> {
             if let Some(init) = init {
                 match init {
@@ -1907,13 +1925,23 @@ impl<'a> Interpreter<'a> {
                 };
                 match body_flow {
                     Flow::Continue | Flow::LoopContinue => {}
-                    Flow::LoopBreak => break Ok(Flow::Continue),
+                    Flow::LoopBreak => {
+                        ended_by_break = true;
+                        break Ok(Flow::Continue);
+                    }
                     flow => break Ok(flow),
                 }
                 self.exec_for_step(step, body, frame, objects)?;
             }
         })();
-        self.finish_for_scope(span, false_condition_span, frame, objects, result)
+        self.finish_for_scope(
+            span,
+            false_condition_span,
+            frame,
+            objects,
+            result,
+            ended_by_break,
+        )
     }
 
     fn finish_for_scope(
@@ -1923,11 +1951,13 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
         result: Result<Flow, Diagnostic>,
+        ended_by_break: bool,
     ) -> Result<Flow, Diagnostic> {
         if let Some(scope) = self.pop_active_block_scope(frame.id, span) {
             self.restore_block_scope(scope, frame, objects);
         }
-        if matches!(&result, Ok(Flow::Continue)) {
+        // A break jumps straight past the loop, so its closing brace never runs.
+        if matches!(&result, Ok(Flow::Continue)) && !ended_by_break {
             if let Some(condition_span) = false_condition_span {
                 // Testing false and leaving the for-init scope are one step.
                 self.trace_cboxes_loop_event(condition_span, frame, objects)?;

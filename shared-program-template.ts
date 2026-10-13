@@ -303,8 +303,10 @@ function boxesNamed(boxes: BoxState[], ...names: string[]): Array<BoxState | und
   return names.map((name) => boxNamed(boxes, name));
 }
 
+// A line that decides where execution goes next: an if, a loop's condition (including
+// a do-while's, after its block), or a switch.
 function isHeaderLine(line: string): boolean {
-  return /^\s*(?:}\s*else\s+)?(?:if|while|for)\s*\(/.test(line || "");
+  return /^\s*(?:}\s*else\s+)?(?:if|while|for|switch)\s*\(|^\s*}\s*while\s*\(/.test(line || "");
 }
 
 function resolveIndexed<T>(spec: T | T[] | undefined, index: number): T | undefined {
@@ -481,9 +483,19 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   const runtimeStages: RuntimeStage[] = [];
   const shownState = (boxes: BoxState[]) =>
     workspace.hideStringLiterals ? boxes.filter((box) => box.anonymous !== "string literal") : boxes;
-  const trace = (run.trace || []).map((event) =>
-    workspace.hideStringLiterals ? { ...event, state: shownState(event.state) } : event,
-  );
+  const trace = (run.trace || [])
+    .map((event) => (workspace.hideStringLiterals ? { ...event, state: shownState(event.state) } : event))
+    // A do-while's closing brace and its condition share a line, so reaching the
+    // brace is just part of checking the condition.
+    .filter((event, index, events) => {
+      const next = events[index + 1];
+      return !(
+        event.kind === "block-close" &&
+        next?.kind === "loop" &&
+        next.frameId === event.frameId &&
+        next.startLine === event.startLine
+      );
+    });
   const exitStatus = run.exitStatus;
   // What exists before the first line runs: string literals, globals, and main's parameters.
   const initialState = shownState(run.initialState);
