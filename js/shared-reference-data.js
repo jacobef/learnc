@@ -163,6 +163,7 @@ const REFERENCE_SECTIONS = [
                     { lesson: "47-for.html", code: "for (setup; c; update) {\n  ...\n}", text: "Same as $c{setup;} followed by $c{while (c) \\{ ... update; \\}}. A variable created in $c{setup} is removed when the loop finishes." },
                     { lesson: "118-loop-control.html", code: "do {\n  ...\n} while (c);", text: "Like $c{while}, but checks $c{c} after each run, so the block runs at least once." },
                     { lesson: "118-loop-control.html", code: "break;", text: "Ends the innermost loop (or $c{switch}). $c{continue;} skips to the loop's next run." },
+                    { lesson: "119-goto.html", code: "goto done;", text: "Jumps to the statement labeled $c{done:}, which has to be in the same function." },
                     { lesson: "120-switch.html", code: "switch (x) {\n  case 1:\n    ...\n    break;\n  default:\n    ...\n}", text: "Jumps to the $c{case} matching $c{x}, or to $c{default}. Without $c{break}, execution falls through into the next case." },
                     { lesson: "54-functions-i.html", code: "int f(int x) {\n  ...\n  return x;\n}", text: "A function definition. Calling it creates its parameters, set to the arguments' values; $c{return} ends it and gives the call its value. Every program starts at $c{main}." },
                     { lesson: "55-functions-ii.html", code: "void f(int x)", text: "A $t{void} function doesn't return a value. Parameters are copies, so changing one doesn't affect the caller." },
@@ -203,7 +204,7 @@ const REFERENCE_SECTIONS = [
             {
                 label: "Arrays from malloc",
                 entries: [
-                    { lesson: "88-malloc.html", code: "int* p = malloc(3 * sizeof(int));", text: "Gets a nameless block with room for 3 $t{int}s, which lasts until the program ends. Needs $c{#include <stdlib.h>}." },
+                    { lesson: "88-malloc.html", code: "int* p = malloc(3 * sizeof(int));", text: "Gets a nameless block with room for 3 $t{int}s, which lasts until it's freed or the program ends. Needs $c{#include <stdlib.h>}." },
                     { lesson: "88-malloc.html", code: "p = q;", text: "If nothing points to a block anymore, it still exists, but can't be used: a memory leak." },
                 ],
             },
