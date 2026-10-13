@@ -129,6 +129,7 @@ export function strikeFragmentsForTrace(
     file: string;
     startLine: number;
     frameId: number;
+    function: string;
     skippedRange: {
       file: string;
       startLine: number;
@@ -179,17 +180,19 @@ export function strikeFragmentsForTrace(
     if (siteIndex >= 0 && columns.length) {
       nextBranchSiteByLine.set(lineKey, (siteIndex + 1) % columns.length);
     }
-    const branchKey =
+    const branchKey = `${event.frameId}:` + (
       siteIndex >= 0
         ? `${lineKey}:${siteIndex}`
         : range
           ? `${lineKey}:${range.startLine}:${range.startColumn}:${range.endLine}:${range.endColumn}`
-          : lineKey;
+          : lineKey);
     latestRangeByBranch.set(branchKey, { range, frameId: event.frameId, loop: innermostLoop(event.startLine) });
   }
   const fragments: StrikeFragment[] = [];
-  latestRangeByBranch.forEach(({ range }) => {
-    if (!range) return;
+  // Each call skips its own branches.
+  const frames = shownFrames(trace, traceEndIndex);
+  latestRangeByBranch.forEach(({ range, frameId }) => {
+    if (!range || !frames.has(frameId)) return;
     for (let line = range.startLine; line <= range.endLine && line < lines.length; line += 1) {
       const lineText = lines[line] ?? "";
       const start = line === range.startLine ? range.startColumn : 0;
@@ -234,6 +237,44 @@ function functionDefinitions(code: string[]): Map<string, LineRange> {
   return definitions;
 }
 
+// main's frame. A call event belongs to the function being called, so it's the
+// first other event in main.
+function mainFrame(trace: Array<{ kind: string; frameId: number; function: string }>): number | null {
+  return (trace.find((event) => event.function === "main" && event.kind !== "call") ?? trace[0])?.frameId ?? null;
+}
+
+/**
+ * The calls whose lines are shown: for each function, its innermost call that's
+ * still running, or else the call that finished most recently. A program without
+ * function calls only has main's.
+ */
+function shownFrames(
+  trace: Array<{ kind: string; frameId: number; function: string }>,
+  traceEndIndex: number,
+): Set<number> {
+  const functionOf = new Map<number, string>();
+  const active: number[] = [];
+  const lastFinished = new Map<string, number>();
+  const main = mainFrame(trace);
+  if (main !== null) {
+    active.push(main);
+    functionOf.set(main, "main");
+  }
+  for (let index = 0; index <= traceEndIndex && index < trace.length; index += 1) {
+    const event = trace[index]!;
+    if (event.kind === "call") {
+      active.push(event.frameId);
+      functionOf.set(event.frameId, event.function);
+    } else if (event.kind === "return" && active.length > 1) {
+      const callee = active.pop()!;
+      lastFinished.set(functionOf.get(callee) ?? "", callee);
+    }
+  }
+  const shown = new Map<string, number>(lastFinished);
+  for (const frame of active) shown.set(functionOf.get(frame) ?? "", frame);
+  return new Set(shown.values());
+}
+
 /**
  * The lines that have finished running by the end of `trace[traceEndIndex]`: in the
  * current iteration of any loop they're in, and the current call of any function
@@ -254,8 +295,6 @@ export function doneLinesForTrace(
     if (!body) loopBodies.set(line, (body = loopBodyLines(code, line)));
     return body;
   };
-  const done = new Set<number>();
-  const ran = new Set<number>();
   // Lines that just open a block, with the block's last line. A block's opening
   // brace counts as run once execution is inside the block.
   const openers: Array<{ line: number; end: number }> = [];
@@ -273,7 +312,17 @@ export function doneLinesForTrace(
       }
     }
   });
-  const finish = (start: number, end: number) => {
+  // Each call has its own lines, so a recursive call doesn't affect its caller's.
+  const doneByFrame = new Map<number, Set<number>>();
+  const ranByFrame = new Map<number, Set<number>>();
+  const setOf = (sets: Map<number, Set<number>>, frame: number) => {
+    let set = sets.get(frame);
+    if (!set) sets.set(frame, (set = new Set()));
+    return set;
+  };
+  const finish = (frame: number, start: number, end: number) => {
+    const done = setOf(doneByFrame, frame);
+    const ran = setOf(ranByFrame, frame);
     for (const opener of openers) {
       if (start > opener.line && start <= opener.end) {
         done.add(opener.line);
@@ -285,61 +334,69 @@ export function doneLinesForTrace(
       ran.add(line);
     }
   };
-  const forget = (range: LineRange, except: number) => {
+  const forget = (frame: number, range: LineRange, except: number) => {
+    const done = setOf(doneByFrame, frame);
     for (let line = range.start; line <= range.end; line += 1) if (line !== except) done.delete(line);
+  };
+  // A loop that has finished has finished as a whole.
+  const finishLoop = (frame: number, body: LineRange) => {
+    const done = setOf(doneByFrame, frame);
+    const ran = setOf(ranByFrame, frame);
+    for (let line = body.start; line <= body.end; line += 1) if (ran.has(line)) done.add(line);
   };
   // The loops each frame is currently inside, innermost last.
   const activeLoops = new Map<number, Array<{ line: number; body: LineRange }>>();
-  // A loop that has finished has finished as a whole.
-  const finishLoop = (body: LineRange) => {
-    for (let line = body.start; line <= body.end; line += 1) if (ran.has(line)) done.add(line);
-  };
-  const leaveLoops = (frameId: number, line: number) => {
-    const loops = activeLoops.get(frameId) ?? [];
+  const leaveLoops = (frame: number, line: number) => {
+    const loops = activeLoops.get(frame) ?? [];
     while (loops.length) {
       const loop = loops[loops.length - 1]!;
       if (line >= loop.body.start && line <= loop.body.end) break;
       loops.pop();
-      finishLoop(loop.body);
+      finishLoop(frame, loop.body);
     }
-    activeLoops.set(frameId, loops);
+    activeLoops.set(frame, loops);
   };
   // Entering a function: its header has run, and nothing else in this call has yet.
-  const enter = (name: string) => {
+  const enter = (name: string, frame: number) => {
     const definition = functions.get(name);
     if (!definition) return;
-    forget(definition, -1);
     let brace = definition.start;
     while (brace < definition.end && !code[brace]!.includes("{")) brace += 1;
-    finish(definition.start, brace);
+    finish(frame, definition.start, brace);
   };
   // main is entered when the program starts.
-  if (traceEndIndex >= 0 && trace.length) enter("main");
+  const main = mainFrame(trace);
+  if (traceEndIndex >= 0 && main !== null) enter("main", main);
   for (let index = 0; index <= traceEndIndex && index < trace.length; index += 1) {
     const event = trace[index]!;
+    const frame = event.frameId;
     if (event.kind === "call") {
-      enter(event.function);
+      enter(event.function, frame);
       continue;
     }
     // Back in the caller, the line with the call still has to finish.
     if (event.kind === "return") continue;
-    leaveLoops(event.frameId, event.startLine);
+    leaveLoops(frame, event.startLine);
     if (event.kind === "loop") {
       const body = loopBody(event.startLine);
-      const loops = activeLoops.get(event.frameId) ?? [];
+      const loops = activeLoops.get(frame) ?? [];
       if (loops[loops.length - 1]?.line !== event.startLine) loops.push({ line: event.startLine, body });
-      activeLoops.set(event.frameId, loops);
+      activeLoops.set(frame, loops);
       // Checking the condition starts a new iteration.
-      forget(body, event.startLine);
-      finish(event.startLine, event.endLine);
-      const next = trace.slice(index + 1).find((later) => later.frameId === event.frameId);
+      forget(frame, body, event.startLine);
+      finish(frame, event.startLine, event.endLine);
+      const next = trace.slice(index + 1).find((later) => later.frameId === frame);
       if (!next || next.startLine < body.start || next.startLine > body.end) {
         loops.pop();
-        finishLoop(body);
+        finishLoop(frame, body);
       }
       continue;
     }
-    finish(event.startLine, event.endLine);
+    finish(frame, event.startLine, event.endLine);
+  }
+  const done = new Set<number>();
+  for (const frame of shownFrames(trace, traceEndIndex)) {
+    for (const line of doneByFrame.get(frame) ?? []) done.add(line);
   }
   return done;
 }

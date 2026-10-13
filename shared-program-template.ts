@@ -1205,11 +1205,15 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       stage?.traceKind !== "block-close" &&
       stage?.step?.lines.length === 1 &&
       isHeaderLine(stage.step.lines[0] || "");
-    // After a call, execution is inside the function, not back on the line with the call.
+    // After a call, execution is inside the function, not back on the line with the
+    // call. After a function returns, the marker stays just below the line that
+    // returned, until the next step goes back to the caller.
     const displayBoundary =
-      stage && !headerOnly && stage.step && !isElseLine(stage.step) && stage.traceKind !== "call"
-        ? Math.min(rawBoundary, stage.step.boundary)
-        : rawBoundary;
+      stage?.traceKind === "function-exit" && stage.step
+        ? stage.step.codeEndLine + 1
+        : stage && !headerOnly && stage.step && !isElseLine(stage.step) && stage.traceKind !== "call"
+          ? Math.min(rawBoundary, stage.step.codeEndLine + 1)
+          : rawBoundary;
     const selectable =
       stage && solving && (stage.editableMode === "boundary" || stage.selectsResume)
         ? stage.branchTargets

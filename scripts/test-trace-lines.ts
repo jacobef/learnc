@@ -184,3 +184,37 @@ test("a block's opening brace counts as done once execution is inside it", () =>
   assert.deepEqual(doneAt(source, run, "statement", 0, 0), [0]);
   assert.deepEqual(doneAt(source, run, "statement", 2, 0), [0, 1, 2]);
 });
+
+test("each call of a recursive function has its own done and skipped lines", () => {
+  const source = `int f(int n) {
+  if (n <= 1) {
+    return 1;
+  }
+  return n * f(n - 1);
+}
+
+int main(void) {
+  int r = f(2);
+  return 0;
+}
+`;
+  const run = runCFiles([{ path: "program.c", source }], undefined, "", false, {
+    stepLimit: 100_000,
+    followingTraceLimit: 256,
+    traceFunctions: true,
+  });
+  const lines = source.split("\n");
+  const at = (kind: string, line: number, occurrence: number) => {
+    let seen = 0;
+    return run.trace.findIndex((event) => event.kind === kind && event.startLine === line && seen++ === occurrence);
+  };
+  // The inner call hasn't checked its if yet, so the outer call's skip isn't shown.
+  const innerCall = at("call", 4, 0);
+  assert.deepEqual([...strikeFragmentsForTrace(lines, run.trace, innerCall)], []);
+  assert.deepEqual(doneAt(source, run, "call", 4, 0), [0, 7]);
+  // Back in the outer call, the inner call's return 1 isn't one of its lines.
+  const backInOuter = at("return", 4, 0);
+  const done = [...doneLinesForTrace(lines, run.trace, backInOuter)].sort((a, b) => a - b);
+  assert.deepEqual(done, [0, 1, 7]);
+  assert.deepEqual(new Set(strikeFragmentsForTrace(lines, run.trace, backInOuter).map((f) => f.line)), new Set([1, 2, 3]));
+});
