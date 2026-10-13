@@ -51,7 +51,8 @@ export function renderMachineState(state, view, onChange) {
             onChange(next);
         }
         : undefined;
-    wrap.appendChild(renderLights(state.memory[LIGHTS_ADDRESS], toggle));
+    if (view.lights !== false)
+        wrap.appendChild(renderLights(state.memory[LIGHTS_ADDRESS], toggle));
     const cell = (label, value, set, sub) => {
         const box = document.createElement("div");
         box.className = "machine-cell";
@@ -96,8 +97,9 @@ export function renderMachineState(state, view, onChange) {
         wrap.appendChild(group);
         return cells;
     };
-    const registers = section("Registers");
-    for (const register of view.registers ?? REGISTERS) {
+    const shownRegisters = view.registers ?? REGISTERS;
+    const registers = shownRegisters.length || view.stack ? section("Registers") : null;
+    for (const register of shownRegisters) {
         registers.appendChild(cell(register, state.registers[register], onChange && ((value) => {
             const next = copyMachine(state);
             next.registers[register] = value;
@@ -511,11 +513,17 @@ export function createMachineChallengeTemplate(config) {
             parts.push(`address ${address} = ${value}`);
         return parts.length ? `Starting with ${parts.join(", ")}.` : "";
     }
+    // The expected result shows only what has to match.
+    const expectedView = {
+        lights: check.lights !== false,
+        registers: check.registers ?? [],
+        memory: check.memory ?? [],
+        memoryNames: view.memoryNames,
+    };
     function renderResults() {
         clearNode(results);
-        const start = startState(cases[shownCase]);
         const ran = attempt(shownCase);
-        const column = (title, state, note) => {
+        const column = (title, state, shown, note) => {
             const box = document.createElement("div");
             box.className = "panel machine-panel";
             const heading = document.createElement("div");
@@ -529,12 +537,11 @@ export function createMachineChallengeTemplate(config) {
                 box.appendChild(text);
             }
             if (state)
-                box.appendChild(renderMachineState(state, view));
+                box.appendChild(renderMachineState(state, shown));
             results.appendChild(box);
         };
-        column("Your program's result", ran.final, ran.error ?? describeStart(cases[shownCase]));
-        column("Expected result", expected[shownCase]);
-        void start;
+        column("Your program's result", ran.final, view, ran.error ?? describeStart(cases[shownCase]));
+        column("Expected result", expected[shownCase], expectedView);
     }
     section.querySelector("[data-role=machine-check]").addEventListener("click", () => {
         hideHint();

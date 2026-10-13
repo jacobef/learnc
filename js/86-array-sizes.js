@@ -15,7 +15,7 @@ createProgramTemplate({
             instructions: "Dividing the array's size by the size of one element gives the number of elements. This is a common idiom, since it keeps working if the array's length is changed later.",
             hints: (ctx) => ctx.basicHintTopicIs("value", "count") ? "$c{sizeof a} is $v{20}, and $c{sizeof a[0]} is the size of one $t{int}." : ctx.basicHint,
         },
-        { code: "int *p = a;\n" },
+        { code: "int* p = a;\n" },
         {
             code: "int pointer_bytes = sizeof p;\n",
             editable: true,

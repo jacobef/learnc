@@ -66,7 +66,7 @@ export interface MachineStep {
 export interface MachineRun {
   steps: MachineStep[];
   final: MachineState;
-  // Why the program stopped, if it wasn't by halting or running off the end.
+  // Why the program stopped, if it wasn't by halting.
   error: string | null;
 }
 
@@ -190,6 +190,9 @@ export function copyMachine(state: MachineState): MachineState {
   return { registers: { ...state.registers }, sp: state.sp, memory: state.memory.slice() };
 }
 
+const RAN_PAST_END =
+  "The program ran past its last instruction without halting. A real processor wouldn't stop there: it would treat whatever bytes come next in memory as more instructions. End with HALT.";
+
 const byte = (value: number) => ((value % 256) + 256) % 256;
 
 export function runMachine(program: MachineProgram, start: MachineState, stepLimit = 5000): MachineRun {
@@ -202,7 +205,8 @@ export function runMachine(program: MachineProgram, start: MachineState, stepLim
     operand.kind === "pointer" ? state.registers[operand.register] : operand.kind === "address" ? operand.address : 0;
   const reg = (operand: Operand) => (operand as { register: Register }).register;
   const target = (operand: Operand) => program.labels.get((operand as { label: string }).label)!;
-  while (pc < program.instructions.length) {
+  if (!program.instructions.length) return { steps, final: state, error: "There are no instructions to run." };
+  for (;;) {
     if (steps.length >= stepLimit) {
       return { steps, final: state, error: `The program ran ${stepLimit} instructions without halting. Is there a loop that never ends?` };
     }
@@ -275,19 +279,19 @@ export function runMachine(program: MachineProgram, start: MachineState, stepLim
         next = null;
         break;
     }
-    if (next !== null && next >= program.instructions.length) next = null;
+    const pastEnd = next !== null && next >= program.instructions.length;
     steps.push({
       index: pc,
       line: instruction.line,
       op: instruction.op,
-      nextIndex: next,
-      jumped: next !== null && next !== pc + 1,
+      nextIndex: pastEnd ? null : next,
+      jumped: !pastEnd && next !== null && next !== pc + 1,
       after: copyMachine(state),
     });
-    if (next === null) break;
+    if (pastEnd) return { steps, final: state, error: RAN_PAST_END };
+    if (next === null) return { steps, final: state, error: null };
     pc = next;
   }
-  return { steps, final: state, error: null };
 }
 
 export function startState(start: MachineStart | undefined): MachineState {

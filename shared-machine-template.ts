@@ -43,6 +43,8 @@ interface MachineLessonStep {
 }
 
 export interface MachineView {
+  // Shows the lights. Defaults to true.
+  lights?: boolean;
   // Memory addresses to show, besides the lights' byte.
   memory?: number[];
   // Labels for memory addresses, like "x" for a C variable that lives there.
@@ -141,7 +143,7 @@ export function renderMachineState(
         onChange(next);
       }
     : undefined;
-  wrap.appendChild(renderLights(state.memory[LIGHTS_ADDRESS]!, toggle));
+  if (view.lights !== false) wrap.appendChild(renderLights(state.memory[LIGHTS_ADDRESS]!, toggle));
   const cell = (label: string, value: number, set?: (value: number) => void, sub?: string) => {
     const box = document.createElement("div");
     box.className = "machine-cell";
@@ -183,9 +185,10 @@ export function renderMachineState(
     wrap.appendChild(group);
     return cells;
   };
-  const registers = section("Registers");
-  for (const register of view.registers ?? REGISTERS) {
-    registers.appendChild(
+  const shownRegisters = view.registers ?? REGISTERS;
+  const registers = shownRegisters.length || view.stack ? section("Registers") : null;
+  for (const register of shownRegisters) {
+    registers!.appendChild(
       cell(register, state.registers[register], onChange && ((value) => {
         const next = copyMachine(state);
         next.registers[register] = value;
@@ -194,7 +197,7 @@ export function renderMachineState(
     );
   }
   if (view.stack) {
-    registers.appendChild(
+    registers!.appendChild(
       cell("SP", state.sp, onChange && ((value) => {
         const next = copyMachine(state);
         next.sp = value;
@@ -644,11 +647,18 @@ export function createMachineChallengeTemplate(config: MachineChallengeConfig): 
     return parts.length ? `Starting with ${parts.join(", ")}.` : "";
   }
 
+  // The expected result shows only what has to match.
+  const expectedView: MachineView = {
+    lights: check.lights !== false,
+    registers: check.registers ?? [],
+    memory: check.memory ?? [],
+    memoryNames: view.memoryNames,
+  };
+
   function renderResults() {
     clearNode(results);
-    const start = startState(cases[shownCase]);
     const ran = attempt(shownCase);
-    const column = (title: string, state: MachineState | null, note?: string) => {
+    const column = (title: string, state: MachineState | null, shown: MachineView, note?: string) => {
       const box = document.createElement("div");
       box.className = "panel machine-panel";
       const heading = document.createElement("div");
@@ -661,12 +671,11 @@ export function createMachineChallengeTemplate(config: MachineChallengeConfig): 
         text.textContent = note;
         box.appendChild(text);
       }
-      if (state) box.appendChild(renderMachineState(state, view));
+      if (state) box.appendChild(renderMachineState(state, shown));
       results.appendChild(box);
     };
-    column("Your program's result", ran.final, ran.error ?? describeStart(cases[shownCase]!));
-    column("Expected result", expected[shownCase]!);
-    void start;
+    column("Your program's result", ran.final, view, ran.error ?? describeStart(cases[shownCase]!));
+    column("Expected result", expected[shownCase]!, expectedView);
   }
 
   section.querySelector("[data-role=machine-check]")!.addEventListener("click", () => {

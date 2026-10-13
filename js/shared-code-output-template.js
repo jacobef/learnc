@@ -762,14 +762,17 @@ function createCodeOutputChallengeTemplate(config) {
                 state.pendingFailingCase = failingCase ? copyCase(failingCase) : null;
                 render();
                 const failureKind = report.firstFailure?.result.kind;
+                // The failing input may not be the one on screen.
+                const shown = (visibleCaseResult ?? evaluateCase(state.visibleCase)).kind === failureKind;
+                const where = shown ? "shown above" : "with another input";
                 const failureStatus = failureKind === "compile"
-                    ? "fix the error shown above"
+                    ? `fix the error ${where}`
                     : failureKind === "ub"
-                        ? "fix the undefined behavior shown above"
+                        ? `fix the undefined behavior ${where}`
                         : failureKind === "step-limit"
-                            ? "program did not finish"
+                            ? `program did not finish${shown ? "" : " with another input"}`
                             : failureKind === "blocked-input"
-                                ? "program is waiting for input"
+                                ? `program is waiting for input${shown ? "" : " with another input"}`
                                 : "incorrect";
                 setStatus(failureStatus, "err");
                 flashStatus(status);

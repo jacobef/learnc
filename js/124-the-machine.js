@@ -31,7 +31,7 @@ createMachineTemplate({
         },
         {
             code: "HALT             ; stop\n",
-            instructions: "$c{HALT} stops the processor. The lights stay as they were.\nThat's really all a computer is: memory, registers, and instructions that move numbers between them and do arithmetic on them. Everything else, including every C program, is built from instructions like these.",
+            instructions: "$c{HALT} stops the processor. The lights stay as they were. A real processor doesn't know where a program ends, so without $c{HALT} it would carry on, treating whatever bytes come next in memory as more instructions.\nThat's really all a computer is: memory, registers, and instructions that move numbers between them and do arithmetic on them. Everything else, including every C program, is built from instructions like these.",
         },
     ],
     view: { registers: ["A", "B", "C", "D"] },

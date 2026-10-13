@@ -20,7 +20,7 @@ createProgramTemplate({
       hints: (ctx) =>
         ctx.basicHintTopicIs("value", "count") ? "$c{sizeof a} is $v{20}, and $c{sizeof a[0]} is the size of one $t{int}." : ctx.basicHint,
     },
-    { code: "int *p = a;\n" },
+    { code: "int* p = a;\n" },
     {
       code: "int pointer_bytes = sizeof p;\n",
       editable: true,
