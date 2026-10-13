@@ -386,17 +386,24 @@ export function createMachineTemplate(config: MachineTemplateConfig): void {
     return `${needsSolve(stage, stages.indexOf(stage)) ? "🔧 " : ""}${verb} line ${line}`;
   }
 
-  // Lines that have run in the current pass: jumping backwards starts a new one.
+  // Lines that have run in the current pass. A jump backwards, like the end of a
+  // loop, starts a new pass over the lines it jumps back over. (Returning from a
+  // subroutine goes backwards too, but it's not a loop.)
   function doneLines(upTo: number): Set<number> {
     const done = new Set<number>();
-    let previous = -1;
     for (let i = 0; i < upTo; i += 1) {
       const line = stages[i]!.step.line;
-      if (line <= previous) {
-        for (const shown of [...done]) if (shown >= line && shown <= previous) done.delete(shown);
+      const previous = stages[i - 1]?.step;
+      if (previous && previous.jumped && ["JMP", "JZ", "JNZ"].includes(previous.op) && line <= previous.line) {
+        for (const shown of [...done]) if (shown >= line && shown <= previous.line) done.delete(shown);
+      }
+      // A call starts the subroutine over, up to its RET, like a C function call.
+      if (previous?.op === "CALL") {
+        const ret = program.instructions.find((instruction) => instruction.line >= line && instruction.op === "RET");
+        const end = ret?.line ?? lines.length - 1;
+        for (const shown of [...done]) if (shown >= line && shown <= end) done.delete(shown);
       }
       done.add(line);
-      previous = line;
     }
     return done;
   }
