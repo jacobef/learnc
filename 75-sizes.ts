@@ -37,5 +37,5 @@ createProgramTemplate({
         ctx.basicHintTopicIs("value", "f") ? "$c{x * 2} is a $t{double}." : ctx.basicHint,
     },
   ],
-  next: "76-malloc.html",
+  next: "76-arrays-i.html",
 });

@@ -39,8 +39,8 @@ const REFERENCE_SECTIONS: ReferenceSection[] = [
       {
         label: "After the operand",
         entries: [
-          { lesson: "78-subscripts.html", code: "p[i]", text: "Same as $c{*(p + i)}: element $c{i} of the array $c{p} points into, counting from the element $c{p} points to. Indices start at 0." },
-          { lesson: "88-decay.html", code: "a[i]", text: "Element $c{i} of the array $c{a}, since $c{a} decays into a pointer to $c{a[0]}." },
+          { lesson: "78-indexing.html", code: "a[i]", text: "Element $c{i} of the array $c{a}. Indices start at 0." },
+          { lesson: "85-decay.html", code: "", text: "$c{x[i]} means $c{*(x + i)}, so brackets work on any pointer, too." },
           { lesson: "126-structs-i.html", code: "s.m", text: "Member $c{m} of the struct $c{s}." },
           { lesson: "128-struct-pointers.html", code: "p->m", text: "Member $c{m} of the struct $c{p} points to: $c{(*p).m}." },
           { lesson: "54-functions-i.html", code: "f(x)", text: "Calls the function $c{f}, with $c{x} as its argument." },
@@ -71,7 +71,7 @@ const REFERENCE_SECTIONS: ReferenceSection[] = [
         entries: [
           { lesson: "14-integer-arithmetic.html", code: "x + y", text: "Addition." },
           { lesson: "14-integer-arithmetic.html", code: "x - y", text: "Subtraction." },
-          { lesson: "77-pointer-arithmetic.html", code: "p + n", text: "If $c{p} points to an array element, $c{p + n} points $c{n} elements later ($c{p - n} goes back). The result must stay inside the array, or point just past its end." },
+          { lesson: "84-pointer-arithmetic.html", code: "p + n", text: "If $c{p} points to an array element, $c{p + n} points $c{n} elements later ($c{p - n} goes back). The result must stay inside the array, or point just past its end." },
         ],
       },
       {
@@ -204,29 +204,28 @@ const REFERENCE_SECTIONS: ReferenceSection[] = [
     title: "Arrays",
     notes: [
       {
-        lesson: "76-malloc.html",
+        lesson: "76-arrays-i.html",
         code: "",
         text: "An array is a group of values of the same type, one after another in memory. Its type is written like $t{int[3]}: an array of 3 $t{int}s.",
       },
     ],
     groups: [
       {
-        label: "Arrays from malloc",
+        label: "Array variables",
         entries: [
-          { lesson: "76-malloc.html", code: "int* p = malloc(3 * sizeof(int));", text: "Gets a nameless block with room for 3 $t{int}s, which lasts until the program ends. Needs $c{#include <stdlib.h>}." },
-          { lesson: "77-pointer-arithmetic.html", code: "p + 1", text: "Points to the next element. Must stay inside the array, or just past its end." },
-          { lesson: "78-subscripts.html", code: "p[i]", text: "Same as $c{*(p + i)}." },
-          { lesson: "76-malloc.html", code: "p = q;", text: "If nothing points to a block anymore, it still exists, but can't be used: a memory leak." },
+          { lesson: "76-arrays-i.html", code: "int a[3];", text: "An array variable of 3 $t{int}s: $c{a[0]}, $c{a[1]}, and $c{a[2]}. Its type is $t{int[3]}." },
+          { lesson: "77-arrays-ii.html", code: "int a[4] = {1, 2};", text: "Elements left out of the list are set to $v{0}. With $c{int a[] = \\{...\\}}, the size comes from the list." },
+          { lesson: "84-pointer-arithmetic.html", code: "p + 1", text: "If $n{p} points to an array element, points to the next element. Must stay inside the array, or just past its end." },
+          { lesson: "85-decay.html", code: "a", text: "An array used in an expression decays into a pointer to its first element, $c{&a[0]}. Not with $c{&a}, which points to the whole array, or $c{sizeof a}." },
+          { lesson: "86-array-sizes.html", code: "sizeof a / sizeof a[0]", text: "The number of elements in the array variable $n{a}. Doesn't work on a pointer: $c{sizeof p} is just a pointer's size." },
+          { lesson: "94-2d-arrays.html", code: "int m[2][3];", text: "An array of 2 arrays of 3 $t{int}s. $c{m[i][j]} is element $c{j} of row $c{i}." },
         ],
       },
       {
-        label: "Array variables",
+        label: "Arrays from malloc",
         entries: [
-          { lesson: "82-arrays-i.html", code: "int a[3];", text: "An array variable of 3 $t{int}s: $c{a[0]}, $c{a[1]}, and $c{a[2]}. Its type is $t{int[3]}." },
-          { lesson: "83-arrays-ii.html", code: "int a[4] = {1, 2};", text: "Elements left out of the list are set to $v{0}. With $c{int a[] = \\{...\\}}, the size comes from the list." },
-          { lesson: "88-decay.html", code: "a", text: "An array used in an expression decays into a pointer to its first element, $c{&a[0]}. Not with $c{&a}, which points to the whole array, or $c{sizeof a}." },
-          { lesson: "89-array-sizes.html", code: "sizeof a / sizeof a[0]", text: "The number of elements in the array variable $n{a}. Doesn't work on a pointer: $c{sizeof p} is just a pointer's size." },
-          { lesson: "94-2d-arrays.html", code: "int m[2][3];", text: "An array of 2 arrays of 3 $t{int}s. $c{m[i][j]} is element $c{j} of row $c{i}." },
+          { lesson: "88-malloc.html", code: "int* p = malloc(3 * sizeof(int));", text: "Gets a nameless block with room for 3 $t{int}s, which lasts until the program ends. Needs $c{#include <stdlib.h>}." },
+          { lesson: "88-malloc.html", code: "p = q;", text: "If nothing points to a block anymore, it still exists, but can't be used: a memory leak." },
         ],
       },
       {
@@ -263,7 +262,7 @@ const REFERENCE_SECTIONS: ReferenceSection[] = [
       {
         entries: [
           { lesson: "67-putchar.html", code: "int putchar(int c);", text: "Prints the character with code $c{c} to stdout." },
-          { lesson: "76-malloc.html", code: "void *malloc(size_t size);", text: "In $c{stdlib.h}. Returns a pointer to a new block of $c{size} bytes. ($t{size_t} is an unsigned integer type for sizes.)" },
+          { lesson: "88-malloc.html", code: "void *malloc(size_t size);", text: "In $c{stdlib.h}. Returns a pointer to a new block of $c{size} bytes. ($t{size_t} is an unsigned integer type for sizes.)" },
           { lesson: "105-puts.html", code: "int puts(const char *s);", text: "Prints the string $c{s} points to, up to its $c{'\\0'}, then a newline." },
           { lesson: "108-printf.html", code: "printf(\"%d %c %s %f\\n\", ...)", text: "In $c{stdio.h}. Prints its format string, replacing each conversion with the next argument: $c{%d} an $t{int}, $c{%c} a character, $c{%s} a string, $c{%f} a $t{double}, $c{%%} a $c{%}." },
           { lesson: "109-printf-formatting.html", code: "%5.2f", text: "Width 5 (padded with spaces on the left; $c{%-5d} pads on the right, $c{%05d} with zeros), and 2 digits after the decimal point. $c{%x} prints hexadecimal." },
@@ -292,11 +291,11 @@ const REFERENCE_SECTIONS: ReferenceSection[] = [
           { lesson: "40-undefined-behavior.html", code: "x / 0", text: "Dividing by zero. $c{x % 0} is undefined too." },
           { lesson: "40-undefined-behavior.html", code: "int u;\nint v = u + 1;", text: "Using a variable's value before it has one." },
           { lesson: "41-errors-or-ub.html", code: "int* p;\n*p = 1;", text: "Following a pointer that doesn't point to anything." },
-          { lesson: "77-pointer-arithmetic.html", code: "p - 1", text: "Pointer arithmetic that leaves an array (here, if $n{p} points to the first element). Just past the end is allowed, but can't be followed." },
+          { lesson: "84-pointer-arithmetic.html", code: "p - 1", text: "Pointer arithmetic that leaves an array (here, if $n{p} points to the first element). Just past the end is allowed, but can't be followed." },
           { lesson: "40-undefined-behavior.html", code: "2147483647 + 1", text: "Overflowing an $t{int}: any step of a calculation whose result is outside the range of an $t{int}, even if later steps would bring it back into range." },
           { lesson: "117-ieee.html", code: "1.0 / 0.0", text: "Floating-point division by zero, or a result too big for its type. (IEEE 754 gives infinity, but C doesn't require it.)" },
           { lesson: "136-memory-errors.html", code: "free(p);\n*p = 1;", text: "Using memory after freeing it, or freeing it twice." },
-          { lesson: "78-subscripts.html", code: "a[3]", text: "Using an index outside an array (here, if $n{a} has 3 elements)." },
+          { lesson: "78-indexing.html", code: "a[3]", text: "Using an index outside an array (here, if $n{a} has 3 elements)." },
           { lesson: "100-string-literals.html", code: "char *p = \"hi\";\np[0] = 'y';", text: "Changing a string literal's array." },
           { lesson: "96-functions-and-arrays.html", code: "int *f(void) {\n  int a[3];\n  return a;\n}", text: "Using a pointer to a variable that no longer exists, such as a function's local array after the function returns." },
         ],
