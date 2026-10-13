@@ -59,7 +59,7 @@ createMachineTemplate({
       code: "        RET              ; return to the caller\n",
       instructions: [
         "",
-        "This is how C's local variables work, too. A function's variables live on the stack, just below its return address, and returning moves $c{SP} back up past them. They aren't erased, but the memory is free to be reused, and the very next call will put its own variables in the same place. That's why the boxes showed the same addresses for each call's variables, and why using a pointer to a variable from a function that has returned is a bug.",
+        "This is how C's local variables work, too. A function's variables live on the stack, just below its return address, and returning moves $c{SP} back up past them. They aren't erased, but the memory is free to be reused, and the very next call will put its own variables in the same place. That's why using a pointer to a variable from a function that has returned is a bug: it points into memory that something else is about to use. (The program state in this tutorial gives every call new addresses, which makes calls easier to tell apart, but a real program reuses the same stack memory over and over.)",
       ],
     },
   ],

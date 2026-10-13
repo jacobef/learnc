@@ -1,6 +1,6 @@
 import { createMachineTemplate } from "./shared-machine-template.js";
 createMachineTemplate({
-    initialInstructions: "The processor keeps track of which instruction comes next in a hidden register called the program counter. Normally it just moves on to the next instruction, but a jump instruction changes it. $c{JMP label} always jumps to the label, like $c{goto}. $c{JZ A, label} jumps only if $c{A} is zero, and $c{JNZ A, label} jumps only if it isn't.\nThat's all a processor needs to make an $c{if} statement or a loop. In fact, this program is exactly the kind of loop you wrote with $c{goto}, and it's what a $c{while} loop really turns into.\nClick $runLineButton to continue.",
+    initialInstructions: "The processor keeps track of which instruction comes next in a hidden register called the program counter. Normally it just moves on to the next instruction, but a jump instruction changes it. $c{JMP label} always jumps to the label, like $c{goto}. $c{JZ A, label} jumps only if $c{A} is zero, and $c{JNZ A, label} jumps only if it isn't.\nThat's all a processor needs to make an $c{if} statement or a loop. In fact, this program is exactly the kind of loop you saw made with $c{goto}, and it's what a $c{while} loop really turns into.\nClick $runLineButton to continue.",
     steps: [
         { code: "        SET A, 4        ; A = 4\n" },
         { code: "        SET B, 1        ; B = 1\n" },

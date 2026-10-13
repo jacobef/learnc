@@ -64,7 +64,7 @@ createCompileQuizTemplate({
       code: "",
       question: false,
       explanation:
-        "So undefined behavior isn't a particular result, like a crash or a garbage value. It's the absence of any rule at all, and optimizers take advantage of that. A program with undefined behavior can seem to work for years, and then break when it's compiled with a newer compiler or different settings. That's why C programmers work so hard to avoid it, and why there are tools to catch it, like the $c{-fsanitize=undefined} option of the gcc and clang compilers, which makes a program stop with an error when it does something undefined, much like the interpreter in this tutorial.",
+        "So undefined behavior isn't a particular result, like a crash or a garbage value. It's the absence of any rule at all, and optimizers take advantage of that. A program with undefined behavior can seem to work for years, and then break when it's compiled with a newer compiler or different settings. That's why C programmers work so hard to avoid it, and why there are tools to catch it, like the $c{-fsanitize=undefined} and $c{-fsanitize=address} options of the gcc and clang compilers, which make a program report many kinds of undefined behavior as they happen, a bit like the interpreter in this tutorial. No tool catches every kind, though.",
     },
   ],
   next: "138-scope-and-storage.html",
