@@ -44,7 +44,7 @@ createCompileQuizTemplate({
     {
       code: "int x = 5;\nint y = x / (x - 5);",
       explanation:
-        "This compiles, since the compiler doesn't work out what $c{x - 5} will be. But when the program runs, it's $v{0}, so this divides by zero.",
+        "This compiles: whether $c{x - 5} is zero is about what the program does, not how it's written. (A compiler might notice and warn you, but it still has to compile it.) When the program runs, it's $v{0}, so this divides by zero.",
       hint: "What is $c{x - 5}?",
     },
   ],
