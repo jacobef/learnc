@@ -140,6 +140,16 @@ function boxesNamed(boxes, ...names) {
 function isHeaderLine(line) {
     return /^\s*(?:}\s*else\s+)?(?:if|while|for|switch)\s*\(|^\s*}\s*while\s*\(/.test(line || "");
 }
+// What decides where execution continues after a header the learner jumps from.
+function headerHint(header) {
+    if (/\bswitch\s*\(/.test(header)) {
+        return "Find the $c{case} label whose value matches the $c{switch}'s value, or $c{default} if none does. Execution continues just after that label.";
+    }
+    if (/\b(?:while|for)\s*\(/.test(header)) {
+        return "Work out whether the condition is true, using the values in the program state. If it is, execution continues into the loop's body. If it isn't, it continues just after the loop.";
+    }
+    return "Work out whether the condition is true, using the values in the program state. If it is, execution continues inside the braces just below it. If it isn't, it skips past them, to the $c{else} if there is one.";
+}
 function resolveIndexed(spec, index) {
     if (Array.isArray(spec))
         return spec[index];
@@ -1060,7 +1070,7 @@ function createProgramTemplate(config) {
         if (checkBtn)
             checkBtn.classList.toggle("hidden", !locked);
         if (hintBtn)
-            hintBtn.classList.toggle("hidden", !(locked && stage?.editableMode === "state"));
+            hintBtn.classList.toggle("hidden", !(locked && stage?.editableMode !== "none"));
         if (addBtn) {
             addBtn.classList.toggle("hidden", !(locked && stage?.editableMode === "state" && workspace.allowVariableCreation));
         }
@@ -1287,7 +1297,11 @@ function createProgramTemplate(config) {
             showHint(parts);
             return;
         }
-        showHint(currentHint());
+        if (stage?.editableMode === "boundary" && stageNeedsSolve(stage)) {
+            showHint(selectedBoundaryByStage.get(stage.index) === stage.afterBoundary
+                ? "Looks good. Press $checkButton."
+                : stage.hints?.(hintContext(stage)) || headerHint(stage.step?.lines.find(isHeaderLine) ?? ""));
+        }
     });
     resetBtn?.addEventListener("click", () => {
         const stage = currentStage();
