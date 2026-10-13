@@ -1,0 +1,17 @@
+# Redeploys the site, which publishes this branch under /wip, after each push to it.
+name: Publish work in progress
+
+on:
+  push:
+    branches: [claude/new-learning-levels-e238a3]
+
+permissions:
+  actions: write
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh workflow run deploy.yml --ref main --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
