@@ -18,7 +18,7 @@ for (int i = 1; i < n; i++) {
   }
 }`,
     textareaMinLines: 7,
-    instructions: "$n{a} points to the first element of an array from $c{malloc}, which has $n{n} $t{int}s, where $n{n} is at least $v{1}. The program doesn't know $n{n} in advance, which is why it couldn't just declare an array. Write code that creates an $t{int} variable named $n{largest}, whose value is the largest element.",
+    instructions: "$n{a} points to the first element of an array from $c{malloc}, which has $n{n} $t{int}s, where $n{n} is at least $v{1}. The program doesn't know $n{n} in advance, which is why the array comes from $c{malloc}. Write code that creates an $t{int} variable named $n{largest}, whose value is the largest element.",
     hints: (ctx) => {
         if (ctx.behavesLike(`int largest = 0;
 for (int i = 0; i < n; i++) {

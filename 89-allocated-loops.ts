@@ -2,7 +2,7 @@ import { createProgramTemplate } from "./shared-program-template.js";
 
 createProgramTemplate({
   initialInstructions:
-    "Since $c{malloc} is called while the program runs, an array from $c{malloc} can have any size the program computes, unlike an array variable, whose size is written in the code.\nClick $runLineButton to continue.",
+    "Since $c{malloc} is called while the program runs, an array from $c{malloc} can have any size the program computes, unlike an array variable, whose size is usually written in the code. (C also has variable-length arrays, array variables whose length is computed while the program runs. But compilers don't have to support them, and a big one can crash the program, so many programmers avoid them.)\nClick $runLineButton to continue.",
   steps: [
     { code: "#include <stdlib.h>\n" },
     { code: "int n = 4;\n" },

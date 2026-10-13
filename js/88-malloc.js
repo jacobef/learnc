@@ -22,7 +22,7 @@ createProgramTemplate({
         {
             code: "q[1] = *p + 1;\n",
             editable: true,
-            hints: (ctx) => ctx.basicHintTopicIs("value") ? "$c{q[1]} is element $v{[1]} of the array, and $c{*p} is $v{7}." : ctx.basicHint,
+            hints: (ctx) => ctx.basicHintTopicIs("value") ? "$c{q[1]} is the second $t{int} in the block $n{q} points to, the one labeled $v{[1]}. $c{*p} is $v{7}." : ctx.basicHint,
         },
         {
             code: "p = q;\n",

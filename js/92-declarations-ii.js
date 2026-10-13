@@ -57,7 +57,7 @@ createProgramTemplate({
         {
             code: "r = &a;\n",
             editable: true,
-            instructions: "$c{&a} is a pointer to the whole array $n{a}. (This is the other place where an array doesn't decay: when it's the operand of $c{&}.) It has the same address as $c{&a[0]}, but a different type: $t{int (*)[3]} instead of $t{int *}.",
+            instructions: "$c{&a} is a pointer to the whole array $n{a}. (This is another place where an array doesn't decay: when it's the operand of $c{&}.) It has the same address as $c{&a[0]}, but a different type: $t{int (*)[3]} instead of $t{int *}.",
             hints: (ctx) => {
                 if (ctx.basicHintTopicIs("value", "r")) {
                     return "$c{&a} is $n{a}'s address, which is the same as its first element's address.";
