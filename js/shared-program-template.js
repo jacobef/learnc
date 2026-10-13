@@ -1198,13 +1198,27 @@ function createProgramTemplate(config) {
             const available = Math.max(0, codeEl.clientHeight - padding * 2);
             const previous = runtimeStages[stage.index - 1];
             const following = runtimeStages[stage.index + 1];
-            const wanted = [
+            // Once a step has run, where execution is now matters most, which is
+            // somewhere else entirely after a call, return, or jump. The marker sits
+            // just above the line at its index.
+            const markerEl = stageNeedsSolve(stage) ? null : codeEl.querySelector(".boundary:not(.selectable)");
+            let markerIndex = 0;
+            for (let node = markerEl?.previousElementSibling; node; node = node.previousElementSibling) {
+                if (node.classList.contains("line"))
+                    markerIndex += 1;
+            }
+            const marker = markerEl ? [[markerIndex - 1, markerIndex]] : [];
+            const [first, ...wanted] = [
+                ...marker,
+                [stage.runLine, stage.runEndLine],
                 [stage.runLine - 1, stage.runLine - 1],
                 [stage.runEndLine + 1, stage.runEndLine + 1],
                 ...(previous ? [[previous.runLine, previous.runEndLine]] : []),
                 ...(following ? [[following.runLine, following.runEndLine]] : []),
-            ].filter(([start]) => start >= 0 && start < lines.length);
-            let shown = extent(stage.runLine, stage.runEndLine);
+            ]
+                .map(([start, end]) => [Math.max(0, start), Math.min(lines.length - 1, end)])
+                .filter(([start, end]) => start <= end);
+            let shown = extent(first[0], first[1]);
             for (const [start, end] of wanted) {
                 const range = extent(start, end);
                 const grown = { top: Math.min(shown.top, range.top), bottom: Math.max(shown.bottom, range.bottom) };
