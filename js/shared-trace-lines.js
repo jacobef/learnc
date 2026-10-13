@@ -163,9 +163,15 @@ export function strikeFragmentsForTrace(lines, trace, traceEndIndex) {
             if (restarted || line < skip.loop.start || line > skip.loop.end)
                 latestRangeByBranch.delete(key);
         });
-        if (event.kind !== "branch")
-            continue;
         const lineKey = `${event.file}:${event.startLine}`;
+        const loop = innermostLoop(event.startLine);
+        // A break out of a switch skips the rest of it.
+        if (event.kind !== "branch") {
+            if (event.skippedRange) {
+                latestRangeByBranch.set(`${event.frameId}:${lineKey}:jump`, { range: event.skippedRange, frameId: event.frameId, loop });
+            }
+            continue;
+        }
         const columns = ifColumns.get(event.startLine) ?? [];
         const range = event.skippedRange;
         let siteIndex = -1;
@@ -185,7 +191,7 @@ export function strikeFragmentsForTrace(lines, trace, traceEndIndex) {
             : range
                 ? `${lineKey}:${range.startLine}:${range.startColumn}:${range.endLine}:${range.endColumn}`
                 : lineKey);
-        latestRangeByBranch.set(branchKey, { range, frameId: event.frameId, loop: innermostLoop(event.startLine) });
+        latestRangeByBranch.set(branchKey, { range, frameId: event.frameId, loop });
     }
     const fragments = [];
     // Each call skips its own branches.
@@ -195,8 +201,9 @@ export function strikeFragmentsForTrace(lines, trace, traceEndIndex) {
             return;
         for (let line = range.startLine; line <= range.endLine && line < lines.length; line += 1) {
             const lineText = lines[line] ?? "";
-            const start = line === range.startLine ? range.startColumn : 0;
-            const end = line === range.endLine ? range.endColumn : lineText.length;
+            // Indentation and trailing spaces aren't struck.
+            const start = Math.max(line === range.startLine ? range.startColumn : 0, lineText.search(/\S|$/));
+            const end = Math.min(line === range.endLine ? range.endColumn : lineText.length, lineText.trimEnd().length);
             if (end > start)
                 fragments.push({ line, start, end });
         }

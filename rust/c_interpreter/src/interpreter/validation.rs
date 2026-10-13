@@ -845,6 +845,7 @@ impl<'a> Interpreter<'a> {
             cboxes_main_state: Vec::new(),
             cboxes_initial_state: Vec::new(),
             cboxes_argument_objects: Vec::new(),
+            cboxes_last_break: None,
             cboxes_trace: Vec::new(),
             cboxes_expression_request: None,
             cboxes_expression_result: None,

@@ -1035,6 +1035,25 @@ fn branch_trace_reports_the_exact_skipped_source_range() {
 }
 
 #[test]
+fn switch_trace_skips_the_cases_before_the_match_and_after_a_break() {
+    let original = "int x = 2;\nswitch (x) {\ncase 1:\n  x = 10;\ncase 2:\n  x = 20;\n  break;\ncase 3:\n  x = 30;\n}\n";
+    let (files, source_display, _) = cboxes_prepare_virtual_sources(
+        vec![(PathBuf::from("program.c"), original.to_owned())],
+        true,
+    )
+    .unwrap();
+    let result = run_virtual_sources_with_options(&files, &RunOptions::default()).unwrap();
+    let json = cboxes_success_json(&result, &source_display);
+
+    assert!(json.contains(
+        "\"skippedRange\":{\"file\":\"program.c\",\"startLine\":1,\"startColumn\":12,\"endLine\":4,\"endColumn\":0}"
+    ));
+    assert!(json.contains(
+        "\"skippedRange\":{\"file\":\"program.c\",\"startLine\":6,\"startColumn\":8,\"endLine\":9,\"endColumn\":0}"
+    ));
+}
+
+#[test]
 fn explicit_main_reports_its_closing_brace_as_the_program_end() {
     let source = "int main(void) {\n  int a = 1;\n}\n";
     let result = run_source("program.c", source).unwrap();

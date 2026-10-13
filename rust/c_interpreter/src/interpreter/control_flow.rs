@@ -227,7 +227,10 @@ impl<'a> Interpreter<'a> {
                 Statement::Block(block) => self.exec_block(block, frame, objects),
                 // Jump statements run like any other statement, and then jump.
                 Statement::Break(span) => {
+                    let trace_index = self.cboxes_trace.len();
                     self.trace_cboxes_main_event(*span, frame, objects)?;
+                    self.cboxes_last_break =
+                        (self.cboxes_trace.len() > trace_index).then_some((trace_index, *span));
                     Ok(Flow::LoopBreak)
                 }
                 Statement::Continue(span) => {
@@ -1350,7 +1353,7 @@ impl<'a> Interpreter<'a> {
                     objects,
                 )?;
                 let control = self.integer_promotion(control, expr.span())?;
-                self.exec_switch_with_control(control, body, frame, objects)
+                self.exec_switch_with_control(control, body, None, frame, objects)
             }
             _ => Err(Diagnostic::error(
                 "internal error: longjmp target site did not match the resumed statement",
@@ -1375,33 +1378,56 @@ impl<'a> Interpreter<'a> {
             objects,
         )?;
         let control = self.integer_promotion(control, expr.span())?;
-        // Choosing where to jump is the switch's own step, like an if's condition.
-        self.trace_cboxes_main_branch_event(
-            Span::new(span.file, span.start, expr.span().end),
-            None,
-            frame,
-            objects,
-        )?;
-        self.exec_switch_with_control(control, body, frame, objects)
+        let header = Span::new(span.file, span.start, expr.span().end);
+        self.exec_switch_with_control(control, body, Some(header), frame, objects)
     }
 
+    // The traced header, if there is one, is the switch's own step, like an if's
+    // condition. It skips the cases before the one it jumps to.
     fn exec_switch_with_control(
         &mut self,
         control: TypedValue,
         body: &Block,
+        traced_header: Option<Span>,
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<Flow, Diagnostic> {
         let control_value = control.to_int()?;
         let dispatch = self.build_switch_dispatch(body, &control.ty, frame, objects)?;
         let target = Self::switch_dispatch_target(&dispatch, control_value);
+        let interior_end = body.span.end.saturating_sub(1);
+        if let Some(header) = traced_header {
+            let interior_start = body.span.start + 1;
+            let skipped_end = target.map_or(interior_end, |target| target.start);
+            let skipped = (skipped_end > interior_start)
+                .then(|| Span::new(body.span.file, interior_start, skipped_end));
+            self.trace_cboxes_main_branch_event(header, skipped, frame, objects)?;
+        }
         let Some(target) = target else {
             return Ok(Flow::Continue);
         };
         let _switch_depth = DepthGuard::enter(&mut self.active_switch_dispatch_depth);
         let result = self.enter_block_at_switch_label(body, target, frame, objects);
         match result? {
-            Some(Flow::LoopBreak) | Some(Flow::Continue) | None => Ok(Flow::Continue),
+            Some(Flow::LoopBreak) => {
+                // A break skips the rest of the switch.
+                if let Some((index, span)) = self.cboxes_last_break.take()
+                    && interior_end > span.end
+                {
+                    let (file, start_line, start_column, end_line, end_column) = self
+                        .sources
+                        .span_display_range(Span::new(span.file, span.end, interior_end));
+                    self.cboxes_trace[index].skipped_range = Some(ProgramSourceRange {
+                        file: file.display().to_string(),
+                        start_line,
+                        start_column,
+                        end_line,
+                        end_column,
+                    });
+                }
+                Ok(Flow::Continue)
+            }
+            Some(Flow::Continue) | None => Ok(Flow::Continue),
             Some(flow) => Ok(flow),
         }
     }

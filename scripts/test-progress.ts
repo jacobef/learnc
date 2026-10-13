@@ -52,6 +52,24 @@ test("lesson saves round-trip, stay scoped to lessons, and clear without removin
   assert.equal(readSandboxProgress(), "sandbox code");
 });
 
+test("the work-in-progress copy of the site counts and clears only its own progress", () => {
+  const { values } = browserStorage();
+  writeLevelProgress({ boundary: 3 }, "1-assignment-i.html");
+  writeSandboxProgress("main sandbox");
+  Object.defineProperty(window, "location", { value: { pathname: "/wip/4-code-editing-i.html" }, configurable: true });
+  writeLevelProgress({ boundary: 1 });
+  assert.equal(readSandboxProgress(), null);
+  writeSandboxProgress("wip sandbox");
+  assert.equal(savedLevelCount(), 1);
+  clearAllLevelProgress();
+  clearSandboxProgress();
+  assert.equal(savedLevelCount(), 0);
+  Object.defineProperty(window, "location", { value: { pathname: "/4-code-editing-i.html" }, configurable: true });
+  assert.equal(savedLevelCount(), 1);
+  assert.equal(readSandboxProgress(), "main sandbox");
+  assert.ok(values.has("cboxes-progress-v1:1-assignment-i.html"));
+});
+
 test("unavailable storage and invalid lesson payloads do not break page initialization", () => {
   const { storage, values } = browserStorage();
   for (const value of ["null", "[]", "not JSON", '{"version":2,"state":{}}', '{"text":"old unversioned state"}']) {

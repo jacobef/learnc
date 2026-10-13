@@ -673,6 +673,8 @@ pub struct Interpreter<'a> {
     cboxes_initial_state: Vec<ProgramStateBox>,
     // main's argv array, then the strings it points to.
     cboxes_argument_objects: Vec<ObjectId>,
+    // The trace event of the last break statement, and where it is.
+    cboxes_last_break: Option<(usize, Span)>,
     cboxes_trace: Vec<ProgramTraceEvent>,
     cboxes_expression_request: Option<ProgramExpressionEvalRequest>,
     cboxes_expression_result: Option<ProgramExpressionResult>,

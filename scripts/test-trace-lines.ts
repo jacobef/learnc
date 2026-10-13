@@ -174,6 +174,25 @@ for (int i = 0; i < 3; i++) {
   assert.deepEqual(doneAt(source, run, "statement", 13, 0), [0, 1, 2, 7, 8, 10, 11, 12, 13]);
 });
 
+test("a switch crosses out the cases before the one it jumps to, and a break the rest", () => {
+  const source = `int day = 2;
+int w = 0;
+switch (day) {
+  case 1:
+    w = 1;
+  case 2:
+    w = 2;
+    break;
+  case 3:
+    w = 3;
+}
+`;
+  assert.deepEqual(struckAt(source, "branch", 2, 0), [3, 4]);
+  assert.deepEqual(struckAt(source, "statement", 7, 0), [3, 4, 8, 9]);
+  // Nothing matching skips the whole body.
+  assert.deepEqual(struckAt(source.replace("day = 2", "day = 9"), "branch", 2, 0), [3, 4, 5, 6, 7, 8, 9]);
+});
+
 test("a block's opening brace counts as done once execution is inside it", () => {
   const source = `int a = 1;
 {
