@@ -49,13 +49,14 @@ function writeWindowNameProgress(value) {
         // This fallback is best effort, just like localStorage.
     }
 }
-// The page's path, so a copy of the site in a subfolder (like /wip/) keeps its own
-// progress. At the site root, this is just the file name.
+// A lesson's file name, wherever the site is hosted. The work-in-progress copy of
+// the site, in a wip folder, keeps its own progress.
 export function currentLevelId() {
     const parts = window.location.pathname.trim().split("/").filter(Boolean);
-    if (!parts.length || !parts[parts.length - 1].includes("."))
-        parts.push("index.html");
-    return parts.join("/");
+    const last = parts[parts.length - 1] ?? "";
+    const file = last.includes(".") ? last : "index.html";
+    const folder = last.includes(".") ? parts[parts.length - 2] : last;
+    return folder === "wip" ? `wip/${file}` : file;
 }
 function levelProgressKey(levelId) {
     return `${PROGRESS_PREFIX}${levelId}`;

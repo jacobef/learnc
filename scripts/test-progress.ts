@@ -32,6 +32,13 @@ function browserStorage() {
 test("lesson saves round-trip, stay scoped to lessons, and clear without removing other storage", () => {
   const { values } = browserStorage();
   assert.equal(currentLevelId(), "4-code-editing-i.html");
+  // The work-in-progress copy of the site keeps its own progress.
+  const location = window.location;
+  Object.defineProperty(window, "location", { value: { pathname: "/wip/4-code-editing-i.html" }, configurable: true });
+  assert.equal(currentLevelId(), "wip/4-code-editing-i.html");
+  Object.defineProperty(window, "location", { value: { pathname: "/wip/" }, configurable: true });
+  assert.equal(currentLevelId(), "wip/index.html");
+  Object.defineProperty(window, "location", { value: location, configurable: true });
   writeLevelProgress({ text: "int cloud;", pass: true });
   writeLevelProgress({ boundary: 3 }, "1-assignment-i.html");
   assert.deepEqual(readLevelProgress(), { text: "int cloud;", pass: true });
