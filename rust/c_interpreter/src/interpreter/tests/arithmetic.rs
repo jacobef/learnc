@@ -11,6 +11,24 @@ fn host_abi_preserves_interpreted_long_width() {
 }
 
 #[test]
+fn binary_integer_constants_follow_the_other_prefixed_constants() {
+    assert_exit_status(
+        r#"
+            int main(void) {
+                unsigned int u = 0b11111111111111111111111111111111;
+                long l = 0B100000000000000000000000000000000;
+                return 0b101 + 0b1u * (u == 4294967295u) + 8 * (l == 4294967296L);
+            }
+        "#,
+        14,
+    );
+    assert_diagnostic_contains(
+        "int main(void) { return 0b102; }",
+        "invalid binary integer literal",
+    );
+}
+
+#[test]
 fn signed_int_overflow_uses_32_bit_int_model() {
     let source = r#"
             int main(void) {

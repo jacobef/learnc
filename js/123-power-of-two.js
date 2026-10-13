@@ -10,5 +10,5 @@ createCodeOutputChallengeTemplate({
     hints: (ctx) => ctx.currentResult.kind === "wrong-output-value"
         ? "Add up $c{n & 1} for each bit, shifting $n{n} right by one each time, until $n{n} is $v{0}."
         : null,
-    next: "124-scope-and-storage.html",
+    next: "124-the-machine.html",
 });

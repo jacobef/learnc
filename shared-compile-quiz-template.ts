@@ -32,6 +32,10 @@ interface QuizStep {
   hint?: Parts;
   // Whether the learner has to say what happens. Defaults to true.
   question?: boolean;
+  // Answers to choose from instead of whether the code compiles, with the index of
+  // the right one. The code isn't run.
+  choices?: string[];
+  answer?: number;
 }
 
 interface CompileQuizConfig {
@@ -144,6 +148,12 @@ function createCompileQuizTemplate(config: CompileQuizConfig): void {
   bindBtnRefPulse(ui.section);
 
   const results: QuizResult[] = steps.map((step, index) => {
+    if (step.choices) {
+      if (step.answer === undefined || !step.choices[step.answer]) {
+        invalidTemplateConfig(`Quiz step ${index} needs the index of its right answer.`);
+      }
+      return { outcome: "compiles", message: "", line: null };
+    }
     const source = step.code.endsWith("\n") ? step.code : `${step.code}\n`;
     const run = implicitMain
       ? runCProgram(source)
@@ -202,9 +212,10 @@ function createCompileQuizTemplate(config: CompileQuizConfig): void {
       return;
     }
     const heading = document.createElement("div");
-    heading.className = `quiz-result-title quiz-result-${result.outcome}`;
-    heading.textContent =
-      result.outcome === "error"
+    heading.className = `quiz-result-title quiz-result-${step.choices ? "compiles" : result.outcome}`;
+    heading.textContent = step.choices
+      ? step.choices[step.answer!]!
+      : result.outcome === "error"
         ? `Doesn't compile${result.line == null ? "" : ` (line ${result.line + 1})`}`
         : result.outcome === "ub"
           ? `Undefined behavior${result.line == null ? "" : ` (line ${result.line + 1})`}`
@@ -238,13 +249,17 @@ function createCompileQuizTemplate(config: CompileQuizConfig): void {
     }
     clearNode(ui.choices);
     const outcomes: QuizOutcome[] = allowUndefinedAnswer ? ["compiles", "error", "ub"] : ["compiles", "error"];
-    for (const outcome of outcomes) {
+    const options: Array<{ label: string; right: boolean }> = step.choices
+      ? step.choices.map((label, index) => ({ label, right: index === step.answer }))
+      : outcomes.map((outcome) => ({ label: ANSWER_LABELS[outcome], right: outcome === result.outcome }));
+    ui.choices.classList.toggle("quiz-choices-list", !!step.choices);
+    for (const option of options) {
       const button = document.createElement("button");
       button.type = "button";
-      button.textContent = ANSWER_LABELS[outcome];
+      button.textContent = option.label;
       button.disabled = revealed(boundary);
-      if (revealed(boundary) && outcome === result.outcome) button.classList.add("is-active");
-      button.addEventListener("click", () => answer(outcome));
+      if (revealed(boundary) && option.right) button.classList.add("is-active");
+      button.addEventListener("click", () => answer(option.right));
       ui.choices.appendChild(button);
     }
     ui.choices.classList.toggle("hidden", !isQuestion(boundary));
@@ -258,9 +273,9 @@ function createCompileQuizTemplate(config: CompileQuizConfig): void {
     persist();
   }
 
-  function answer(outcome: QuizOutcome) {
+  function answer(right: boolean) {
     if (revealed(boundary)) return;
-    if (outcome !== results[boundary]!.outcome) {
+    if (!right) {
       ui.statusEl.textContent = "incorrect";
       ui.statusEl.className = "err";
       flashStatus(ui.statusEl);

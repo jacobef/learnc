@@ -5,7 +5,7 @@ const big = "int big = 2147483647;";
 
 createExpressionEvalTemplate({
   initialInstructions:
-    "Some operations aren't allowed in C, like dividing by zero. If a program does one anyway, the result is called undefined behavior: the C language makes no promises at all about what happens next. On a real computer, the program might crash, or keep running with a garbage value, or do something stranger, and it might do something different every time it runs. In this tutorial, undefined behavior just stops the program with an error.\nFor each expression, either enter its type and value, or press $undefinedButton if evaluating it would be undefined behavior.",
+    "Some operations aren't allowed in C, like dividing by zero. If a program does one anyway, the result is called undefined behavior: the C language makes no promises at all about what happens next. On a real computer, the program might crash, or keep running with a garbage value, or do something stranger, and it might do something different every time it runs. In this tutorial, undefined behavior just stops the program with an error. (Much later, in $i{136. Undefined Behavior Revisited}, you'll see what really happens, and why.)\nFor each expression, either enter its type and value, or press $undefinedButton if evaluating it would be undefined behavior.",
   steps: [
     {
       expression: "7 / 0",

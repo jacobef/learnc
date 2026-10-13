@@ -3941,3 +3941,171 @@ body.arrays-ambiance-shake .wrap {
     font-size: 13px;
     color: #666;
 }
+
+/* The toy machine: lights, registers, and memory. */
+.machine-code-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+.machine-code-row > .panel {
+    flex: 2 1 560px;
+    min-width: 0;
+}
+/* The C pane, when there is one, sits beside the assembly only if there's room for both. */
+.machine-code-row > .panel:first-child:not(:last-child) {
+    flex: 1 1 300px;
+}
+.machine-panel {
+    padding-bottom: 12px;
+}
+.machine-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px 0;
+}
+.machine-state {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 10px 12px 4px;
+}
+.machine-lights-caption,
+.machine-group-title {
+    font-size: 13px;
+    color: #666;
+    margin-bottom: 6px;
+}
+.machine-lights-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.machine-light {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    width: 52px;
+    padding: 6px 0;
+    border: 1px solid var(--line, #d8dde6);
+    border-radius: 8px;
+    background: #f7f8fb;
+    font: inherit;
+    color: inherit;
+}
+button.machine-light {
+    cursor: pointer;
+}
+button.machine-light:hover {
+    border-color: #9aa4b5;
+}
+.machine-light-bulb {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: #3a3f4b;
+    box-shadow: inset 0 -3px 4px rgba(0, 0, 0, 0.35);
+    transition: background 120ms ease, box-shadow 120ms ease;
+}
+.machine-light.is-on .machine-light-bulb {
+    background: #ffd447;
+    box-shadow: 0 0 10px 3px rgba(255, 196, 0, 0.65), inset 0 -2px 3px rgba(180, 120, 0, 0.4);
+}
+.machine-light-label {
+    font-size: 11px;
+    color: #666;
+}
+.machine-light-weight {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px;
+    color: #888;
+}
+.machine-cells {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.machine-cell {
+    min-width: 72px;
+    padding: 6px 10px;
+    border: 2px solid #222;
+    border-radius: 10px;
+    text-align: center;
+}
+.machine-cell-name {
+    font-size: 12px;
+    color: #666;
+}
+.machine-cell-value {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--value, #1e77ff);
+}
+input.machine-cell-value {
+    width: 64px;
+    text-align: center;
+    border: 1px dashed #c9a400;
+    border-radius: 6px;
+    background: #fffbe6;
+}
+.machine-cell-note {
+    font-size: 12px;
+    color: var(--name, #1f9d55);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+.machine-c-active .src {
+    background: #e8f0ff;
+    border-radius: 4px;
+}
+.machine-status {
+    padding: 6px 12px 0;
+    min-height: 1.2em;
+}
+.machine-status:empty {
+    display: none;
+}
+.program-lights {
+    padding: 8px 8px 0;
+}
+.machine-editor {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 220px;
+    padding: 10px 12px;
+    border: none;
+    border-top: 1px solid var(--line, #d8dde6);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 16px;
+    line-height: 1.6;
+    resize: vertical;
+    background: #fffdf2;
+}
+.machine-results {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+.machine-results > .panel {
+    flex: 1 1 520px;
+    min-width: 0;
+}
+.quiz-choices.quiz-choices-list {
+    flex-direction: column;
+    align-items: stretch;
+}
+.quiz-choices.quiz-choices-list button {
+    text-align: left;
+    white-space: normal;
+}
+/* Assembly lines line up in columns, so they scroll instead of wrapping. */
+.machine-code-row .codepane {
+    overflow-x: auto;
+}
+.machine-code-row .src {
+    white-space: pre;
+}

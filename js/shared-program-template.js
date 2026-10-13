@@ -1,5 +1,6 @@
 import { doneLinesForTrace, strikeFragmentsForTrace } from "./shared-trace-lines.js";
 import { renderSyntaxDiagrams } from "./shared-syntax-tree.js";
+import { renderLights } from "./shared-machine-template.js";
 import { applyOtherNames, appendStateObjects, bindBtnRefPulse, clearNode, cloneBoxes, isMobileViewport, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, makeAnswerBox, queryRole, readBoxState, renderCodePane, reshapeDynamicBox, restoreWorkspace, serializeWorkspace, setPartsContent, setStepperLabel, syncDocumentTitleFromNav, withSidebarParam, } from "./shared-core.js";
 import { createButtonTokenReplacer, createHintPresenter, createLevelProgressController, nextLessonLabel, resetLevelAfterConfirmation, } from "./shared-lesson-runtime.js";
 import { runCFiles, runCProgram } from "./shared-c-interpreter.js";
@@ -719,6 +720,7 @@ function createProgramTemplate(config) {
             });
             stageEl.appendChild(wrap);
             refreshDynamicAddresses(wrap, stage);
+            renderVariableLights(wrap, true);
             wrap.addEventListener("input", (event) => {
                 const target = event.target;
                 const dynamicBox = target instanceof Element
@@ -732,6 +734,7 @@ function createProgramTemplate(config) {
                 persistProgress();
                 if (workspace.showOtherNames)
                     refreshOtherNames();
+                renderVariableLights(wrap, true);
             });
             wrap.addEventListener("focusout", (event) => {
                 const target = event.target;
@@ -775,6 +778,7 @@ function createProgramTemplate(config) {
             });
         }
         stageEl.appendChild(wrap);
+        renderVariableLights(wrap, false);
         // Once main has returned, the program is over, and what it returned is its exit status.
         if (!implicitMain && stage && stage.index === runtimeStages.length - 1) {
             const exit = document.createElement("div");
@@ -789,6 +793,29 @@ function createProgramTemplate(config) {
         if (workspace.showOtherNames) {
             refreshOtherNames();
         }
+    }
+    // The lights panel for workspace.lights, above the program state.
+    function renderVariableLights(wrap, editable) {
+        const name = workspace.lights;
+        if (!name || !stageEl)
+            return;
+        stageEl.querySelector(".program-lights")?.remove();
+        const valueEl = [...wrap.querySelectorAll(".vbox")]
+            .find((box) => (box.dataset.stateName || box.querySelector(".name-text")?.textContent?.trim()) === name)
+            ?.querySelector(".value");
+        const holder = document.createElement("div");
+        holder.className = "program-lights";
+        stageEl.prepend(holder);
+        if (!valueEl)
+            return;
+        const value = Number((valueEl.dataset.rawValue ?? valueEl.textContent ?? "").trim()) & 0xff;
+        holder.appendChild(renderLights(value, editable && valueEl.isContentEditable
+            ? (bit) => {
+                valueEl.textContent = String(value ^ (1 << bit));
+                // The workspace's input listener saves the change and redraws the lights.
+                valueEl.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+            : undefined, `the value of ${name}`));
     }
     function getWorkspaceEl() {
         return stageEl?.querySelector('[data-role="workspace"]') || null;

@@ -1,5 +1,6 @@
 import { doneLinesForTrace, strikeFragmentsForTrace } from "./shared-trace-lines.js";
 import { renderSyntaxDiagrams } from "./shared-syntax-tree.js";
+import { renderLights } from "./shared-machine-template.js";
 import type { SyntaxDiagram } from "./shared-syntax-tree.js";
 import {
   applyOtherNames,
@@ -59,6 +60,9 @@ interface ProgramWorkspaceConfig {
   // Leaves string literals' arrays out of the program state, for lessons where
   // they'd only be clutter, like ones that print with printf.
   hideStringLiterals?: boolean;
+  // Shows the bits of this unsigned char variable as eight lights, which can be
+  // clicked to change it while it's being edited.
+  lights?: string;
 }
 
 interface ProgramContext {
@@ -993,6 +997,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       });
       stageEl.appendChild(wrap);
       refreshDynamicAddresses(wrap, stage);
+      renderVariableLights(wrap, true);
       wrap.addEventListener("input", (event) => {
         const target = event.target;
         const dynamicBox =
@@ -1008,6 +1013,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
         updateResetVisibility();
         persistProgress();
         if (workspace.showOtherNames) refreshOtherNames();
+        renderVariableLights(wrap, true);
       });
       wrap.addEventListener("focusout", (event) => {
         const target = event.target;
@@ -1049,6 +1055,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       });
     }
     stageEl.appendChild(wrap);
+    renderVariableLights(wrap, false);
     // Once main has returned, the program is over, and what it returned is its exit status.
     if (!implicitMain && stage && stage.index === runtimeStages.length - 1) {
       const exit = document.createElement("div");
@@ -1063,6 +1070,34 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     if (workspace.showOtherNames) {
       refreshOtherNames();
     }
+  }
+
+  // The lights panel for workspace.lights, above the program state.
+  function renderVariableLights(wrap: HTMLElement, editable: boolean) {
+    const name = workspace.lights;
+    if (!name || !stageEl) return;
+    stageEl.querySelector(".program-lights")?.remove();
+    const valueEl = [...wrap.querySelectorAll<HTMLElement>(".vbox")]
+      .find((box) => (box.dataset.stateName || box.querySelector(".name-text")?.textContent?.trim()) === name)
+      ?.querySelector<HTMLElement>(".value");
+    const holder = document.createElement("div");
+    holder.className = "program-lights";
+    stageEl.prepend(holder);
+    if (!valueEl) return;
+    const value = Number((valueEl.dataset.rawValue ?? valueEl.textContent ?? "").trim()) & 0xff;
+    holder.appendChild(
+      renderLights(
+        value,
+        editable && valueEl.isContentEditable
+          ? (bit) => {
+              valueEl.textContent = String(value ^ (1 << bit));
+              // The workspace's input listener saves the change and redraws the lights.
+              valueEl.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+          : undefined,
+        `the value of ${name}`,
+      ),
+    );
   }
 
   function getWorkspaceEl(): HTMLElement | null {

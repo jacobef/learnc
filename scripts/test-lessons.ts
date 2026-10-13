@@ -8,6 +8,7 @@ import type { createCodeEditorTemplate } from "../shared-code-editor.ts";
 import type { createCodeOutputChallengeTemplate } from "../shared-code-output-template.ts";
 import type { createExpressionEvalTemplate } from "../shared-expression-template.ts";
 import type { createCompileQuizTemplate } from "../shared-compile-quiz-template.ts";
+import type { createMachineChallengeTemplate, createMachineTemplate } from "../shared-machine-template.ts";
 
 Object.assign(globalThis, {
   window: { location: { pathname: "/" } },
@@ -17,13 +18,16 @@ const { DEFAULT_NAV_ITEMS } = await import("../js/nav-items.js");
 const { runCProgram, runCFiles, evaluateCExpression } = await import("../js/shared-c-interpreter.js");
 const { normalizeChallengeInput, runChallengeProgram } = await import("../js/shared-code-challenge-input.js");
 const { REFERENCE_SECTIONS } = await import("../js/shared-reference-data.js");
+const { assemble, runMachine, startState } = await import("../js/shared-toy-machine.js");
 
 type Lesson =
   | { kind: "program"; config: Parameters<typeof createProgramTemplate>[0] }
   | { kind: "editor"; config: Parameters<typeof createCodeEditorTemplate>[0] }
   | { kind: "challenge"; config: Parameters<typeof createCodeOutputChallengeTemplate>[0] }
   | { kind: "expression"; config: Parameters<typeof createExpressionEvalTemplate>[0] }
-  | { kind: "quiz"; config: Parameters<typeof createCompileQuizTemplate>[0] };
+  | { kind: "quiz"; config: Parameters<typeof createCompileQuizTemplate>[0] }
+  | { kind: "machine"; config: Parameters<typeof createMachineTemplate>[0] }
+  | { kind: "machine-challenge"; config: Parameters<typeof createMachineChallengeTemplate>[0] };
 
 function run(source: string, implicitMain = true, stdin = "") {
   return checkedRun(implicitMain
@@ -49,6 +53,8 @@ function loadLesson(file: string): Lesson {
     createCodeOutputChallengeTemplate: (config: Parameters<typeof createCodeOutputChallengeTemplate>[0]) => captured.push({ kind: "challenge", config }),
     createExpressionEvalTemplate: (config: Parameters<typeof createExpressionEvalTemplate>[0]) => captured.push({ kind: "expression", config }),
     createCompileQuizTemplate: (config: Parameters<typeof createCompileQuizTemplate>[0]) => captured.push({ kind: "quiz", config }),
+    createMachineTemplate: (config: Parameters<typeof createMachineTemplate>[0]) => captured.push({ kind: "machine", config }),
+    createMachineChallengeTemplate: (config: Parameters<typeof createMachineChallengeTemplate>[0]) => captured.push({ kind: "machine-challenge", config }),
     // Page effects that only matter in a browser.
     startArraysAmbiance: () => {},
   }, { filename: file, timeout: 1000 });
@@ -92,8 +98,24 @@ for (const item of lessons) {
         }
         break;
       }
+      case "machine": {
+        const program = assemble(lesson.config.steps.map(step => step.code).join(""));
+        const result = runMachine(program, startState(lesson.config.start));
+        assert.equal(result.error, null);
+        assert.ok(result.steps.at(-1)?.op === "HALT", "Machine lessons end by halting");
+        break;
+      }
+      case "machine-challenge": {
+        const program = assemble(lesson.config.solve);
+        assemble(lesson.config.startCode ?? "");
+        for (const [index, start] of lesson.config.cases.entries()) {
+          assert.equal(runMachine(program, startState(start)).error, null, `Case ${index}`);
+        }
+        break;
+      }
       case "quiz":
         for (const [index, step] of lesson.config.steps.entries()) {
+          if (step.choices) continue;
           const source = step.code.endsWith("\n") ? step.code : `${step.code}\n`;
           const result = lesson.config.implicitMain === false
             ? runCFiles([{ path: "program.c", source }], 4096, "", false)
