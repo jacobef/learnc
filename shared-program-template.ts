@@ -832,7 +832,8 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       : "Back ◀";
   const nextButtonLabel = () => {
     const stage = currentStage();
-    if (stageNeedsSolve(stage) && stage?.editableMode === "boundary") {
+    // Naming the next line would give away where execution continues.
+    if (stageNeedsSolve(stage) && (stage?.editableMode === "boundary" || stage?.selectsResume)) {
       return "🔧 ??? ▶";
     }
     if (executionSteps >= runtimeStages.length - 1) {
@@ -1203,6 +1204,13 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     }
     if (entered === `${expected}\n`) {
       return "The output shouldn't end with a newline here.";
+    }
+    if (!entered.startsWith(stage.stdoutBefore)) {
+      return "What was printed before stays printed: this line can only add to the end of the output.";
+    }
+    const conversion = /%[-+ #0]*\d*(?:\.\d+)?[a-z]/i;
+    if (conversion.test(entered.slice(stage.stdoutBefore.length)) && !conversion.test(expected.slice(stage.stdoutBefore.length))) {
+      return "Conversion specifications like $c{%d} aren't printed as they are: each one is replaced by the next argument, formatted.";
     }
     return "The output isn't right yet.";
   }
