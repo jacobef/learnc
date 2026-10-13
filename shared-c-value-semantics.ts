@@ -9,7 +9,8 @@ export function inspectCType(type: string): CTypeInfo | null {
   if (!normalized) return null;
   const cached = typeInfoCache.get(normalized);
   if (cached) return cached;
-  const evaluated = evaluateCExpression("0;", 0, `(${normalized})0`);
+  // A compound literal, unlike a cast, can have any object type, arrays included.
+  const evaluated = evaluateCExpression("0;", 0, `(${normalized}){0}`);
   if (evaluated.kind !== "ok") return null;
   typeInfoCache.set(normalized, evaluated.result.typeInfo);
   return evaluated.result.typeInfo;

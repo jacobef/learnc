@@ -1642,3 +1642,380 @@ fn expression_inspection_stops_at_the_requested_state_before_later_execution() {
     .unwrap();
     assert_eq!(output.expression.unwrap().value, "7");
 }
+
+#[test]
+fn expression_inspection_reads_string_literal_elements() {
+    let source = "int main(void) { char *p = \"hi\"; return 0; }\n";
+    for (expression, expected) in [
+        ("*p", "104"),
+        ("p[1]", "105"),
+        ("p[2]", "0"),
+        ("\"hi\"[1]", "105"),
+    ] {
+        let output = run_source_with_options(
+            "program.c",
+            source,
+            &RunOptions {
+                expression_eval: Some(RunExpressionEvalRequest {
+                    event_index: 1,
+                    expression: expression.into(),
+                }),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        let result = output.expression.unwrap();
+        assert_eq!(
+            (result.ty.as_str(), result.value.as_str()),
+            ("char", expected),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn expression_inspection_reads_allocated_elements() {
+    let source = "#include <stdlib.h>\nint main(void) { int *q = malloc(3 * sizeof(int)); q[0] = 10; q[1] = 20; int *p = q + 1; return 0; }\n";
+    let last_event = run_source_with_options("program.c", source, &RunOptions::default())
+        .unwrap()
+        .trace
+        .len()
+        - 1;
+    // An element that hasn't been given a value yet shows as empty, not as an error.
+    for (expression, expected) in [
+        ("*q", "10"),
+        ("p[0]", "20"),
+        ("*(p - 1)", "10"),
+        ("q[2]", ""),
+    ] {
+        let output = run_source_with_options(
+            "program.c",
+            source,
+            &RunOptions {
+                expression_eval: Some(RunExpressionEvalRequest {
+                    event_index: last_event,
+                    expression: expression.into(),
+                }),
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        let result = output.expression.unwrap();
+        assert_eq!(
+            (
+                result.kind.as_str(),
+                result.ty.as_str(),
+                result.value.as_str()
+            ),
+            ("lvalue", "int", expected),
+            "{expression}"
+        );
+    }
+}
+
+#[test]
+fn string_literal_arrays_appear_in_state_without_names() {
+    let output = run_source_with_options(
+        "program.c",
+        "int main(void) { char *p = \"hi\"; char *q = \"hi\"; char s[] = \"yo\"; return 0; }\n",
+        &RunOptions::default(),
+    )
+    .unwrap();
+    let state = &output.trace.last().unwrap().state;
+    let literals = state
+        .iter()
+        .filter(|item| item.anonymous.as_deref() == Some("string literal"))
+        .collect::<Vec<_>>();
+    // One char[3] array plus its three elements; "yo" only initializes s.
+    assert_eq!(literals.len(), 4);
+    assert!(
+        literals
+            .iter()
+            .all(|item| item.name.is_empty() || item.name.starts_with('['))
+    );
+    assert_eq!(literals[0].ty, "char[3]");
+    let p = state.iter().find(|item| item.name == "p").unwrap();
+    let q = state.iter().find(|item| item.name == "q").unwrap();
+    assert_eq!(p.value, literals[0].address.unwrap().to_string());
+    assert_eq!(q.value, p.value);
+}
+
+fn allocated_blocks(state: &[crate::interpreter::ProgramStateBox]) -> Vec<(&str, &str, &str)> {
+    state
+        .iter()
+        .filter(|item| item.anonymous.as_deref() == Some("allocated block"))
+        .map(|item| (item.name.as_str(), item.ty.as_str(), item.value.as_str()))
+        .collect()
+}
+
+#[test]
+fn allocated_blocks_appear_as_the_type_pointing_into_them() {
+    let output = run_source_with_options(
+        "program.c",
+        "#include <stdlib.h>\nint main(void) { int *p = malloc(3 * sizeof(int)); p[1] = 5; return 0; }\n",
+        &RunOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        allocated_blocks(&output.trace.last().unwrap().state),
+        vec![
+            ("", "int[3]", ""),
+            ("[0]", "int", ""),
+            ("[1]", "int", "5"),
+            ("[2]", "int", ""),
+        ]
+    );
+}
+
+#[test]
+fn allocated_blocks_get_addresses_apart_from_declared_variables() {
+    let output = run_source_with_options(
+        "program.c",
+        "#include <stdlib.h>\nint main(void) { int a = 1; int *p = malloc(sizeof(int)); int b = 2; *p = a + b; return 0; }\n",
+        &RunOptions::default(),
+    )
+    .unwrap();
+    let state = &output.trace.last().unwrap().state;
+    let address = |name: &str| {
+        state
+            .iter()
+            .find(|item| item.name == name)
+            .unwrap()
+            .address
+            .unwrap()
+    };
+    let block = state
+        .iter()
+        .find(|item| item.anonymous.as_deref() == Some("allocated block"))
+        .unwrap()
+        .address
+        .unwrap();
+    // Declared variables stay together, and the heap is in its own range.
+    assert!(address("b") - address("a") < 64);
+    assert!(block > address("b") + 0x10000);
+}
+
+#[test]
+fn allocated_blocks_without_a_type_show_their_size_and_leaked_blocks_stay() {
+    let output = run_source_with_options(
+        "program.c",
+        "#include <stdlib.h>\nint main(void) { void *v = malloc(8); int *p = malloc(sizeof(int)); *p = 4; p = 0; double *d = malloc(sizeof(double)); free(d); return 0; }\n",
+        &RunOptions::default(),
+    )
+    .unwrap();
+    // The int's block keeps its value after p stops pointing to it; the freed block is gone.
+    assert_eq!(
+        allocated_blocks(&output.trace.last().unwrap().state),
+        vec![("", "8 bytes, no type yet", ""), ("", "int", "4")]
+    );
+}
+
+#[test]
+fn allocated_blocks_take_their_types_from_pointers_in_other_blocks() {
+    let output = run_source_with_options(
+        "program.c",
+        "#include <stdlib.h>\nstruct node { int value; struct node *next; };\nint main(void) { struct node *head = malloc(sizeof *head); head->value = 1; head->next = malloc(sizeof *head); head->next->value = 2; head->next->next = 0; return 0; }\n",
+        &RunOptions::default(),
+    )
+    .unwrap();
+    let blocks = allocated_blocks(&output.trace.last().unwrap().state);
+    assert_eq!(
+        blocks
+            .iter()
+            .filter(|(_, ty, _)| *ty == "struct node")
+            .count(),
+        2
+    );
+    assert!(blocks.contains(&(".value", "int", "2")));
+}
+
+fn string_literal_objects(
+    state: &[crate::interpreter::ProgramStateBox],
+) -> Vec<&crate::interpreter::ProgramStateBox> {
+    state
+        .iter()
+        .filter(|item| item.anonymous.as_deref() == Some("string literal") && item.name.is_empty())
+        .collect()
+}
+
+#[test]
+fn string_literal_objects_exist_before_use_and_keep_their_identity() {
+    let output = run_source(
+        "program.c",
+        r#"
+        void prototype(int n, char a[static n + sizeof "prototype" + sizeof (char[]){"no"}]);
+        char *unused(void) {
+            void local(int n, char a[static n + sizeof "local"]);
+            return "never";
+        }
+        int main(void) {
+            int first = 7;
+            char *p = "same";
+            char *q = "same";
+            if (0) p = "branch";
+            unsigned long n = sizeof "sizeof";
+            switch (first) { case sizeof "label": break; default: break; }
+            char *selected = _Generic(0, int: "chosen", default: "other");
+            return first != 7 || p != q || n != 7 || selected[0] != 'c';
+        }
+"#,
+    )
+    .unwrap();
+    assert_eq!(output.exit_status, 0);
+    let first_state = &output.trace.first().unwrap().state;
+    assert!(first_state.iter().all(|item| item.name != "p"));
+    let literals = string_literal_objects(first_state);
+    assert_eq!(literals.len(), 9);
+    let identities = literals
+        .iter()
+        .map(|item| (item.object_id, item.address))
+        .collect::<Vec<_>>();
+    for event in &output.trace {
+        assert_eq!(
+            string_literal_objects(&event.state)
+                .iter()
+                .map(|item| (item.object_id, item.address))
+                .collect::<Vec<_>>(),
+            identities,
+        );
+    }
+    let shared = literals.iter().find(|item| item.ty == "char[5]").unwrap();
+    let final_state = &output.trace.last().unwrap().state;
+    for name in ["p", "q"] {
+        assert_eq!(
+            final_state
+                .iter()
+                .find(|item| item.name == name)
+                .unwrap()
+                .value,
+            shared.address.unwrap().to_string()
+        );
+    }
+}
+
+#[test]
+fn startup_string_literals_include_every_translation_unit_and_inline_definition() {
+    let files = vec![
+        (
+            PathBuf::from("main.c"),
+            r#"
+            char *other(void);
+            char *global = "shared";
+            int main(void) {
+                int first = 0;
+                char *p = "shared";
+                return first || p != global || other() != p;
+            }
+"#
+            .to_owned(),
+        ),
+        (
+            PathBuf::from("other.c"),
+            r#"
+            char *other(void) { return "shared"; }
+            static char *unused(void) { return "uncalled"; }
+            inline char *inline_only(void) { return "inline"; }
+"#
+            .to_owned(),
+        ),
+    ];
+    let output = run_virtual_sources_with_options(&files, &RunOptions::default()).unwrap();
+    assert_eq!(output.exit_status, 0);
+    let literals = string_literal_objects(&output.trace.first().unwrap().state);
+    assert_eq!(literals.len(), 3);
+    assert_eq!(
+        literals.iter().filter(|item| item.ty == "char[9]").count(),
+        1
+    );
+    assert_eq!(
+        literals.iter().filter(|item| item.ty == "char[7]").count(),
+        2
+    );
+}
+
+#[test]
+fn startup_string_literals_skip_nested_character_array_initializers() {
+    let output = run_source(
+        "program.c",
+        r#"
+        struct S { char a[8]; char *p; };
+        struct Outer { struct S s; char tail[8]; };
+        struct S global = {"global", "kept"};
+        int main(void) {
+            int first = 0;
+            char plain[] = "plain";
+            char braced[] = {"braced"};
+            char rows[][8] = {"row0", {"row1"}};
+            struct Outer nested = {{"nested", "kept"}, "tail"};
+            struct Outer elided = {"elided", "kept", "last"};
+            struct Outer designated = {.s.a = "design", "kept", .tail = "end"};
+            struct { struct { char a[8]; }; char *p; } anonymous = {"anon", "kept"};
+            union U { char a[8]; char *p; } u = {.a = "union"};
+            union U pointer = {.p = "kept"};
+            struct S compound = (struct S){"compound", "kept"};
+            if (0) { struct Outer dead = {"dead", "kept", "gone"}; }
+            char *p = (char[]){"temp"};
+            return first || plain[0] != 'p' || braced[0] != 'b' || rows[1][0] != 'r'
+                || nested.s.p != global.p || elided.s.p != global.p
+                || designated.s.p != global.p || anonymous.p != global.p
+                || u.a[0] != 'u' || pointer.p != global.p || compound.p != global.p
+                || p[0] != 't';
+        }
+"#,
+    )
+    .unwrap();
+    assert_eq!(output.exit_status, 0);
+    for event in &output.trace {
+        let literals = string_literal_objects(&event.state);
+        assert_eq!(literals.len(), 1, "{}", event.start_line);
+        assert_eq!(literals[0].ty, "char[5]");
+    }
+}
+
+#[test]
+fn startup_string_literals_cover_all_encodings_without_array_initializer_objects() {
+    let output = run_source(
+        "program.c",
+        r#"
+        #include <stddef.h>
+        #include <uchar.h>
+        void unused(void) {
+            char *n = u8"hi";
+            wchar_t *w = L"hi";
+            char16_t *u = u"hi";
+            char32_t *v = U"hi";
+            struct { char a[3]; wchar_t b[3]; char16_t c[3]; char32_t d[3]; }
+                arrays = {"no", {L"no"}, u"no", {U"no"}};
+        }
+        int main(void) {
+            int first = 0;
+            char *n = "hi";
+            wchar_t *w = L"hi";
+            char16_t *u = u"hi";
+            char32_t *v = U"hi";
+            return first || n[1] != 'i' || w[1] != 'i' || u[1] != 'i' || v[1] != 'i';
+        }
+"#,
+    )
+    .unwrap();
+    assert_eq!(output.exit_status, 0);
+    for event in &output.trace {
+        let literals = string_literal_objects(&event.state);
+        assert_eq!(literals.len(), 4);
+        assert!(literals.iter().all(|item| item.ty.ends_with("[3]")));
+    }
+    let state = &output.trace.last().unwrap().state;
+    let literals = string_literal_objects(state);
+    let mut pointed_to = state
+        .iter()
+        .filter(|item| ["n", "w", "u", "v"].contains(&item.name.as_str()))
+        .map(|item| item.value.clone())
+        .collect::<Vec<_>>();
+    pointed_to.sort();
+    let mut addresses = literals
+        .iter()
+        .map(|item| item.address.unwrap().to_string())
+        .collect::<Vec<_>>();
+    addresses.sort();
+    assert_eq!(pointed_to, addresses);
+}

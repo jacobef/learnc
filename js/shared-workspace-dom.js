@@ -1,7 +1,8 @@
 import { normalizeZeroDisplay } from "./shared-core-utils.js";
 import { disableAutoText, el, txt } from "./shared-dom-utils.js";
-import { attachTypeHelp } from "./shared-type-help.js";
+import { attachTypeHelp, detachTypeHelp } from "./shared-type-help.js";
 import { memoryDisplayState } from "./shared-program-state.js";
+import { inspectCType } from "./shared-c-value-semantics.js";
 export function markInaccessibleName(node, box) {
     var _a;
     if (box?.nameAccessible !== false)
@@ -15,6 +16,64 @@ export function markInaccessibleName(node, box) {
         if (parts) {
             name.textContent = parts[1] + parts[3];
         }
+    });
+}
+const CHAR_TYPE = /^(?:(?:const|volatile)\s+)*(?:(?:signed|unsigned)\s+)?char$/;
+const CHAR_ESCAPES = { 0: "\\0", 9: "\\t", 10: "\\n", 13: "\\r", 39: "\\'", 92: "\\\\" };
+/** The character literal a char value stands for, e.g. 'h' for 104. */
+function charGlyph(type, value) {
+    if (!CHAR_TYPE.test(type.trim()))
+        return "";
+    const text = value.trim();
+    if (!/^-?\d+$/.test(text))
+        return "";
+    const code = Number(text);
+    const escaped = CHAR_ESCAPES[code];
+    if (escaped)
+        return `'${escaped}'`;
+    return code >= 32 && code <= 126 ? `'${String.fromCharCode(code)}'` : "";
+}
+// Shows, under a char's value, the character it stands for, and keeps it current.
+function attachCharGlyph(valueEl, readType, watchedRoot) {
+    const glyph = document.createElement("div");
+    glyph.className = "char-glyph";
+    glyph.setAttribute("aria-hidden", "true");
+    const update = () => {
+        glyph.textContent = charGlyph(readType(), valueEl.dataset.rawValue ?? valueEl.textContent ?? "");
+    };
+    valueEl.insertAdjacentElement("afterend", glyph);
+    watchedRoot.addEventListener("input", update);
+    update();
+}
+// Nameless objects keep their internal key for state comparisons, but show no name.
+export function markAnonymous(node, box) {
+    var _a;
+    const kind = box?.anonymous;
+    // A member of a nameless struct still has its member name.
+    if (!kind || box.aggregateRoot != null)
+        return;
+    node.dataset.anonymous = kind;
+    if (node.classList.contains("vbox"))
+        (_a = node.dataset).stateName || (_a.stateName = box.name);
+    if (node.classList.contains("aggregatebox")) {
+        // Only the struct or union itself is nameless; its members keep their names.
+        const stack = node.querySelector(":scope > .aggregatebox-main > .aggregate-name-stack");
+        stack?.querySelector(".aggregate-name")?.replaceChildren();
+        const label = stack?.querySelector(".lbl-aggregate-name");
+        if (label)
+            label.textContent = `no name (${kind})`;
+        return;
+    }
+    node.querySelectorAll(".name-text, .array-name").forEach((name) => {
+        name.textContent = "";
+    });
+    // A lone element of a nameless array is described by its position instead.
+    const element = node.classList.contains("vbox") && box.arrayRoot
+        ? box.name.slice(box.arrayRoot.length)
+        : "";
+    node.querySelectorAll(".lbl-name, .lbl-array-name").forEach((label) => {
+        const article = /^[aeiou]/i.test(kind) ? "an" : "a";
+        label.textContent = element ? `element ${element} of ${article} ${kind}` : `no name (${kind})`;
     });
 }
 export function vbox({ address = "—", type = "int", value = "", name = "", editable = false, allowNameEdit = false, allowTypeEdit = false, showDoubleExact = false, displayValue = null, exactValue = null, typeInfo = null, aliases = [], stateName = null, } = {}) {
@@ -67,7 +126,10 @@ export function vbox({ address = "—", type = "int", value = "", name = "", edi
     const valueEl = node.querySelector(".value");
     if (typeInfo)
         node.dataset.typeInfo = JSON.stringify(typeInfo);
-    attachTypeHelp(node, ".type", typeInfo);
+    if (editable && allowTypeEdit)
+        refreshEditableTypeHelp(node);
+    else
+        attachTypeHelp(node, ".type", typeInfo);
     if (aliases.length)
         node.dataset.aliases = JSON.stringify(aliases);
     if (displayValue != null)
@@ -76,6 +138,8 @@ export function vbox({ address = "—", type = "int", value = "", name = "", edi
         node.dataset.exactValue = exactValue;
     if (valueEl) {
         valueEl.dataset.rawValue = rawValue.trim();
+        const typeEl = node.querySelector(".type");
+        attachCharGlyph(valueEl, () => typeEl?.textContent ?? type, node);
     }
     if (editable && valueEl) {
         valueEl.setAttribute("contenteditable", "true");
@@ -103,6 +167,7 @@ export function vbox({ address = "—", type = "int", value = "", name = "", edi
                 typeEl.setAttribute("contenteditable", "true");
                 typeEl.classList.add("editable");
                 disableAutoText(typeEl);
+                typeEl.addEventListener("focusout", () => refreshEditableTypeHelp(node));
             }
         }
         node.querySelectorAll(".name-text").forEach((el) => {
@@ -216,6 +281,7 @@ export function readBoxState(root) {
         defaultAddressType: el.dataset.defaultAddressType ?? null,
         expectedAddress: el.dataset.expectedAddress ?? null,
         expectedAddressType: el.dataset.expectedAddressType ?? null,
+        anonymous: el.dataset.anonymous ?? null,
     };
 }
 function parseStoredAliases(raw) {
@@ -732,7 +798,8 @@ function makeArrayBox(group, opts) {
     node.dataset.arrayRoot = group.name;
     node.dataset.arrayShape = group.shape.join(",");
     node.dataset.arrayElementType = group.elementType;
-    node.querySelector(".array-address").textContent = firstAddress;
+    // Like a scalar box's, the address may be markup such as "<i>(any)</i>".
+    node.querySelector(".array-address").innerHTML = firstAddress;
     node.querySelector(".array-type").textContent = typeText;
     attachTypeHelp(node, ".array-type", group.typeInfo);
     node.querySelector(".array-name").textContent = displayName;
@@ -766,6 +833,14 @@ function makeArrayBox(group, opts) {
             continue;
         const col = document.createElement("div");
         col.className = "array-col";
+        // Each element is an object with its own address.
+        const elementAddress = String(entry.box.address ?? "").trim();
+        if (/^\d+$/.test(elementAddress)) {
+            const addressEl = document.createElement("div");
+            addressEl.className = "array-col-address";
+            addressEl.textContent = elementAddress;
+            col.appendChild(addressEl);
+        }
         const valueEl = document.createElement("div");
         valueEl.className = "array-col-value";
         const raw = entry.box.rawValue ?? entry.box.value ?? "";
@@ -796,6 +871,11 @@ function makeArrayBox(group, opts) {
             });
         }
         col.appendChild(valueEl);
+        attachCharGlyph(valueEl, () => entry.box.type, col);
+        const indexEl = document.createElement("div");
+        indexEl.className = "array-col-index";
+        indexEl.textContent = `[${entry.indices[entry.indices.length - 1]}]`;
+        col.appendChild(indexEl);
         rowValuesEl.appendChild(col);
     }
     if (deletable && group.allowDelete) {
@@ -839,6 +919,7 @@ function appendScalarStateBox(container, box, opts) {
         aliases: box.aliases ?? [],
     });
     markInaccessibleName(node, box);
+    markAnonymous(node, box);
     if (allowDelete)
         node.dataset.allowDelete = "true";
     if (box.dynamicAddress)
@@ -940,6 +1021,117 @@ function makeAggregateBox(root, descendants, opts) {
     }
     return node;
 }
+function arrayElementCountFor(shape) {
+    return shape.reduce((count, dimension) => count * dimension, 1);
+}
+// An empty, editable array the learner is creating, laid out like the interpreter would.
+function makeDynamicArrayBox(name, type, address, typeInfo) {
+    const shape = typeInfo.arrayShape.slice();
+    const elementType = type.replace(/(\s*\[\s*\d+\s*\])+\s*$/, "").trim();
+    const count = arrayElementCountFor(shape);
+    const elementSize = Math.max(1, Math.floor((typeInfo.size ?? count) / count));
+    const base = Number(address);
+    const entries = Array.from({ length: count }, (_, linear) => {
+        const indices = [];
+        let rest = linear;
+        for (let axis = shape.length - 1; axis >= 0; axis -= 1) {
+            indices.unshift(rest % shape[axis]);
+            rest = Math.floor(rest / shape[axis]);
+        }
+        return {
+            box: {
+                name: arrayElementName(name, indices),
+                type: elementType,
+                value: "",
+                address: Number.isFinite(base) ? String(base + linear * elementSize) : "",
+                arrayRoot: name,
+                arrayShape: shape.slice(),
+                arrayIndices: indices,
+            },
+            indices,
+            shape: shape.slice(),
+            index: linear,
+            linear,
+        };
+    });
+    const node = makeArrayBox({
+        kind: "array",
+        name,
+        shape,
+        index: 0,
+        address,
+        elementType,
+        type,
+        typeInfo,
+        entries,
+        allowDelete: true,
+    }, { editable: true, deletable: true });
+    node.dataset.dynamicArray = "true";
+    for (const selector of [".array-name", ".array-type"]) {
+        const field = node.querySelector(selector);
+        if (!field)
+            continue;
+        field.setAttribute("contenteditable", "true");
+        field.classList.add("editable");
+        disableAutoText(field);
+    }
+    return node;
+}
+/**
+ * Explains the type the learner has typed into a box, not the one they're expected to
+ * type, so the help only appears once there's a type it would appear for in the sandbox.
+ */
+export function refreshEditableTypeHelp(node) {
+    detachTypeHelp(node, ".type");
+    const typeEl = node.querySelector(".type");
+    if (!typeEl)
+        return;
+    const type = txt(typeEl).trim();
+    attachTypeHelp(node, ".type", type ? inspectCType(type) : null);
+}
+/**
+ * Switches a box the learner is creating between a scalar box and an array box
+ * when its type is changed to or from an array type. Returns the replacement.
+ */
+export function reshapeDynamicBox(typeField) {
+    const node = typeField.closest('.vbox[data-dynamic-address="true"], .arraybox[data-dynamic-array="true"]');
+    if (!node)
+        return null;
+    const isArray = node.classList.contains("arraybox");
+    const type = txt(typeField).trim();
+    const info = type ? inspectCType(type) : null;
+    const wantsArray = info?.kind === "array" && info.arrayShape.length > 0;
+    if (!isArray && !wantsArray)
+        return null;
+    if (isArray && wantsArray && node.dataset.arrayType === type)
+        return null;
+    const name = txt(node.querySelector(isArray ? ".array-name" : ".name-text")).trim();
+    const address = txt(node.querySelector(isArray ? ".array-address" : ".address")).trim();
+    let replacement;
+    if (wantsArray && info) {
+        replacement = makeDynamicArrayBox(name, type, address, info);
+        replacement.dataset.arrayType = type;
+    }
+    else {
+        replacement = makeAnswerBox({
+            name,
+            type,
+            address,
+            allowNameEdit: true,
+            deletable: true,
+            typeInfo: info,
+        });
+        replacement.dataset.allowDelete = "true";
+        replacement.dataset.dynamicAddress = "true";
+    }
+    for (const key of ["defaultAddressType", "expectedAddress", "expectedAddressType"]) {
+        const value = node.dataset[key];
+        if (value)
+            replacement.dataset[key] = value;
+    }
+    node.replaceWith(replacement);
+    return replacement;
+}
 export function appendStateObjects(container, boxes, opts = {}) {
     const { editable = false, deletable = editable, allowNameEdit = null, allowTypeEdit = null, } = opts;
     const source = Array.isArray(boxes) ? (editable ? boxes : memoryDisplayState(boxes)) : [];
@@ -963,12 +1155,14 @@ export function appendStateObjects(container, boxes, opts = {}) {
     renderItems.sort((left, right) => left.index - right.index);
     for (const item of renderItems) {
         if (item.kind === "aggregate") {
-            container.appendChild(makeAggregateBox(item.root, item.descendants, {
+            const node = makeAggregateBox(item.root, item.descendants, {
                 editable,
                 deletable,
                 allowNameEdit,
                 allowTypeEdit,
-            }));
+            });
+            markAnonymous(node, item.root);
+            container.appendChild(node);
             continue;
         }
         if (item.object.kind === "scalar") {
@@ -985,6 +1179,7 @@ export function appendStateObjects(container, boxes, opts = {}) {
                 deletable,
             });
             markInaccessibleName(node, item.object.entries[0]?.box);
+            markAnonymous(node, item.object.entries[0]?.box);
             container.appendChild(node);
         }
     }
@@ -994,7 +1189,10 @@ function readArrayBoxState(root) {
         .split(",")
         .filter(Boolean)
         .map((value) => Number(value)));
-    const rootName = String(root.dataset.arrayRoot || "").trim();
+    const dynamic = root.dataset.dynamicArray === "true";
+    const rootName = dynamic
+        ? txt(root.querySelector(".array-name"))
+        : String(root.dataset.arrayRoot || "").trim();
     const values = [...root.querySelectorAll(".array-col-value")];
     return values.map((valueEl) => {
         const typeText = String(valueEl.dataset.arrayType || root.dataset.arrayElementType || "int").trim();
@@ -1012,13 +1210,14 @@ function readArrayBoxState(root) {
             type: typeText,
             value,
             rawValue,
-            name: String(valueEl.dataset.arrayName || fallbackName).trim(),
+            name: dynamic ? fallbackName : String(valueEl.dataset.arrayName || fallbackName).trim(),
             names: [],
             arrayRoot: rootName || null,
             arrayShape: shape.length ? shape.slice() : null,
             arrayIndices: indices.length ? indices.slice() : null,
             allowDelete: root.dataset.allowDelete === "true" ||
                 (root.querySelector(".delete") != null),
+            anonymous: root.dataset.anonymous ?? null,
         };
     });
 }

@@ -2,6 +2,81 @@
 
 use super::*;
 
+#[derive(Default)]
+pub(super) struct StartupStringLiterals {
+    literals: HashMap<Span, (StringLiteralKind, StringLiteralValue)>,
+    array_initializers: HashSet<Span>,
+}
+
+#[derive(Clone, Copy)]
+enum StringLiteralKind {
+    Narrow,
+    Wide,
+    Utf16,
+    Utf32,
+}
+
+impl Interpreter<'_> {
+    // Constraint validation visits every function, including uncalled functions
+    // and unevaluated expressions. Its typed initializer walk also identifies
+    // literals that supply array contents rather than separate literal objects.
+    pub(super) fn collect_startup_string_literal(&self, expr: &Expr) {
+        let (kind, text, span) = match expr {
+            Expr::StringLiteral(text, span) => (StringLiteralKind::Narrow, text, span),
+            Expr::WideStringLiteral(text, span) => (StringLiteralKind::Wide, text, span),
+            Expr::Utf16StringLiteral(text, span) => (StringLiteralKind::Utf16, text, span),
+            Expr::Utf32StringLiteral(text, span) => (StringLiteralKind::Utf32, text, span),
+            _ => return,
+        };
+        if let Some(startup) = self.startup_string_literals.borrow_mut().as_mut() {
+            startup
+                .literals
+                .entry(*span)
+                .or_insert_with(|| (kind, text.clone()));
+        }
+    }
+
+    pub(super) fn exclude_string_array_initializer(&self, span: Span) {
+        if let Some(startup) = self.startup_string_literals.borrow_mut().as_mut() {
+            startup.array_initializers.insert(span);
+        }
+    }
+
+    pub(super) fn initialize_string_literal_objects(
+        &mut self,
+        objects: &ObjectFrames,
+    ) -> Result<(), Diagnostic> {
+        // Stop collecting before execution or expression inspection performs any
+        // more validation. Only the translation units define startup objects.
+        let startup = self.startup_string_literals.get_mut().take().unwrap();
+        let mut literals = startup
+            .literals
+            .into_iter()
+            .filter(|(span, _)| !startup.array_initializers.contains(span))
+            .collect::<Vec<_>>();
+        literals.sort_unstable_by_key(|(span, _)| (span.file.0, span.start, span.end));
+        for (span, (kind, text)) in literals {
+            match kind {
+                StringLiteralKind::Narrow => {
+                    self.intern_string_literal(&text);
+                }
+                StringLiteralKind::Wide => {
+                    self.intern_wide_string_literal(&text, span)?;
+                }
+                StringLiteralKind::Utf16 | StringLiteralKind::Utf32 => {
+                    self.eval_unicode_string_literal(
+                        &text,
+                        matches!(kind, StringLiteralKind::Utf16),
+                        span,
+                        objects,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl<'a> Interpreter<'a> {
     pub(super) fn pointer_object_bytes(
         &mut self,

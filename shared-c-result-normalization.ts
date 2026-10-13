@@ -4,6 +4,7 @@ import type {
   CTypeInfo,
   CTypeKind,
 } from "./shared-core-utils.js";
+import { anonymousObjectName } from "./shared-core-utils.js";
 import { rustDiagnostic, type CInterpreterError } from "./shared-c-diagnostics.js";
 import { WasiProcExit } from "./shared-c-wasm-bridge.js";
 import type {
@@ -35,6 +36,7 @@ const BOX_KEYS: ReadonlySet<string> = new Set([
   "aggregateRoot",
   "aggregatePath",
   "aggregateKind",
+  "anonymous",
   "aliases",
   "typeInfo",
 ]);
@@ -213,22 +215,31 @@ function decodeBox(value: unknown, path: string, types?: readonly CTypeInfo[]): 
   if (aggregateKind !== null && aggregateKind !== "struct" && aggregateKind !== "union") {
     return schemaError(`${path}.aggregateKind`, '"struct", "union", or null');
   }
+  const objectId = nonnegativeIntegerAt(box.objectId, `${path}.objectId`);
+  const anonymous = nullableStringAt(box.anonymous, `${path}.anonymous`);
+  // The interpreter leaves nameless objects' names empty; give each one a key
+  // that is unique per object and can never collide with a C name.
+  const key = anonymous === null ? "" : anonymousObjectName(anonymous, objectId);
+  const name = stringAt(box.name, `${path}.name`);
+  const arrayRoot = nullableStringAt(box.arrayRoot, `${path}.arrayRoot`);
+  const aggregateRoot = nullableStringAt(box.aggregateRoot, `${path}.aggregateRoot`);
   return {
-    objectId: nonnegativeIntegerAt(box.objectId, `${path}.objectId`),
+    objectId,
     nameAccessible: booleanAt(box.nameAccessible, `${path}.nameAccessible`),
     scope: stringAt(box.scope, `${path}.scope`),
-    name: stringAt(box.name, `${path}.name`),
+    name: key + name,
     type: stringAt(box.type, `${path}.type`),
     value: stringAt(box.value, `${path}.value`),
     displayValue: stringAt(box.displayValue, `${path}.displayValue`),
     exactValue: stringAt(box.exactValue, `${path}.exactValue`),
     address: nullableStringAt(box.address, `${path}.address`),
-    arrayRoot: nullableStringAt(box.arrayRoot, `${path}.arrayRoot`),
+    arrayRoot: arrayRoot === null ? null : key + arrayRoot,
     arrayShape: integerArrayAt(box.arrayShape, `${path}.arrayShape`),
     arrayIndices: integerArrayAt(box.arrayIndices, `${path}.arrayIndices`),
-    aggregateRoot: nullableStringAt(box.aggregateRoot, `${path}.aggregateRoot`),
+    aggregateRoot: aggregateRoot === null ? null : key + aggregateRoot,
     aggregatePath: stringArrayAt(box.aggregatePath, `${path}.aggregatePath`),
     aggregateKind,
+    anonymous,
     aliases: stringArrayAt(box.aliases, `${path}.aliases`),
     typeInfo: types === undefined
       ? decodeTypeInfo(box.typeInfo, `${path}.typeInfo`)
@@ -539,6 +550,7 @@ function normalizeProgramResult(
     "stdinPosition",
     "exitStatus",
     "state",
+    "initialState",
     "trace",
     "traceTypeInfos",
     "mainClose",
@@ -555,6 +567,7 @@ function normalizeProgramResult(
   return {
     kind: "ok",
     state: decodeState(root.state, "$.state"),
+    initialState: decodeState(root.initialState, "$.initialState"),
     trace: decodeTrace(root.trace, "$.trace", traceTypes),
     mainClose: decodeSourceLocation(root.mainClose, "$.mainClose"),
     blocked: decodeBlocked(root.blocked, "$.blocked"),

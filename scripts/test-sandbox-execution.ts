@@ -186,7 +186,10 @@ test("background discovery finds lines beyond the loaded page without expanding 
   const jumped = execution.run(files, "", false);
   assert.equal(jumped.kind, "ok");
   assert.equal(jumped.trace[position].startLine, 5);
-  assert.deepEqual(jumped.trace[position - 1].state, []);
+  // Once the loop variable is gone, only the format string's nameless array remains.
+  const remaining = jumped.trace[position - 1].state;
+  assert.deepEqual(remaining.filter(box => box.anonymous !== "string literal"), []);
+  assert.deepEqual(remaining.filter(box => !box.arrayRoot).map(box => box.type), ["char[4]"]);
   const skipped = discoverSandboxBoundaries([{path: "program.c", source: "int main(void) {\nif (0) {\nint unreachable;\n}\nint end;\n}"}], "", false, 100000, 1024);
   assert.equal(skipped.boundaries.some(boundary => boundary?.line === 2), false);
 });

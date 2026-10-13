@@ -7,6 +7,8 @@ function collectCodeLessonElements(root = document) {
         instructionsEl: role("code-instructions"),
         lockedLineNumbers: role("code-locked-line-numbers"),
         lockedInputLine: role("code-locked-input-line"),
+        lockedSuffixNumbers: role("code-locked-suffix-numbers"),
+        lockedSuffixLines: role("code-locked-suffix-lines"),
         editor: role("code-editor"),
         lineNumbers: role("code-line-numbers"),
         stage: role("code-stage"),
@@ -37,7 +39,48 @@ function lessonButton({ text, role, stepper, className, }) {
         button.className = className;
     return button;
 }
-function ensureCodeLessonLayout({ textareaMinLines, lockedInput, }) {
+function lockedCodeRow(numbersRole, linesRole) {
+    const row = document.createElement("div");
+    row.className = "codepane-row code-locked-row";
+    const numbers = document.createElement("div");
+    numbers.dataset.role = numbersRole;
+    numbers.className = "code-gutter";
+    numbers.setAttribute("aria-hidden", "true");
+    const lines = document.createElement("div");
+    lines.dataset.role = linesRole;
+    lines.className = "code-locked-line";
+    row.append(numbers, lines);
+    return row;
+}
+function fileHeading(path) {
+    const heading = document.createElement("div");
+    heading.className = "code-file-name";
+    heading.textContent = path;
+    return heading;
+}
+function readOnlyFileBlock(file) {
+    const block = document.createElement("div");
+    block.className = "code-readonly-file";
+    const row = document.createElement("div");
+    row.className = "codepane-row code-locked-row";
+    const numbers = document.createElement("div");
+    numbers.className = "code-gutter";
+    numbers.setAttribute("aria-hidden", "true");
+    const lines = file.source.replace(/\n$/, "").split("\n");
+    lines.forEach((_, index) => {
+        const number = document.createElement("div");
+        number.className = "code-line-number";
+        number.textContent = String(index + 1);
+        numbers.appendChild(number);
+    });
+    const text = document.createElement("div");
+    text.className = "code-locked-line";
+    text.textContent = lines.join("\n");
+    row.append(numbers, text);
+    block.append(fileHeading(file.path), row);
+    return block;
+}
+function ensureCodeLessonLayout({ textareaMinLines, lockedInput, lockedSuffix = false, readOnlyFiles = [], fileName = "program.c", }) {
     const resolvedTitle = syncDocumentTitleFromNav();
     if (queryRole("code-editor")) {
         return collectCodeLessonElements();
@@ -66,18 +109,12 @@ function ensureCodeLessonLayout({ textareaMinLines, lockedInput, }) {
     codeTitle.textContent = "Code";
     const codePane = document.createElement("div");
     codePane.className = "codepane panel-body";
+    for (const file of readOnlyFiles)
+        codePane.appendChild(readOnlyFileBlock(file));
+    if (readOnlyFiles.length)
+        codePane.appendChild(fileHeading(fileName));
     if (lockedInput) {
-        const lockedRow = document.createElement("div");
-        lockedRow.className = "codepane-row code-locked-row";
-        const lockedNumbers = document.createElement("div");
-        lockedNumbers.dataset.role = "code-locked-line-numbers";
-        lockedNumbers.className = "code-gutter";
-        lockedNumbers.setAttribute("aria-hidden", "true");
-        const lockedLine = document.createElement("div");
-        lockedLine.dataset.role = "code-locked-input-line";
-        lockedLine.className = "code-locked-line";
-        lockedRow.append(lockedNumbers, lockedLine);
-        codePane.appendChild(lockedRow);
+        codePane.appendChild(lockedCodeRow("code-locked-line-numbers", "code-locked-input-line"));
     }
     const codeRow = document.createElement("div");
     codeRow.className = "codepane-row";
@@ -96,6 +133,9 @@ function ensureCodeLessonLayout({ textareaMinLines, lockedInput, }) {
     editorWrap.appendChild(editor);
     codeRow.append(lineNumbers, editorWrap);
     codePane.appendChild(codeRow);
+    if (lockedSuffix) {
+        codePane.appendChild(lockedCodeRow("code-locked-suffix-numbers", "code-locked-suffix-lines"));
+    }
     const diagnosticEl = document.createElement("div");
     diagnosticEl.dataset.role = "code-diagnostic";
     diagnosticEl.className = "code-diagnostic hidden";

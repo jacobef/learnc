@@ -20,8 +20,9 @@ createCodeEditorTemplate({
   startCode: "",
   textareaMinLines: 4,
   targetState,
-  next: "6-assignment-ii.html",
-  instructions: "Write the code yourself.",
+  next: "6-compile-errors-i.html",
+  instructions:
+    "Write the code yourself.\nIf you forget how to write something, press $referenceButton, next to the lessons menu. It summarizes everything you've learned so far, and grows as you go through the lessons.",
   hints: (ctx) => {
     const currentState = ctx.applyUserProgram();
     if (!currentState) {

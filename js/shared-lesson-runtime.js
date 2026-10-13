@@ -12,8 +12,15 @@ function createLevelProgressController(isDefault, levelId = currentLevelId()) {
         clear: () => clearLevelProgress(levelId),
     };
 }
+// Buttons outside the lesson template that any lesson's text can mention.
+const SHARED_BUTTON_REPLACEMENTS = [
+    ["$referenceButton", "$b{Reference}"],
+];
 function createButtonTokenReplacer(replacements) {
-    return (parts) => applyTextTokenReplacements(parts, replacements());
+    return (parts) => applyTextTokenReplacements(parts, [
+        ...replacements(),
+        ...SHARED_BUTTON_REPLACEMENTS,
+    ]);
 }
 function createHintPresenter(panel, transform = (parts) => parts) {
     const hide = () => {

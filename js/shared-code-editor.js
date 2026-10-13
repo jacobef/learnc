@@ -6,9 +6,21 @@ import { diagnosticDecorations, diagnosticMessageText, } from "./shared-diagnost
 import { runCProgram } from "./shared-c-interpreter.js";
 import { codeRuntimeIssue, renderCodeDiagnostic, diagnosticRuntimeContextText, renderCodeRuntimeIssue, } from "./shared-code-runtime-issues.js";
 import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
+import { sameCType } from "./shared-core-utils.js";
 import { createButtonTokenReplacer, createHintPresenter, createLevelProgressController, nextLessonLabel, resetLevelAfterConfirmation, } from "./shared-lesson-runtime.js";
+function solvedTargetState(solve) {
+    const solved = runCProgram(solve);
+    if (solved.kind !== "ok") {
+        throw new Error(`Code editor solve does not run: ${diagnosticMessageText(solved.diagnostic)}`);
+    }
+    // Only the state's shape and values matter, not where things are stored.
+    return solved.state.map((box) => ({ ...box, address: "<i>(any)</i>", aliases: [] }));
+}
 function createCodeEditorTemplate(config) {
-    const { startCode = "", targetState = [], textareaMinLines, allowNewLines = true, hints = null, instructions = "", next = null, nextLabel, } = config;
+    const { startCode = "", textareaMinLines, allowNewLines = true, hints = null, instructions = "", next = null, nextLabel, } = config;
+    const targetState = config.solve === undefined
+        ? config.targetState ?? []
+        : solvedTargetState(config.solve);
     const { instructionsEl, editor, lineNumbers, stage, status, diagnosticEl, hintPanel, hintBtn, checkBtn, levelResetBtn, prevBtn, nextBtn, codeRoot, } = ensureCodeLessonLayout({ textareaMinLines, lockedInput: false });
     const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
     bindBtnRefPulse(codeRoot || document);
@@ -126,7 +138,7 @@ function createCodeEditorTemplate(config) {
             const actual = byName.get(expected.name);
             if (!actual)
                 return false;
-            if ((actual.type || "") !== (expected.type || ""))
+            if (!sameCType(actual.type, expected.type))
                 return false;
             if (!boxValueMatchesSpec(actual, expected).ok)
                 return false;

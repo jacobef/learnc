@@ -2976,8 +2976,10 @@ impl<'a> Interpreter<'a> {
         let argv_pointer_ty = CType::pointer_to(argv_element_ty.clone());
 
         let mut argv_elements = Vec::with_capacity(argv_strings.len() + 1);
+        let mut string_objects = Vec::new();
         for arg in argv_strings {
             let pointer = self.allocate_runtime_c_string(arg, main.span, objects)?;
+            string_objects.extend(pointer.object);
             argv_elements.push(self.stored_value_from_typed_value(
                 self.pointer_value_with_type(argv_element_ty.clone(), pointer),
                 &argv_element_ty,
@@ -3004,6 +3006,7 @@ impl<'a> Interpreter<'a> {
             TypedValue::aggregate(argv_array_ty, StoredValue::Array(argv_elements)),
             main.span,
         )?;
+        self.cboxes_argument_objects = std::iter::once(argv_object).chain(string_objects).collect();
         let argv_value = self.pointer_value_with_type(
             argv_pointer_ty.clone(),
             PointerValue::at_object(argv_object),

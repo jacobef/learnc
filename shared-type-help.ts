@@ -525,3 +525,16 @@ export function attachTypeHelp(
     row.appendChild(control);
   }
 }
+
+/** Undoes `attachTypeHelp`, so the help can be rebuilt for a different type. */
+export function detachTypeHelp(root: HTMLElement, typeSelector: string): void {
+  const typeEl = root.querySelector(typeSelector) as HTMLElement | null;
+  const row = typeEl?.closest(".type-value-row");
+  if (!typeEl || !row) return;
+  row.replaceWith(typeEl);
+  const typeLabel = typeEl.previousElementSibling;
+  if (typeLabel instanceof HTMLElement && typeLabel.matches(".lbl")) {
+    typeLabel.classList.remove("type-help-label");
+    typeLabel.querySelector(".type-help-control")?.remove();
+  }
+}

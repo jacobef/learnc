@@ -39,11 +39,19 @@ function createLevelProgressController<T>(
   };
 }
 
+// Buttons outside the lesson template that any lesson's text can mention.
+const SHARED_BUTTON_REPLACEMENTS: readonly ButtonReplacement[] = [
+  ["$referenceButton", "$b{Reference}"],
+];
+
 function createButtonTokenReplacer(
   replacements: () => readonly ButtonReplacement[],
 ): (parts: Parts | null) => Parts | null {
   return (parts) =>
-    applyTextTokenReplacements(parts, replacements()) as Parts | null;
+    applyTextTokenReplacements(parts, [
+      ...replacements(),
+      ...SHARED_BUTTON_REPLACEMENTS,
+    ]) as Parts | null;
 }
 
 function createHintPresenter(

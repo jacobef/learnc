@@ -407,7 +407,7 @@ function outcomeForPosition(result, position, files) {
                 ? "execution-limit"
                 : "ok"),
         state: diagnostic ? null : blocked?.state ??
-            (current ? current.state : executionLimit ? result.state : []),
+            (current ? current.state : executionLimit ? result.state : result.initialState),
         files,
         eventIndex: current ? safePosition - 1 : null,
         implicitMain: sandbox.effectiveImplicitMain,

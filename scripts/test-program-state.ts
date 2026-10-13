@@ -53,9 +53,9 @@ test("challenge inputs preserve scalar values across internal naming changes", (
     [" -10 ", "int", "-10"], ["0", "int", "0"], ["2147483647", "int", "2147483647"],
     ["3.5", "double", "3.5"], ["257", "unsigned char", "1"], ["0.5", "_Bool", "1"],
   ]) {
-    assert.deepEqual(normalizeChallengeInput(literal, type), { runtime: expected, literal: literal.trim() });
+    assert.deepEqual(normalizeChallengeInput(literal, { type }), { runtime: expected, literal: literal.trim() });
   }
-  assert.throws(() => normalizeChallengeInput("missing", "int"), /not valid C/);
+  assert.throws(() => normalizeChallengeInput("missing", { type: "int" }), /not valid C/);
 });
 
 test("lesson objects receive distinct interpreter-backed addresses", () => {

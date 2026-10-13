@@ -23,9 +23,18 @@ import {
   diagnosticMessageText,
   offsetDiagnosticLines,
 } from "./shared-diagnostics.js";
-import { runCProgram } from "./shared-c-interpreter.js";
-import { normalizeChallengeInput } from "./shared-code-challenge-input.js";
-import type { CProgramResult } from "./shared-c-interpreter-types.js";
+import {
+  challengeFileName,
+  challengePrefix,
+  challengeSuffix,
+  normalizeChallengeInput,
+  runChallengeProgram,
+} from "./shared-code-challenge-input.js";
+import type {
+  ChallengeProgramShape,
+  ChallengeVariableSpec,
+} from "./shared-code-challenge-input.js";
+import type { CProgramResult, CSourceFile } from "./shared-c-interpreter-types.js";
 import {
   codeRuntimeIssue,
   renderCodeDiagnostic,
@@ -35,6 +44,7 @@ import {
   type CodeRuntimeIssue,
 } from "./shared-code-runtime-issues.js";
 import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
+import { sameCType } from "./shared-core-utils.js";
 import {
   createButtonTokenReplacer,
   createHintPresenter,
@@ -45,7 +55,6 @@ import {
 } from "./shared-lesson-runtime.js";
 
 type ChallengeParts = Parts;
-type ChallengeRuntimeValue = string;
 type ChallengePartsSpec =
   | ChallengeParts
   | ((ctx: CodeOutputChallengeHintContext) => ChallengeParts | null | undefined)
@@ -58,19 +67,24 @@ type ChallengeFailureKind =
   | "blocked-input"
   | "missing-output"
   | "wrong-output-type"
-  | "wrong-output-value";
-
-interface ChallengeVariableSpec {
-  name: string;
-  type: string;
-}
+  | "wrong-output-value"
+  | "wrong-stdout";
 
 interface CodeOutputChallengeConfig {
-  inputs: ChallengeVariableSpec[];
-  outputs: ChallengeVariableSpec[];
-  testInputs: string[][];
-  startInput: string[];
+  inputs?: ChallengeVariableSpec[];
+  // Variables whose final values are checked.
+  outputs?: ChallengeVariableSpec[];
+  // Whether what the program prints is checked.
+  checkStdout?: boolean;
+  // Each row has one C literal per input. Defaults to a single row with no inputs.
+  testInputs?: string[][];
+  startInput?: string[];
   solve: string;
+  prelude?: string;
+  main?: (inputs: string[]) => string;
+  implicitMain?: boolean;
+  files?: CSourceFile[];
+  fileName?: string;
   instructions?: string;
   startCode?: string;
   textareaMinLines?: number;
@@ -81,15 +95,18 @@ interface CodeOutputChallengeConfig {
 }
 
 interface ChallengeCase {
-  inputValues: ChallengeRuntimeValue[];
+  inputValues: string[];
   inputLiterals: string[];
-  expectedLiterals: string[];
+  // Per output, its box and (for an array) its elements' boxes.
+  expectedOutputs: BoxState[][];
+  expectedStdout: string;
 }
 
 interface ChallengeCaseResult {
   ok: boolean;
   kind: "ok" | ChallengeFailureKind;
   state: BoxState[] | null;
+  stdout: string;
   outputBox: BoxState | null;
   expected: BoxState | null;
   failingOutput: ChallengeVariableSpec | null;
@@ -124,7 +141,7 @@ interface CodeOutputChallengeState {
 
 interface CodeOutputChallengeHintContext {
   text: string;
-  inputs: Array<ChallengeVariableSpec & { value: ChallengeRuntimeValue }>;
+  inputs: Array<ChallengeVariableSpec & { value: string }>;
   outputs: ChallengeVariableSpec[];
   currentCase: ChallengeCase;
   currentResult: ChallengeCaseResult;
@@ -141,14 +158,23 @@ interface CodeOutputChallengeProgress {
   hasRunChecks: boolean;
 }
 
+// The boxes that make up a named object: the object itself and, for an array, its elements.
+function objectBoxes(state: BoxState[], name: string): BoxState[] {
+  return state.filter((box) => box.name === name || box.arrayRoot === name);
+}
+
+function lineCount(text: string): number {
+  return text === "" ? 0 : text.replace(/\n$/, "").split("\n").length;
+}
+
 function createCodeOutputChallengeTemplate(
   config: CodeOutputChallengeConfig,
 ): void {
   const {
-    inputs,
-    outputs,
-    testInputs,
-    startInput,
+    inputs = [],
+    outputs = [],
+    checkStdout = false,
+    testInputs = [[]],
     solve,
     instructions = "",
     startCode = "",
@@ -158,6 +184,7 @@ function createCodeOutputChallengeTemplate(
     next = null,
     nextLabel,
   } = config;
+  const startInput = config.startInput ?? testInputs[0] ?? [];
   const endLabel = nextLessonLabel({
     next,
     fallback: "Next Program",
@@ -172,27 +199,32 @@ function createCodeOutputChallengeTemplate(
     return trimmed;
   };
 
-  if (!Array.isArray(inputs) || inputs.length === 0) {
-    invalidTemplateConfig("inputs must be a non-empty array.");
+  if (!outputs.length && !checkStdout) {
+    invalidTemplateConfig("A challenge must check outputs, stdout, or both.");
   }
-  if (!Array.isArray(outputs) || outputs.length === 0) {
-    invalidTemplateConfig("outputs must be a non-empty array.");
+  if (config.files?.length && (config.implicitMain ?? !config.main)) {
+    invalidTemplateConfig("A challenge with several files can't use implicit main.");
   }
   const inputSpecs: ChallengeVariableSpec[] = inputs.map((spec, index) => ({
     name: ensureIdentifier(spec?.name || "", `Input name ${index + 1}`),
     type: String(spec?.type || "").trim(),
+    allocated: !!spec?.allocated,
   }));
   const outputSpecs: ChallengeVariableSpec[] = outputs.map((spec, index) => ({
     name: ensureIdentifier(spec?.name || "", `Output name ${index + 1}`),
     type: String(spec?.type || "").trim(),
   }));
-  if (!Array.isArray(testInputs)) {
-    invalidTemplateConfig("testInputs must be an array.");
-  }
-  if (testInputs.length === 0) {
-    invalidTemplateConfig("testInputs must contain at least one value.");
-  }
+  const shape: ChallengeProgramShape = {
+    inputs: inputSpecs,
+    prelude: config.prelude,
+    main: config.main,
+    implicitMain: config.implicitMain,
+    files: config.files,
+    fileName: config.fileName,
+  };
+  const fileName = challengeFileName(shape);
   if (
+    !testInputs.length ||
     testInputs.some(
       (row) =>
         !Array.isArray(row) ||
@@ -201,23 +233,14 @@ function createCodeOutputChallengeTemplate(
     )
   ) {
     invalidTemplateConfig(
-      `Each testInputs entry must be a string array of length ${inputSpecs.length}.`,
+      `testInputs must be a non-empty list of string arrays of length ${inputSpecs.length}.`,
     );
-  }
-  if (!Array.isArray(startInput)) {
-    invalidTemplateConfig("startInput is required.");
   }
   if (
     startInput.length !== inputSpecs.length ||
     startInput.some((value) => typeof value !== "string")
   ) {
     invalidTemplateConfig(`startInput must be a string array of length ${inputSpecs.length}.`);
-  }
-  if (typeof solve !== "string") {
-    invalidTemplateConfig("solve must be a C code string.");
-  }
-  if (!Number.isFinite(textareaMinLines)) {
-    invalidTemplateConfig("textareaMinLines must be a number.");
   }
   const solveCode = String(solve || "").replace(/\r\n/g, "\n");
   if (!solveCode.trim()) {
@@ -228,6 +251,8 @@ function createCodeOutputChallengeTemplate(
     instructionsEl,
     lockedLineNumbers,
     lockedInputLine,
+    lockedSuffixNumbers,
+    lockedSuffixLines,
     editor,
     lineNumbers,
     stage,
@@ -242,95 +267,64 @@ function createCodeOutputChallengeTemplate(
     prevBtn,
     nextBtn,
     codeRoot,
-  } = ensureCodeLessonLayout({ textareaMinLines, lockedInput: true });
+  } = ensureCodeLessonLayout({
+    textareaMinLines,
+    lockedInput: true,
+    lockedSuffix: !!shape.main,
+    readOnlyFiles: shape.files,
+    fileName,
+  });
   const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
 
   bindBtnRefPulse(codeRoot || document);
 
-  function normalizeProgramBody(text: string): string {
-    const normalized = String(text || "").replace(/\r\n/g, "\n");
-    return normalized === "" || normalized.endsWith("\n")
-      ? normalized
-      : `${normalized}\n`;
-  }
-
   function normalizeInputLiteral(
     value: string,
-    type: string,
+    spec: ChallengeVariableSpec,
     label: string,
-  ): { runtime: ChallengeRuntimeValue; literal: string } {
+  ): { runtime: string; literal: string } {
     try {
-      return normalizeChallengeInput(value, type);
+      return normalizeChallengeInput(value, spec);
     } catch (error) {
       return invalidTemplateConfig(`${label} ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  const preludeLineCount = inputSpecs.length;
   const targetOutputNameSet = new Set(outputSpecs.map((spec) => spec.name));
-  const outputNamesText = outputSpecs.map((spec) => spec.name).join(", ");
 
-  function lockedInputLinesForCase(
-    testCase: Pick<ChallengeCase, "inputLiterals">,
-  ): string[] {
-    return inputSpecs.map(
-      (inputSpec, index) =>
-        `${inputSpec.type} ${inputSpec.name} = ${testCase.inputLiterals[index]};`,
-    );
+  function prefixLineCount(testCase: Pick<ChallengeCase, "inputLiterals">): number {
+    return lineCount(challengePrefix(shape, testCase.inputLiterals));
   }
 
-  function lockedInputTextForCase(
-    testCase: Pick<ChallengeCase, "inputLiterals">,
-  ): string {
-    return lockedInputLinesForCase(testCase).join("\n");
-  }
-
-  function fullProgramTextForBody(
-    testCase: Pick<ChallengeCase, "inputLiterals">,
-    body: string,
-  ): string {
-    return `${lockedInputTextForCase(testCase)}\n${normalizeProgramBody(body)}`;
-  }
-
-  function expectedLiteralsFromSolve(
-    testCase: Pick<ChallengeCase, "inputLiterals">,
+  function expectedFromSolve(
+    inputLiterals: string[],
     label: string,
-  ): string[] {
-    const text = fullProgramTextForBody(testCase, solveCode);
-    const analyzed = runCProgram(text);
-    const solvedState =
-      analyzed.kind === "ok" && !analyzed.executionLimit
-        ? analyzed.state
-        : null;
-    if (!solvedState) {
-      if (analyzed.kind === "compile") {
-        invalidTemplateConfig(`solve does not compile for ${label}.`);
-      }
-      invalidTemplateConfig(`solve has undefined behavior for ${label}.`);
-      return [];
+  ): Pick<ChallengeCase, "expectedOutputs" | "expectedStdout"> {
+    const analyzed = runChallengeProgram(shape, inputLiterals, solveCode);
+    if (analyzed.kind !== "ok" || analyzed.executionLimit) {
+      return invalidTemplateConfig(
+        analyzed.kind === "compile"
+          ? `solve does not compile for ${label}: ${diagnosticMessageText(analyzed.diagnostic)}`
+          : `solve does not finish cleanly for ${label}.`,
+      );
     }
-    const expectedLiterals: string[] = [];
-    for (const outputSpec of outputSpecs) {
-      const outputBox =
-        solvedState.find((box: BoxState) => box.name === outputSpec.name) || null;
-      if (!outputBox) {
-        invalidTemplateConfig(`solve must create ${outputSpec.name} for ${label}.`);
-        return [];
-      }
-      if (String(outputBox.type || "").trim() !== outputSpec.type) {
+    const expectedOutputs = outputSpecs.map((outputSpec) => {
+      const boxes = objectBoxes(analyzed.state, outputSpec.name);
+      const root = boxes.find((box) => box.name === outputSpec.name);
+      if (!root) invalidTemplateConfig(`solve must create ${outputSpec.name} for ${label}.`);
+      if (!sameCType(root!.type, outputSpec.type)) {
         invalidTemplateConfig(
           `solve must produce ${outputSpec.name} with type ${outputSpec.type} for ${label}.`,
         );
-        return [];
       }
-      const literal = String(outputBox.value ?? "").trim();
-      if (!literal) {
-        invalidTemplateConfig(`solve leaves ${outputSpec.name} without a value for ${label}.`);
-        return [];
+      // An array's own box has no value; everything else must have one.
+      const valued = boxes.filter((box) => box.arrayRoot || !box.arrayShape?.length);
+      if (valued.some((box) => box.value === "")) {
+        invalidTemplateConfig(`solve leaves part of ${outputSpec.name} without a value for ${label}.`);
       }
-      expectedLiterals.push(literal);
-    }
-    return expectedLiterals;
+      return boxes;
+    });
+    return { expectedOutputs, expectedStdout: analyzed.stdout };
   }
 
   function createChallengeCaseForInputRow(
@@ -340,17 +334,15 @@ function createCodeOutputChallengeTemplate(
     const normalizedInputs = inputSpecs.map((inputSpec, index) =>
       normalizeInputLiteral(
         rawInputRow[index]!,
-        inputSpec.type,
+        inputSpec,
         `${label} input ${inputSpec.name}`,
       ),
     );
-    const partialCase: Pick<ChallengeCase, "inputLiterals"> = {
-      inputLiterals: normalizedInputs.map((item) => item.literal),
-    };
+    const inputLiterals = normalizedInputs.map((item) => item.literal);
     return {
       inputValues: normalizedInputs.map((item) => item.runtime),
-      inputLiterals: partialCase.inputLiterals.slice(),
-      expectedLiterals: expectedLiteralsFromSolve(partialCase, label),
+      inputLiterals,
+      ...expectedFromSolve(inputLiterals, label),
     };
   }
 
@@ -362,7 +354,8 @@ function createCodeOutputChallengeTemplate(
     return {
       inputValues: testCase.inputValues.slice(),
       inputLiterals: testCase.inputLiterals.slice(),
-      expectedLiterals: testCase.expectedLiterals.slice(),
+      expectedOutputs: testCase.expectedOutputs.map((boxes) => boxes.slice()),
+      expectedStdout: testCase.expectedStdout,
     };
   }
 
@@ -376,9 +369,7 @@ function createCodeOutputChallengeTemplate(
       (testCase) => caseInputKey(testCase) !== currentKey,
     );
     if (!candidates.length) return copyCase(currentCase);
-    const index = Math.floor(Math.random() * candidates.length);
-    const item = candidates[index]!;
-    return copyCase(item);
+    return copyCase(candidates[Math.floor(Math.random() * candidates.length)]!);
   }
 
   function restoreCase(
@@ -440,17 +431,18 @@ function createCodeOutputChallengeTemplate(
     return Math.max(0, pos - removed);
   }
 
-  function getEditorText(): string {
-    return fullProgramTextForCase(state.visibleCase);
-  }
-
   function getUserText(): string {
     const raw = editor ? editor.value : state.text || "";
     return normalizeUserCodeText(raw);
   }
 
-  function fullProgramTextForCase(testCase: ChallengeCase): string {
-    return fullProgramTextForBody(testCase, getUserText());
+  function getEditorText(): string {
+    const { inputLiterals } = state.visibleCase;
+    return challengePrefix(shape, inputLiterals) + getUserText() + challengeSuffix(shape, inputLiterals);
+  }
+
+  function runCase(testCase: ChallengeCase, body = getUserText()): CProgramResult {
+    return runChallengeProgram(shape, testCase.inputLiterals, body);
   }
 
   if (editor) {
@@ -475,26 +467,31 @@ function createCodeOutputChallengeTemplate(
   };
   let visibleCaseResult: ChallengeCaseResult | null = null;
 
+  // Feedback in the learner's line numbering. Problems in locked code or other
+  // files keep their location but don't decorate the editor.
   function getVisibleProgramFeedback(
     result: CProgramResult,
   ): VisibleProgramFeedback {
+    const offset = -prefixLineCount(state.visibleCase);
     if (result.kind !== "ok") {
       const diagnostic = result.diagnostic;
+      const inLearnerFile = !diagnostic.file || diagnostic.file === fileName;
       return {
-        diagnostic:
-          diagnostic.range.startLine < preludeLineCount
-            ? null
-            : offsetDiagnosticLines(diagnostic, -preludeLineCount),
+        diagnostic: inLearnerFile ? offsetDiagnosticLines(diagnostic, offset) : diagnostic,
         runtimeIssue: null,
       };
     }
     const issue = codeRuntimeIssue(result);
     return {
       diagnostic: null,
-      runtimeIssue: issue
-        ? offsetCodeRuntimeIssue(issue, -preludeLineCount)
-        : null,
+      runtimeIssue: issue ? offsetCodeRuntimeIssue(issue, offset) : null,
     };
+  }
+
+  function diagnosticInEditor(diagnostic: ProgramDiagnostic | null): ProgramDiagnostic | null {
+    if (!diagnostic || (diagnostic.file && diagnostic.file !== fileName)) return null;
+    const line = diagnostic.range.startLine;
+    return line >= 0 && line < getUserRawLines().length ? diagnostic : null;
   }
 
   function updateLineGutters(
@@ -502,237 +499,156 @@ function createCodeOutputChallengeTemplate(
     runtimeIssue: CodeRuntimeIssue | null,
   ) {
     const lines = getUserRawLines();
+    const editorDiagnostic = diagnosticInEditor(diagnostic);
     const lineNumberClasses = new Map<number, string[]>();
-    const problemLine = diagnostic?.range.startLine ?? runtimeIssue?.range.startLine;
-    if (problemLine !== undefined) {
+    const problemLine = editorDiagnostic?.range.startLine ?? runtimeIssue?.range.startLine;
+    if (problemLine !== undefined && problemLine >= 0 && problemLine < lines.length) {
       lineNumberClasses.set(problemLine, ["has-error"]);
     }
+    const prefixLines = prefixLineCount(state.visibleCase);
     updateCodeSurface({
       editor,
       lineNumbers,
       highlightEl,
       measureEl,
       lines,
-      lineNumberStart: preludeLineCount + 1,
-      decorations: diagnosticDecorations(diagnostic, lines),
+      lineNumberStart: prefixLines + 1,
+      decorations: diagnosticDecorations(editorDiagnostic, lines),
       lineNumberClasses,
     });
     syncEditorLinkedScroll();
     if (diagnostic) {
-      renderCodeDiagnostic(diagnosticEl, editor, diagnostic, { displayedLineOffset: preludeLineCount });
+      const inLearnerFile = !diagnostic.file || diagnostic.file === fileName;
+      renderCodeDiagnostic(diagnosticEl, editor, diagnostic, {
+        displayedLineOffset: inLearnerFile ? prefixLines : 0,
+        activeFile: shape.files?.length ? fileName : undefined,
+      });
     } else {
-      renderCodeRuntimeIssue(
-        diagnosticEl,
-        editor,
-        runtimeIssue,
-        preludeLineCount,
-      );
+      renderCodeRuntimeIssue(diagnosticEl, editor, runtimeIssue, prefixLines);
     }
   }
 
   type ProgramBehavior =
-    | {
-        kind:
-          | "compile"
-          | "ub"
-          | "step-limit"
-          | "blocked-input"
-          | "missing-output"
-          | "wrong-output-type";
-      }
-    | { kind: "ok"; outputBoxes: BoxState[] };
+    | { kind: Exclude<ChallengeFailureKind, "wrong-output-value" | "wrong-stdout"> }
+    | { kind: "ok"; outputBoxes: BoxState[][]; stdout: string };
 
-  function validateOutputBoxes(
-    finalState: BoxState[],
-  ):
-    | { kind: "ok"; boxes: BoxState[] }
-    | {
-        kind: "missing-output" | "wrong-output-type";
-        outputBox: BoxState | null;
-        outputSpec: ChallengeVariableSpec;
-      } {
-    const boxes: BoxState[] = [];
-    for (const outputSpec of outputSpecs) {
-      const outputBox =
-        finalState.find((box: BoxState) => box.name === outputSpec.name) || null;
-      if (!outputBox) {
-        return { kind: "missing-output", outputBox: null, outputSpec };
-      }
-      if (String(outputBox.type || "").trim() !== outputSpec.type) {
-        return { kind: "wrong-output-type", outputBox, outputSpec };
-      }
-      boxes.push(outputBox);
-    }
-    return { kind: "ok", boxes };
-  }
-
-  function evaluateProgramBehaviorForCase(
-    body: string,
-    testCase: ChallengeCase,
-  ): ProgramBehavior {
-    const text = fullProgramTextForBody(testCase, body);
-    const analyzed = runCProgram(text);
-    if (analyzed.kind !== "ok") {
-      return { kind: analyzed.kind };
-    }
+  function evaluateProgramBehavior(analyzed: CProgramResult): ProgramBehavior {
+    if (analyzed.kind !== "ok") return { kind: analyzed.kind };
     const runtimeIssue = codeRuntimeIssue(analyzed);
     if (runtimeIssue) {
-      return {
-        kind:
-          runtimeIssue.kind === "execution-limit"
-            ? "step-limit"
-            : "blocked-input",
-      };
+      return { kind: runtimeIssue.kind === "execution-limit" ? "step-limit" : "blocked-input" };
     }
-    const checked = validateOutputBoxes(analyzed.state);
-    if (checked.kind !== "ok") {
-      return { kind: checked.kind };
+    const outputBoxes: BoxState[][] = [];
+    for (const outputSpec of outputSpecs) {
+      const boxes = objectBoxes(analyzed.state, outputSpec.name);
+      const root = boxes.find((box) => box.name === outputSpec.name);
+      if (!root) return { kind: "missing-output" };
+      if (!sameCType(root.type, outputSpec.type)) return { kind: "wrong-output-type" };
+      outputBoxes.push(boxes);
     }
-    return { kind: "ok", outputBoxes: checked.boxes };
+    return { kind: "ok", outputBoxes, stdout: analyzed.stdout };
+  }
+
+  // Whether actual has every expected box, with matching values.
+  function outputMatches(actual: BoxState[], expected: BoxState[]): boolean {
+    return expected.every((expectedBox) => {
+      const actualBox = actual.find((box) => box.name === expectedBox.name);
+      return !!actualBox && boxValueMatchesSpec(actualBox, expectedBox).ok;
+    });
   }
 
   function behavesLikeProgramOnTestInputs(program: string): boolean {
-    if (!testCases.length) return false;
-    const candidateBody = normalizeProgramBody(program);
-    if (!candidateBody.trim()) return false;
-    const userBody = normalizeProgramBody(getUserText());
-    for (const testCase of testCases) {
-      const userBehavior = evaluateProgramBehaviorForCase(userBody, testCase);
-      const candidateBehavior = evaluateProgramBehaviorForCase(
-        candidateBody,
-        testCase,
+    const candidate = program.replace(/\r\n/g, "\n");
+    if (!candidate.trim()) return false;
+    const userBody = getUserText();
+    return testCases.every((testCase) => {
+      const user = evaluateProgramBehavior(runCase(testCase, userBody));
+      const other = evaluateProgramBehavior(runCase(testCase, candidate));
+      if (user.kind !== other.kind) return false;
+      if (user.kind !== "ok" || other.kind !== "ok") return true;
+      return (
+        (!checkStdout || user.stdout === other.stdout) &&
+        user.outputBoxes.every((boxes, index) => outputMatches(boxes, other.outputBoxes[index]!))
       );
-      if (userBehavior.kind !== candidateBehavior.kind) return false;
-      if (userBehavior.kind !== "ok" || candidateBehavior.kind !== "ok") {
-        continue;
-      }
-      for (let index = 0; index < outputSpecs.length; index += 1) {
-        if (
-          !boxValueMatchesSpec(
-            userBehavior.outputBoxes[index]!,
-            candidateBehavior.outputBoxes[index]!,
-          ).ok
-        ) {
-          return false;
-        }
-      }
-    }
-    return true;
+    });
   }
 
   function evaluateCase(
     testCase: ChallengeCase,
-    analyzed = runCProgram(fullProgramTextForCase(testCase)),
+    analyzed = runCase(testCase),
   ): ChallengeCaseResult {
-    const expectedBoxes = expectedBoxesForCase(testCase);
-    const fallbackExpected = expectedBoxes[0] || null;
-    const fallbackOutput = outputSpecs[0] || null;
+    const fallbackExpected = testCase.expectedOutputs[0]?.[0] ?? null;
+    const failure = (
+      kind: ChallengeFailureKind,
+      resultState: BoxState[] | null,
+      extra: Partial<ChallengeCaseResult> = {},
+    ): ChallengeCaseResult => ({
+      ok: false,
+      kind,
+      state: resultState,
+      stdout: analyzed.kind === "ok" ? analyzed.stdout : "",
+      outputBox: null,
+      expected: fallbackExpected,
+      failingOutput: outputSpecs[0] ?? null,
+      ...extra,
+    });
     if (analyzed.kind !== "ok") {
-      return {
-        ok: false,
-        kind: analyzed.kind,
-        state: analyzed.diagnostic.runtimeContext?.state ?? null,
-        outputBox: null,
-        expected: fallbackExpected,
-        failingOutput: fallbackOutput,
-      };
+      return failure(analyzed.kind, analyzed.diagnostic.runtimeContext?.state ?? null);
     }
     const runtimeIssue = codeRuntimeIssue(analyzed);
     if (runtimeIssue) {
-      return {
-        ok: false,
-        kind:
-          runtimeIssue.kind === "execution-limit"
-            ? "step-limit"
-            : "blocked-input",
-        state:
-          runtimeIssue.kind === "blocked-input"
-            ? analyzed.blocked?.state ?? analyzed.state
-            : analyzed.state,
-        outputBox: null,
-        expected: fallbackExpected,
-        failingOutput: fallbackOutput,
-      };
+      return runtimeIssue.kind === "execution-limit"
+        ? failure("step-limit", analyzed.state)
+        : failure("blocked-input", analyzed.blocked?.state ?? analyzed.state);
     }
     const finalState = analyzed.state;
     for (let index = 0; index < outputSpecs.length; index += 1) {
       const outputSpec = outputSpecs[index]!;
-      const expected = expectedBoxes[index]!;
-      const actual =
-        finalState.find((box: BoxState) => box.name === outputSpec.name) || null;
-      if (!actual) {
-        return {
-          ok: false,
-          kind: "missing-output",
-          state: finalState,
-          outputBox: null,
-          expected,
-          failingOutput: outputSpec,
-        };
-      }
-      if (String(actual.type || "").trim() !== outputSpec.type) {
-        return {
-          ok: false,
-          kind: "wrong-output-type",
-          state: finalState,
-          outputBox: actual,
-          expected,
-          failingOutput: outputSpec,
-        };
-      }
-      if (!boxValueMatchesSpec(actual, expected).ok) {
-        return {
-          ok: false,
-          kind: "wrong-output-value",
-          state: finalState,
-          outputBox: actual,
-          expected,
-          failingOutput: outputSpec,
-        };
-      }
+      const expected = testCase.expectedOutputs[index]!;
+      const boxes = objectBoxes(finalState, outputSpec.name);
+      const actual = boxes.find((box) => box.name === outputSpec.name) ?? null;
+      const details = { outputBox: actual, expected: expected[0] ?? null, failingOutput: outputSpec };
+      if (!actual) return failure("missing-output", finalState, details);
+      if (!sameCType(actual.type, outputSpec.type)) return failure("wrong-output-type", finalState, details);
+      if (!outputMatches(boxes, expected)) return failure("wrong-output-value", finalState, details);
+    }
+    if (checkStdout && analyzed.stdout !== testCase.expectedStdout) {
+      return failure("wrong-stdout", finalState, { failingOutput: null });
     }
     return {
       ok: true,
       kind: "ok",
       state: finalState,
-      outputBox:
-        finalState.find(
-          (box: BoxState) =>
-            box.name === (outputSpecs[0]?.name || ""),
-        ) || null,
+      stdout: analyzed.stdout,
+      outputBox: finalState.find((box) => box.name === outputSpecs[0]?.name) ?? null,
       expected: fallbackExpected,
       failingOutput: null,
     };
   }
 
   function runAllCases(): ChallengeRunReport {
-    const allCases = state.testCases;
-    const items: ChallengeRunItem[] = allCases.map((testCase, index) => ({
+    const items: ChallengeRunItem[] = state.testCases.map((testCase, index) => ({
       index,
       testCase,
       result: evaluateCase(testCase),
     }));
     const firstFailure = items.find((item) => !item.result.ok) || null;
-    return {
-      pass: !firstFailure,
-      items,
-      firstFailure,
-    };
-  }
-
-  function expectedBoxesForCase(testCase: ChallengeCase): BoxState[] {
-    return outputSpecs.map((outputSpec, index) => ({
-      name: outputSpec.name,
-      type: outputSpec.type,
-      value: testCase.expectedLiterals[index] || "",
-    }));
+    return { pass: !firstFailure, items, firstFailure };
   }
 
   function expectedStateBoxesForCase(testCase: ChallengeCase): BoxState[] {
-    return expectedBoxesForCase(testCase).map((box) => ({
+    return testCase.expectedOutputs.flat().map((box) => ({
       ...box,
       address: "<i>(any)</i>",
+      aliases: [],
     }));
+  }
+
+  // How an expected output reads in a hint: a value, or an array's values.
+  function expectedValueText(boxes: BoxState[]): string {
+    const elements = boxes.filter((box) => box.arrayRoot);
+    if (!elements.length) return `$v{${boxes[0]?.value ?? ""}}`;
+    return `$v{\\{ ${elements.map((box) => box.value).join(", ")} \\}}`;
   }
 
   function progressSnapshot(): CodeOutputChallengeProgress {
@@ -764,77 +680,110 @@ function createCodeOutputChallengeTemplate(
     progress.save(progressSnapshot());
   }
 
+  function renderStdoutPanel(title: string, text: string | null, emptyMessage: string): HTMLElement {
+    const panel = document.createElement("div");
+    panel.className = "state-panel";
+    const heading = document.createElement("h3");
+    heading.className = "panel-title state-heading";
+    heading.textContent = title;
+    panel.appendChild(heading);
+    const pre = document.createElement("pre");
+    pre.className = "program-output-text";
+    if (text === null) {
+      pre.classList.add("muted");
+      pre.textContent = emptyMessage;
+    } else {
+      pre.textContent = text;
+      const cursor = document.createElement("span");
+      cursor.className = "program-output-cursor";
+      cursor.setAttribute("aria-hidden", "true");
+      pre.appendChild(cursor);
+    }
+    panel.appendChild(pre);
+    return panel;
+  }
+
   function renderStage(currentResult: ChallengeCaseResult): void {
     if (!stage) return;
     clearNode(stage);
-    const group = document.createElement("div");
-    group.className = "state-group two-col";
-    const shownKind: "ok" | "compile" | "ub" =
-      currentResult.kind === "compile" || currentResult.kind === "ub"
-        ? currentResult.kind
-        : "ok";
-    const fullShownState = currentResult.state || [];
-    const filteredShownState = fullShownState.filter(
-      (box: BoxState) => targetOutputNameSet.has(String(box.name || "")),
-    );
-    const hasExtraShownVars =
-      shownKind === "ok" &&
-      fullShownState.some(
-        (box: BoxState) => !targetOutputNameSet.has(String(box.name || "")),
-      );
-    const shownBoxes =
-      shownKind !== "ok" || state.showFullShownOutput
-        ? currentResult.state
-        : filteredShownState;
-    const shownEmptyMessage =
+    const ran =
+      currentResult.kind !== "compile" &&
+      currentResult.kind !== "ub" &&
+      currentResult.kind !== "step-limit" &&
+      currentResult.kind !== "blocked-input";
+    const notRunMessage =
       currentResult.kind === "compile"
         ? "(fix the error above to run the program)"
         : currentResult.kind === "step-limit"
-        ? "(no output was produced before the program was stopped)"
-        : currentResult.kind === "blocked-input"
-          ? "(no output was produced before the program began waiting)"
-          : shownKind === "ok" && !state.showFullShownOutput
-        ? outputSpecs.length === 1
-          ? `(missing variable ${outputSpecs[0]!.name})`
-          : "(missing one or more output variables)"
-        : "(no variables)";
-    const shownTitle =
-      currentResult.kind === "ub" && currentResult.state
-        ? "Last recorded state before undefined behavior"
-        : currentResult.kind === "step-limit"
-          ? "State before the repeating section"
+          ? "(the program was stopped before it finished)"
           : currentResult.kind === "blocked-input"
-            ? "Program state when it began waiting"
-            : currentResult.kind === "compile"
-              ? "Program did not run"
-          : "Your code's output";
-    const shownControls = (() => {
-      if (!hasExtraShownVars) return null;
-      const toggle = document.createElement("button");
-      toggle.type = "button";
-      toggle.className = "state-panel-toggle";
-      toggle.textContent = state.showFullShownOutput
-        ? outputSpecs.length === 1
-          ? "Show only output variable"
-          : "Show only output variables"
-        : "Show full state";
-      toggle.addEventListener("click", () => {
-        state.showFullShownOutput = !state.showFullShownOutput;
-        renderStage(currentResult);
-        persistProgress();
-      });
-      return toggle;
-    })();
-    group.appendChild(
-      renderStatePanel(shownTitle, shownBoxes, {
-        emptyMessage: shownEmptyMessage,
-        controls: shownControls,
-      }),
-    );
-    group.appendChild(
-      renderStatePanel("Expected output", expectedStateBoxesForCase(state.visibleCase)),
-    );
-    stage.appendChild(group);
+            ? "(the program began waiting for input)"
+            : "(the program stopped because of undefined behavior)";
+    if (outputSpecs.length) {
+      const group = document.createElement("div");
+      group.className = "state-group two-col";
+      const fullShownState = currentResult.state || [];
+      const isTarget = (box: BoxState) =>
+        targetOutputNameSet.has(box.name) || targetOutputNameSet.has(box.arrayRoot ?? "");
+      const hasExtraShownVars = ran && fullShownState.some((box) => !isTarget(box) && !box.anonymous);
+      const shownBoxes = !ran || state.showFullShownOutput
+        ? fullShownState
+        : fullShownState.filter(isTarget);
+      const shownTitle =
+        currentResult.kind === "ub" && currentResult.state
+          ? "Last recorded state before undefined behavior"
+          : currentResult.kind === "step-limit"
+            ? "State before the repeating section"
+            : currentResult.kind === "blocked-input"
+              ? "Program state when it began waiting"
+              : currentResult.kind === "compile"
+                ? "Program did not run"
+                : "Your code's result";
+      const shownEmptyMessage =
+        !ran
+          ? notRunMessage
+          : state.showFullShownOutput
+            ? "(no variables)"
+            : outputSpecs.length === 1
+              ? `(missing variable ${outputSpecs[0]!.name})`
+              : "(missing one or more result variables)";
+      const shownControls = (() => {
+        if (!hasExtraShownVars) return null;
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "state-panel-toggle";
+        toggle.textContent = state.showFullShownOutput
+          ? outputSpecs.length === 1
+            ? "Show only result variable"
+            : "Show only result variables"
+          : "Show full state";
+        toggle.addEventListener("click", () => {
+          state.showFullShownOutput = !state.showFullShownOutput;
+          renderStage(currentResult);
+          persistProgress();
+        });
+        return toggle;
+      })();
+      group.appendChild(
+        renderStatePanel(shownTitle, shownBoxes, {
+          emptyMessage: shownEmptyMessage,
+          controls: shownControls,
+        }),
+      );
+      group.appendChild(
+        renderStatePanel("Expected result", expectedStateBoxesForCase(state.visibleCase)),
+      );
+      stage.appendChild(group);
+    }
+    if (checkStdout) {
+      const group = document.createElement("div");
+      group.className = "state-group two-col";
+      group.append(
+        renderStdoutPanel("Your program's output", ran ? currentResult.stdout : null, notRunMessage),
+        renderStdoutPanel("Expected output", state.visibleCase.expectedStdout, ""),
+      );
+      stage.appendChild(group);
+    }
   }
 
   function buttonReplacements() {
@@ -856,22 +805,35 @@ function createCodeOutputChallengeTemplate(
     status.className = cls;
   }
 
-  function updateLockedInputLine() {
-    const lines = lockedInputLinesForCase(state.visibleCase);
-    if (lockedInputLine) {
-      lockedInputLine.textContent = lines.join("\n");
-    }
-    if (lockedLineNumbers) {
-      const frag = document.createDocumentFragment();
-      for (let i = 0; i < lines.length; i += 1) {
-        const num = document.createElement("div");
-        num.className = "code-line-number";
-        num.textContent = String(i + 1);
-        frag.appendChild(num);
-      }
-      clearNode(lockedLineNumbers);
-      lockedLineNumbers.appendChild(frag);
-    }
+  function renderLockedLines(
+    numbersEl: HTMLElement | null,
+    linesEl: HTMLElement | null,
+    text: string,
+    firstLine: number,
+  ) {
+    const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
+    linesEl?.closest(".code-locked-row")?.classList.toggle("hidden", lines.length === 0);
+    if (linesEl) linesEl.textContent = lines.join("\n");
+    if (!numbersEl) return;
+    clearNode(numbersEl);
+    lines.forEach((_, index) => {
+      const num = document.createElement("div");
+      num.className = "code-line-number";
+      num.textContent = String(firstLine + index);
+      numbersEl.appendChild(num);
+    });
+  }
+
+  function updateLockedLines() {
+    const { inputLiterals } = state.visibleCase;
+    const prefix = challengePrefix(shape, inputLiterals);
+    renderLockedLines(lockedLineNumbers, lockedInputLine, prefix, 1);
+    renderLockedLines(
+      lockedSuffixNumbers,
+      lockedSuffixLines,
+      challengeSuffix(shape, inputLiterals),
+      lineCount(prefix) + getUserRawLines().length + 1,
+    );
   }
 
   function updateInstructions() {
@@ -879,27 +841,7 @@ function createCodeOutputChallengeTemplate(
       setPartsContent(instructionsEl, "Challenge solved!");
       return;
     }
-    if (instructions) {
-      setPartsContent(instructionsEl, applyButtonTokens(instructions));
-      return;
-    }
-    const inputSummary = inputSpecs
-      .map((spec) => `${spec.type} ${spec.name}`)
-      .join(", ");
-    const outputSummary = outputSpecs
-      .map((spec) => `${spec.type} ${spec.name}`)
-      .join(", ");
-    const lockedLineSummary =
-      preludeLineCount === 1
-        ? "Line 1 is the current input assignment and is locked."
-        : `Lines 1-${preludeLineCount} are the current input assignments and are locked.`;
-    const msg =
-      `Write code that creates ${outputSummary} from ${inputSummary}. ` +
-      `${lockedLineSummary} ` +
-      `Press $checkButton to run all ${state.testCases.length} test input${
-        state.testCases.length === 1 ? "" : "s"
-      }.`;
-    setPartsContent(instructionsEl, applyButtonTokens(msg));
+    setPartsContent(instructionsEl, applyButtonTokens(instructions || null));
   }
 
   const { hide: hideHint, show: showHint } = createHintPresenter(
@@ -930,42 +872,45 @@ function createCodeOutputChallengeTemplate(
       return "The shown case has undefined behavior.";
     }
     if (current.kind === "step-limit") {
-      return "The shown case did not finish. Check whether a loop condition can become false or a recursive call can reach its base case.";
+      return "The shown case did not finish. Check whether every loop's condition eventually becomes zero.";
     }
     if (current.kind === "blocked-input") {
       return "The shown case is waiting for input, but code-writing lessons do not provide interactive input. Remove the input operation or initialize the value directly.";
     }
     if (current.kind === "missing-output") {
-      if (current.failingOutput) {
-        return `Create a variable named $n{${current.failingOutput.name}}.`;
-      }
-      return `Create the output variable${outputSpecs.length === 1 ? "" : "s"}: $n{${outputNamesText}}.`;
+      return current.failingOutput
+        ? `Create a variable named $n{${current.failingOutput.name}}.`
+        : "Create the result variables.";
     }
     if (current.kind === "wrong-output-type") {
-      if (current.failingOutput) {
-        return `$n{${current.failingOutput.name}} should have type $t{${current.failingOutput.type}}.`;
-      }
-      return `One output variable has the wrong type.`;
+      return current.failingOutput
+        ? `$n{${current.failingOutput.name}} should have type $t{${current.failingOutput.type}}.`
+        : "One result variable has the wrong type.";
     }
     if (current.kind === "wrong-output-value") {
-      if (current.failingOutput && current.expected) {
-        return `For the shown input, $n{${current.failingOutput.name}} should be $v{${current.expected.value}}.`;
+      const index = outputSpecs.findIndex((spec) => spec.name === current.failingOutput?.name);
+      const expected = state.visibleCase.expectedOutputs[index];
+      if (current.failingOutput && expected) {
+        return `For the shown input, $n{${current.failingOutput.name}} should be ${expectedValueText(expected)}.`;
       }
-      return "For the shown input, one output variable has the wrong value.";
+      return "For the shown input, one result variable has the wrong value.";
+    }
+    if (current.kind === "wrong-stdout") {
+      return "For the shown input, your program's output doesn't match the expected output.";
     }
     if (report && !report.pass) {
-      return "The shown input works, but at least one other test input fails. Make sure your code computes the value from the input instead of hardcoding.";
+      return "The shown input works, but at least one other test input fails. Click $showFailingCaseButton to see one that fails.";
     }
     return "Looks good. Press $checkButton.";
   }
 
   function render() {
-    const analyzed = runCProgram(fullProgramTextForCase(state.visibleCase));
+    const analyzed = runCase(state.visibleCase);
     const currentResult = evaluateCase(state.visibleCase, analyzed);
     visibleCaseResult = currentResult;
     visibleProgramFeedback = getVisibleProgramFeedback(analyzed);
     renderStage(currentResult);
-    updateLockedInputLine();
+    updateLockedLines();
     updateInstructions();
     updateLineGutters(
       visibleProgramFeedback.diagnostic,

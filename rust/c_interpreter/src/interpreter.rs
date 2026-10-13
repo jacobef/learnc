@@ -24,6 +24,8 @@ use crate::{RunOptions, UbDetectionMode};
 
 const INT_MIN: i128 = i32::MIN as i128;
 const INT_MAX: i128 = i32::MAX as i128;
+// How far above the first declared object's address the heap starts.
+const HEAP_ADDRESS_OFFSET: u64 = 1 << 20;
 const HOST_MATH_ERRHANDLING: c_int = 2;
 const HOST_FE_INVALID: c_int = 0x0001;
 const HOST_FE_DIVBYZERO: c_int = 0x0002;
@@ -417,6 +419,7 @@ pub struct ProgramOutput {
     pub stderr: String,
     pub exit_status: c_int,
     pub state: Vec<ProgramStateBox>,
+    pub initial_state: Vec<ProgramStateBox>,
     pub trace: Vec<ProgramTraceEvent>,
     pub main_close: ProgramSourceLocation,
     pub blocked: Option<ProgramBlocked>,
@@ -470,6 +473,8 @@ pub struct ProgramStateBox {
     pub aggregate_root: Option<String>,
     pub aggregate_path: Vec<String>,
     pub aggregate_kind: Option<String>,
+    /// What an unnamed object is, such as "string literal"; its name is then empty.
+    pub anonymous: Option<String>,
     pub aliases: Vec<String>,
     pub type_info: Arc<ProgramTypeInfo>,
 }
@@ -584,6 +589,9 @@ pub struct Interpreter<'a> {
     formatted_io_accesses: Option<Vec<FormattedIoAccess>>,
     pending_stream_buffer_lifetime_ub: Option<Diagnostic>,
     next_encoded_pointer: u64,
+    // Memory from malloc and friends gets addresses from a separate range, far
+    // from declared variables, like a real program's heap.
+    next_heap_pointer: u64,
     object_type_registry: HashMap<ObjectId, CType>,
     object_base_addresses: HashMap<ObjectId, u64>,
     dynamic_allocations: HashSet<ObjectId>,
@@ -625,6 +633,7 @@ pub struct Interpreter<'a> {
     func_name_bindings: HashMap<usize, ObjectId>,
     static_array_contracts: HashMap<usize, Vec<Vec<Parameter>>>,
     literal_bindings: [HashMap<StringLiteralValue, ObjectId>; 4],
+    startup_string_literals: RefCell<Option<strings::StartupStringLiterals>>,
     mbrtoc16_pending: HashMap<PointerValue, u16>,
     mbrtoc16_null_pending: Option<u16>,
     c16rtomb_pending: HashMap<PointerValue, u16>,
@@ -660,6 +669,10 @@ pub struct Interpreter<'a> {
     strtok_state: Option<PointerValue>,
     strtok_started: bool,
     cboxes_main_state: Vec<ProgramStateBox>,
+    // The state when main starts: globals and main's parameters, before any line runs.
+    cboxes_initial_state: Vec<ProgramStateBox>,
+    // main's argv array, then the strings it points to.
+    cboxes_argument_objects: Vec<ObjectId>,
     cboxes_trace: Vec<ProgramTraceEvent>,
     cboxes_expression_request: Option<ProgramExpressionEvalRequest>,
     cboxes_expression_result: Option<ProgramExpressionResult>,
@@ -2435,7 +2448,7 @@ fn cboxes_initializer_has_side_effects(initializer: &Initializer) -> bool {
     }
 }
 
-fn cboxes_type_string(ty: &CType) -> String {
+pub(crate) fn cboxes_type_string(ty: &CType) -> String {
     cboxes_render_c_type(ty, String::new())
 }
 

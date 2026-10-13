@@ -40,7 +40,7 @@ pub(super) fn cboxes_success_json(
 ) -> String {
     let (trace, trace_types) = cboxes_trace_json(&result.trace, source_display);
     format!(
-        "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"stdoutBytes\":{:?},\"stderrBytes\":{:?},\"stdinPosition\":{},\"exitStatus\":{},\"state\":{},\"trace\":{},\"traceTypeInfos\":{},\"mainClose\":{},\"blocked\":{},\"executionLimit\":{}}}",
+        "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"stdoutBytes\":{:?},\"stderrBytes\":{:?},\"stdinPosition\":{},\"exitStatus\":{},\"state\":{},\"initialState\":{},\"trace\":{},\"traceTypeInfos\":{},\"mainClose\":{},\"blocked\":{},\"executionLimit\":{}}}",
         cboxes_json_string(&result.stdout),
         cboxes_json_string(&result.stderr),
         result.stdout_bytes,
@@ -48,6 +48,7 @@ pub(super) fn cboxes_success_json(
         result.stdin_position,
         result.exit_status,
         cboxes_state_json(&result.state),
+        cboxes_state_json(&result.initial_state),
         trace,
         trace_types,
         cboxes_source_location_json(&result.main_close, source_display),
@@ -432,6 +433,12 @@ fn cboxes_state_json_with_types(state: &[ProgramStateBox], types: &mut StateType
         out.push_str(",\"aggregateKind\":");
         if let Some(kind) = &item.aggregate_kind {
             out.push_str(&cboxes_json_string(kind));
+        } else {
+            out.push_str("null");
+        }
+        out.push_str(",\"anonymous\":");
+        if let Some(anonymous) = &item.anonymous {
+            out.push_str(&cboxes_json_string(anonymous));
         } else {
             out.push_str("null");
         }

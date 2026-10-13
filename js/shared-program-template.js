@@ -1,108 +1,10 @@
-import { applyOtherNames, appendStateObjects, bindBtnRefPulse, clearNode, cloneBoxes, isMobileViewport, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, makeAnswerBox, queryRole, readBoxState, renderCodePane, restoreWorkspace, serializeWorkspace, setPartsContent, setStepperLabel, syncDocumentTitleFromNav, withSidebarParam, } from "./shared-core.js";
+import { doneLinesForTrace, strikeFragmentsForTrace } from "./shared-trace-lines.js";
+import { renderSyntaxDiagrams } from "./shared-syntax-tree.js";
+import { applyOtherNames, appendStateObjects, bindBtnRefPulse, clearNode, cloneBoxes, isMobileViewport, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, makeAnswerBox, queryRole, readBoxState, renderCodePane, reshapeDynamicBox, restoreWorkspace, serializeWorkspace, setPartsContent, setStepperLabel, syncDocumentTitleFromNav, withSidebarParam, } from "./shared-core.js";
 import { createButtonTokenReplacer, createHintPresenter, createLevelProgressController, nextLessonLabel, resetLevelAfterConfirmation, } from "./shared-lesson-runtime.js";
-import { runCProgram } from "./shared-c-interpreter.js";
+import { runCFiles, runCProgram } from "./shared-c-interpreter.js";
 import { basicHintForBoxes, stateMatches, stateWithArrayRoots, } from "./shared-program-state.js";
 import { allocateCWorkspaceObject, resolveCBoxAliases, } from "./shared-c-workspace-model.js";
-function ifKeywordColumnsByLine(lines) {
-    const columnsByLine = new Map();
-    let inBlockComment = false;
-    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-        const line = lines[lineIndex] ?? "";
-        const columns = [];
-        let quote = null;
-        let escaped = false;
-        for (let column = 0; column < line.length; column += 1) {
-            const ch = line[column] ?? "";
-            const next = line[column + 1] ?? "";
-            if (inBlockComment) {
-                if (ch === "*" && next === "/") {
-                    inBlockComment = false;
-                    column += 1;
-                }
-                continue;
-            }
-            if (quote) {
-                if (escaped)
-                    escaped = false;
-                else if (ch === "\\")
-                    escaped = true;
-                else if (ch === quote)
-                    quote = null;
-                continue;
-            }
-            if (ch === "/" && next === "/")
-                break;
-            if (ch === "/" && next === "*") {
-                inBlockComment = true;
-                column += 1;
-                continue;
-            }
-            if (ch === "'" || ch === '"') {
-                quote = ch;
-                continue;
-            }
-            if (ch !== "i" || next !== "f")
-                continue;
-            const before = line[column - 1] ?? "";
-            const after = line[column + 2] ?? "";
-            if (/[A-Za-z0-9_]/.test(before) || /[A-Za-z0-9_]/.test(after)) {
-                continue;
-            }
-            let cursor = column + 2;
-            while (/\s/.test(line[cursor] ?? ""))
-                cursor += 1;
-            if (line[cursor] === "(")
-                columns.push(column);
-        }
-        if (columns.length)
-            columnsByLine.set(lineIndex, columns);
-    }
-    return columnsByLine;
-}
-function strikeFragmentsForTrace(lines, trace, traceEndIndex) {
-    const latestRangeByBranch = new Map();
-    const ifColumns = ifKeywordColumnsByLine(lines);
-    const nextBranchSiteByLine = new Map();
-    for (let index = 0; index <= traceEndIndex && index < trace.length; index += 1) {
-        const event = trace[index];
-        if (event.kind !== "branch")
-            continue;
-        const lineKey = `${event.file}:${event.startLine}`;
-        const columns = ifColumns.get(event.startLine) ?? [];
-        const range = event.skippedRange;
-        let siteIndex = -1;
-        if (range?.startLine === event.startLine) {
-            siteIndex = columns.indexOf(range.startColumn);
-        }
-        if (siteIndex < 0 && columns.length === 1)
-            siteIndex = 0;
-        if (siteIndex < 0 && columns.length > 1) {
-            siteIndex = (nextBranchSiteByLine.get(lineKey) ?? 0) % columns.length;
-        }
-        if (siteIndex >= 0 && columns.length) {
-            nextBranchSiteByLine.set(lineKey, (siteIndex + 1) % columns.length);
-        }
-        const branchKey = siteIndex >= 0
-            ? `${lineKey}:${siteIndex}`
-            : range
-                ? `${lineKey}:${range.startLine}:${range.startColumn}:${range.endLine}:${range.endColumn}`
-                : lineKey;
-        latestRangeByBranch.set(branchKey, range);
-    }
-    const fragments = [];
-    latestRangeByBranch.forEach((range) => {
-        if (!range)
-            return;
-        for (let line = range.startLine; line <= range.endLine && line < lines.length; line += 1) {
-            const lineText = lines[line] ?? "";
-            const start = line === range.startLine ? range.startColumn : 0;
-            const end = line === range.endLine ? range.endColumn : lineText.length;
-            if (end > start)
-                fragments.push({ line, start, end });
-        }
-    });
-    return fragments;
-}
 function collectProgramElements(root = document) {
     const role = (name) => queryRole(name, root);
     return {
@@ -110,6 +12,8 @@ function collectProgramElements(root = document) {
         codeEl: role("program-code"),
         codeRoot: role("program-root"),
         stageEl: role("program-stage"),
+        outputPanel: role("program-output-panel"),
+        outputEl: role("program-output"),
         controlsActionsEl: role("program-controls"),
         mobileActionsEl: role("program-mobile-actions"),
         statusEl: role("program-status"),
@@ -170,7 +74,17 @@ function ensureProgramLayout() {
     const stageEl = document.createElement("div");
     stageEl.dataset.role = "program-stage";
     stageEl.className = "panel-body";
-    statePanel.append(stateTitle, stageEl);
+    const outputPanel = document.createElement("div");
+    outputPanel.dataset.role = "program-output-panel";
+    outputPanel.className = "program-output-panel hidden";
+    const outputTitle = document.createElement("div");
+    outputTitle.className = "panel-title";
+    outputTitle.textContent = "Output";
+    const outputEl = document.createElement("div");
+    outputEl.dataset.role = "program-output";
+    outputEl.className = "program-output";
+    outputPanel.append(outputTitle, outputEl);
+    statePanel.append(stateTitle, stageEl, outputPanel);
     const prevBtn = document.createElement("button");
     prevBtn.dataset.role = "program-prev";
     prevBtn.dataset.stepper = "prev";
@@ -221,7 +135,7 @@ function boxesNamed(boxes, ...names) {
     return names.map((name) => boxNamed(boxes, name));
 }
 function isHeaderLine(line) {
-    return /^\s*(?:}\s*else\s+)?(?:if|while)\s*\(/.test(line || "");
+    return /^\s*(?:}\s*else\s+)?(?:if|while|for)\s*\(/.test(line || "");
 }
 function resolveIndexed(spec, index) {
     if (Array.isArray(spec))
@@ -246,9 +160,13 @@ function formatRunLabel(stage, totalLines, endLabel, { withArrow = true, badge =
         isHeaderLine(stage.step.lines[0] || "");
     const verb = stage.editableMode === "boundary" || (stage.editableMode === "none" && headerOnly)
         ? "Branch from"
-        : stage.editableMode === "state" && badge === "note"
-            ? "Solve"
-            : "Run";
+        : stage.traceKind === "call"
+            ? "Call from"
+            : stage.editableMode === "state" && badge === "note"
+                ? "Solve"
+                : stage.traceKind === "return"
+                    ? "Return to"
+                    : "Run";
     const suffix = withArrow ? " ▶" : "";
     const prefix = badge === "note" ? "🔧 " : badge === "check" ? "✅ " : "";
     return start === end
@@ -256,11 +174,11 @@ function formatRunLabel(stage, totalLines, endLabel, { withArrow = true, badge =
         : `${prefix}${verb} lines ${start}-${end}${suffix}`;
 }
 function createProgramTemplate(config) {
-    const { steps, initialInstructions = "", next = null, workspace = {}, nextLabel, } = config;
+    const { steps, implicitMain = true, initialInstructions = "", initialDiagrams, next = null, workspace = {}, nextLabel, onOpenAtStart, stdin = "", } = config;
     if (!Array.isArray(steps) || !steps.length) {
         throw new Error("Program steps must be a non-empty array.");
     }
-    const { instructionsEl, codeEl, codeRoot, stageEl, statusEl, controlsActionsEl, mobileActionsEl, hintPanel, hintBtn, checkBtn, levelResetBtn, addBtn, resetBtn, prevBtn, nextBtn, } = ensureProgramLayout();
+    const { instructionsEl, codeEl, codeRoot, stageEl, outputPanel, outputEl, statusEl, controlsActionsEl, mobileActionsEl, hintPanel, hintBtn, checkBtn, levelResetBtn, addBtn, resetBtn, prevBtn, nextBtn, } = ensureProgramLayout();
     function placeActionButtonsForViewport() {
         const mobileMode = isMobileViewport() && !!mobileActionsEl;
         const target = mobileMode ? mobileActionsEl : controlsActionsEl;
@@ -321,24 +239,39 @@ function createProgramTemplate(config) {
             lines: rawLines,
             startLine,
             endLine,
+            codeEndLine: Math.max(startLine, startLine + rawLines.reduce((last, line, index) => (line.trim() ? index : last), 0)),
             boundary: endLine + 1,
             instructions: step.instructions,
+            diagrams: step.diagrams,
             hints: step.hints,
             editable: step.editable ?? false,
         });
     });
     const totalLines = lineList.length;
     const fullCode = steps.map((step) => step.code).join("");
-    const run = runCProgram(fullCode);
+    const run = implicitMain
+        ? runCProgram(fullCode, undefined, stdin)
+        : runCFiles([{ path: "program.c", source: fullCode }], undefined, stdin, false, {
+            stepLimit: 100000,
+            followingTraceLimit: 256,
+            traceFunctions: true,
+        });
     if (run.kind !== "ok") {
         throw new Error(run.diagnostic.message || "Program template code does not compile.");
     }
     const stepForLine = (line) => stepInfos.find((step) => line >= step.startLine && line <= step.endLine) || null;
     const visitCounts = new Map();
     const runtimeStages = [];
+    const shownState = (boxes) => workspace.hideStringLiterals ? boxes.filter((box) => box.anonymous !== "string literal") : boxes;
+    const trace = (run.trace || []).map((event) => workspace.hideStringLiterals ? { ...event, state: shownState(event.state) } : event);
+    const exitStatus = run.exitStatus;
+    // What exists before the first line runs: string literals, globals, and main's parameters.
+    const initialState = shownState(run.initialState);
+    const stdoutDecoder = new TextDecoder();
+    const stdoutAt = (length) => stdoutDecoder.decode(run.stdoutBytes.subarray(0, length));
     let previousBoundary = 0;
-    let previousState = [];
-    const trace = run.trace || [];
+    let previousState = cloneBoxes(initialState);
+    let previousStdout = "";
     function matchingCloseBoundaryForHeader(headerLine) {
         const header = lineList[headerLine] || "";
         if (!isHeaderLine(header))
@@ -388,10 +321,13 @@ function createProgramTemplate(config) {
                 afterBoundary: step.boundary,
                 stateBefore: cloneBoxes(previousState),
                 stateAfter: cloneBoxes(stateAfterStep),
+                stdoutBefore: previousStdout,
+                stdoutAfter: previousStdout,
                 step,
                 traceKind: "synthetic",
                 stepVisitIndex: visitIndex,
                 editableMode: editable ? (headerEditable ? "boundary" : "state") : "none",
+                selectsResume: false,
                 instructions: resolveIndexed(step.instructions, visitIndex),
                 hints: resolveIndexed(step.hints, visitIndex),
                 branchTargets: editable && headerEditable
@@ -427,96 +363,174 @@ function createProgramTemplate(config) {
             return `addr:${address}`;
         return `name:${box.name ?? ""}:${box.type ?? ""}:${box.arrayRoot ?? ""}:${(box.arrayIndices ?? []).join(",")}`;
     }
-    for (let i = 0; i < trace.length; i += 1) {
-        const event = trace[i];
-        if (event.startLine < previousBoundary) {
-            const loopClose = matchingCloseBoundaryForHeader(event.startLine);
-            pushNoEventStages(loopClose ?? previousBoundary, event.state, event.startLine);
-        }
-        else {
-            pushNoEventStages(event.startLine, event.state);
-        }
-        const step = stepForLine(event.startLine);
-        if (!step)
-            continue;
-        const visitIndex = visitCounts.get(step.index) ?? 0;
-        const editable = editableForVisit(step, visitIndex);
-        const headerOnly = event.kind !== "block-close" &&
-            step.lines.length === 1 &&
-            isHeaderLine(step.lines[0] || "");
-        const headerEditable = editable && headerOnly;
-        let lastEvent = event;
-        let j = i;
-        if (!headerOnly) {
-            while (j + 1 < trace.length) {
-                const nextEvent = trace[j + 1];
-                if (nextEvent.startLine < step.startLine || nextEvent.startLine > step.endLine)
-                    break;
-                lastEvent = nextEvent;
-                j += 1;
+    // Where execution starts: line 1, or the top of main's body.
+    const initialBoundary = implicitMain ? 0 : trace[0]?.startLine ?? 0;
+    // Programs with their own functions jump between distant lines, so their
+    // stages come straight from the trace instead of from walking the steps.
+    function pushTraceStages() {
+        previousBoundary = initialBoundary;
+        for (let i = 0; i < trace.length; i += 1) {
+            const event = trace[i];
+            const step = stepForLine(event.startLine);
+            if (!step)
+                continue;
+            const visitIndex = visitCounts.get(step.index) ?? 0;
+            const editable = editableForVisit(step, visitIndex);
+            const headerOnly = event.kind !== "block-close" &&
+                step.lines.length === 1 &&
+                isHeaderLine(step.lines[0] || "");
+            let j = i;
+            if (!headerOnly && event.kind !== "call") {
+                while (j + 1 < trace.length) {
+                    const following = trace[j + 1];
+                    if (following.kind === "call" || following.frameId !== event.frameId)
+                        break;
+                    if (following.startLine < step.startLine || following.startLine > step.endLine)
+                        break;
+                    j += 1;
+                }
             }
+            const lastEvent = trace[j];
+            const nextTraceLine = trace[j + 1]?.startLine ?? totalLines;
+            const headerCloseBoundary = headerOnly
+                ? matchingCloseBoundaryForHeader(step.startLine)
+                : null;
+            const afterBoundary = headerCloseBoundary != null &&
+                headerCloseBoundary < nextTraceLine &&
+                nextTraceLine > lastEvent.endLine + 1
+                ? headerCloseBoundary
+                : nextTraceLine;
+            runtimeStages.push({
+                index: runtimeStages.length,
+                runLine: step.startLine,
+                runEndLine: headerOnly ? event.endLine : step.codeEndLine,
+                beforeBoundary: previousBoundary,
+                afterBoundary,
+                stateBefore: cloneBoxes(previousState),
+                stateAfter: cloneBoxes(lastEvent.state),
+                stdoutBefore: previousStdout,
+                stdoutAfter: stdoutAt(lastEvent.stdoutLength),
+                step,
+                traceKind: event.kind,
+                stepVisitIndex: visitIndex,
+                editableMode: editable ? (headerOnly ? "boundary" : "state") : "none",
+                selectsResume: editable && !headerOnly && event.kind === "call",
+                instructions: resolveIndexed(step.instructions, visitIndex),
+                hints: resolveIndexed(step.hints, visitIndex),
+                branchTargets: editable && (headerOnly || event.kind === "call")
+                    ? Array.from({ length: totalLines + 1 }, (_, index) => index)
+                    : [],
+                traceEndIndex: j,
+            });
+            visitCounts.set(step.index, visitIndex + 1);
+            previousBoundary = afterBoundary;
+            previousState = cloneBoxes(lastEvent.state);
+            previousStdout = stdoutAt(lastEvent.stdoutLength);
+            i = j;
         }
-        const nextEvent = trace[j + 1] || null;
-        const afterExecutedLine = headerOnly ? lastEvent.endLine + 1 : step.boundary;
-        const nextTraceLine = nextEvent?.startLine ?? totalLines;
-        const headerCloseBoundary = headerOnly
-            ? matchingCloseBoundaryForHeader(step.startLine)
-            : null;
-        const headerAfterBoundary = headerOnly &&
-            headerCloseBoundary != null &&
-            headerCloseBoundary < nextTraceLine &&
-            nextTraceLine > afterExecutedLine
-            ? headerCloseBoundary
-            : nextTraceLine;
-        const pendingNoEventStep = headerOnly
-            ? null
-            : firstNoEventStep(afterExecutedLine, nextTraceLine);
-        const skipElseTail = !headerOnly && isElseLine(step) && nextTraceLine > afterExecutedLine;
-        const loopBackAfterClose = !headerOnly &&
-            step.lines.some((line) => line.includes("}")) &&
-            !!nextEvent &&
-            nextTraceLine < afterExecutedLine;
-        const naturalAfter = headerOnly
-            ? headerAfterBoundary
-            : skipElseTail || loopBackAfterClose
-                ? nextTraceLine
-                : pendingNoEventStep
-                    ? afterExecutedLine
-                    : Math.max(afterExecutedLine, nextTraceLine);
-        const afterBoundary = Math.max(0, Math.min(totalLines, naturalAfter));
-        const stateAfterStage = cloneBoxes(lastEvent.state);
-        const branchTargets = headerEditable
-            ? Array.from({ length: totalLines + 1 }, (_, index) => index)
-            : [];
-        runtimeStages.push({
-            index: runtimeStages.length,
-            runLine: step.startLine,
-            runEndLine: !headerOnly ? step.endLine : event.endLine,
-            beforeBoundary: previousBoundary,
-            afterBoundary,
-            stateBefore: cloneBoxes(previousState),
-            stateAfter: cloneBoxes(stateAfterStage),
-            step,
-            traceKind: event.kind,
-            stepVisitIndex: visitIndex,
-            editableMode: editable ? (headerEditable ? "boundary" : "state") : "none",
-            instructions: resolveIndexed(step.instructions, visitIndex),
-            hints: resolveIndexed(step.hints, visitIndex),
-            branchTargets,
-            traceEndIndex: j,
-        });
-        visitCounts.set(step.index, visitIndex + 1);
-        previousBoundary = afterBoundary;
-        previousState = cloneBoxes(stateAfterStage);
-        i = j;
     }
-    pushNoEventStages(totalLines + 1, run.state || previousState);
+    if (!implicitMain) {
+        pushTraceStages();
+    }
+    else {
+        for (let i = 0; i < trace.length; i += 1) {
+            const event = trace[i];
+            if (event.startLine < previousBoundary) {
+                const loopClose = matchingCloseBoundaryForHeader(event.startLine);
+                pushNoEventStages(loopClose ?? previousBoundary, event.state, event.startLine);
+            }
+            else {
+                pushNoEventStages(event.startLine, event.state);
+            }
+            const step = stepForLine(event.startLine);
+            if (!step)
+                continue;
+            const visitIndex = visitCounts.get(step.index) ?? 0;
+            const editable = editableForVisit(step, visitIndex);
+            const headerOnly = event.kind !== "block-close" &&
+                step.lines.length === 1 &&
+                isHeaderLine(step.lines[0] || "");
+            const headerEditable = editable && headerOnly;
+            let lastEvent = event;
+            let j = i;
+            if (!headerOnly) {
+                while (j + 1 < trace.length) {
+                    const nextEvent = trace[j + 1];
+                    if (nextEvent.startLine < step.startLine || nextEvent.startLine > step.endLine)
+                        break;
+                    lastEvent = nextEvent;
+                    j += 1;
+                }
+            }
+            const nextEvent = trace[j + 1] || null;
+            const afterExecutedLine = headerOnly ? lastEvent.endLine + 1 : step.boundary;
+            const nextTraceLine = nextEvent?.startLine ?? totalLines;
+            const headerCloseBoundary = headerOnly
+                ? matchingCloseBoundaryForHeader(step.startLine)
+                : null;
+            const headerAfterBoundary = headerOnly &&
+                headerCloseBoundary != null &&
+                headerCloseBoundary < nextTraceLine &&
+                nextTraceLine > afterExecutedLine
+                ? headerCloseBoundary
+                : nextTraceLine;
+            const pendingNoEventStep = headerOnly
+                ? null
+                : firstNoEventStep(afterExecutedLine, nextTraceLine);
+            const skipElseTail = !headerOnly && isElseLine(step) && nextTraceLine > afterExecutedLine;
+            const loopBackAfterClose = !headerOnly &&
+                step.lines.some((line) => line.includes("}")) &&
+                !!nextEvent &&
+                nextTraceLine < afterExecutedLine;
+            const naturalAfter = headerOnly
+                ? headerAfterBoundary
+                : skipElseTail || loopBackAfterClose
+                    ? nextTraceLine
+                    : pendingNoEventStep
+                        ? afterExecutedLine
+                        : Math.max(afterExecutedLine, nextTraceLine);
+            const afterBoundary = Math.max(0, Math.min(totalLines, naturalAfter));
+            const stateAfterStage = cloneBoxes(lastEvent.state);
+            const branchTargets = headerEditable
+                ? Array.from({ length: totalLines + 1 }, (_, index) => index)
+                : [];
+            runtimeStages.push({
+                index: runtimeStages.length,
+                runLine: step.startLine,
+                runEndLine: !headerOnly ? step.endLine : event.endLine,
+                beforeBoundary: previousBoundary,
+                afterBoundary,
+                stateBefore: cloneBoxes(previousState),
+                stateAfter: cloneBoxes(stateAfterStage),
+                stdoutBefore: previousStdout,
+                stdoutAfter: stdoutAt(lastEvent.stdoutLength),
+                step,
+                traceKind: event.kind,
+                stepVisitIndex: visitIndex,
+                editableMode: editable ? (headerEditable ? "boundary" : "state") : "none",
+                selectsResume: false,
+                instructions: resolveIndexed(step.instructions, visitIndex),
+                hints: resolveIndexed(step.hints, visitIndex),
+                branchTargets,
+                traceEndIndex: j,
+            });
+            visitCounts.set(step.index, visitIndex + 1);
+            previousBoundary = afterBoundary;
+            previousState = cloneBoxes(stateAfterStage);
+            previousStdout = stdoutAt(lastEvent.stdoutLength);
+            i = j;
+        }
+        pushNoEventStages(totalLines + 1, run.state ? shownState(run.state) : previousState);
+    }
     const progress = createLevelProgressController(isDefaultProgress);
     const restored = progress.restore();
     let executionSteps = Math.max(-1, Math.min(runtimeStages.length - 1, restored?.executionSteps ?? -1));
     let solvedStage = Math.max(-1, restored?.solvedStage ?? -1);
     const workspaceByStage = new Map((restored?.workspaceByStage || []).map((entry) => [entry.stageIndex, entry.boxes ? cloneBoxes(entry.boxes) : null]));
     const selectedBoundaryByStage = new Map((restored?.selectedBoundaryByStage || []).map((entry) => [entry.stageIndex, entry.boundary]));
+    const showOutput = !!workspace.showOutput;
+    // The learner's predicted output for each editable stage.
+    const outputByStage = new Map((restored?.outputByStage || []).map((entry) => [entry.stageIndex, entry.output]));
     const otherNamesShown = new Set(Array.isArray(restored?.otherNamesShown)
         ? restored.otherNamesShown.filter((addr) => typeof addr === "string")
         : []);
@@ -530,7 +544,7 @@ function createProgramTemplate(config) {
     const currentBoundary = () => {
         const stage = currentStage();
         if (!stage)
-            return 0;
+            return initialBoundary;
         if (stageNeedsSolve(stage) && stage.editableMode === "boundary") {
             return stage.step?.boundary ?? stage.afterBoundary;
         }
@@ -572,6 +586,10 @@ function createProgramTemplate(config) {
                 boundary,
             })),
             otherNamesShown: Array.from(otherNamesShown),
+            outputByStage: Array.from(outputByStage.entries()).map(([stageIndex, output]) => ({
+                stageIndex,
+                output,
+            })),
         };
     }
     function isDefaultProgress(snapshot) {
@@ -579,7 +597,8 @@ function createProgramTemplate(config) {
             snapshot.solvedStage === -1 &&
             snapshot.workspaceByStage.length === 0 &&
             snapshot.selectedBoundaryByStage.length === 0 &&
-            (snapshot.otherNamesShown?.length ?? 0) === 0);
+            (snapshot.otherNamesShown?.length ?? 0) === 0 &&
+            (snapshot.outputByStage?.length ?? 0) === 0);
     }
     function persistProgress() {
         progress.save(progressSnapshot());
@@ -610,6 +629,16 @@ function createProgramTemplate(config) {
         const text = stage?.instructions ??
             (executionSteps < 0 ? initialInstructions : null);
         setPartsContent(instructionsEl, applyButtonTokens(text));
+        const diagrams = stage ? stage.step?.diagrams : initialDiagrams;
+        let diagramsEl = queryRole("program-diagrams");
+        if (!diagramsEl && instructionsEl) {
+            diagramsEl = document.createElement("div");
+            diagramsEl.dataset.role = "program-diagrams";
+            instructionsEl.after(diagramsEl);
+        }
+        if (diagramsEl) {
+            diagramsEl.replaceChildren(...(diagrams?.length ? [renderSyntaxDiagrams(diagrams)] : []));
+        }
     }
     function refreshOtherNames() {
         const sourceBoxes = resolveCBoxAliases(readWorkspace());
@@ -692,6 +721,17 @@ function createProgramTemplate(config) {
                 if (workspace.showOtherNames)
                     refreshOtherNames();
             });
+            wrap.addEventListener("focusout", (event) => {
+                const target = event.target;
+                if (!(target instanceof HTMLElement) || !target.matches(".type, .array-type"))
+                    return;
+                if (!reshapeDynamicBox(target))
+                    return;
+                refreshDynamicAddresses(wrap, stage);
+                workspaceByStage.set(stage.index, serializeWorkspace(wrap) || []);
+                updateResetVisibility();
+                persistProgress();
+            });
             wrap.addEventListener("click", () => {
                 window.setTimeout(() => {
                     refreshDynamicAddresses(wrap, stage);
@@ -708,7 +748,7 @@ function createProgramTemplate(config) {
         const wrap = document.createElement("div");
         wrap.dataset.role = "workspace";
         wrap.className = "grid";
-        const boxes = cloneBoxes(stage?.stateAfter || []);
+        const boxes = cloneBoxes(stage?.stateAfter || initialState);
         if (!boxes.length) {
             const msg = document.createElement("div");
             msg.className = "muted";
@@ -723,6 +763,17 @@ function createProgramTemplate(config) {
             });
         }
         stageEl.appendChild(wrap);
+        // Once main has returned, the program is over, and what it returned is its exit status.
+        if (!implicitMain && stage && stage.index === runtimeStages.length - 1) {
+            const exit = document.createElement("div");
+            exit.className = "program-exit-status";
+            exit.append("The program has ended, with exit status ");
+            const status = document.createElement("span");
+            status.className = "program-exit-status-value";
+            status.textContent = String(exitStatus);
+            exit.append(status, ".");
+            stageEl.appendChild(exit);
+        }
         if (workspace.showOtherNames) {
             refreshOtherNames();
         }
@@ -743,7 +794,81 @@ function createProgramTemplate(config) {
         }
         const current = readWorkspace();
         const baseline = stage.stateBefore;
-        resetBtn.classList.toggle("hidden", stateMatches(current, baseline));
+        const outputUnchanged = enteredOutput(stage) === stage.stdoutBefore;
+        resetBtn.classList.toggle("hidden", stateMatches(current, baseline) && outputUnchanged);
+    }
+    function enteredOutput(stage) {
+        return outputByStage.get(stage.index) ?? stage.stdoutBefore;
+    }
+    function solvingState(stage) {
+        return !!stage && stageNeedsSolve(stage) && stage.editableMode === "state";
+    }
+    function outputMatches(stage) {
+        return !showOutput || enteredOutput(stage) === stage.stdoutAfter;
+    }
+    // A terminal-like view of stdout. The cursor shows where the next character goes,
+    // which makes a trailing newline visible.
+    function renderOutput(stage) {
+        if (!outputPanel || !outputEl)
+            return;
+        outputPanel.classList.toggle("hidden", !showOutput);
+        if (!showOutput)
+            return;
+        clearNode(outputEl);
+        if (stdin) {
+            const input = document.createElement("div");
+            input.className = "program-stdin";
+            const label = document.createElement("div");
+            label.className = "program-stdin-label";
+            label.textContent = "Standard input:";
+            const text = document.createElement("pre");
+            text.className = "program-output-text";
+            text.textContent = stdin;
+            input.append(label, text);
+            outputEl.appendChild(input);
+        }
+        if (stage && solvingState(stage)) {
+            const input = document.createElement("textarea");
+            input.className = "program-output-text program-output-input";
+            input.setAttribute("aria-label", "Predicted output");
+            input.spellcheck = false;
+            input.value = enteredOutput(stage);
+            input.addEventListener("input", () => {
+                outputByStage.set(stage.index, input.value.replace(/\r\n/g, "\n"));
+                updateResetVisibility();
+                persistProgress();
+            });
+            outputEl.appendChild(input);
+            return;
+        }
+        const text = stage ? stage.stdoutAfter : "";
+        const pre = document.createElement("pre");
+        pre.className = "program-output-text";
+        pre.textContent = text;
+        const cursor = document.createElement("span");
+        cursor.className = "program-output-cursor";
+        cursor.setAttribute("aria-hidden", "true");
+        pre.appendChild(cursor);
+        outputEl.appendChild(pre);
+    }
+    function basicOutputHint(stage) {
+        const entered = enteredOutput(stage);
+        const expected = stage.stdoutAfter;
+        if (!showOutput || entered === expected)
+            return null;
+        if (entered === stage.stdoutBefore) {
+            return "This line should change the output.";
+        }
+        if (expected === stage.stdoutBefore) {
+            return "This line shouldn't change the output.";
+        }
+        if (`${entered}\n` === expected) {
+            return "The output is missing a newline at the end. A newline moves the cursor to the start of the next line; press Enter to type one.";
+        }
+        if (entered === `${expected}\n`) {
+            return "The output shouldn't end with a newline here.";
+        }
+        return "The output isn't right yet.";
     }
     function renderCode() {
         if (!codeEl)
@@ -754,10 +879,11 @@ function createProgramTemplate(config) {
         const headerOnly = stage?.traceKind !== "block-close" &&
             stage?.step?.lines.length === 1 &&
             isHeaderLine(stage.step.lines[0] || "");
-        const displayBoundary = stage && !headerOnly && stage.step && !isElseLine(stage.step)
+        // After a call, execution is inside the function, not back on the line with the call.
+        const displayBoundary = stage && !headerOnly && stage.step && !isElseLine(stage.step) && stage.traceKind !== "call"
             ? Math.min(rawBoundary, stage.step.boundary)
             : rawBoundary;
-        const selectable = stage && solving && stage.editableMode === "boundary"
+        const selectable = stage && solving && (stage.editableMode === "boundary" || stage.selectsResume)
             ? stage.branchTargets
             : [];
         const lastResolvedStageIndex = solving && stage ? stage.index - 1 : executionSteps;
@@ -766,6 +892,7 @@ function createProgramTemplate(config) {
             resolvedTraceEnd = Math.max(resolvedTraceEnd, runtimeStages[index]?.traceEndIndex ?? -1);
         }
         const strikeFragments = strikeFragmentsForTrace(lineList, trace, resolvedTraceEnd);
+        const doneLines = doneLinesForTrace(lineList, trace, resolvedTraceEnd);
         const nextStage = solving ? null : nextLabelStage();
         renderCodePane(codeEl, lineList, displayBoundary, {
             nextRange: nextStage ? { start: nextStage.runLine, end: nextStage.runEndLine } : undefined,
@@ -777,6 +904,7 @@ function createProgramTemplate(config) {
                     ? rawBoundary
                     : stage.runLine
                 : displayBoundary,
+            doneLines,
             suppressProgressMid: solving && stage?.editableMode === "boundary",
             hideBoundary: selectable.length > 0,
             boundaryTargets: selectable.length > 0,
@@ -805,7 +933,9 @@ function createProgramTemplate(config) {
         const basic = basicHintForBoxes(rawBoxes, stage.stateAfter, stage.stateBefore, stage);
         return {
             boxes,
-            basicHint: basic?.message ?? null,
+            output: solvingState(stage) ? enteredOutput(stage) : stage.stdoutAfter,
+            expectedOutput: stage.stdoutAfter,
+            basicHint: basic?.message ?? (solvingState(stage) ? basicOutputHint(stage) : null),
             basicHintTopicIs: (kind, variable) => basic?.kind === kind && (variable == null || basic.variable === variable),
             boxNamed: (name) => boxNamed(boxes, name),
             boxesNamed: (...names) => boxesNamed(boxes, ...names),
@@ -838,7 +968,14 @@ function createProgramTemplate(config) {
         else {
             const actual = readWorkspace();
             workspaceByStage.set(stage.index, cloneBoxes(actual));
-            if (!stateMatches(actual, stage.stateAfter)) {
+            if (stage.selectsResume && selectedBoundaryByStage.get(stage.index) == null) {
+                setStatus("Select where execution continues.", "err");
+                flashStatus(statusEl);
+                return false;
+            }
+            if (!stateMatches(actual, stage.stateAfter) ||
+                !outputMatches(stage) ||
+                (stage.selectsResume && selectedBoundaryByStage.get(stage.index) !== stage.afterBoundary)) {
                 setStatus("incorrect", "err");
                 flashStatus(statusEl);
                 return false;
@@ -849,6 +986,7 @@ function createProgramTemplate(config) {
         flashStatus(statusEl);
         hideHint();
         workspaceByStage.delete(stage.index);
+        outputByStage.delete(stage.index);
         persistProgress();
         render();
         pulseNext();
@@ -886,6 +1024,7 @@ function createProgramTemplate(config) {
         renderInstructions();
         renderCode();
         renderWorkspace(currentStage());
+        renderOutput(currentStage());
         renderControls();
         persistProgress();
     }
@@ -976,30 +1115,49 @@ function createProgramTemplate(config) {
             });
         });
     }
+    // Scrolls the code so the statement that just ran is visible, along with as much
+    // of its surroundings as fits: first the lines right around it, then the whole
+    // statements that ran before it and will run after it.
     function scrollCodeStatementIntoView(stage) {
         if (!codeEl || !stage)
             return;
         window.requestAnimationFrame(() => {
             const lines = codeEl.querySelectorAll(".line");
-            const firstLine = lines[stage.runLine] ?? null;
-            const lastLine = lines[stage.runEndLine] ?? firstLine;
-            if (!firstLine || !lastLine)
+            if (!lines.length)
                 return;
-            const hostRect = codeEl.getBoundingClientRect();
-            const firstRect = firstLine.getBoundingClientRect();
-            const lastRect = lastLine.getBoundingClientRect();
+            const hostTop = codeEl.getBoundingClientRect().top;
+            const extent = (start, end) => {
+                const first = lines[Math.max(0, Math.min(lines.length - 1, start))];
+                const last = lines[Math.max(0, Math.min(lines.length - 1, end))];
+                return {
+                    top: codeEl.scrollTop + first.getBoundingClientRect().top - hostTop,
+                    bottom: codeEl.scrollTop + last.getBoundingClientRect().bottom - hostTop,
+                };
+            };
             const padding = 8;
-            const statementTop = codeEl.scrollTop + firstRect.top - hostRect.top;
-            const statementBottom = codeEl.scrollTop + lastRect.bottom - hostRect.top;
-            const statementHeight = statementBottom - statementTop;
-            const availableHeight = Math.max(0, codeEl.clientHeight - padding * 2);
+            const available = Math.max(0, codeEl.clientHeight - padding * 2);
+            const previous = runtimeStages[stage.index - 1];
+            const following = runtimeStages[stage.index + 1];
+            const wanted = [
+                [stage.runLine - 1, stage.runLine - 1],
+                [stage.runEndLine + 1, stage.runEndLine + 1],
+                ...(previous ? [[previous.runLine, previous.runEndLine]] : []),
+                ...(following ? [[following.runLine, following.runEndLine]] : []),
+            ].filter(([start]) => start >= 0 && start < lines.length);
+            let shown = extent(stage.runLine, stage.runEndLine);
+            for (const [start, end] of wanted) {
+                const range = extent(start, end);
+                const grown = { top: Math.min(shown.top, range.top), bottom: Math.max(shown.bottom, range.bottom) };
+                if (grown.bottom - grown.top <= available)
+                    shown = grown;
+            }
             let target = codeEl.scrollTop;
-            if (statementHeight > availableHeight) {
-                target = statementBottom - codeEl.clientHeight + padding;
+            if (shown.bottom - shown.top > available) {
+                target = shown.bottom - codeEl.clientHeight + padding;
             }
             else {
-                const minimum = statementBottom - codeEl.clientHeight + padding;
-                const maximum = statementTop - padding;
+                const minimum = shown.bottom - codeEl.clientHeight + padding;
+                const maximum = shown.top - padding;
                 target = Math.max(minimum, Math.min(maximum, target));
             }
             const maxScroll = Math.max(0, codeEl.scrollHeight - codeEl.clientHeight);
@@ -1039,8 +1197,8 @@ function createProgramTemplate(config) {
         const nextDisplayedState = nextStage?.editableMode === "state" && stageNeedsSolve(nextStage)
             ? nextStage.stateBefore
             : nextStage?.stateAfter || [];
-        const shouldScrollState = introducesVisibleObject(stage?.stateAfter || [], nextDisplayedState);
-        const changedBoxes = changedValueBoxes(stage?.stateAfter || [], nextDisplayedState);
+        const shouldScrollState = introducesVisibleObject(stage?.stateAfter || initialState, nextDisplayedState);
+        const changedBoxes = changedValueBoxes(stage?.stateAfter || initialState, nextDisplayedState);
         if (nextStage?.editableMode === "state" && !workspaceByStage.has(nextStage.index)) {
             workspaceByStage.set(nextStage.index, cloneBoxes(nextStage.stateBefore));
         }
@@ -1060,8 +1218,11 @@ function createProgramTemplate(config) {
         const stage = currentStage();
         if (stage?.editableMode === "state" && stageNeedsSolve(stage)) {
             const boxes = readWorkspace();
-            if (stateMatches(boxes, stage.stateAfter)) {
-                showHint("Looks good. Press $checkButton.");
+            const resumeRight = !stage.selectsResume || selectedBoundaryByStage.get(stage.index) === stage.afterBoundary;
+            if (stateMatches(boxes, stage.stateAfter) && outputMatches(stage)) {
+                showHint(resumeRight
+                    ? "Looks good. Press $checkButton."
+                    : "The program state is right. Now select where execution continues: once a function is called, it runs its body from the top.");
                 return;
             }
             const parts = currentHint();
@@ -1083,6 +1244,8 @@ function createProgramTemplate(config) {
         if (!stage || stage.editableMode !== "state")
             return;
         workspaceByStage.set(stage.index, cloneBoxes(stage.stateBefore));
+        outputByStage.delete(stage.index);
+        selectedBoundaryByStage.delete(stage.index);
         setStatus("", "muted");
         hideHint();
         render();
@@ -1138,6 +1301,7 @@ function createProgramTemplate(config) {
             solvedStage = -1;
             workspaceByStage.clear();
             selectedBoundaryByStage.clear();
+            outputByStage.clear();
             otherNamesShown.clear();
             setStatus("", "muted");
             hideHint();
@@ -1145,5 +1309,7 @@ function createProgramTemplate(config) {
         });
     });
     render();
+    if (executionSteps === -1)
+        onOpenAtStart?.();
 }
 export { createProgramTemplate };

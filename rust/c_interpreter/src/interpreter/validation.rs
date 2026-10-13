@@ -762,6 +762,10 @@ impl<'a> Interpreter<'a> {
             restrict_tracking_required,
             formatted_io_accesses: None,
             pending_stream_buffer_lifetime_ub: None,
+            next_heap_pointer: run_options
+                .synthetic_address_base
+                .max(1)
+                .saturating_add(HEAP_ADDRESS_OFFSET),
             next_encoded_pointer,
             object_type_registry: HashMap::default(),
             object_base_addresses: HashMap::default(),
@@ -804,6 +808,7 @@ impl<'a> Interpreter<'a> {
             func_name_bindings: HashMap::default(),
             static_array_contracts: HashMap::default(),
             literal_bindings: std::array::from_fn(|_| HashMap::default()),
+            startup_string_literals: RefCell::new(Some(strings::StartupStringLiterals::default())),
             mbrtoc16_pending: HashMap::default(),
             mbrtoc16_null_pending: None,
             c16rtomb_pending: HashMap::default(),
@@ -838,6 +843,8 @@ impl<'a> Interpreter<'a> {
             strtok_state: None,
             strtok_started: false,
             cboxes_main_state: Vec::new(),
+            cboxes_initial_state: Vec::new(),
+            cboxes_argument_objects: Vec::new(),
             cboxes_trace: Vec::new(),
             cboxes_expression_request: None,
             cboxes_expression_result: None,
@@ -882,6 +889,7 @@ impl<'a> Interpreter<'a> {
         self.initialize_host_math(&mut objects)?;
         self.initialize_host_errno(&mut objects)?;
         self.validate_program_constraints(&objects)?;
+        self.initialize_string_literal_objects(&objects)?;
         let main_args = self.build_main_arguments(&main, &mut objects)?;
         let main_symbol = function_symbol(main.as_ref());
         let entry = catch_unwind(AssertUnwindSafe(|| {
@@ -1000,6 +1008,7 @@ impl<'a> Interpreter<'a> {
             stderr_bytes,
             exit_status,
             state,
+            initial_state: self.cboxes_initial_state.clone(),
             trace: self.cboxes_trace.clone(),
             main_close: ProgramSourceLocation {
                 file: main_close_file.display().to_string(),
@@ -1218,6 +1227,20 @@ impl<'a> Interpreter<'a> {
     }
 
     fn validate_program_constraints(&self, objects: &ObjectFrames) -> Result<(), Diagnostic> {
+        let prototype_frame = Frame {
+            id: usize::MAX,
+            bindings: HashMap::default(),
+            object_decls: HashMap::default(),
+            function_decls: HashMap::default(),
+        };
+        for external in &self.program.externals {
+            let params = match external {
+                ExternalDeclaration::Function(function) => &function.params,
+                ExternalDeclaration::FunctionDeclaration(declaration) => &declaration.params,
+                ExternalDeclaration::ObjectDeclaration(_) => continue,
+            };
+            self.collect_prototype_string_literals(params, &prototype_frame, objects);
+        }
         for function in self
             .program
             .functions
@@ -1308,6 +1331,54 @@ impl<'a> Interpreter<'a> {
             self.validate_block_constraints(&function.body, &mut frame, objects, &mut context)?;
         }
         Ok(())
+    }
+
+    fn collect_prototype_string_literals(
+        &self,
+        params: &[Parameter],
+        frame: &Frame,
+        objects: &ObjectFrames,
+    ) {
+        if self.startup_string_literals.borrow().is_none()
+            || params.iter().all(|param| {
+                param.vla_bounds.iter().all(Option::is_none) && param.static_array_bound.is_none()
+            })
+        {
+            return;
+        }
+        let mut prototype_frame = frame.clone();
+        for param in params {
+            if let Some(name) = &param.name {
+                prototype_frame.bindings.remove(name);
+                prototype_frame.function_decls.remove(name);
+                prototype_frame.object_decls.insert(
+                    name.clone(),
+                    Declaration {
+                        name: name.clone(),
+                        ty: param.ty.clone(),
+                        vla_bounds: param.vla_bounds.clone(),
+                        storage_class: param.storage_class,
+                        linkage: None,
+                        alignment: None,
+                        init: None,
+                        declarator_span: param.span,
+                        span: param.span,
+                    },
+                );
+            }
+        }
+        for param in params {
+            for bound in param
+                .vla_bounds
+                .iter()
+                .flatten()
+                .chain(param.static_array_bound.iter())
+            {
+                // Prototype bounds are not executed. Use the existing typed walk
+                // only to classify their literals, preserving prototype diagnostics.
+                let _ = self.validate_expr_constraints(bound, &prototype_frame, objects);
+            }
+        }
     }
 
     fn validate_jump_scopes(&self, function: &FunctionDef) -> Result<(), Diagnostic> {
@@ -1518,6 +1589,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     BlockItem::FunctionDeclaration(decl) => {
+                        self.collect_prototype_string_literals(&decl.params, frame, objects);
                         frame.object_decls.remove(&decl.name);
                         frame.bindings.remove(&decl.name);
                         frame.function_decls.insert(decl.name.clone(), decl.clone());
@@ -1681,13 +1753,18 @@ impl<'a> Interpreter<'a> {
                 Ok(())
             }
             Statement::Labeled {
-                statement, span, ..
+                label,
+                statement,
+                span,
             } => {
                 if context.switch_depth == 0 {
                     return Err(Diagnostic::error(
                         "case/default label is not within a switch statement",
                         *span,
                     ));
+                }
+                if let SwitchLabel::Case { expr, .. } = label {
+                    self.validate_full_expr_constraints(expr, frame, objects)?;
                 }
                 self.validate_statement_constraints(statement, frame, objects, context)
             }
@@ -1758,6 +1835,7 @@ impl<'a> Interpreter<'a> {
                     && inner.is_character()
                 {
                     self.string_literal_array_initializer(inner, *len, text, *span)?;
+                    self.exclude_string_array_initializer(expr.span());
                     return Ok(());
                 }
                 if let (CType::Array(inner, len), Expr::WideStringLiteral(text, span)) =
@@ -1765,6 +1843,7 @@ impl<'a> Interpreter<'a> {
                     && *inner.unqualified() == self.wchar_type()
                 {
                     self.wide_string_literal_array_initializer(*len, text, *span)?;
+                    self.exclude_string_array_initializer(expr.span());
                     return Ok(());
                 }
                 if let CType::Array(inner, len) = target.unqualified() {
@@ -1783,6 +1862,7 @@ impl<'a> Interpreter<'a> {
                     };
                     if let Some((text, utf16, span)) = unicode {
                         self.unicode_string_literal_array_initializer(*len, text, utf16, span)?;
+                        self.exclude_string_array_initializer(expr.span());
                         return Ok(());
                     }
                 }
@@ -2501,6 +2581,7 @@ impl<'a> Interpreter<'a> {
         frame: &Frame,
         objects: &ObjectFrames,
     ) -> Result<(), Diagnostic> {
+        self.collect_startup_string_literal(expr);
         match expr {
             Expr::Number(..)
             | Expr::CharLiteral(..)

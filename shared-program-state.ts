@@ -1,4 +1,4 @@
-import { normalizeZeroDisplay, type BoxState } from "./shared-core-utils.js";
+import { normalizeZeroDisplay, sameCType, type BoxState } from "./shared-core-utils.js";
 import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
 
 /** Give inaccessible objects distinct display names without changing source-level names. */
@@ -109,7 +109,7 @@ export function stateMatches(actual: BoxState[], expected: BoxState[]): boolean 
   for (const [name, expectedBox] of expectedByName.entries()) {
     const actualBox = actualByName.get(name);
     if (!actualBox) return false;
-    if ((actualBox.type || "").trim() !== (expectedBox.type || "").trim()) return false;
+    if (!sameCType(actualBox.type, expectedBox.type)) return false;
     if (!boxValueMatchesSpec(actualBox, expectedBox).ok) return false;
   }
   return true;
@@ -246,7 +246,7 @@ export function basicHintForBoxes(
     if (!actualBox) continue;
     const expectedType = typeOf(expectedBox);
     const actualType = typeOf(actualBox);
-    if (actualType !== expectedType) {
+    if (!sameCType(actualType, expectedType)) {
       return {
         message: `$n{${name}}'s type should be $t{${expectedType}}.`,
         kind: "type",
@@ -303,7 +303,7 @@ export function basicHintForBoxes(
       };
     }
     const expectedType = typeOf(expectedBox);
-    if (typeOf(actualBox) !== expectedType) {
+    if (!sameCType(typeOf(actualBox), expectedType)) {
       return {
         message: `$n{${name}}'s type should be $t{${expectedType}}.`,
         kind: "type",

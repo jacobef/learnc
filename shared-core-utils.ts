@@ -51,6 +51,9 @@ export interface BoxState {
   aggregateRoot?: string | null;
   aggregatePath?: string[] | null;
   aggregateKind?: "struct" | "union" | null;
+  // What a nameless object is, e.g. "string literal". Its name is then an
+  // internal key that is never shown; see anonymousObjectName.
+  anonymous?: string | null;
   aliases?: string[] | null;
   typeInfo?: CTypeInfo | null;
   names?: string[] | string | null;
@@ -100,6 +103,16 @@ export type ProgramDiagnostic = {
     stdinPosition: number;
   } | null;
 };
+
+/** Whether two spellings of a C type are the same, ignoring spacing like int* vs int *. */
+export function sameCType(left: string | null | undefined, right: string | null | undefined): boolean {
+  return String(left ?? "").replace(/\s+/g, "") === String(right ?? "").replace(/\s+/g, "");
+}
+
+/** The internal name of a nameless object; the brackets keep it from ever matching a C name. */
+export function anonymousObjectName(kind: string, objectId: number): string {
+  return `<${kind} #${objectId}>`;
+}
 
 export function normalizeZeroDisplay(value: BoxValue): string {
   const trimmed = value.trim();

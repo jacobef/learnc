@@ -1,4 +1,4 @@
-import { appendStateObjects, bindBtnRefPulse, clearNode, createStepper, disableBoxEditing, ensurePanelizedMain, isMobileViewport, findArrayObjectBoxesForResult, flashStatus, readBoxState, queryRole, setPartsContent, syncDocumentTitleFromNav, vbox, } from "./shared-core.js";
+import { appendStateObjects, bindBtnRefPulse, clearNode, createStepper, disableBoxEditing, ensurePanelizedMain, isMobileViewport, findArrayObjectBoxesForResult, flashStatus, getNavLabelForHref, getPreviousNavHref, readBoxState, queryRole, setPartsContent, setStepperLabel, syncDocumentTitleFromNav, vbox, withSidebarParam, } from "./shared-core.js";
 import { createSyntheticAddressBase } from "./shared-c-address-space.js";
 import { evaluateCExpression, runCProgram, } from "./shared-c-interpreter.js";
 import { boxValueMatchesSpec, normalizeBoxValueForContext, } from "./shared-c-value-semantics.js";
@@ -23,6 +23,7 @@ function collectExpressionElements(root = document) {
         hintBtn: role("expr-hint-btn"),
         useSelectedBtn: role("expr-use-selected"),
         useEnteredBtn: role("expr-use-entered"),
+        useUndefinedBtn: role("expr-use-undefined"),
         checkBtn: role("expr-check"),
         statusEl: role("expr-status"),
         stageEl: role("expr-stage"),
@@ -97,8 +98,11 @@ function ensureExpressionLayout() {
     useEnteredBtn.type = "button";
     useEnteredBtn.dataset.role = "expr-use-entered";
     useEnteredBtn.textContent = "Type box";
-    toggleWrap.appendChild(useSelectedBtn);
-    toggleWrap.appendChild(useEnteredBtn);
+    const useUndefinedBtn = document.createElement("button");
+    useUndefinedBtn.type = "button";
+    useUndefinedBtn.dataset.role = "expr-use-undefined";
+    useUndefinedBtn.textContent = "Undefined";
+    toggleWrap.append(useSelectedBtn, useEnteredBtn, useUndefinedBtn);
     const prevBtn = document.createElement("button");
     prevBtn.dataset.stepper = "prev";
     prevBtn.textContent = "Back ◀";
@@ -198,7 +202,7 @@ function createExpressionEvalTemplate(config) {
         return addressBase;
     });
     const addressBaseByStep = new Map(normalizedSteps.map((step, index) => [step, addressBases[index]]));
-    const { instructionsEl, previousBtn, nextBtn, continueBtn, levelResetBtn, sectionEl, exerciseStack, expressionEl, answerPanel, answerActions, answerSlot, answerResult, toggleWrap, hintPanel, hintBtn, useSelectedBtn, useEnteredBtn, checkBtn, statusEl, stageEl, statePanel, } = ensureExpressionLayout();
+    const { instructionsEl, previousBtn, nextBtn, continueBtn, levelResetBtn, sectionEl, exerciseStack, expressionEl, answerPanel, answerActions, answerSlot, answerResult, toggleWrap, hintPanel, hintBtn, useSelectedBtn, useEnteredBtn, useUndefinedBtn, checkBtn, statusEl, stageEl, statePanel, } = ensureExpressionLayout();
     bindBtnRefPulse(sectionEl || document);
     let pager = null;
     let selectedName = null;
@@ -224,15 +228,20 @@ function createExpressionEvalTemplate(config) {
         const entries = Object.entries(value).filter(([key, selected]) => passes[Number(key)] === true && typeof selected === "string");
         return Object.fromEntries(entries);
     }
+    // The answer modes offered for a step, default first. An undefined-behavior
+    // answer is offered alongside the fixed category, so fixing it gives nothing away.
+    function answerModes(step) {
+        if (!step.editable)
+            return [];
+        const undefinedModes = workspace.allowUndefinedAnswer ? ["undefined"] : [];
+        if (!step.fixValueCategory)
+            return ["selected", "entered", ...undefinedModes];
+        const evaluated = evaluatedAnswer(step);
+        const lvalue = "result" in evaluated && evaluated.result?.kind === "lvalue";
+        return [lvalue ? "selected" : "entered", ...undefinedModes];
+    }
     function defaultModeForStep(index) {
-        const step = stepFor(index);
-        if (step.editable && step.fixValueCategory) {
-            const evaluated = evaluatedAnswer(step);
-            if ("result" in evaluated && evaluated.result) {
-                return evaluated.result.kind === "lvalue" ? "selected" : "entered";
-            }
-        }
-        return "selected";
+        return answerModes(stepFor(index))[0] ?? "selected";
     }
     const progress = createLevelProgressController(isDefaultProgress);
     const defaultShowIntro = !!initialInstructions;
@@ -291,6 +300,7 @@ function createExpressionEvalTemplate(config) {
             ["$continueButton", "$b{Continue}"],
             ["$fromStateButton", "$b{From state}"],
             ["$typeBoxButton", "$b{Type box}"],
+            ["$undefinedButton", "$b{Undefined}"],
         ];
     }
     const applyButtonTokens = createButtonTokenReplacer(buttonReplacements);
@@ -300,25 +310,25 @@ function createExpressionEvalTemplate(config) {
     }
     function setActiveMode(mode, editable) {
         activeMode = mode;
-        if (useSelectedBtn) {
-            useSelectedBtn.classList.toggle("is-active", mode === "selected");
-            useSelectedBtn.setAttribute("aria-pressed", mode === "selected" ? "true" : "false");
-            useSelectedBtn.disabled = !editable;
-        }
-        if (useEnteredBtn) {
-            useEnteredBtn.classList.toggle("is-active", mode === "entered");
-            useEnteredBtn.setAttribute("aria-pressed", mode === "entered" ? "true" : "false");
-            useEnteredBtn.disabled = !editable;
+        const modes = answerModes(stepFor(state.boundary));
+        const buttons = [
+            [useSelectedBtn, "selected"],
+            [useEnteredBtn, "entered"],
+            [useUndefinedBtn, "undefined"],
+        ];
+        for (const [button, buttonMode] of buttons) {
+            if (!button)
+                continue;
+            button.classList.toggle("hidden", !modes.includes(buttonMode));
+            button.classList.toggle("is-active", mode === buttonMode);
+            button.setAttribute("aria-pressed", mode === buttonMode ? "true" : "false");
+            button.disabled = !editable;
         }
     }
     function updateSelectionHighlight(name, enabled) {
-        if (!stageEl)
-            return;
-        stageEl.querySelectorAll(".vbox").forEach((node) => {
-            const el = node;
-            const isSelected = enabled && !!name && el.dataset.name === name;
-            el.classList.toggle("quiz-selected", isSelected);
-        });
+        for (const node of selectableNodes()) {
+            node.classList.toggle("quiz-selected", enabled && !!name && node.dataset.selectName === name);
+        }
     }
     function sourceForStep(step) {
         const setup = String(step.setup ?? "").trim();
@@ -357,15 +367,6 @@ function createExpressionEvalTemplate(config) {
         const boxes = boxesForStep(step);
         return boxes.find((box) => box.name === selectedName) || null;
     }
-    function getFixedMode(step) {
-        if (!step.editable || !step.fixValueCategory)
-            return null;
-        const evaluated = evaluatedAnswer(step);
-        if ("result" in evaluated && evaluated.result) {
-            return evaluated.result.kind === "lvalue" ? "selected" : "entered";
-        }
-        return null;
-    }
     function renderSelectedPreview(step) {
         if (!answerSlot)
             return;
@@ -378,20 +379,32 @@ function createExpressionEvalTemplate(config) {
             answerSlot.appendChild(msg);
             return;
         }
-        const node = vbox({
-            address: box.address ?? undefined,
-            type: box.type,
-            value: box.value,
-            displayValue: box.displayValue,
-            exactValue: box.exactValue,
-            typeInfo: box.typeInfo,
-            aliases: box.aliases ?? [],
-            name: box.name,
-            editable: false,
-        });
-        if ((box.value ?? "") === "")
-            node.querySelector(".value")?.classList.add("placeholder", "muted");
-        answerSlot.appendChild(node);
+        appendStateObjects(answerSlot, objectBoxes(step, box), { editable: false, deletable: false });
+    }
+    // A box together with its elements, if it's an array.
+    function objectBoxes(step, box) {
+        if (box.arrayRoot || !box.arrayShape?.length)
+            return [box];
+        return boxesForStep(step).filter((other) => other === box || other.arrayRoot === box.name);
+    }
+    function undefinedAnswerNode() {
+        const node = document.createElement("div");
+        node.className = "expr-answer-undefined";
+        node.textContent = "Undefined behavior";
+        return node;
+    }
+    function renderUndefinedAnswer() {
+        if (!answerSlot)
+            return;
+        clearNode(answerSlot);
+        answerSlot.appendChild(undefinedAnswerNode());
+    }
+    function instructionsFor(index) {
+        const step = stepFor(index);
+        const solved = !step.editable || !!state.passes[index];
+        const parts = [step.instructions, solved ? step.explanation : undefined]
+            .flatMap((part) => (part === undefined ? [] : Array.isArray(part) ? part : [part]));
+        return parts.length ? parts.join("\n") : null;
     }
     function renderEnteredBox(saved, editable) {
         if (!answerSlot)
@@ -417,49 +430,52 @@ function createExpressionEvalTemplate(config) {
         if (activeMode === "selected")
             renderSelectedPreview(step);
     }
-    function renderProgramState(step, editable, fixedMode) {
+    // The state's objects, plus each array's elements, can be picked as the answer.
+    function selectableNodes() {
+        if (!stageEl)
+            return [];
+        return [...stageEl.querySelectorAll(".vbox, .arraybox, .array-col-value")];
+    }
+    function selectionNameOf(node) {
+        if (node.classList.contains("array-col-value"))
+            return node.dataset.arrayName ?? "";
+        if (node.classList.contains("arraybox"))
+            return node.dataset.arrayRoot ?? "";
+        return node.dataset.stateName || (node.querySelector(".name-text")?.textContent ?? "").trim();
+    }
+    function sameObject(box, address, type) {
+        return String(box.address) === address && box.type === type;
+    }
+    function renderProgramState(step, editable) {
         if (!stageEl)
             return;
         clearNode(stageEl);
         const boxes = boxesForStep(step);
-        const disableHover = !editable || fixedMode === "entered";
-        boxes.forEach((box) => {
-            const node = vbox({
-                address: box.address ?? undefined,
-                type: box.type,
-                value: box.value,
-                displayValue: box.displayValue,
-                exactValue: box.exactValue,
-                typeInfo: box.typeInfo,
-                aliases: box.aliases ?? [],
-                name: box.name,
-                editable: false,
-            });
-            if ((box.value ?? "") === "")
-                node.querySelector(".value")?.classList.add("placeholder", "muted");
-            node.dataset.name = box.name;
+        appendStateObjects(stageEl, boxes, { editable: false, deletable: false });
+        const selectable = editable && answerModes(step).includes("selected");
+        for (const node of selectableNodes()) {
+            node.dataset.selectName = selectionNameOf(node);
             node.classList.add("quiz-selectable");
-            if (editable) {
-                if (!disableHover) {
-                    node.addEventListener("click", () => setSelected(box.name));
-                }
-            }
-            else {
+            if (!selectable) {
                 node.classList.add("quiz-static");
+                continue;
             }
-            if (disableHover)
-                node.classList.add("quiz-static");
-            stageEl.appendChild(node);
-        });
+            node.addEventListener("click", (event) => {
+                // A click on an element shouldn't also select its whole array.
+                event.stopPropagation();
+                if (activeMode !== "selected")
+                    switchAnswerMode("selected");
+                setSelected(node.dataset.selectName || null);
+            });
+        }
         if (editable) {
             updateSelectionHighlight(selectedName, activeMode === "selected");
         }
         else {
             const evaluated = evaluatedAnswer(step);
-            if ("result" in evaluated &&
-                evaluated.result &&
-                evaluated.result.kind === "lvalue") {
-                const match = boxes.find((box) => String(box.address) === evaluated.result.address) || null;
+            if ("result" in evaluated && evaluated.result.kind === "lvalue") {
+                const { address, type } = evaluated.result;
+                const match = boxes.find((box) => sameObject(box, address, type)) || null;
                 updateSelectionHighlight(match?.name ?? null, true);
             }
         }
@@ -483,7 +499,7 @@ function createExpressionEvalTemplate(config) {
         const entered = Object.fromEntries(Object.entries(state.entered).filter(([, value]) => value != null));
         const modes = Object.fromEntries(Object.entries(state.modes).filter(([key, value]) => {
             const index = Number(key);
-            return value === "entered" && defaultModeForStep(index) !== "entered";
+            return value !== defaultModeForStep(index);
         }));
         return {
             boundary: clampBoundary(state.boundary),
@@ -562,6 +578,9 @@ function createExpressionEvalTemplate(config) {
                     String(entered.type || "").trim() === expected.type &&
                     boxValueMatchesSpec(entered, expectedBox).ok;
         }
+        else {
+            ok = activeMode === "undefined";
+        }
         return {
             step,
             mode: activeMode,
@@ -584,6 +603,10 @@ function createExpressionEvalTemplate(config) {
         clearNode(answerResult);
         const evaluated = evaluatedAnswer(step);
         if ("error" in evaluated) {
+            if (evaluated.kind === "ub") {
+                answerResult.appendChild(undefinedAnswerNode());
+                return;
+            }
             const msg = document.createElement("div");
             msg.className = "expr-answer-empty muted";
             msg.textContent = errorText(evaluated.kind);
@@ -603,34 +626,22 @@ function createExpressionEvalTemplate(config) {
             }
         }
         if (result.kind === "lvalue") {
-            const match = boxes.find((box) => String(box.address) === result.address) || null;
-            const node = match
-                ? vbox({
-                    address: match.address ?? undefined,
-                    type: match.type,
-                    value: match.value,
-                    displayValue: match.displayValue,
-                    exactValue: match.exactValue,
-                    typeInfo: match.typeInfo,
-                    aliases: match.aliases ?? [],
-                    name: match.name,
-                    editable: false,
-                })
-                : vbox({
-                    address: result.address || "—",
-                    type: result.type,
-                    value: result.value ?? "",
-                    displayValue: result.displayValue,
-                    exactValue: result.exactValue,
-                    typeInfo: result.typeInfo,
-                    name: "",
-                    editable: false,
-                });
-            if (match && (match.value ?? "") === "") {
-                node.querySelector(".value")?.classList.add("placeholder", "muted");
+            const match = boxes.find((box) => sameObject(box, result.address, result.type)) || null;
+            if (match) {
+                appendStateObjects(answerResult, objectBoxes(step, match), { editable: false, deletable: false });
+                return;
             }
-            if (!match)
-                node.classList.add("no-name");
+            const node = vbox({
+                address: result.address || "—",
+                type: result.type,
+                value: result.value ?? "",
+                displayValue: result.displayValue,
+                exactValue: result.exactValue,
+                typeInfo: result.typeInfo,
+                name: "",
+                editable: false,
+            });
+            node.classList.add("no-name");
             answerResult.appendChild(node);
             return;
         }
@@ -681,7 +692,13 @@ function createExpressionEvalTemplate(config) {
             renderInstructions(initialInstructions || null);
             setControlVisible(sectionEl, true);
             setControlVisible(exerciseStack, false);
-            setControlVisible(previousBtn, false);
+            // From the intro, going back means leaving for the previous lesson.
+            const previousHref = getPreviousNavHref();
+            const previousLabel = getNavLabelForHref(previousHref);
+            setControlVisible(previousBtn, !!previousHref);
+            if (previousBtn && previousLabel) {
+                setStepperLabel(previousBtn, `Prev: ${previousLabel} ◀◀`, "◀ Prev");
+            }
             setControlVisible(nextBtn, false);
             setControlVisible(continueBtn, true);
             setControlVisible(levelResetBtn, false);
@@ -702,20 +719,16 @@ function createExpressionEvalTemplate(config) {
         const actionsPanel = showExprResultPane ? answerPanel : expressionEl?.parentElement;
         if (answerActions && actionsPanel)
             actionsPanel.appendChild(answerActions);
-        const instructionText = step.instructions ?? null;
-        renderInstructions(instructionText);
+        renderInstructions(instructionsFor(state.boundary));
         if (expressionEl)
             expressionEl.textContent = step.expression;
         clearStatus();
         hideHint();
         selectedName = state.selections[state.boundary] ?? null;
         const savedEntered = state.entered[state.boundary] ?? null;
-        activeMode = state.modes[state.boundary] ?? "selected";
-        const fixedMode = getFixedMode(step);
-        if (fixedMode) {
-            activeMode = fixedMode;
-            state.modes[state.boundary] = fixedMode;
-        }
+        const modes = answerModes(step);
+        const savedMode = state.modes[state.boundary];
+        activeMode = savedMode && modes.includes(savedMode) ? savedMode : modes[0] ?? "selected";
         const passed = !!state.passes[state.boundary];
         if (statePanel) {
             statePanel.classList.toggle("hidden", !hasState);
@@ -724,19 +737,18 @@ function createExpressionEvalTemplate(config) {
             const canEdit = !passed;
             answerResult?.classList.add("hidden");
             answerSlot?.classList.remove("hidden");
-            if (fixedMode)
-                toggleWrap?.classList.add("hidden");
-            else
-                toggleWrap?.classList.remove("hidden");
+            toggleWrap?.classList.toggle("hidden", modes.length < 2);
             setControlVisible(checkBtn, !passed);
             setControlVisible(hintBtn, !passed && !!step.hints);
             if (passed)
                 setStatus("correct", true, true);
             if (hasState) {
-                renderProgramState(step, canEdit, fixedMode);
+                renderProgramState(step, canEdit);
             }
             if (activeMode === "selected")
                 renderSelectedPreview(step);
+            else if (activeMode === "undefined")
+                renderUndefinedAnswer();
             else
                 renderEnteredBox(savedEntered, canEdit);
             setActiveMode(activeMode, canEdit);
@@ -747,7 +759,7 @@ function createExpressionEvalTemplate(config) {
             setControlVisible(checkBtn, false);
             setControlVisible(hintBtn, false);
             if (hasState) {
-                renderProgramState(step, false, fixedMode);
+                renderProgramState(step, false);
             }
             answerResult?.classList.remove("hidden");
             renderCorrectAnswer(step);
@@ -769,7 +781,7 @@ function createExpressionEvalTemplate(config) {
         disableBoxEditing(answerSlot);
         pager?.pulseNext();
         pager?.update();
-        renderInstructions(stepFor(state.boundary).instructions ?? null);
+        renderInstructions(instructionsFor(state.boundary));
         persistProgress();
     }
     function checkAnswer() {
@@ -778,8 +790,16 @@ function createExpressionEvalTemplate(config) {
         if (!step.editable)
             return;
         const evaluation = evaluatedAnswer(step);
+        if (activeMode === "undefined") {
+            const ok = "error" in evaluation && evaluation.kind === "ub";
+            setStatus(ok ? "correct" : "incorrect", ok);
+            if (ok)
+                markCurrentStepPassed();
+            return;
+        }
         if ("error" in evaluation) {
-            setStatus(errorText(evaluation.kind), false);
+            const answerable = evaluation.kind === "ub" && workspace.allowUndefinedAnswer;
+            setStatus(answerable ? "incorrect" : errorText(evaluation.kind), false);
             return;
         }
         if (activeMode === "selected") {
@@ -792,7 +812,7 @@ function createExpressionEvalTemplate(config) {
                 setStatus("Incorrect.", false);
                 return;
             }
-            const ok = String(chosen.address) === evaluation.result.address;
+            const ok = sameObject(chosen, evaluation.result.address, evaluation.result.type);
             setStatus(ok ? "correct" : "incorrect", ok);
             if (ok) {
                 state.selections[state.boundary] = selectedName;
@@ -830,35 +850,29 @@ function createExpressionEvalTemplate(config) {
             markCurrentStepPassed();
         }
     }
-    if (useSelectedBtn) {
-        useSelectedBtn.addEventListener("click", () => {
-            const step = stepFor(state.boundary);
-            if (!step.editable || step.fixValueCategory)
-                return;
-            if (activeMode === "entered") {
-                const node = answerSlot?.querySelector(".vbox") || null;
-                if (node)
-                    state.entered[state.boundary] = readBoxState(node);
-            }
-            setActiveMode("selected", true);
-            state.modes[state.boundary] = "selected";
-            updateSelectionHighlight(selectedName, true);
-            renderSelectedPreview(stepFor(state.boundary));
-            persistProgress();
-        });
-    }
-    if (useEnteredBtn) {
-        useEnteredBtn.addEventListener("click", () => {
-            const step = stepFor(state.boundary);
-            if (!step.editable || step.fixValueCategory)
-                return;
-            setActiveMode("entered", true);
-            state.modes[state.boundary] = "entered";
-            updateSelectionHighlight(selectedName, false);
+    function switchAnswerMode(mode) {
+        const step = stepFor(state.boundary);
+        if (!answerModes(step).includes(mode) || state.passes[state.boundary])
+            return;
+        if (activeMode === "entered") {
+            const node = answerSlot?.querySelector(".vbox") || null;
+            if (node)
+                state.entered[state.boundary] = readBoxState(node);
+        }
+        setActiveMode(mode, true);
+        state.modes[state.boundary] = mode;
+        updateSelectionHighlight(selectedName, mode === "selected");
+        if (mode === "selected")
+            renderSelectedPreview(step);
+        else if (mode === "undefined")
+            renderUndefinedAnswer();
+        else
             renderEnteredBox(state.entered[state.boundary] ?? null, true);
-            persistProgress();
-        });
+        persistProgress();
     }
+    useSelectedBtn?.addEventListener("click", () => switchAnswerMode("selected"));
+    useEnteredBtn?.addEventListener("click", () => switchAnswerMode("entered"));
+    useUndefinedBtn?.addEventListener("click", () => switchAnswerMode("undefined"));
     if (answerSlot) {
         answerSlot.addEventListener("input", () => {
             saveStep(state.boundary);
@@ -923,6 +937,18 @@ function createExpressionEvalTemplate(config) {
             return "Next";
         },
         endLabel,
+        backToIntro: initialInstructions
+            ? () => {
+                if (!state.showIntro) {
+                    state.showIntro = true;
+                    render();
+                    return;
+                }
+                const previousUrl = withSidebarParam(getPreviousNavHref());
+                if (previousUrl)
+                    window.location.href = previousUrl;
+            }
+            : undefined,
     });
     render();
 }

@@ -25,6 +25,8 @@ export type CProgramResult = (
   | {
       kind: "ok";
       state: BoxState[];
+      // Globals and main's parameters, as main starts, before any line runs.
+      initialState: BoxState[];
       trace: CProgramTraceEvent[];
       mainClose: CProgramSourceLocation | null;
       blocked: CProgramBlocked | null;

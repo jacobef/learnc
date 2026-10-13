@@ -181,6 +181,7 @@ impl<'a> Interpreter<'a> {
         let saved_next_object = self.next_object;
         let saved_reusable_automatic_object_ids = self.reusable_automatic_object_ids.clone();
         let saved_next_encoded_pointer = self.next_encoded_pointer;
+        let saved_next_heap_pointer = self.next_heap_pointer;
         let saved_retired_objects = self.retired_objects.clone();
         let saved_live_non_dynamic_bytes = self.live_non_dynamic_bytes;
         let saved_object_type_registry = self.object_type_registry.clone();
@@ -209,6 +210,16 @@ impl<'a> Interpreter<'a> {
                         address
                             .map(|address| address.to_string())
                             .unwrap_or_default()
+                    } else if self.dynamic_allocations.contains(&lvalue.object) {
+                        // Allocated memory is untyped bytes, so read it the way the
+                        // program would. An element without a value yet shows as empty.
+                        match self.load_lvalue(lvalue.clone(), expr.span(), &eval_objects) {
+                            Ok(loaded) if !loaded.indeterminate => {
+                                self.cboxes_typed_value_string(&loaded, &ty, expr.span())?
+                            }
+                            Ok(_) => String::new(),
+                            Err(_) => String::new(),
+                        }
                     } else {
                         self.cboxes_lvalue_value_string(&lvalue, expr.span(), &eval_objects)?
                     };
@@ -253,6 +264,7 @@ impl<'a> Interpreter<'a> {
         self.next_object = saved_next_object;
         self.reusable_automatic_object_ids = saved_reusable_automatic_object_ids;
         self.next_encoded_pointer = saved_next_encoded_pointer;
+        self.next_heap_pointer = saved_next_heap_pointer;
         self.retired_objects = saved_retired_objects;
         self.live_non_dynamic_bytes = saved_live_non_dynamic_bytes;
         self.object_type_registry = saved_object_type_registry;
@@ -286,8 +298,17 @@ impl<'a> Interpreter<'a> {
                 Some("6.2.4"),
             ));
         }
+        // Byte-backed objects such as string literals must be decoded before
+        // their elements can be addressed, as in cboxes_push_object_state.
+        let decoded_value;
+        let object_value = if let StoredValue::ObjectRepresentation(bytes) = &object.value {
+            decoded_value = self.deserialize_stored_value(&object.ty, bytes, span)?;
+            &decoded_value
+        } else {
+            &object.value
+        };
         let (base_stored, base_ty, tail_offset) =
-            self.resolve_lvalue_array_base(&object.value, &object.ty, lvalue, span)?;
+            self.resolve_lvalue_array_base(object_value, &object.ty, lvalue, span)?;
         let (base_stored, base_ty, tail_offset) = if !lvalue.member_path.is_empty()
             && matches!(base_ty.unqualified(), CType::Array(_, _))
         {
@@ -377,7 +398,7 @@ impl<'a> Interpreter<'a> {
         )
     }
 
-    fn cboxes_frame_state(
+    pub(super) fn cboxes_frame_state(
         &self,
         frame: &Frame,
         objects: &ObjectFrames,
@@ -411,6 +432,254 @@ impl<'a> Interpreter<'a> {
             }
         }
         let mut state = Vec::new();
+        self.cboxes_push_named_objects(&mut state, bindings, &visible, objects, span)?;
+        self.cboxes_push_string_literals(&mut state, objects, span)?;
+        self.cboxes_push_main_arguments(&mut state, objects, span)?;
+        self.cboxes_push_dynamic_allocations(&mut state, objects, span)?;
+        self.cboxes_add_aliases(&mut state);
+        Ok(state)
+    }
+
+    /// main's argv array and the argument strings it points to have no names either.
+    fn cboxes_push_main_arguments(
+        &self,
+        state: &mut Vec<ProgramStateBox>,
+        objects: &ObjectFrames,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        for (index, &object_id) in self.cboxes_argument_objects.iter().enumerate() {
+            let Some(object) = self
+                .lookup_object(objects, object_id)
+                .filter(|object| object.alive)
+            else {
+                continue;
+            };
+            let start = state.len();
+            let base_address = self.object_base_addresses.get(&object_id).copied();
+            self.cboxes_push_object_state(state, "", object, base_address, span)?;
+            let kind = if index == 0 {
+                "command-line arguments"
+            } else {
+                "command-line argument"
+            };
+            for item in &mut state[start..] {
+                item.object_id = object_id.0;
+                item.anonymous = Some(kind.to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// Memory from `malloc` and friends has no name and no declared type, so each
+    /// block is shown as the type it's being used as: the type of a pointer that
+    /// points into it, or else the type of the values stored in it. A block nothing
+    /// has given a type to yet is shown as just its size.
+    fn cboxes_push_dynamic_allocations(
+        &self,
+        state: &mut Vec<ProgramStateBox>,
+        objects: &ObjectFrames,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let mut blocks = self
+            .dynamic_allocations
+            .iter()
+            .copied()
+            .filter(|id| objects.get(*id).is_some_and(|object| object.alive))
+            .collect::<Vec<_>>();
+        if blocks.is_empty() {
+            return Ok(());
+        }
+        blocks.sort_unstable_by_key(|id| id.0);
+        let mut pointee_hints: HashMap<ObjectId, CType> = HashMap::default();
+        let mut sources = objects.frames.iter().flatten().copied().collect::<Vec<_>>();
+        for definition in &self.program.global_definitions {
+            if let Some(id) = self.lookup_global_binding(&definition.name, definition.span.file) {
+                sources.push(id);
+            }
+        }
+        for id in sources {
+            if let Some(object) = objects.get(id).filter(|object| object.alive) {
+                self.cboxes_collect_heap_pointer_hints(&object.value, &mut pointee_hints);
+            }
+        }
+        // Blocks can point to each other, as in a linked list, so a block's type can
+        // depend on another block's contents.
+        let mut views: HashMap<ObjectId, Option<(CType, StoredValue)>> = HashMap::default();
+        for _ in 0..=blocks.len() {
+            let mut changed = false;
+            for &id in &blocks {
+                if views.get(&id).is_some_and(Option::is_some) {
+                    continue;
+                }
+                let object = objects.get(id).expect("live block");
+                let view = self.cboxes_dynamic_view_type(object, pointee_hints.get(&id));
+                let view = match view {
+                    Some(ty) => {
+                        let value = match &object.value {
+                            StoredValue::ObjectRepresentation(bytes) => {
+                                self.deserialize_stored_value(&ty, bytes, span)?
+                            }
+                            StoredValue::Indeterminate => self.deserialize_stored_value(
+                                &ty,
+                                &vec![ByteCell::Indeterminate; object.byte_size],
+                                span,
+                            )?,
+                            other => other.clone(),
+                        };
+                        self.cboxes_collect_heap_pointer_hints(&value, &mut pointee_hints);
+                        changed = true;
+                        Some((ty, value))
+                    }
+                    None => None,
+                };
+                views.insert(id, view);
+            }
+            if !changed {
+                break;
+            }
+        }
+        for id in blocks {
+            let object = objects.get(id).expect("live block");
+            let base_address = self.object_base_addresses.get(&id).copied();
+            let start = state.len();
+            match views.remove(&id).flatten() {
+                Some((ty, value)) => {
+                    self.cboxes_push_subobject_state(
+                        state,
+                        "",
+                        &ty,
+                        &value,
+                        base_address,
+                        None,
+                        &[],
+                        span,
+                    )?;
+                }
+                None => state.push(ProgramStateBox {
+                    object_id: 0,
+                    name_accessible: true,
+                    scope: String::new(),
+                    name: String::new(),
+                    ty: format!(
+                        "{} byte{}, no type yet",
+                        object.byte_size,
+                        if object.byte_size == 1 { "" } else { "s" }
+                    ),
+                    value: String::new(),
+                    display_value: String::new(),
+                    exact_value: String::new(),
+                    address: base_address,
+                    array_root: None,
+                    array_shape: Vec::new(),
+                    array_indices: Vec::new(),
+                    aggregate_root: None,
+                    aggregate_path: Vec::new(),
+                    aggregate_kind: None,
+                    anonymous: None,
+                    aliases: Vec::new(),
+                    type_info: self.cboxes_type_info(&CType::Void),
+                }),
+            }
+            for item in &mut state[start..] {
+                item.object_id = id.0;
+                item.anonymous = Some("allocated block".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// The type a block of allocated memory is being used as, if any: a whole number
+    /// of whatever a pointer into it points to, or of the type stored in it.
+    fn cboxes_dynamic_view_type(
+        &self,
+        object: &ObjectState,
+        hint: Option<&CType>,
+    ) -> Option<CType> {
+        let size = object.byte_size;
+        let fits = |ty: &CType| {
+            self.type_size_of(ty)
+                .filter(|element| *element > 0 && size % *element == 0)
+                .map(|element| (ty.clone(), size / element))
+        };
+        let from_pointer = hint.and_then(|ty| fits(ty.unqualified()));
+        let from_stores = || {
+            let mut types = object.effective_types.iter().map(|region| {
+                region
+                    .coalesced_element_type
+                    .clone()
+                    .unwrap_or_else(|| region.ty.clone())
+            });
+            let first = types.next()?;
+            let mut element = first.unqualified().clone();
+            while let CType::Array(inner, _) = element {
+                element = inner.unqualified().clone();
+            }
+            let uniform = object.effective_types.iter().all(|region| {
+                let mut ty = region
+                    .coalesced_element_type
+                    .clone()
+                    .unwrap_or_else(|| region.ty.clone())
+                    .unqualified()
+                    .clone();
+                while let CType::Array(inner, _) = ty {
+                    ty = inner.unqualified().clone();
+                }
+                ty == element
+            });
+            if uniform { fits(&element) } else { None }
+        };
+        let (element, count) = from_pointer.or_else(from_stores)?;
+        Some(if count == 1 {
+            element
+        } else {
+            CType::array_of(element, count)
+        })
+    }
+
+    fn cboxes_collect_heap_pointer_hints(
+        &self,
+        value: &StoredValue,
+        hints: &mut HashMap<ObjectId, CType>,
+    ) {
+        match value {
+            StoredValue::Scalar(typed) => {
+                if let (ValueData::Pointer(pointer), CType::Pointer(pointee)) =
+                    (&typed.data, typed.ty.unqualified())
+                {
+                    if let Some(object) = pointer
+                        .object
+                        .filter(|id| self.dynamic_allocations.contains(id))
+                    {
+                        if !matches!(pointee.unqualified(), CType::Void) {
+                            hints
+                                .entry(object)
+                                .or_insert_with(|| pointee.as_ref().clone());
+                        }
+                    }
+                }
+            }
+            StoredValue::Array(items) => {
+                for item in items {
+                    self.cboxes_collect_heap_pointer_hints(item, hints);
+                }
+            }
+            StoredValue::Record(members) | StoredValue::Union { members, .. } => {
+                for (_, member) in members {
+                    self.cboxes_collect_heap_pointer_hints(member, hints);
+                }
+            }
+            StoredValue::ObjectRepresentation(_) | StoredValue::Indeterminate => {}
+        }
+    }
+
+    fn cboxes_push_named_objects(
+        &self,
+        state: &mut Vec<ProgramStateBox>,
+        bindings: BTreeMap<usize, (String, String)>,
+        visible: &HashMap<ObjectId, &str>,
+        objects: &ObjectFrames,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
         for (id, (name, scope)) in bindings {
             if name.is_empty() || name == "__func__" || name.starts_with("__cboxes_") {
                 continue;
@@ -424,7 +693,7 @@ impl<'a> Interpreter<'a> {
             };
             let start = state.len();
             let base_address = self.object_base_addresses.get(&object_id).copied();
-            self.cboxes_push_object_state(&mut state, &name, object, base_address, span)?;
+            self.cboxes_push_object_state(state, &name, object, base_address, span)?;
             for item in &mut state[start..] {
                 item.object_id = id;
                 item.name_accessible = visible
@@ -433,8 +702,39 @@ impl<'a> Interpreter<'a> {
                 item.scope = scope.clone();
             }
         }
-        self.cboxes_add_aliases(&mut state);
-        Ok(state)
+        Ok(())
+    }
+
+    /// String literal arrays have no name, so they are listed by object, in
+    /// allocation order. Literal objects exist before main starts.
+    fn cboxes_push_string_literals(
+        &self,
+        state: &mut Vec<ProgramStateBox>,
+        objects: &ObjectFrames,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let mut literals = self
+            .literal_bindings
+            .iter()
+            .flat_map(|bindings| bindings.values().copied())
+            .collect::<Vec<_>>();
+        literals.sort_unstable_by_key(|id| id.0);
+        for object_id in literals {
+            let Some(object) = self
+                .lookup_object(objects, object_id)
+                .filter(|object| object.alive)
+            else {
+                continue;
+            };
+            let start = state.len();
+            let base_address = self.object_base_addresses.get(&object_id).copied();
+            self.cboxes_push_object_state(state, "", object, base_address, span)?;
+            for item in &mut state[start..] {
+                item.object_id = object_id.0;
+                item.anonymous = Some("string literal".to_owned());
+            }
+        }
+        Ok(())
     }
 
     fn cboxes_visible_global_bindings<'b>(&'b self, frame: &Frame) -> Vec<(ObjectId, &'b str)> {
@@ -548,6 +848,7 @@ impl<'a> Interpreter<'a> {
                 aggregate_root: aggregate_root.map(str::to_owned),
                 aggregate_path: aggregate_path.to_vec(),
                 aggregate_kind: None,
+                anonymous: None,
                 aliases: Vec::new(),
                 type_info: self.cboxes_type_info(ty),
             });
@@ -604,6 +905,7 @@ impl<'a> Interpreter<'a> {
             aggregate_root: aggregate_root.map(str::to_owned),
             aggregate_path: aggregate_path.to_vec(),
             aggregate_kind: None,
+            anonymous: None,
             aliases: Vec::new(),
             type_info: self.cboxes_type_info(ty),
         });
@@ -655,6 +957,7 @@ impl<'a> Interpreter<'a> {
             aggregate_root: aggregate_root.map(str::to_owned),
             aggregate_path: aggregate_path.to_vec(),
             aggregate_kind: Some(kind.to_owned()),
+            anonymous: None,
             aliases: Vec::new(),
             type_info: self.cboxes_type_info(ty),
         });
@@ -820,6 +1123,7 @@ impl<'a> Interpreter<'a> {
                 aggregate_root: aggregate_root.map(str::to_owned),
                 aggregate_path: aggregate_path.to_vec(),
                 aggregate_kind: None,
+                anonymous: None,
                 aliases: Vec::new(),
                 type_info: self.cboxes_type_info(ty),
             });
