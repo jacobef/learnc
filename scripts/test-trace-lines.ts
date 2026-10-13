@@ -173,3 +173,14 @@ for (int i = 0; i < 3; i++) {
   // The continue counts, and the if's closing brace it jumps past doesn't.
   assert.deepEqual(doneAt(source, run, "statement", 13, 0), [0, 1, 2, 7, 8, 10, 11, 12, 13]);
 });
+
+test("a block's opening brace counts as done once execution is inside it", () => {
+  const source = `int a = 1;
+{
+  int b = 2;
+}
+`;
+  const run = runCProgram(source);
+  assert.deepEqual(doneAt(source, run, "statement", 0, 0), [0]);
+  assert.deepEqual(doneAt(source, run, "statement", 2, 0), [0, 1, 2]);
+});

@@ -1228,6 +1228,13 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       resolvedTraceEnd,
     );
     const doneLines = doneLinesForTrace(lineList, trace, resolvedTraceEnd);
+    // Stepping onto a line that only opens a block is entering the block, so it counts.
+    for (let index = 0; index <= lastResolvedStageIndex; index += 1) {
+      const resolved = runtimeStages[index];
+      if (resolved?.traceEndIndex == null && (lineList[resolved?.runLine ?? -1] ?? "").trim() === "{") {
+        doneLines.add(resolved!.runLine);
+      }
+    }
     const nextStage = solving ? null : nextLabelStage();
     renderCodePane(codeEl, lineList, displayBoundary, {
       nextRange: nextStage ? { start: nextStage.runLine, end: nextStage.runEndLine } : undefined,

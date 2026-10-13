@@ -256,7 +256,30 @@ export function doneLinesForTrace(
   };
   const done = new Set<number>();
   const ran = new Set<number>();
+  // Lines that just open a block, with the block's last line. A block's opening
+  // brace counts as run once execution is inside the block.
+  const openers: Array<{ line: number; end: number }> = [];
+  code.forEach((text, line) => {
+    if (text.trim() !== "{") return;
+    let depth = 0;
+    for (let end = line; end < code.length; end += 1) {
+      for (const ch of code[end]!) {
+        if (ch === "{") depth += 1;
+        else if (ch === "}") depth -= 1;
+      }
+      if (depth <= 0) {
+        openers.push({ line, end });
+        return;
+      }
+    }
+  });
   const finish = (start: number, end: number) => {
+    for (const opener of openers) {
+      if (start > opener.line && start <= opener.end) {
+        done.add(opener.line);
+        ran.add(opener.line);
+      }
+    }
     for (let line = start; line <= end; line += 1) {
       done.add(line);
       ran.add(line);
