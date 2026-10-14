@@ -22,6 +22,14 @@ export function memoryDisplayState(boxes) {
         };
     });
 }
+// Whether a type name like "int *[3]" or "int (*[2])[3]" is an array type, and
+// not, like "int (*)[3]", a pointer to one. The declarator in the innermost
+// parentheses, where the name would go, decides.
+function isArrayTypeName(type) {
+    const groups = [...type.matchAll(/\(([\s*[\]\d]*)\)/g)];
+    const declarator = groups.length ? groups[groups.length - 1][1] : type;
+    return /\[\s*\d+\s*\]\s*$/.test(declarator);
+}
 function isArrayRootStateBox(box) {
     if (box.arrayRoot)
         return false;
@@ -29,7 +37,9 @@ function isArrayRootStateBox(box) {
     const indices = Array.isArray(box.arrayIndices) ? box.arrayIndices : [];
     if (shape.length > 0 && indices.length === 0)
         return true;
-    return /\[\s*\d+\s*\]\s*$/.test(String(box.type || ""));
+    if (box.typeInfo)
+        return box.typeInfo.kind === "array";
+    return isArrayTypeName(String(box.type || ""));
 }
 export function stateWithArrayRoots(boxes) {
     const result = boxes.slice();
@@ -104,6 +114,18 @@ export function stateMatches(actual, expected) {
             return false;
     }
     return true;
+}
+// How a hint refers to part of a box, like "x's value". A nameless object, whose
+// name is an internal key like "<allocated block #7>[1]", is described instead.
+function namesPart(name, part) {
+    const nameless = /^<([^#>]+?) #\d+>((?:\[\d+\])*)$/.exec(name);
+    if (!nameless)
+        return `$n{${name}}'s ${part}`;
+    const [, kind, indices] = nameless;
+    return indices ? `the ${part} of element $v{${indices}} of the ${kind}` : `the ${part} of the ${kind}`;
+}
+function capitalize(text) {
+    return text.charAt(0).toUpperCase() + text.slice(1);
 }
 function formatNameList(names) {
     const tokens = names.map((name) => `$n{${name}}`);
@@ -220,7 +242,7 @@ export function basicHintForBoxes(actual, expected, baseline, stage) {
         const actualType = typeOf(actualBox);
         if (!sameCType(actualType, expectedType)) {
             return {
-                message: `$n{${name}}'s type should be $t{${expectedType}}.`,
+                message: `${capitalize(namesPart(name, "type"))} should be $t{${expectedType}}.`,
                 kind: "type",
                 variable: name,
             };
@@ -234,7 +256,7 @@ export function basicHintForBoxes(actual, expected, baseline, stage) {
         const shouldRemain = baselineBox
             ? boxValueMatchesSpec(baselineBox, expectedBox).ok
             : false;
-        const message = `$n{${name}}'s value should ${shouldRemain ? "remain" : "be"} ${label}.`;
+        const message = `${capitalize(namesPart(name, "value"))} should ${shouldRemain ? "remain" : "be"} ${label}.`;
         if (shouldRemain) {
             return {
                 message,
@@ -271,7 +293,7 @@ export function basicHintForBoxes(actual, expected, baseline, stage) {
         const expectedType = typeOf(expectedBox);
         if (!sameCType(typeOf(actualBox), expectedType)) {
             return {
-                message: `$n{${name}}'s type should be $t{${expectedType}}.`,
+                message: `${capitalize(namesPart(name, "type"))} should be $t{${expectedType}}.`,
                 kind: "type",
                 variable: name,
             };
@@ -287,7 +309,7 @@ export function basicHintForBoxes(actual, expected, baseline, stage) {
         const shouldRemain = baselineBox
             ? boxValueMatchesSpec(baselineBox, expectedBox).ok
             : false;
-        const message = `$n{${name}}'s value should ${shouldRemain ? "remain" : "be"} ${label}.`;
+        const message = `${capitalize(namesPart(name, "value"))} should ${shouldRemain ? "remain" : "be"} ${label}.`;
         if (shouldRemain) {
             return { message, kind: "value", variable: name };
         }

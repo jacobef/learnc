@@ -33,6 +33,27 @@ test("array roots are display metadata, while every element remains part of the 
   assert.equal(stateMatches([...rooted, elements[0]], elements), false);
 });
 
+test("pointers to arrays are part of the answer, unlike array roots", () => {
+  const pointer = (name: string, type: string, value = ""): BoxState => ({ name, type, value });
+  for (const type of ["int (*)[3]", "int (**)[3]"]) {
+    assert.equal(stateMatches([], [pointer("r", type)]), false, type);
+    assert.equal(stateMatches([pointer("r", type, "8")], [pointer("r", type, "9")]), false, type);
+  }
+  // An array of pointers, or of pointers to arrays, is still an array.
+  for (const type of ["int *[3]", "int (*[2])[3]"]) {
+    assert.equal(stateMatches([], [pointer("q", type)]), true, type);
+  }
+});
+
+test("hints describe nameless objects instead of showing their internal names", () => {
+  const element = (value: string): BoxState => ({
+    ...variable("<allocated block #7>[1]", value),
+    arrayRoot: "<allocated block #7>", arrayShape: [2], arrayIndices: [1],
+  });
+  const hint = basicHintForBoxes([element("0")], [element("1")], [element("0")], { runLine: 1, runEndLine: 1 });
+  assert.equal(hint?.message, "The value of element $v{[1]} of the allocated block should be $v{1}.");
+});
+
 test("hints distinguish removed variables from missing new variables", () => {
   const baseline = [variable("x")];
   const expected = [...baseline, variable("y")];
