@@ -1,4 +1,4 @@
-import { normalizeZeroDisplay } from "./shared-core-utils.js";
+import { normalizeZeroDisplay, sameCType } from "./shared-core-utils.js";
 import { disableAutoText, el, txt } from "./shared-dom-utils.js";
 import { attachTypeHelp, detachTypeHelp } from "./shared-type-help.js";
 import { memoryDisplayState } from "./shared-program-state.js";
@@ -964,6 +964,13 @@ function makeAggregateBox(root, descendants, opts) {
     </div>
   `);
     node.dataset.aggregateName = root.name;
+    node.dataset.aggregateKind = kind;
+    if (root.typeInfo)
+        node.dataset.typeInfo = JSON.stringify(root.typeInfo);
+    // Like a scalar's, unless the box says otherwise.
+    const allowDelete = root.allowDelete != null ? !!root.allowDelete : opts.deletable;
+    if (allowDelete)
+        node.dataset.allowDelete = "true";
     node.querySelector(".aggregate-address").textContent = String(root.address ?? "—");
     node.querySelector(".aggregate-name").textContent = displayName;
     markInaccessibleName(node, root);
@@ -1014,7 +1021,7 @@ function makeAggregateBox(root, descendants, opts) {
             displayName: memberName,
         });
     }
-    if (opts.deletable && root.allowDelete) {
+    if (opts.deletable && allowDelete) {
         const del = el('<button class="delete" title="delete">×</button>');
         node.appendChild(del);
         del.addEventListener("click", () => node.remove());
@@ -1093,12 +1100,54 @@ export function refreshEditableTypeHelp(node) {
  * Switches a box the learner is creating between a scalar box and an array box
  * when its type is changed to or from an array type. Returns the replacement.
  */
-export function reshapeDynamicBox(typeField) {
-    const node = typeField.closest('.vbox[data-dynamic-address="true"], .arraybox[data-dynamic-array="true"]');
+// A struct or union the learner is creating, laid out like one of the same type
+// from the models (the program's other states) or the workspace, with every member
+// empty. It needs a name first, since its members' names start with it.
+function dynamicAggregateBox(node, type, models) {
+    const name = txt(node.querySelector(".name-text")).trim();
+    if (!type || !name)
+        return null;
+    const workspace = node.closest('[data-role="workspace"]') ?? node.parentElement;
+    const candidates = [...models, ...(serializeWorkspace(workspace) ?? [])];
+    const model = candidates.find((box) => !!box.aggregateKind && !box.aggregateRoot && sameCType(box.type, type));
+    if (!model)
+        return null;
+    const boxes = [model, ...candidates.filter((box) => box.aggregateRoot === model.name)]
+        .filter((box, index, all) => all.findIndex((other) => other.name === box.name) === index);
+    const address = txt(node.querySelector(".address")).trim();
+    const renamed = boxes.map((box) => ({
+        ...box,
+        name: name + box.name.slice(model.name.length),
+        aggregateRoot: box.aggregateRoot ? name : box.aggregateRoot,
+        arrayRoot: box.arrayRoot ? name + box.arrayRoot.slice(model.name.length) : box.arrayRoot,
+        value: "",
+        rawValue: "",
+        address: box.aggregateRoot ? "" : address,
+        allowDelete: !box.aggregateRoot,
+        dynamicAddress: !box.aggregateRoot,
+    }));
+    const [root, ...members] = renamed;
+    const replacement = makeAggregateBox(root, members, {
+        editable: true,
+        deletable: true,
+        allowNameEdit: false,
+        allowTypeEdit: false,
+    });
+    replacement.dataset.dynamicAddress = "true";
+    return replacement;
+}
+export function reshapeDynamicBox(field, models = []) {
+    const node = field.closest('.vbox[data-dynamic-address="true"], .arraybox[data-dynamic-array="true"]');
     if (!node)
         return null;
     const isArray = node.classList.contains("arraybox");
-    const type = txt(typeField).trim();
+    const typeField = node.querySelector(isArray ? ".array-type" : ".type");
+    const type = typeField ? txt(typeField).trim() : "";
+    const aggregate = isArray ? null : dynamicAggregateBox(node, type, models);
+    if (aggregate) {
+        node.replaceWith(aggregate);
+        return aggregate;
+    }
     const info = type ? inspectCType(type) : null;
     const wantsArray = info?.kind === "array" && info.arrayShape.length > 0;
     if (!isArray && !wantsArray)
@@ -1221,17 +1270,48 @@ function readArrayBoxState(root) {
         };
     });
 }
+// A struct or union box itself. Its members are read separately.
+function readAggregateBoxState(node) {
+    return {
+        name: node.dataset.aggregateName || "",
+        type: txt(node.querySelector(":scope > .aggregatebox-meta .aggregate-type")),
+        value: "",
+        address: txt(node.querySelector(":scope > .aggregatebox-main .aggregate-address")),
+        aggregateKind: node.dataset.aggregateKind === "union" ? "union" : "struct",
+        typeInfo: parseStoredTypeInfo(node.dataset.typeInfo),
+        allowDelete: node.dataset.allowDelete === "true",
+        dynamicAddress: node.dataset.dynamicAddress === "true",
+        anonymous: node.dataset.anonymous ?? null,
+    };
+}
+// Links a box inside a struct or union to the outermost one, like the interpreter
+// does: "p.inner.x" has the root "p" and the path ["inner", "x"].
+function withAggregateRoot(box, node) {
+    let outermost = null;
+    for (let parent = node.parentElement?.closest(".aggregatebox"); parent; parent = parent.parentElement?.closest(".aggregatebox") ?? null) {
+        outermost = parent;
+    }
+    const root = outermost?.dataset.aggregateName;
+    if (!root || !box.name.startsWith(root))
+        return box;
+    const path = box.name.slice(root.length).split(/\.|(?=\[)/).filter(Boolean);
+    return { ...box, aggregateRoot: root, aggregatePath: path };
+}
 export function serializeWorkspace(target) {
     if (!target)
         return null;
-    const nodes = target.querySelectorAll(".vbox, .arraybox");
+    const nodes = target.querySelectorAll(".vbox, .arraybox, .aggregatebox");
     const out = [];
     nodes.forEach((node) => {
-        if (node.classList.contains("arraybox")) {
-            out.push(...readArrayBoxState(node));
+        if (node.classList.contains("aggregatebox")) {
+            out.push(withAggregateRoot(readAggregateBoxState(node), node));
             return;
         }
-        out.push(readBoxState(node));
+        if (node.classList.contains("arraybox")) {
+            out.push(...readArrayBoxState(node).map((box) => withAggregateRoot(box, node)));
+            return;
+        }
+        out.push(withAggregateRoot(readBoxState(node), node));
     });
     return out;
 }

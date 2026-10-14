@@ -34,4 +34,5 @@ createProgramTemplate({
         { code: "}\n" },
     ],
     next: "116-floats.html",
+    workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

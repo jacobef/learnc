@@ -33,4 +33,5 @@ createProgramTemplate({
         { code: "}\n" },
     ],
     next: "75-sizes.html",
+    workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

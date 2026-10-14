@@ -2450,6 +2450,24 @@ fn cboxes_initializer_has_side_effects(initializer: &Initializer) -> bool {
     }
 }
 
+thread_local! {
+    // The typedef names of the running program's tagless structs and unions, which
+    // the program state shows instead of their internal names.
+    static CBOXES_ANONYMOUS_RECORD_NAMES: RefCell<crate::fast_hash::FastHashMap<usize, String>> =
+        RefCell::new(crate::fast_hash::FastHashMap::default());
+}
+
+fn set_cboxes_anonymous_record_names(names: crate::fast_hash::FastHashMap<usize, String>) {
+    CBOXES_ANONYMOUS_RECORD_NAMES.with(|cell| *cell.borrow_mut() = names);
+}
+
+fn cboxes_anonymous_record_name(ty: &CType) -> Option<String> {
+    let (CType::Struct(id, None) | CType::Union(id, None)) = ty else {
+        return None;
+    };
+    CBOXES_ANONYMOUS_RECORD_NAMES.with(|cell| cell.borrow().get(id).cloned())
+}
+
 pub(crate) fn cboxes_type_string(ty: &CType) -> String {
     cboxes_render_c_type(ty, String::new())
 }
@@ -2782,7 +2800,7 @@ fn cboxes_render_c_type(ty: &CType, declarator: String) -> String {
             }
         },
         _ => {
-            let base = ty.to_string();
+            let base = cboxes_anonymous_record_name(ty).unwrap_or_else(|| ty.to_string());
             if declarator.is_empty() || declarator.starts_with(['*', '[']) {
                 format!("{base}{declarator}")
             } else {

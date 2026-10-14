@@ -23,5 +23,5 @@ createProgramTemplate({
         { code: "}\n" },
     ],
     next: "sandbox.html?finished=1",
-    workspace: { allowVariableCreation: true },
+    workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

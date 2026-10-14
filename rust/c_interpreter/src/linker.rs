@@ -47,6 +47,7 @@ pub(crate) fn merge_translation_units(
         records: Default::default(),
         enums: Default::default(),
         enum_constants: Default::default(),
+        anonymous_record_names: Default::default(),
     };
     let mut external_function_decls = HashMap::<String, FunctionDecl>::new();
     let mut external_function_defs = HashMap::<String, FunctionDef>::new();
@@ -88,6 +89,11 @@ pub(crate) fn merge_translation_units(
                 remapper.ty(&mut member.ty);
             }
             merged.records.insert(record.id, record);
+        }
+        for (old_id, name) in unit.anonymous_record_names {
+            merged
+                .anonymous_record_names
+                .insert(remapper.records[&old_id], name);
         }
         for (old_id, mut enum_ty) in unit.enums {
             enum_ty.id = remapper.enums[&old_id];

@@ -30,4 +30,5 @@ createProgramTemplate({
         { code: "}\n" },
     ],
     next: "148-unions.html",
+    workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

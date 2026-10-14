@@ -47,4 +47,5 @@ createProgramTemplate({
     { code: "}\n" },
   ],
   next: "117-ieee.html",
+  workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

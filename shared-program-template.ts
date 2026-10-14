@@ -511,6 +511,9 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
         next.startLine === event.startLine
       );
     });
+  // Every struct and union in the program, so the learner can create one of the
+  // same type.
+  const aggregateModels = trace.flatMap((event) => event.state);
   const exitStatus = run.exitStatus;
   // What exists before the first line runs: string literals, globals, and main's parameters.
   const initialState = shownState(run.initialState);
@@ -804,6 +807,23 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       : [],
   );
 
+  // Where the learner starts editing a step: the state before it, plus any nameless
+  // objects it creates, like blocks from malloc. There's no declaration to copy
+  // those from, so they're laid out already, with their values left empty.
+  const workspaceStart = (stage: RuntimeStage): BoxState[] => {
+    const before = new Set(stage.stateBefore.map((box) => box.name));
+    const created = new Set(
+      stage.stateAfter
+        .filter((box) => box.anonymous && !before.has(box.name) && !box.arrayRoot && !box.aggregateRoot)
+        .map((box) => box.name),
+    );
+    const parts = stage.stateAfter.filter((box) =>
+      [box.name, box.arrayRoot, box.aggregateRoot].some((name) => !!name && created.has(name)));
+    return [
+      ...cloneBoxes(stage.stateBefore),
+      ...cloneBoxes(parts).map((box) => ({ ...box, value: "", rawValue: "", displayValue: null })),
+    ];
+  };
   const currentStage = () => (executionSteps >= 0 ? runtimeStages[executionSteps] || null : null);
   const stageNeedsSolve = (stage: RuntimeStage | null) =>
     !!stage && stage.editableMode !== "none" && stage.index > solvedStage;
@@ -1001,7 +1021,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     const editable = !!stage && stageNeedsSolve(stage) && stage.editableMode === "state";
     if (editable && stage) {
       const snapshot = workspaceByStage.get(stage.index) ?? null;
-      const wrap = restoreWorkspace(snapshot, stage.stateBefore, {
+      const wrap = restoreWorkspace(snapshot, workspaceStart(stage), {
         editable: true,
         deletable: !!workspace.allowVariableDeletion,
         allowNameEdit: null,
@@ -1029,8 +1049,9 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       });
       wrap.addEventListener("focusout", (event) => {
         const target = event.target;
-        if (!(target instanceof HTMLElement) || !target.matches(".type, .array-type")) return;
-        if (!reshapeDynamicBox(target)) return;
+        // A struct needs both its name and its type before it can be laid out.
+        if (!(target instanceof HTMLElement) || !target.matches(".type, .array-type, .name-text")) return;
+        if (!reshapeDynamicBox(target, aggregateModels)) return;
         refreshDynamicAddresses(wrap, stage);
         workspaceByStage.set(stage.index, serializeWorkspace(wrap) || []);
         updateResetVisibility();
@@ -1128,7 +1149,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       return;
     }
     const current = readWorkspace();
-    const baseline = stage.stateBefore;
+    const baseline = workspaceStart(stage);
     const outputUnchanged = enteredOutput(stage) === stage.stdoutBefore;
     resetBtn.classList.toggle("hidden", stateMatches(current, baseline) && outputUnchanged);
   }
@@ -1606,7 +1627,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     const nextStage = currentStage();
     const nextDisplayedState =
       nextStage?.editableMode === "state" && stageNeedsSolve(nextStage)
-        ? nextStage.stateBefore
+        ? workspaceStart(nextStage)
         : nextStage?.stateAfter || [];
     const shouldScrollState = introducesVisibleObject(
       stage?.stateAfter || initialState,
@@ -1617,7 +1638,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       nextDisplayedState,
     );
     if (nextStage?.editableMode === "state" && !workspaceByStage.has(nextStage.index)) {
-      workspaceByStage.set(nextStage.index, cloneBoxes(nextStage.stateBefore));
+      workspaceByStage.set(nextStage.index, workspaceStart(nextStage));
     }
     setStatus("", "muted");
     hideHint();
@@ -1672,7 +1693,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   resetBtn?.addEventListener("click", () => {
     const stage = currentStage();
     if (!stage || stage.editableMode !== "state") return;
-    workspaceByStage.set(stage.index, cloneBoxes(stage.stateBefore));
+    workspaceByStage.set(stage.index, workspaceStart(stage));
     outputByStage.delete(stage.index);
     selectedBoundaryByStage.delete(stage.index);
     setStatus("", "muted");

@@ -47,5 +47,5 @@ createProgramTemplate({
     { code: "}\n" },
   ],
   next: "155-files.html",
-  workspace: { showOutput: true, hideStringLiterals: true },
+  workspace: { allowVariableCreation: true, allowVariableDeletion: true, showOutput: true, hideStringLiterals: true },
 });

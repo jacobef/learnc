@@ -44,4 +44,5 @@ createProgramTemplate({
     { code: "}\n" },
   ],
   next: "113-conversions.html",
+  workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

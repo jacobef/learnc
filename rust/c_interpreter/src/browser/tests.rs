@@ -1054,6 +1054,21 @@ fn switch_trace_skips_the_cases_before_the_match_and_after_a_break() {
 }
 
 #[test]
+fn a_tagless_struct_is_shown_by_its_typedef_name() {
+    let original = "typedef struct {\n  int x;\n} vec;\nvec v = {1};\n";
+    let (files, source_display, _) = cboxes_prepare_virtual_sources(
+        vec![(PathBuf::from("program.c"), original.to_owned())],
+        true,
+    )
+    .unwrap();
+    let result = run_virtual_sources_with_options(&files, &RunOptions::default()).unwrap();
+    let json = cboxes_success_json(&result, &source_display);
+
+    assert!(json.contains("\"type\":\"vec\""));
+    assert!(!json.contains("anonymous struct"));
+}
+
+#[test]
 fn explicit_main_reports_its_closing_brace_as_the_program_end() {
     let source = "int main(void) {\n  int a = 1;\n}\n";
     let result = run_source("program.c", source).unwrap();

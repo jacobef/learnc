@@ -48,5 +48,5 @@ createProgramTemplate({
     { code: "}\n" },
   ],
   next: "153-duplicate.html",
-  workspace: { hideStringLiterals: true },
+  workspace: { allowVariableCreation: true, allowVariableDeletion: true, hideStringLiterals: true },
 });

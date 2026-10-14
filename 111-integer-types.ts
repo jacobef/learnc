@@ -51,4 +51,5 @@ createProgramTemplate({
     { code: "}\n" },
   ],
   next: "112-unsigned.html",
+  workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

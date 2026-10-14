@@ -29,6 +29,8 @@ pub struct TranslationUnit {
     pub records: FastHashMap<usize, RecordType>,
     pub enums: FastHashMap<usize, EnumType>,
     pub enum_constants: FastHashMap<(FileId, String), i128>,
+    // The first typedef name given to each tagless struct or union, for display.
+    pub anonymous_record_names: FastHashMap<usize, String>,
 }
 
 #[derive(Debug, Clone)]

@@ -52,4 +52,5 @@ createProgramTemplate({
     { code: "}\n" },
   ],
   next: "118-loop-control.html",
+  workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

@@ -84,8 +84,14 @@ export function stateWithArrayRoots(boxes: BoxState[]): BoxState[] {
   return result;
 }
 
+// A struct or union itself, rather than one of its members. Like an array, it's
+// just a container: its members hold the values.
+function isAggregateStateBox(box: BoxState): boolean {
+  return !!box.aggregateKind;
+}
+
 function comparableStateBoxes(boxes: BoxState[]): BoxState[] {
-  return boxes.filter((box) => !isArrayRootStateBox(box));
+  return boxes.filter((box) => !isArrayRootStateBox(box) && !isAggregateStateBox(box));
 }
 
 function comparableStateBoxKey(box: BoxState): string {
@@ -99,8 +105,14 @@ function comparableStateBoxKey(box: BoxState): string {
   return `scalar:${box.name}`;
 }
 
+// Whole variables: arrays, structs, and unions count once, not once per part.
 function visibleStateBoxes(boxes: BoxState[]): BoxState[] {
-  return stateWithArrayRoots(boxes).filter((box) => !box.arrayRoot);
+  return stateWithArrayRoots(boxes).filter((box) => !box.arrayRoot && !box.aggregateRoot);
+}
+
+// An array element or a struct or union member, which holds part of a variable's value.
+function isPartStateBox(box: BoxState): boolean {
+  return !!box.arrayRoot || (!!box.aggregateRoot && !box.aggregateKind);
 }
 
 export function stateMatches(actual: BoxState[], expected: BoxState[]): boolean {
@@ -128,10 +140,22 @@ export function stateMatches(actual: BoxState[], expected: BoxState[]): boolean 
 // How a hint refers to part of a box, like "x's value". A nameless object, whose
 // name is an internal key like "<allocated block #7>[1]", is described instead.
 function namesPart(name: string, part: string): string {
-  const nameless = /^<([^#>]+?) #\d+>((?:\[\d+\])*)$/.exec(name);
+  const nameless = /^<([^#>]+?) #\d+>(.*)$/.exec(name);
   if (!nameless) return `$n{${name}}'s ${part}`;
-  const [, kind, indices] = nameless;
-  return indices ? `the ${part} of element $v{${indices}} of the ${kind}` : `the ${part} of the ${kind}`;
+  const [, kind, rest] = nameless;
+  if (!rest) return `the ${part} of the ${kind}`;
+  if (/^(?:\[\d+\])+$/.test(rest)) return `the ${part} of element $v{${rest}} of the ${kind}`;
+  const member = /^\.(\w+)$/.exec(rest)?.[1];
+  return member
+    ? `the ${part} of the ${kind}'s member $n{${member}}`
+    : `the ${part} of $c{${rest}} in the ${kind}`;
+}
+
+// How a hint refers to a whole variable, or to a nameless object like a block
+// from malloc.
+function objectPhrase(name: string): string {
+  const nameless = /^<([^#>]+?) #\d+>$/.exec(name);
+  return nameless ? `the ${nameless[1]}` : `the $n{${name}} variable`;
 }
 
 function capitalize(text: string): string {
@@ -174,7 +198,7 @@ export function basicHintForBoxes(
   );
   if (removedName) {
     return {
-      message: `This line shouldn't remove the $n{${removedName}} variable.`,
+      message: `This line shouldn't remove ${objectPhrase(removedName)}.`,
       kind: "removed",
       variable: removedName,
     };
@@ -187,7 +211,7 @@ export function basicHintForBoxes(
     const name = extraBaselineNames[0] || "";
     if (name) {
       return {
-        message: `This line should remove the $n{${name}} variable.`,
+        message: `This line should remove ${objectPhrase(name)}.`,
         kind: "not-removed",
         variable: name,
       };
@@ -200,7 +224,7 @@ export function basicHintForBoxes(
       return { message: "You need to add a new variable.", kind: "count" };
     }
     return {
-      message: `You need to add the $n{${expectedName}} variable.`,
+      message: `You need to add ${objectPhrase(expectedName)}.`,
       kind: "count",
       variable: expectedName,
     };
@@ -304,23 +328,21 @@ export function basicHintForBoxes(
 
   const actualElementsByName = new Map(
     comparableStateBoxes(actual)
-      .filter((box) => !!box.arrayRoot)
+      .filter(isPartStateBox)
       .map((box) => [box.name, box]),
   );
   const baselineElementsByName = new Map(
     comparableStateBoxes(baseline)
-      .filter((box) => !!box.arrayRoot)
+      .filter(isPartStateBox)
       .map((box) => [box.name, box]),
   );
-  for (const expectedBox of comparableStateBoxes(expected).filter(
-    (box) => !!box.arrayRoot,
-  )) {
+  for (const expectedBox of comparableStateBoxes(expected).filter(isPartStateBox)) {
     const name = nameOf(expectedBox);
     if (!name) continue;
     const actualBox = actualElementsByName.get(name);
     if (!actualBox) {
       return {
-        message: `The $n{${name}} array element is missing.`,
+        message: `The $n{${name}} ${expectedBox.arrayRoot ? "array element" : "member"} is missing.`,
         kind: "value",
         variable: name,
       };

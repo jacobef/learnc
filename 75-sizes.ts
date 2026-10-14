@@ -38,4 +38,5 @@ createProgramTemplate({
     },
   ],
   next: "76-arrays-i.html",
+  workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

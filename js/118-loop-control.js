@@ -51,5 +51,5 @@ createProgramTemplate({
         { code: "}\n" },
     ],
     next: "119-goto.html",
-    workspace: { allowVariableCreation: true },
+    workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

@@ -36,4 +36,5 @@ createProgramTemplate({
         { code: "}\n" },
     ],
     next: "142-struct-pointers.html",
+    workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

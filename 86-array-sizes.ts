@@ -31,4 +31,5 @@ createProgramTemplate({
     },
   ],
   next: "87-pointer-loops.html",
+  workspace: { allowVariableCreation: true, allowVariableDeletion: true },
 });

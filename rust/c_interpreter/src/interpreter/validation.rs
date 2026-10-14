@@ -640,6 +640,7 @@ impl<'a> Interpreter<'a> {
         run_options: &RunOptions,
     ) -> Self {
         install_control_flow_panic_hook();
+        set_cboxes_anonymous_record_names(program.anonymous_record_names.clone());
         let mut functions = HashMap::default();
         let mut internal_functions: FileScopedMap<Rc<FunctionDef>> = HashMap::default();
         let mut declared_functions = HashMap::default();
