@@ -1004,6 +1004,8 @@ button {
 
 .panel-shell {
     display: grid;
+    /* Wide content, like unwrapped assembly, scrolls instead of widening the page. */
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
     gap: 16px;
     height: 100%;
