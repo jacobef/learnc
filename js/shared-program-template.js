@@ -1311,6 +1311,23 @@ function createProgramTemplate(config) {
         else
             minimallyRevealChangedValue(changedBoxes);
     });
+    // For checking that every step can be solved: with ?solve in the URL, this puts
+    // the current step's expected answer into the editor, as a learner would.
+    if (new URLSearchParams(window.location.search).has("solve")) {
+        window.solveCurrentStage = () => {
+            const stage = currentStage();
+            if (!stage || !stageNeedsSolve(stage))
+                return;
+            if (stage.editableMode === "state") {
+                workspaceByStage.set(stage.index, cloneBoxes(stage.stateAfter));
+                outputByStage.set(stage.index, stage.stdoutAfter);
+            }
+            if (stage.editableMode === "boundary" || stage.selectsResume) {
+                selectedBoundaryByStage.set(stage.index, stage.afterBoundary);
+            }
+            render();
+        };
+    }
     checkBtn?.addEventListener("click", () => {
         checkCurrentStage();
     });

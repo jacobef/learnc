@@ -54,6 +54,15 @@ test("hints describe nameless objects instead of showing their internal names", 
   assert.equal(hint?.message, "The value of element $v{[1]} of the allocated block should be $v{1}.");
 });
 
+test("infinity and NaN can be entered as words", () => {
+  const typeInfo = { kind: "floating" as const, pointerDepth: 0, arrayShape: [], pointeeArrayShape: [], size: 8, align: 8 };
+  const double = (value: string): BoxState => ({ name: "d", type: "double", value, typeInfo });
+  assert.equal(stateMatches([double("inf")], [double("Infinity")]), true);
+  assert.equal(stateMatches([double("-inf")], [double("Infinity")]), false);
+  assert.equal(stateMatches([double("nan")], [double("NaN")]), true);
+  assert.equal(stateMatches([double("1e308")], [double("Infinity")]), false);
+});
+
 test("hints distinguish removed variables from missing new variables", () => {
   const baseline = [variable("x")];
   const expected = [...baseline, variable("y")];

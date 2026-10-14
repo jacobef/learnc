@@ -39,6 +39,14 @@ interface CValueMatch {
 }
 
 /** Compares lesson answers using C conversion rules rather than JS coercion. */
+// Infinity and NaN, which can't be written as C constants. They can be typed as
+// the program state shows them, like Infinity, or as printf prints them, like inf.
+function specialFloatingValue(raw: string): string | null {
+  const match = /^([+-]?)(inf|infinity|nan)$/i.exec(raw.trim());
+  if (!match) return null;
+  return match[2]!.toLowerCase() === "nan" ? "nan" : `${match[1] === "-" ? "-" : ""}inf`;
+}
+
 export function boxValueMatchesSpec(
   actual: BoxState,
   expected: BoxState,
@@ -58,6 +66,15 @@ export function boxValueMatchesSpec(
     return { ok, normalized: ok ? expectedRaw : "" };
   }
 
+  if (targetKind === "floating") {
+    const actualSpecial = specialFloatingValue(actualRaw);
+    const expectedSpecial = specialFloatingValue(expectedRaw);
+    if (actualSpecial || expectedSpecial) {
+      const ok = actualSpecial === expectedSpecial;
+      return { ok, normalized: ok ? expectedRaw : "" };
+    }
+  }
+
   const entered = evaluateCExpression("0;", 0, actualRaw);
   if (entered.kind !== "ok" || !entered.result.valueLiteral) {
     return { ok: false, normalized: "" };
@@ -69,8 +86,10 @@ export function boxValueMatchesSpec(
     return { ok: false, normalized: "" };
   }
 
+  // An enum's type is only defined in the program, but its values are ints.
+  const castType = /^enum\b/.test(targetType) ? "int" : targetType;
   const cast = (raw: string) =>
-    evaluateCExpression("0;", 0, `(${targetType})(${raw})`);
+    evaluateCExpression("0;", 0, `(${castType})(${raw})`);
   const convertedActual = cast(actualRaw);
   const convertedExpected = cast(expectedRaw);
   if (convertedActual.kind !== "ok" || convertedExpected.kind !== "ok") {
