@@ -4,8 +4,12 @@ import type { ReferenceEntry, ReferenceSection } from "./shared-reference-data.j
 
 type RenderStyledText = (target: HTMLElement, text: string) => void;
 
+// Lessons are matched by name without their number, so entries follow a lesson
+// when lessons are renumbered.
+const lessonSlug = (href: string) => href.replace(/^\d+-/, "");
+
 function navIndex(href: string): number {
-  return DEFAULT_NAV_ITEMS.findIndex((item) => item.href === href);
+  return DEFAULT_NAV_ITEMS.findIndex((item) => lessonSlug(item.href) === lessonSlug(href));
 }
 
 // Only content from lessons up to and including the current page is shown.
@@ -34,8 +38,9 @@ function entryNode(entry: ReferenceEntry, render: RenderStyledText): HTMLElement
   render(text, entry.text);
   const lesson = document.createElement("a");
   lesson.className = "reference-lesson";
-  lesson.href = entry.lesson;
-  const label = DEFAULT_NAV_ITEMS[navIndex(entry.lesson)]?.label ?? "";
+  const item = DEFAULT_NAV_ITEMS[navIndex(entry.lesson)];
+  lesson.href = item?.href ?? entry.lesson;
+  const label = item?.label ?? "";
   lesson.textContent = label.replace(/\..*$/, "");
   lesson.title = `Introduced in ${label}`;
   row.append(code, text, lesson);
