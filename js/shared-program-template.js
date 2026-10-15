@@ -290,7 +290,7 @@ function createProgramTemplate(config) {
     // Every struct and union in the program, so the learner can create one of the
     // same type.
     const aggregateModels = trace.flatMap((event) => event.state);
-    const exitStatus = run.exitStatus;
+    const { exitStatus, endedBy } = run;
     // What exists before the first line runs: string literals, globals, and main's parameters.
     const initialState = shownState(run.initialState);
     const stdoutDecoder = new TextDecoder();
@@ -808,8 +808,8 @@ function createProgramTemplate(config) {
         }
         stageEl.appendChild(wrap);
         renderVariableLights(wrap, false);
-        // Once main has returned, the program is over, and what it returned is its exit status.
-        if (!implicitMain && stage && stage.index === runtimeStages.length - 1) {
+        // Once the program has ended, by main returning or by a call like exit, give its exit status.
+        if (!implicitMain && endedBy && stage && stage.index === runtimeStages.length - 1) {
             const exit = document.createElement("div");
             exit.className = "program-exit-status";
             exit.append("The program has ended, with exit status ");

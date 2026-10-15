@@ -7,7 +7,7 @@ Object.assign(globalThis, {
   window: { location: { pathname: "/" } },
   localStorage: { getItem: () => null, setItem: () => {} },
 });
-const { runCProgram, evaluateCExpressionFiles } = await import("../js/shared-c-interpreter.js");
+const { runCProgram, runCFiles, evaluateCExpressionFiles } = await import("../js/shared-c-interpreter.js");
 const fixtures = new URL("../rust/c_interpreter/tests/standard_examples/", import.meta.url);
 for (const name of readdirSync(fixtures).filter((name) => name.endsWith(".c")).sort()) {
   const source = readFileSync(new URL(name, fixtures), "utf8");
@@ -216,3 +216,55 @@ console.log("PASS unsized multidimensional parameters and partially initialized 
   assert.throws(() => normalizeProgramResult(bad, source), /valid trace type reference/);
 }
 console.log("PASS trace type pooling preserves metadata and rejects invalid references");
+
+{
+  const run = (body: string, stepLimit?: number) =>
+    runCFiles(
+      [{ path: "program.c", source: `#include <setjmp.h>\n#include <stdio.h>\n#include <stdlib.h>\n${body}\n` }],
+      4096,
+      "",
+      false,
+      stepLimit === undefined ? undefined : { stepLimit },
+    );
+  const ended = (body: string, endedBy: string, exitStatus: number, stdout = "") => {
+    const result = run(body);
+    assert.equal(result.kind, "ok", JSON.stringify(result));
+    if (result.kind !== "ok") return;
+    assert.equal(result.endedBy, endedBy, body);
+    assert.equal(result.exitStatus, exitStatus, body);
+    assert.equal(result.stdout, stdout, body);
+  };
+  const undefinedBehavior = (body: string, message: RegExp) => {
+    const result = run(body);
+    assert.equal(result.kind, "ub", JSON.stringify(result));
+    if (result.kind === "ub") assert.match(result.diagnostic.message, message);
+  };
+  const handlers = `void a(void) { printf("a"); }\nvoid b(void) { printf("b"); }\nvoid q(void) { printf("q"); }\n`;
+
+  ended("int main(void) {\n  exit(2);\n}", "exit", 2);
+  ended("int main(void) { return 3; }", "return", 3);
+  ended("void f(void) { printf(\"hi\"); exit(EXIT_FAILURE); }\nint main(void) { f(); return 0; }", "exit", 1, "hi");
+  ended(`${handlers}int main(void) { atexit(a); atexit(b); return 4; }`, "return", 4, "ba");
+  ended(`${handlers}int main(void) { atexit(a); atexit(b); exit(5); }`, "exit", 5, "ba");
+  ended(`${handlers}int main(void) { atexit(a); at_quick_exit(q); quick_exit(6); }`, "quick_exit", 6, "q");
+  ended(`${handlers}int main(void) { atexit(a); _Exit(7); }`, "_Exit", 7);
+  ended(`${handlers}int main(void) { atexit(a); abort(); }`, "abort", 1);
+  ended("void x(void) { _Exit(8); }\nint main(void) { atexit(x); return 0; }", "_Exit", 8);
+  ended(`${handlers}void x(void) { exit(9); }\nint main(void) { atexit(a); at_quick_exit(x); quick_exit(0); }`, "exit", 9, "a");
+  ended(`jmp_buf env;\nvoid f(int n) { if (n == 0) longjmp(env, 10); f(n - 1); }\nint main(void) {\n  if (setjmp(env) == 10) return 10;\n  f(3);\n  return 0;\n}`, "return", 10);
+  ended(`jmp_buf env;\nint main(void) {\n  volatile int count = 0;\n  if (setjmp(env) < 3) { count++; longjmp(env, count + 1); }\n  return count;\n}`, "return", 2);
+
+  undefinedBehavior("void x(void) { exit(0); }\nint main(void) { atexit(x); return 0; }", /calling exit from an atexit handler/);
+  undefinedBehavior("jmp_buf env;\nvoid x(void) { longjmp(env, 1); }\nint main(void) { atexit(x); if (setjmp(env)) return 1; return 0; }", /longjmp/);
+  undefinedBehavior("jmp_buf env;\nvoid x(void) { longjmp(env, 1); }\nint main(void) { at_quick_exit(x); if (setjmp(env)) return 1; quick_exit(0); }", /longjmp/);
+  undefinedBehavior("void x(void) { quick_exit(0); }\nint main(void) { at_quick_exit(x); quick_exit(0); }", /quick_exit was called from an at_quick_exit handler/);
+  undefinedBehavior("jmp_buf env;\nvoid f(void) { setjmp(env); }\nint main(void) { f(); longjmp(env, 1); }", /already returned/);
+
+  const limited = run("int main(void) { volatile int i = 0; for (;;) i++; }", 50);
+  assert.equal(limited.kind, "ok", JSON.stringify(limited));
+  if (limited.kind === "ok") {
+    assert.ok(limited.executionLimit);
+    assert.equal(limited.endedBy, null);
+  }
+}
+console.log("PASS exit, atexit handlers, abort, and longjmp work through the Wasm bridge");

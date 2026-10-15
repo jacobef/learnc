@@ -37,10 +37,15 @@ export type CProgramResult = (
       stderr: string;
       stdinPosition: number;
       exitStatus: number;
+      // How the program ended, or null when the run stopped before it ended.
+      endedBy: CProgramEnd | null;
     }
   | { kind: "compile" | "ub"; diagnostic: ProgramDiagnostic }
 ) &
   CImplicitMainResult;
+
+// Whether main returned, or which <stdlib.h> function ended the program.
+export type CProgramEnd = "return" | "exit" | "quick_exit" | "_Exit" | "abort";
 
 export interface CProgramTraceEvent {
   callDepth: number;

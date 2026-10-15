@@ -35,6 +35,7 @@ export function sandboxTimeline(result) {
         stderrBytes: context.stderrBytes,
         stdinPosition: context.stdinPosition,
         exitStatus: 0,
+        endedBy: null,
     };
 }
 export function sandboxDiagnosticAt(result, position) {

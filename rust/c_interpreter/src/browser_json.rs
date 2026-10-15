@@ -40,13 +40,17 @@ pub(super) fn cboxes_success_json(
 ) -> String {
     let (trace, trace_types) = cboxes_trace_json(&result.trace, source_display);
     format!(
-        "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"stdoutBytes\":{:?},\"stderrBytes\":{:?},\"stdinPosition\":{},\"exitStatus\":{},\"state\":{},\"initialState\":{},\"trace\":{},\"traceTypeInfos\":{},\"mainClose\":{},\"blocked\":{},\"executionLimit\":{}}}",
+        "{{\"ok\":true,\"stdout\":{},\"stderr\":{},\"stdoutBytes\":{:?},\"stderrBytes\":{:?},\"stdinPosition\":{},\"exitStatus\":{},\"endedBy\":{},\"state\":{},\"initialState\":{},\"trace\":{},\"traceTypeInfos\":{},\"mainClose\":{},\"blocked\":{},\"executionLimit\":{}}}",
         cboxes_json_string(&result.stdout),
         cboxes_json_string(&result.stderr),
         result.stdout_bytes,
         result.stderr_bytes,
         result.stdin_position,
         result.exit_status,
+        result
+            .ended_by
+            .map(|end| cboxes_json_string(end.json_name()))
+            .unwrap_or_else(|| "null".to_owned()),
         cboxes_state_json(&result.state),
         cboxes_state_json(&result.initial_state),
         trace,

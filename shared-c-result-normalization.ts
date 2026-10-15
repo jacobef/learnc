@@ -10,6 +10,7 @@ import { WasiProcExit } from "./shared-c-wasm-bridge.js";
 import type {
   CExpressionResult,
   CProgramBlocked,
+  CProgramEnd,
   CProgramExecutionLimit,
   CProgramResult,
   CProgramSourceLocation,
@@ -365,6 +366,15 @@ function decodeExecutionLimit(
   };
 }
 
+function decodeProgramEnd(value: unknown, path: string): CProgramEnd | null {
+  if (value === null) return null;
+  const end = stringAt(value, path);
+  if (end !== "return" && end !== "exit" && end !== "quick_exit" && end !== "_Exit" && end !== "abort") {
+    return schemaError(path, "a known way for a program to end");
+  }
+  return end;
+}
+
 function decodeImplicitMain(root: JsonObject, expected: boolean) {
   const hasApplied = Object.prototype.hasOwnProperty.call(
     root,
@@ -549,6 +559,7 @@ function normalizeProgramResult(
     "stderr",
     "stdinPosition",
     "exitStatus",
+    "endedBy",
     "state",
     "initialState",
     "trace",
@@ -578,6 +589,7 @@ function normalizeProgramResult(
     stdoutBytes: decodeBytes(root.stdoutBytes, "$.stdoutBytes"),
     stderrBytes: decodeBytes(root.stderrBytes, "$.stderrBytes"),
     exitStatus: numberAt(root.exitStatus, "$.exitStatus"),
+    endedBy: decodeProgramEnd(root.endedBy, "$.endedBy"),
     ...implicit,
   };
 }

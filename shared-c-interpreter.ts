@@ -22,6 +22,7 @@ export type {
   CExecutionBudget,
   CExpressionResult,
   CProgramBlocked,
+  CProgramEnd,
   CProgramExecutionLimit,
   CProgramResult,
   CProgramSourceLocation,

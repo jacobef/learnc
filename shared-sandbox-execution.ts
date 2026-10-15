@@ -38,6 +38,7 @@ export function sandboxTimeline(result: CProgramResult): SandboxTimeline {
     stderrBytes: context.stderrBytes,
     stdinPosition: context.stdinPosition,
     exitStatus: 0,
+    endedBy: null,
   };
 }
 

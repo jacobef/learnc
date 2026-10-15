@@ -15,6 +15,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::ProgramEnd;
+
 use crate::{
     ProgramOutput, RunExpressionEvalRequest, RunOptions, UbDetectionMode, diag::Diagnostic,
     run_file as crate_run_file, run_files as crate_run_files,
