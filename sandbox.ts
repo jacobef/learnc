@@ -949,15 +949,15 @@ function renderStage() {
     outcome.blocked ?? null,
     outcome.executionLimit ?? null,
   );
-  // Once a visible main has returned, say what it returned.
+  // Once a program with a visible main has ended, say how.
   if (
     result.kind === "ok" &&
+    result.endedBy &&
     outcome.globalKind === "ok" &&
-    !result.executionLimit &&
     !sandbox.effectiveImplicitMain &&
     sandbox.stepPosition >= sandbox.traceLength
   ) {
-    statePanel.appendChild(renderExitStatus(result.exitStatus));
+    statePanel.appendChild(renderExitStatus(result.exitStatus, result.endedBy));
   }
   stage.appendChild(statePanel);
   refreshOtherNames();

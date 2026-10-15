@@ -4389,9 +4389,9 @@ impl<'a> Interpreter<'a> {
             "abort" => self.eval_abort_call(span),
             "atexit" => self.eval_atexit_call(evaluated, span),
             "at_quick_exit" => self.eval_at_quick_exit_call(evaluated, span),
-            "exit" => self.eval_exit_call(evaluated, span, true, false),
-            "quick_exit" => self.eval_exit_call(evaluated, span, false, true),
-            "_Exit" => self.eval_exit_call(evaluated, span, false, false),
+            "exit" => self.eval_exit_call(evaluated, span, ProgramEnd::Exit),
+            "quick_exit" => self.eval_exit_call(evaluated, span, ProgramEnd::QuickExit),
+            "_Exit" => self.eval_exit_call(evaluated, span, ProgramEnd::UnderscoreExit),
             "bsearch" => self.eval_bsearch_call(evaluated, args, span, frame, objects),
             "qsort" => self.eval_qsort_call(evaluated, args, span, frame, objects),
             "getenv" => self.eval_getenv_call(evaluated, args, span, objects),
@@ -4845,10 +4845,13 @@ impl<'a> Interpreter<'a> {
             ));
         }
         let value = evaluated[1].to_int()?;
-        panic_any(LongjmpSignal {
-            handle,
-            target_frame_id: env.frame_id,
-            value: if value == 0 { 1 } else { value },
-        });
+        Err(Diagnostic::longjmp(
+            LongjmpSignal {
+                handle,
+                target_frame_id: env.frame_id,
+                value: if value == 0 { 1 } else { value },
+            },
+            span,
+        ))
     }
 }

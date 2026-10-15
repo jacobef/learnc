@@ -2,9 +2,8 @@ use libc::{self, c_char, c_double, c_float, c_int, c_long, c_longlong, c_ulonglo
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
-use std::panic::{AssertUnwindSafe, catch_unwind, panic_any, resume_unwind, set_hook, take_hook};
 use std::rc::Rc;
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 
 use crate::ast::{
     BinaryOp, Block, BlockItem, Declaration, Designator, Expr, ExternalDeclaration, ForInit,
@@ -418,6 +417,9 @@ pub struct ProgramOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_status: c_int,
+    /// None when the run stopped before the program ended (waiting for input,
+    /// or at an execution limit).
+    pub ended_by: Option<ProgramEnd>,
     pub state: Vec<ProgramStateBox>,
     pub initial_state: Vec<ProgramStateBox>,
     pub trace: Vec<ProgramTraceEvent>,
@@ -724,30 +726,6 @@ struct JumpScopeValidation {
 struct SwitchScopeValidation {
     source_scope: HashSet<Span>,
     label_scopes: Vec<(HashSet<Span>, Span)>,
-}
-
-struct CallFrameCleanup<'a> {
-    interpreter: *mut Interpreter<'a>,
-    objects: *mut ObjectFrames,
-    frame_id: usize,
-}
-
-impl<'a> CallFrameCleanup<'a> {
-    fn new(interpreter: &mut Interpreter<'a>, objects: &mut ObjectFrames, frame_id: usize) -> Self {
-        Self {
-            interpreter,
-            objects,
-            frame_id,
-        }
-    }
-}
-
-impl Drop for CallFrameCleanup<'_> {
-    fn drop(&mut self) {
-        unsafe {
-            (*self.interpreter).cleanup_call_frame(self.frame_id, &mut *self.objects);
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1578,31 +1556,47 @@ struct PendingLongjmpReturn {
     value: i128,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TerminationSignal {
-    status: c_int,
-    run_atexit: bool,
-    run_quick_exit: bool,
+/// How a finished program run ended: by main returning, or by a call to one of
+/// the <stdlib.h> functions that end the program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramEnd {
+    MainReturned,
+    Exit,
+    QuickExit,
+    UnderscoreExit,
+    Abort,
 }
 
+impl ProgramEnd {
+    pub fn json_name(self) -> &'static str {
+        match self {
+            ProgramEnd::MainReturned => "return",
+            ProgramEnd::Exit => "exit",
+            ProgramEnd::QuickExit => "quick_exit",
+            ProgramEnd::UnderscoreExit => "_Exit",
+            ProgramEnd::Abort => "abort",
+        }
+    }
+
+    fn runs_atexit_handlers(self) -> bool {
+        matches!(self, ProgramEnd::MainReturned | ProgramEnd::Exit)
+    }
+}
+
+/// Carried up to the run loop by `Diagnostic::termination` when the program
+/// calls exit, quick_exit, _Exit, or abort.
 #[derive(Debug, Clone, Copy)]
-struct LongjmpSignal {
+pub(crate) struct TerminationSignal {
+    status: c_int,
+    end: ProgramEnd,
+}
+
+/// Carried up to the frame that called setjmp by `Diagnostic::longjmp`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LongjmpSignal {
     handle: u64,
     target_frame_id: usize,
     value: i128,
-}
-
-fn install_control_flow_panic_hook() {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let previous = take_hook();
-        set_hook(Box::new(move |info| {
-            if info.payload().is::<LongjmpSignal>() || info.payload().is::<TerminationSignal>() {
-                return;
-            }
-            previous(info);
-        }));
-    });
 }
 
 #[derive(Debug, Clone)]

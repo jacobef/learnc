@@ -1,4 +1,5 @@
 import { DEFAULT_NAV_ITEMS as NAV_ITEMS } from "./nav-items.js";
+import type { CProgramEnd } from "./shared-c-interpreter.js";
 import { startLevelReplay } from "./shared-replay.js";
 import { mountQuickReference } from "./shared-reference.js";
 import {
@@ -1404,16 +1405,22 @@ function flashStatus(el: Element | null) {
   node.classList.add("status-flash");
 }
 
-// Shown once main has returned, with the value it returned.
-function renderExitStatus(status: number): HTMLElement {
+// Shown once the program has ended: what main returned, or which call ended it.
+function renderExitStatus(status: number, endedBy: CProgramEnd): HTMLElement {
   const exit = document.createElement("div");
   exit.className = "program-exit-status";
-  const main = document.createElement("code");
-  main.textContent = "main";
   const value = document.createElement("span");
   value.className = "program-exit-status-value";
   value.textContent = String(status);
-  exit.append("The program has ended: ", main, " returned ", value, ".");
+  const code = document.createElement("code");
+  if (endedBy === "return") {
+    code.textContent = "main";
+    exit.append("The program has ended: ", code, " returned ", value, ".");
+  } else {
+    if (endedBy === "abort") code.textContent = "abort()";
+    else code.append(`${endedBy}(`, value, ")");
+    exit.append("The program has ended: it called ", code, ".");
+  }
   return exit;
 }
 

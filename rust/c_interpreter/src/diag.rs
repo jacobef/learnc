@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
 
-use crate::interpreter::{ProgramStateBox, ProgramTraceEvent};
+use crate::interpreter::{LongjmpSignal, ProgramStateBox, ProgramTraceEvent, TerminationSignal};
 use crate::source::{Snippet, SourceManager, Span};
 
 #[derive(Debug, Clone)]
@@ -82,6 +82,8 @@ enum DiagnosticControl {
     ExecutionStepLimit,
     ExecutionTraceLimit,
     ExpressionComplete,
+    Termination(TerminationSignal),
+    Longjmp(LongjmpSignal),
 }
 
 impl Diagnostic {
@@ -169,6 +171,32 @@ impl Diagnostic {
             self.data.control,
             Some(DiagnosticControl::ExpressionComplete)
         )
+    }
+
+    pub(crate) fn termination(signal: TerminationSignal, span: Span) -> Self {
+        let mut diagnostic = Self::error("the program ended", span);
+        diagnostic.data.control = Some(DiagnosticControl::Termination(signal));
+        diagnostic
+    }
+
+    pub(crate) fn termination_signal(&self) -> Option<TerminationSignal> {
+        match self.data.control? {
+            DiagnosticControl::Termination(signal) => Some(signal),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn longjmp(signal: LongjmpSignal, span: Span) -> Self {
+        let mut diagnostic = Self::error("longjmp did not reach its setjmp", span);
+        diagnostic.data.control = Some(DiagnosticControl::Longjmp(signal));
+        diagnostic
+    }
+
+    pub(crate) fn longjmp_signal(&self) -> Option<LongjmpSignal> {
+        match self.data.control? {
+            DiagnosticControl::Longjmp(signal) => Some(signal),
+            _ => None,
+        }
     }
 
     #[cfg(test)]

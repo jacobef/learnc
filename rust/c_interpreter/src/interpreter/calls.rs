@@ -109,9 +109,7 @@ impl<'a> Interpreter<'a> {
         };
         frame.bindings.insert("__func__".to_owned(), func_object);
 
-        let result = {
-            let _cleanup = CallFrameCleanup::new(self, objects, frame_id);
-            let execution = (|| -> Result<TypedValue, Diagnostic> {
+        let execution = (|| -> Result<TypedValue, Diagnostic> {
                 for (param, arg) in function.params.iter().zip(args) {
                     if param.ty == CType::Void {
                         continue;
@@ -197,45 +195,31 @@ impl<'a> Interpreter<'a> {
                 let needs_longjmp_catch =
                     function_may_setjmp || !self.live_setjmp_frames.is_empty();
                 let flow = if needs_longjmp_catch {
-                    let mut execution = catch_unwind(AssertUnwindSafe(|| {
-                        self.exec_block(&function.body, &mut frame, objects)
-                    }));
+                    let mut execution = self.exec_block(&function.body, &mut frame, objects);
                     loop {
-                        match execution {
-                            Ok(flow) => break flow?,
-                            Err(payload) => {
-                                let Some(signal) = payload.downcast_ref::<LongjmpSignal>().copied()
-                                else {
-                                    resume_unwind(payload);
-                                };
-                                if signal.target_frame_id != frame_id {
-                                    resume_unwind(payload);
-                                }
-                                let env = self
-                                    .setjmp_envs
-                                    .get(&signal.handle)
-                                    .cloned()
-                                    .ok_or_else(|| {
-                                        Diagnostic::ub(
-                                            "longjmp was called with an invalid or uninitialized jmp_buf",
-                                            call_span,
-                                            Some("7.13.2.1"),
-                                        )
-                                    })?;
-                                self.restore_setjmp_environment(
-                                    &env, &mut frame, objects, call_span,
-                                )?;
-                                self.pending_longjmp_return = Some(PendingLongjmpReturn {
-                                    frame_id,
-                                    value: signal.value,
-                                });
-                                execution = catch_unwind(AssertUnwindSafe(|| {
-                                    self.resume_function_after_longjmp(
-                                        function, env.site, &mut frame, objects,
-                                    )
-                                }));
-                            }
-                        }
+                        let signal = match execution {
+                            Err(diag) => match diag.longjmp_signal() {
+                                Some(signal) if signal.target_frame_id == frame_id => signal,
+                                _ => return Err(diag),
+                            },
+                            Ok(flow) => break flow,
+                        };
+                        let env = self.setjmp_envs.get(&signal.handle).cloned().ok_or_else(
+                            || {
+                                Diagnostic::ub(
+                                    "longjmp was called with an invalid or uninitialized jmp_buf",
+                                    call_span,
+                                    Some("7.13.2.1"),
+                                )
+                            },
+                        )?;
+                        self.restore_setjmp_environment(&env, &mut frame, objects, call_span)?;
+                        self.pending_longjmp_return = Some(PendingLongjmpReturn {
+                            frame_id,
+                            value: signal.value,
+                        });
+                        execution = self
+                            .resume_function_after_longjmp(function, env.site, &mut frame, objects);
                     }
                 } else {
                     self.exec_block(&function.body, &mut frame, objects)?
@@ -317,13 +301,13 @@ impl<'a> Interpreter<'a> {
                             function.span,
                         )),
                 }
-            })();
-            execution.and_then(|value| {
+            })()
+            .and_then(|value| {
                 self.reject_unended_va_lists(frame_id, function.body.span)?;
                 Ok(value)
-            })
-        };
-        result.and_then(|mut value| {
+            });
+        self.cleanup_call_frame(frame_id, objects);
+        execution.and_then(|mut value| {
             self.take_pending_stream_buffer_lifetime_ub()?;
             if value.ty.is_pointer() && self.pointer_value_has_ended_lifetime(&value, objects) {
                 value.indeterminate = true;

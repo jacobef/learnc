@@ -639,7 +639,6 @@ impl<'a> Interpreter<'a> {
         program: TranslationUnit,
         run_options: &RunOptions,
     ) -> Self {
-        install_control_flow_panic_hook();
         set_cboxes_anonymous_record_names(program.anonymous_record_names.clone());
         let mut functions = HashMap::default();
         let mut internal_functions: FileScopedMap<Rc<FunctionDef>> = HashMap::default();
@@ -894,18 +893,16 @@ impl<'a> Interpreter<'a> {
         self.initialize_string_literal_objects(&objects)?;
         let main_args = self.build_main_arguments(&main, &mut objects)?;
         let main_symbol = function_symbol(main.as_ref());
-        let entry = catch_unwind(AssertUnwindSafe(|| {
-            self.call_function(
-                &main,
-                self.function_may_setjmp_symbol(&main_symbol),
-                main_args,
-                main.span,
-                &mut objects,
-            )
-        }));
+        let entry = self.call_function(
+            &main,
+            self.function_may_setjmp_symbol(&main_symbol),
+            main_args,
+            main.span,
+            &mut objects,
+        );
         let mut trace_page_complete = false;
-        let (exit_status, blocked, execution_limit_span) = match entry {
-            Ok(Ok(result)) => {
+        let (exit_status, ended_by, blocked, execution_limit_span) = match entry {
+            Ok(result) => {
                 let exit_status = if main.return_type == CType::Void {
                     0
                 } else {
@@ -917,37 +914,32 @@ impl<'a> Interpreter<'a> {
                 self.complete_termination(
                     TerminationSignal {
                         status: exit_status,
-                        run_atexit: true,
-                        run_quick_exit: false,
+                        end: ProgramEnd::MainReturned,
                     },
                     &mut objects,
                     main.span,
                 )?
             }
-            Ok(Err(diag)) => {
-                if diag.is_expression_complete() {
-                    (0, None, None)
+            Err(diag) => {
+                if let Some(signal) = diag.termination_signal() {
+                    self.complete_termination(signal, &mut objects, main.span)?
+                } else if diag.is_expression_complete() {
+                    (0, None, None, None)
                 } else if let Some(span) = diag.execution_trace_limit_span() {
                     trace_page_complete = true;
-                    (0, None, Some(span))
+                    (0, None, None, Some(span))
                 } else if let Some(span) = diag.execution_step_limit_span() {
-                    (0, None, Some(span))
+                    (0, None, None, Some(span))
                 } else {
                     let Some((function_name, span)) = diag.blocked_info() else {
                         return Err(self.with_cboxes_runtime_context(diag));
                     };
                     (
                         0,
+                        None,
                         Some(self.cboxes_blocked_result(function_name, span)),
                         None,
                     )
-                }
-            }
-            Err(payload) => {
-                if let Some(signal) = payload.downcast_ref::<TerminationSignal>().copied() {
-                    self.complete_termination(signal, &mut objects, main.span)?
-                } else {
-                    resume_unwind(payload);
                 }
             }
         };
@@ -1009,6 +1001,7 @@ impl<'a> Interpreter<'a> {
             stdout_bytes,
             stderr_bytes,
             exit_status,
+            ended_by,
             state,
             initial_state: self.cboxes_initial_state.clone(),
             trace: self.cboxes_trace.clone(),
@@ -1022,49 +1015,51 @@ impl<'a> Interpreter<'a> {
         })
     }
 
+    /// Runs the handlers the way the program ended calls for, and returns its
+    /// exit status, and how it ended, unless a handler stopped the run early.
     fn complete_termination(
         &mut self,
         mut signal: TerminationSignal,
         objects: &mut ObjectFrames,
         span: Span,
-    ) -> Result<(c_int, Option<ProgramBlocked>, Option<Span>), Diagnostic> {
+    ) -> Result<
+        (
+            c_int,
+            Option<ProgramEnd>,
+            Option<ProgramBlocked>,
+            Option<Span>,
+        ),
+        Diagnostic,
+    > {
         loop {
-            let handlers = if signal.run_atexit {
+            let handlers = if signal.end.runs_atexit_handlers() {
                 self.take_pending_stream_buffer_lifetime_ub()
                     .map_err(|diag| self.with_cboxes_runtime_context(diag))?;
-                catch_unwind(AssertUnwindSafe(|| self.run_atexit_handlers(objects, span)))
-            } else if signal.run_quick_exit {
-                catch_unwind(AssertUnwindSafe(|| {
-                    self.run_quick_exit_handlers(objects, span)
-                }))
+                self.run_atexit_handlers(objects, span)
+            } else if signal.end == ProgramEnd::QuickExit {
+                self.run_quick_exit_handlers(objects, span)
             } else {
-                return Ok((signal.status, None, None));
+                Ok(())
             };
-
-            match handlers {
-                Ok(Ok(())) => return Ok((signal.status, None, None)),
-                Ok(Err(diag)) => {
-                    if let Some(limit_span) = diag.execution_step_limit_span() {
-                        return Ok((signal.status, None, Some(limit_span)));
-                    }
-                    let Some((function_name, blocked_span)) = diag.blocked_info() else {
-                        return Err(self.with_cboxes_runtime_context(diag));
-                    };
-                    return Ok((
-                        signal.status,
-                        Some(self.cboxes_blocked_result(function_name, blocked_span)),
-                        None,
-                    ));
-                }
-                Err(payload) => {
-                    if let Some(next_signal) = payload.downcast_ref::<TerminationSignal>().copied()
-                    {
-                        signal = next_signal;
-                    } else {
-                        resume_unwind(payload);
-                    }
-                }
+            let Err(diag) = handlers else {
+                return Ok((signal.status, Some(signal.end), None, None));
+            };
+            if let Some(next_signal) = diag.termination_signal() {
+                signal = next_signal;
+                continue;
             }
+            if let Some(limit_span) = diag.execution_step_limit_span() {
+                return Ok((signal.status, None, None, Some(limit_span)));
+            }
+            let Some((function_name, blocked_span)) = diag.blocked_info() else {
+                return Err(self.with_cboxes_runtime_context(diag));
+            };
+            return Ok((
+                signal.status,
+                None,
+                Some(self.cboxes_blocked_result(function_name, blocked_span)),
+                None,
+            ));
         }
     }
 

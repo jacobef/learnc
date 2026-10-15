@@ -1658,7 +1658,40 @@ int main(void) {
     quick_exit(4);
 }
 "#;
-    assert_eq!(run_source("test.c", source).unwrap().exit_status, 7);
+    let result = run_source("test.c", source).unwrap();
+    assert_eq!(result.exit_status, 7);
+    assert_eq!(result.ended_by, Some(ProgramEnd::UnderscoreExit));
+}
+
+#[test]
+fn program_results_say_how_the_program_ended() {
+    let cases = [
+        ("int main(void) { return 3; }", ProgramEnd::MainReturned, 3),
+        ("int main(void) { exit(2); }", ProgramEnd::Exit, 2),
+        (
+            "int main(void) { quick_exit(4); }",
+            ProgramEnd::QuickExit,
+            4,
+        ),
+        (
+            "int main(void) { _Exit(5); }",
+            ProgramEnd::UnderscoreExit,
+            5,
+        ),
+        (
+            "int main(void) { abort(); }",
+            ProgramEnd::Abort,
+            libc::EXIT_FAILURE,
+        ),
+    ];
+    for (body, end, status) in cases {
+        let source = format!("#include <stdlib.h>\n{body}\n");
+        let result = run_source("test.c", &source).unwrap_or_else(|diag| {
+            panic!("{body}: {}", diag.render());
+        });
+        assert_eq!(result.ended_by, Some(end), "{body}");
+        assert_eq!(result.exit_status, status, "{body}");
+    }
 }
 
 #[test]

@@ -300,6 +300,15 @@ function decodeExecutionLimit(value, path) {
         tracePosition: nonnegativeIntegerAt(limit.tracePosition, `${path}.tracePosition`),
     };
 }
+function decodeProgramEnd(value, path) {
+    if (value === null)
+        return null;
+    const end = stringAt(value, path);
+    if (end !== "return" && end !== "exit" && end !== "quick_exit" && end !== "_Exit" && end !== "abort") {
+        return schemaError(path, "a known way for a program to end");
+    }
+    return end;
+}
 function decodeImplicitMain(root, expected) {
     const hasApplied = Object.prototype.hasOwnProperty.call(root, "implicitMainApplied");
     const hasNotice = Object.prototype.hasOwnProperty.call(root, "implicitMainNotice");
@@ -444,6 +453,7 @@ function normalizeProgramResult(raw, diagnosticSource, implicitMainExpected = fa
         "stderr",
         "stdinPosition",
         "exitStatus",
+        "endedBy",
         "state",
         "initialState",
         "trace",
@@ -471,6 +481,7 @@ function normalizeProgramResult(raw, diagnosticSource, implicitMainExpected = fa
         stdoutBytes: decodeBytes(root.stdoutBytes, "$.stdoutBytes"),
         stderrBytes: decodeBytes(root.stderrBytes, "$.stderrBytes"),
         exitStatus: numberAt(root.exitStatus, "$.exitStatus"),
+        endedBy: decodeProgramEnd(root.endedBy, "$.endedBy"),
         ...implicit,
     };
 }

@@ -739,42 +739,32 @@ impl<'a> Interpreter<'a> {
                         Some("7.20.4.2"),
                     )
                 })?;
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                self.call_function(
-                    &function,
-                    self.function_may_setjmp_symbol(&symbol),
-                    Vec::new(),
-                    span,
-                    objects,
-                )
-            }));
-            match result {
-                Ok(result) => {
-                    let _ = result?;
+            if let Err(diag) = self.call_function(
+                &function,
+                self.function_may_setjmp_symbol(&symbol),
+                Vec::new(),
+                span,
+                objects,
+            ) {
+                self.running_atexit = false;
+                if diag
+                    .termination_signal()
+                    .is_some_and(|signal| signal.end.runs_atexit_handlers())
+                {
+                    return Err(Diagnostic::ub(
+                        "calling exit from an atexit handler is undefined behavior",
+                        span,
+                        Some("7.20.4.3"),
+                    ));
                 }
-                Err(payload) => {
-                    if let Some(signal) = payload.downcast_ref::<TerminationSignal>().copied() {
-                        self.running_atexit = false;
-                        if signal.run_atexit {
-                            return Err(Diagnostic::ub(
-                                "calling exit from an atexit handler is undefined behavior",
-                                span,
-                                Some("7.20.4.3"),
-                            ));
-                        }
-                        resume_unwind(payload);
-                    }
-                    if payload.downcast_ref::<LongjmpSignal>().is_some() {
-                        self.running_atexit = false;
-                        return Err(Diagnostic::ub(
-                            "using longjmp from an atexit handler is undefined behavior",
-                            span,
-                            Some("7.20.4.2"),
-                        ));
-                    }
-                    self.running_atexit = false;
-                    resume_unwind(payload);
+                if diag.longjmp_signal().is_some() {
+                    return Err(Diagnostic::ub(
+                        "using longjmp from an atexit handler is undefined behavior",
+                        span,
+                        Some("7.20.4.2"),
+                    ));
                 }
+                return Err(diag);
             }
         }
         self.running_atexit = false;
@@ -799,42 +789,36 @@ impl<'a> Interpreter<'a> {
                         Some("7.22.4.1"),
                     )
                 })?;
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                self.call_function(
-                    &function,
-                    self.function_may_setjmp_symbol(&symbol),
-                    Vec::new(),
-                    span,
-                    objects,
-                )
-            }));
-            match result {
-                Ok(result) => {
-                    let _ = result?;
+            if let Err(diag) = self.call_function(
+                &function,
+                self.function_may_setjmp_symbol(&symbol),
+                Vec::new(),
+                span,
+                objects,
+            ) {
+                self.running_quick_exit = false;
+                if diag.longjmp_signal().is_some() {
+                    return Err(Diagnostic::ub(
+                        "using longjmp from an at_quick_exit handler is undefined behavior",
+                        span,
+                        Some("7.22.4.1"),
+                    ));
                 }
-                Err(payload) => {
-                    self.running_quick_exit = false;
-                    if payload.downcast_ref::<LongjmpSignal>().is_some() {
-                        return Err(Diagnostic::ub(
-                            "using longjmp from an at_quick_exit handler is undefined behavior",
-                            span,
-                            Some("7.22.4.1"),
-                        ));
-                    }
-                    resume_unwind(payload);
-                }
+                return Err(diag);
             }
         }
         self.running_quick_exit = false;
         Ok(())
     }
 
-    pub(super) fn eval_abort_call(&mut self, _span: Span) -> Result<TypedValue, Diagnostic> {
-        panic_any(TerminationSignal {
-            status: libc::EXIT_FAILURE,
-            run_atexit: false,
-            run_quick_exit: false,
-        });
+    pub(super) fn eval_abort_call(&mut self, span: Span) -> Result<TypedValue, Diagnostic> {
+        Err(Diagnostic::termination(
+            TerminationSignal {
+                status: libc::EXIT_FAILURE,
+                end: ProgramEnd::Abort,
+            },
+            span,
+        ))
     }
 
     pub(super) fn eval_atexit_call(
@@ -877,21 +861,22 @@ impl<'a> Interpreter<'a> {
         &mut self,
         evaluated: &[TypedValue],
         span: Span,
-        run_atexit: bool,
-        run_quick_exit: bool,
+        end: ProgramEnd,
     ) -> Result<TypedValue, Diagnostic> {
-        if run_quick_exit && self.running_quick_exit {
+        if end == ProgramEnd::QuickExit && self.running_quick_exit {
             return Err(Diagnostic::ub(
                 "quick_exit was called from an at_quick_exit handler",
                 span,
                 Some("7.22.4.7"),
             ));
         }
-        panic_any(TerminationSignal {
-            status: evaluated[0].to_int()? as c_int,
-            run_atexit,
-            run_quick_exit,
-        });
+        Err(Diagnostic::termination(
+            TerminationSignal {
+                status: evaluated[0].to_int()? as c_int,
+                end,
+            },
+            span,
+        ))
     }
 
     pub(super) fn array_region_snapshot(
