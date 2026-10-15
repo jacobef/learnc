@@ -24,6 +24,7 @@ import {
   setStepperLabel,
   syncDocumentTitleFromNav,
   withSidebarParam,
+  renderExitStatus,
 } from "./shared-core.js";
 import type { BoxState, Part, Parts } from "./shared-core.js";
 import {
@@ -1089,16 +1090,9 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     }
     stageEl.appendChild(wrap);
     renderVariableLights(wrap, false);
-    // Once the program has ended, by main returning or by a call like exit, give its exit status.
+    // Once the program has ended, say how: what main returned, or which call ended it.
     if (!implicitMain && endedBy && stage && stage.index === runtimeStages.length - 1) {
-      const exit = document.createElement("div");
-      exit.className = "program-exit-status";
-      exit.append("The program has ended, with exit status ");
-      const status = document.createElement("span");
-      status.className = "program-exit-status-value";
-      status.textContent = String(exitStatus);
-      exit.append(status, ".");
-      stageEl.appendChild(exit);
+      stageEl.appendChild(renderExitStatus(exitStatus));
     }
     if (workspace.showOtherNames) {
       refreshOtherNames();

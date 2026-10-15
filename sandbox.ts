@@ -14,6 +14,7 @@ import {
   ensureBaseLayout,
   findArrayObjectBoxesForResult,
   queryRole,
+  renderExitStatus,
   vbox,
 } from "./shared-core-dom.js";
 import type { BoxState, ProgramDiagnostic } from "./shared-core-utils.js";
@@ -941,15 +942,24 @@ function renderStage() {
   renderStdinPosition(outcome.stdinPosition);
   stderrWrap.classList.toggle("hidden", !outcome.stderr);
   sandbox.lastState = outcome.state;
-  stage.appendChild(
-    renderState(
-      "",
-      outcome.state,
-      outcome.globalKind,
-      outcome.blocked ?? null,
-      outcome.executionLimit ?? null,
-    ),
+  const statePanel = renderState(
+    "",
+    outcome.state,
+    outcome.globalKind,
+    outcome.blocked ?? null,
+    outcome.executionLimit ?? null,
   );
+  // Once a visible main has returned, say what it returned.
+  if (
+    result.kind === "ok" &&
+    outcome.globalKind === "ok" &&
+    !result.executionLimit &&
+    !sandbox.effectiveImplicitMain &&
+    sandbox.stepPosition >= sandbox.traceLength
+  ) {
+    statePanel.appendChild(renderExitStatus(result.exitStatus));
+  }
+  stage.appendChild(statePanel);
   refreshOtherNames();
   renderExpression(outcome);
   updateStepperControls(
