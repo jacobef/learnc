@@ -1,7 +1,7 @@
 import { doneLinesForTrace, strikeFragmentsForTrace } from "./shared-trace-lines.js";
 import { renderSyntaxDiagrams } from "./shared-syntax-tree.js";
 import { renderLights } from "./shared-machine-template.js";
-import { applyOtherNames, appendStateObjects, bindBtnRefPulse, clearNode, cloneBoxes, isMobileViewport, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, makeAnswerBox, queryRole, readBoxState, renderCodePane, reshapeDynamicBox, restoreWorkspace, serializeWorkspace, setPartsContent, setStepperLabel, syncDocumentTitleFromNav, withSidebarParam, } from "./shared-core.js";
+import { applyOtherNames, appendStateObjects, bindBtnRefPulse, clearNode, cloneBoxes, isMobileViewport, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, makeAnswerBox, queryRole, readBoxState, renderCodePane, reshapeDynamicBox, restoreWorkspace, serializeWorkspace, setPartsContent, setStepperLabel, syncDocumentTitleFromNav, withSidebarParam, renderExitStatus, } from "./shared-core.js";
 import { createButtonTokenReplacer, createHintPresenter, createLevelProgressController, nextLessonLabel, resetLevelAfterConfirmation, } from "./shared-lesson-runtime.js";
 import { runCFiles, runCProgram } from "./shared-c-interpreter.js";
 import { basicHintForBoxes, stateMatches, stateWithArrayRoots, } from "./shared-program-state.js";
@@ -810,14 +810,7 @@ function createProgramTemplate(config) {
         renderVariableLights(wrap, false);
         // Once main has returned, the program is over, and what it returned is its exit status.
         if (!implicitMain && stage && stage.index === runtimeStages.length - 1) {
-            const exit = document.createElement("div");
-            exit.className = "program-exit-status";
-            exit.append("The program has ended, with exit status ");
-            const status = document.createElement("span");
-            status.className = "program-exit-status-value";
-            status.textContent = String(exitStatus);
-            exit.append(status, ".");
-            stageEl.appendChild(exit);
+            stageEl.appendChild(renderExitStatus(exitStatus));
         }
         if (workspace.showOtherNames) {
             refreshOtherNames();

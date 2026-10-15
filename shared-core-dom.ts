@@ -1404,6 +1404,19 @@ function flashStatus(el: Element | null) {
   node.classList.add("status-flash");
 }
 
+// Shown once main has returned: the value it returned is the program's exit status.
+function renderExitStatus(status: number): HTMLElement {
+  const exit = document.createElement("div");
+  exit.className = "program-exit-status";
+  const main = document.createElement("code");
+  main.textContent = "main";
+  const value = document.createElement("span");
+  value.className = "program-exit-status-value";
+  value.textContent = String(status);
+  exit.append("The program has ended: ", main, " returned ", value, ", which is the program's exit status.");
+  return exit;
+}
+
 export {
   clearNode,
   buildNav,
@@ -1434,4 +1447,5 @@ export {
   applyOtherNames,
   appendStateObjects,
   findArrayObjectBoxesForResult,
+  renderExitStatus,
 };

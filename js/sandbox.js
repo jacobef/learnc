@@ -7,7 +7,7 @@ import { bindPanelSplit } from "./shared-panel-split.js";
 import { SandboxExecution, sandboxStepLimit, sandboxTimeline, sandboxDiagnosticAt, DEFAULT_SANDBOX_STEP_LIMIT } from "./shared-sandbox-execution.js";
 import { executionLimitExplanation, renderCodeDiagnostic } from "./shared-code-runtime-issues.js";
 import { readSandboxProgress, writeSandboxProgress } from "./shared-progress.js";
-import { applyOtherNames, appendStateObjects, clearNode, ensureBaseLayout, findArrayObjectBoxesForResult, queryRole, vbox, } from "./shared-core-dom.js";
+import { applyOtherNames, appendStateObjects, clearNode, ensureBaseLayout, findArrayObjectBoxesForResult, queryRole, renderExitStatus, vbox, } from "./shared-core-dom.js";
 import { confettiRain } from "./confetti.js";
 import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
 import { diagnosticDecorations, diagnosticMessageText, } from "./shared-diagnostics.js";
@@ -764,7 +764,16 @@ function renderStage() {
     renderStdinPosition(outcome.stdinPosition);
     stderrWrap.classList.toggle("hidden", !outcome.stderr);
     sandbox.lastState = outcome.state;
-    stage.appendChild(renderState("", outcome.state, outcome.globalKind, outcome.blocked ?? null, outcome.executionLimit ?? null));
+    const statePanel = renderState("", outcome.state, outcome.globalKind, outcome.blocked ?? null, outcome.executionLimit ?? null);
+    // Once a visible main has returned, say what it returned.
+    if (result.kind === "ok" &&
+        outcome.globalKind === "ok" &&
+        !result.executionLimit &&
+        !sandbox.effectiveImplicitMain &&
+        sandbox.stepPosition >= sandbox.traceLength) {
+        statePanel.appendChild(renderExitStatus(result.exitStatus));
+    }
+    stage.appendChild(statePanel);
     refreshOtherNames();
     renderExpression(outcome);
     updateStepperControls(sandbox.stepPosition, sandbox.trace, outcome.blocked ?? null, sandbox.executionLimit, !!sandbox.diagnostic);
