@@ -1,0 +1,44 @@
+# Publishes main at the site root, and the work-in-progress branch under /wip.
+name: Deploy site
+
+on:
+  push:
+    branches: [main]
+  # The work-in-progress branch triggers this after each push to it.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/new-learning-levels-e238a3
+          path: wip
+      - name: Assemble the site
+        run: |
+          mkdir site
+          rsync -a --exclude .git --exclude .github main/ site/
+          rsync -a --exclude .git --exclude .github --exclude CNAME wip/ site/wip/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
