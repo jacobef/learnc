@@ -140,9 +140,11 @@ for (const item of lessons) {
 }
 
 test("Quick reference entries name lessons in the navigation", () => {
-  const hrefs = new Set(DEFAULT_NAV_ITEMS.map(item => item.href));
+  // Like the reference itself, this ignores lesson numbers.
+  const slug = (href: string) => href.replace(/^\d+-/, "");
+  const slugs = new Set(DEFAULT_NAV_ITEMS.map(item => slug(item.href)));
   for (const section of REFERENCE_SECTIONS) {
     const entries = [...(section.notes ?? []), ...section.groups.flatMap(group => group.entries)];
-    for (const entry of entries) assert.ok(hrefs.has(entry.lesson), `${section.title}: ${entry.lesson}`);
+    for (const entry of entries) assert.ok(slugs.has(slug(entry.lesson)), `${section.title}: ${entry.lesson}`);
   }
 });
