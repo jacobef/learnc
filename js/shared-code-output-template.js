@@ -3,13 +3,21 @@ import { bindBtnRefPulse, clearNode, createStepper, flashStatus, setPartsContent
 import { bindCodeEditorTabKey, ensureCodeSurfaceElements, updateCodeSurface, } from "./shared-code-editor-surface.js";
 import { ensureCodeLessonLayout } from "./shared-code-lesson-layout.js";
 import { diagnosticDecorations, diagnosticMessageText, offsetDiagnosticLines, } from "./shared-diagnostics.js";
-import { runCProgram } from "./shared-c-interpreter.js";
-import { normalizeChallengeInput } from "./shared-code-challenge-input.js";
+import { challengeFileName, challengePrefix, challengeSuffix, normalizeChallengeInput, runChallengeProgram, } from "./shared-code-challenge-input.js";
 import { codeRuntimeIssue, renderCodeDiagnostic, diagnosticRuntimeContextText, offsetCodeRuntimeIssue, renderCodeRuntimeIssue, } from "./shared-code-runtime-issues.js";
 import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
+import { sameCType } from "./shared-core-utils.js";
 import { createButtonTokenReplacer, createHintPresenter, createLevelProgressController, invalidTemplateConfig, nextLessonLabel, resetLevelAfterConfirmation, } from "./shared-lesson-runtime.js";
+// The boxes that make up a named object: the object itself and, for an array, its elements.
+function objectBoxes(state, name) {
+    return state.filter((box) => box.name === name || box.arrayRoot === name);
+}
+function lineCount(text) {
+    return text === "" ? 0 : text.replace(/\n$/, "").split("\n").length;
+}
 function createCodeOutputChallengeTemplate(config) {
-    const { inputs, outputs, testInputs, startInput, solve, instructions = "", startCode = "", textareaMinLines = 5, allowNewLines = true, hints = null, next = null, nextLabel, } = config;
+    const { inputs = [], outputs = [], checkStdout = false, testInputs = [[]], solve, instructions = "", startCode = "", textareaMinLines = 5, allowNewLines = true, hints = null, next = null, nextLabel, } = config;
+    const startInput = config.startInput ?? testInputs[0] ?? [];
     const endLabel = nextLessonLabel({
         next,
         fallback: "Next Program",
@@ -22,119 +30,96 @@ function createCodeOutputChallengeTemplate(config) {
         }
         return trimmed;
     };
-    if (!Array.isArray(inputs) || inputs.length === 0) {
-        invalidTemplateConfig("inputs must be a non-empty array.");
+    if (!outputs.length && !checkStdout) {
+        invalidTemplateConfig("A challenge must check outputs, stdout, or both.");
     }
-    if (!Array.isArray(outputs) || outputs.length === 0) {
-        invalidTemplateConfig("outputs must be a non-empty array.");
+    if (config.files?.length && (config.implicitMain ?? !config.main)) {
+        invalidTemplateConfig("A challenge with several files can't use implicit main.");
     }
     const inputSpecs = inputs.map((spec, index) => ({
         name: ensureIdentifier(spec?.name || "", `Input name ${index + 1}`),
         type: String(spec?.type || "").trim(),
+        allocated: !!spec?.allocated,
     }));
     const outputSpecs = outputs.map((spec, index) => ({
         name: ensureIdentifier(spec?.name || "", `Output name ${index + 1}`),
         type: String(spec?.type || "").trim(),
     }));
-    if (!Array.isArray(testInputs)) {
-        invalidTemplateConfig("testInputs must be an array.");
-    }
-    if (testInputs.length === 0) {
-        invalidTemplateConfig("testInputs must contain at least one value.");
-    }
-    if (testInputs.some((row) => !Array.isArray(row) ||
-        row.length !== inputSpecs.length ||
-        row.some((value) => typeof value !== "string"))) {
-        invalidTemplateConfig(`Each testInputs entry must be a string array of length ${inputSpecs.length}.`);
-    }
-    if (!Array.isArray(startInput)) {
-        invalidTemplateConfig("startInput is required.");
+    const shape = {
+        inputs: inputSpecs,
+        prelude: config.prelude,
+        main: config.main,
+        implicitMain: config.implicitMain,
+        files: config.files,
+        fileName: config.fileName,
+    };
+    const fileName = challengeFileName(shape);
+    if (!testInputs.length ||
+        testInputs.some((row) => !Array.isArray(row) ||
+            row.length !== inputSpecs.length ||
+            row.some((value) => typeof value !== "string"))) {
+        invalidTemplateConfig(`testInputs must be a non-empty list of string arrays of length ${inputSpecs.length}.`);
     }
     if (startInput.length !== inputSpecs.length ||
         startInput.some((value) => typeof value !== "string")) {
         invalidTemplateConfig(`startInput must be a string array of length ${inputSpecs.length}.`);
     }
-    if (typeof solve !== "string") {
-        invalidTemplateConfig("solve must be a C code string.");
-    }
-    if (!Number.isFinite(textareaMinLines)) {
-        invalidTemplateConfig("textareaMinLines must be a number.");
-    }
     const solveCode = String(solve || "").replace(/\r\n/g, "\n");
     if (!solveCode.trim()) {
         invalidTemplateConfig("solve must be a non-empty C code string.");
     }
-    const { instructionsEl, lockedLineNumbers, lockedInputLine, editor, lineNumbers, stage, status, diagnosticEl, hintPanel, hintBtn, checkBtn, levelResetBtn, rerollBtn, showFailBtn, prevBtn, nextBtn, codeRoot, } = ensureCodeLessonLayout({ textareaMinLines, lockedInput: true });
+    const { instructionsEl, lockedLineNumbers, lockedInputLine, lockedSuffixNumbers, lockedSuffixLines, editor, lineNumbers, stage, status, diagnosticEl, hintPanel, hintBtn, checkBtn, levelResetBtn, rerollBtn, showFailBtn, prevBtn, nextBtn, codeRoot, } = ensureCodeLessonLayout({
+        textareaMinLines,
+        lockedInput: true,
+        lockedSuffix: !!shape.main,
+        readOnlyFiles: shape.files,
+        fileName,
+    });
     const { highlightEl, measureEl } = ensureCodeSurfaceElements(editor);
     bindBtnRefPulse(codeRoot || document);
-    function normalizeProgramBody(text) {
-        const normalized = String(text || "").replace(/\r\n/g, "\n");
-        return normalized === "" || normalized.endsWith("\n")
-            ? normalized
-            : `${normalized}\n`;
-    }
-    function normalizeInputLiteral(value, type, label) {
+    function normalizeInputLiteral(value, spec, label) {
         try {
-            return normalizeChallengeInput(value, type);
+            return normalizeChallengeInput(value, spec);
         }
         catch (error) {
             return invalidTemplateConfig(`${label} ${error instanceof Error ? error.message : String(error)}`);
         }
     }
-    const preludeLineCount = inputSpecs.length;
     const targetOutputNameSet = new Set(outputSpecs.map((spec) => spec.name));
-    const outputNamesText = outputSpecs.map((spec) => spec.name).join(", ");
-    function lockedInputLinesForCase(testCase) {
-        return inputSpecs.map((inputSpec, index) => `${inputSpec.type} ${inputSpec.name} = ${testCase.inputLiterals[index]};`);
+    function prefixLineCount(testCase) {
+        return lineCount(challengePrefix(shape, testCase.inputLiterals));
     }
-    function lockedInputTextForCase(testCase) {
-        return lockedInputLinesForCase(testCase).join("\n");
-    }
-    function fullProgramTextForBody(testCase, body) {
-        return `${lockedInputTextForCase(testCase)}\n${normalizeProgramBody(body)}`;
-    }
-    function expectedLiteralsFromSolve(testCase, label) {
-        const text = fullProgramTextForBody(testCase, solveCode);
-        const analyzed = runCProgram(text);
-        const solvedState = analyzed.kind === "ok" && !analyzed.executionLimit
-            ? analyzed.state
-            : null;
-        if (!solvedState) {
-            if (analyzed.kind === "compile") {
-                invalidTemplateConfig(`solve does not compile for ${label}.`);
-            }
-            invalidTemplateConfig(`solve has undefined behavior for ${label}.`);
-            return [];
+    function expectedFromSolve(inputLiterals, label) {
+        const analyzed = runChallengeProgram(shape, inputLiterals, solveCode);
+        if (analyzed.kind !== "ok" || analyzed.executionLimit) {
+            return invalidTemplateConfig(analyzed.kind === "compile"
+                ? `solve does not compile for ${label}: ${diagnosticMessageText(analyzed.diagnostic)}`
+                : `solve does not finish cleanly for ${label}.`);
         }
-        const expectedLiterals = [];
-        for (const outputSpec of outputSpecs) {
-            const outputBox = solvedState.find((box) => box.name === outputSpec.name) || null;
-            if (!outputBox) {
+        const expectedOutputs = outputSpecs.map((outputSpec) => {
+            const boxes = objectBoxes(analyzed.state, outputSpec.name);
+            const root = boxes.find((box) => box.name === outputSpec.name);
+            if (!root)
                 invalidTemplateConfig(`solve must create ${outputSpec.name} for ${label}.`);
-                return [];
-            }
-            if (String(outputBox.type || "").trim() !== outputSpec.type) {
+            if (!sameCType(root.type, outputSpec.type)) {
                 invalidTemplateConfig(`solve must produce ${outputSpec.name} with type ${outputSpec.type} for ${label}.`);
-                return [];
             }
-            const literal = String(outputBox.value ?? "").trim();
-            if (!literal) {
-                invalidTemplateConfig(`solve leaves ${outputSpec.name} without a value for ${label}.`);
-                return [];
+            // An array's own box has no value; everything else must have one.
+            const valued = boxes.filter((box) => box.arrayRoot || !box.arrayShape?.length);
+            if (valued.some((box) => box.value === "")) {
+                invalidTemplateConfig(`solve leaves part of ${outputSpec.name} without a value for ${label}.`);
             }
-            expectedLiterals.push(literal);
-        }
-        return expectedLiterals;
+            return boxes;
+        });
+        return { expectedOutputs, expectedStdout: analyzed.stdout };
     }
     function createChallengeCaseForInputRow(rawInputRow, label) {
-        const normalizedInputs = inputSpecs.map((inputSpec, index) => normalizeInputLiteral(rawInputRow[index], inputSpec.type, `${label} input ${inputSpec.name}`));
-        const partialCase = {
-            inputLiterals: normalizedInputs.map((item) => item.literal),
-        };
+        const normalizedInputs = inputSpecs.map((inputSpec, index) => normalizeInputLiteral(rawInputRow[index], inputSpec, `${label} input ${inputSpec.name}`));
+        const inputLiterals = normalizedInputs.map((item) => item.literal);
         return {
             inputValues: normalizedInputs.map((item) => item.runtime),
-            inputLiterals: partialCase.inputLiterals.slice(),
-            expectedLiterals: expectedLiteralsFromSolve(partialCase, label),
+            inputLiterals,
+            ...expectedFromSolve(inputLiterals, label),
         };
     }
     const testCases = testInputs.map((row, index) => createChallengeCaseForInputRow(row, `testInputs[${index}]`));
@@ -142,7 +127,8 @@ function createCodeOutputChallengeTemplate(config) {
         return {
             inputValues: testCase.inputValues.slice(),
             inputLiterals: testCase.inputLiterals.slice(),
-            expectedLiterals: testCase.expectedLiterals.slice(),
+            expectedOutputs: testCase.expectedOutputs.map((boxes) => boxes.slice()),
+            expectedStdout: testCase.expectedStdout,
         };
     }
     function caseInputKey(testCase) {
@@ -153,9 +139,7 @@ function createCodeOutputChallengeTemplate(config) {
         const candidates = testCases.filter((testCase) => caseInputKey(testCase) !== currentKey);
         if (!candidates.length)
             return copyCase(currentCase);
-        const index = Math.floor(Math.random() * candidates.length);
-        const item = candidates[index];
-        return copyCase(item);
+        return copyCase(candidates[Math.floor(Math.random() * candidates.length)]);
     }
     function restoreCase(inputLiterals) {
         if (!Array.isArray(inputLiterals) || inputLiterals.length !== inputSpecs.length) {
@@ -201,15 +185,16 @@ function createCodeOutputChallengeTemplate(config) {
         }
         return Math.max(0, pos - removed);
     }
-    function getEditorText() {
-        return fullProgramTextForCase(state.visibleCase);
-    }
     function getUserText() {
         const raw = editor ? editor.value : state.text || "";
         return normalizeUserCodeText(raw);
     }
-    function fullProgramTextForCase(testCase) {
-        return fullProgramTextForBody(testCase, getUserText());
+    function getEditorText() {
+        const { inputLiterals } = state.visibleCase;
+        return challengePrefix(shape, inputLiterals) + getUserText() + challengeSuffix(shape, inputLiterals);
+    }
+    function runCase(testCase, body = getUserText()) {
+        return runChallengeProgram(shape, testCase.inputLiterals, body);
     }
     if (editor) {
         const lines = Math.max(1, Number(textareaMinLines));
@@ -231,206 +216,173 @@ function createCodeOutputChallengeTemplate(config) {
         runtimeIssue: null,
     };
     let visibleCaseResult = null;
+    // Feedback in the learner's line numbering. Problems in locked code or other
+    // files keep their location but don't decorate the editor.
     function getVisibleProgramFeedback(result) {
+        const offset = -prefixLineCount(state.visibleCase);
         if (result.kind !== "ok") {
             const diagnostic = result.diagnostic;
+            const inLearnerFile = !diagnostic.file || diagnostic.file === fileName;
             return {
-                diagnostic: diagnostic.range.startLine < preludeLineCount
-                    ? null
-                    : offsetDiagnosticLines(diagnostic, -preludeLineCount),
+                diagnostic: inLearnerFile ? offsetDiagnosticLines(diagnostic, offset) : diagnostic,
                 runtimeIssue: null,
             };
         }
         const issue = codeRuntimeIssue(result);
         return {
             diagnostic: null,
-            runtimeIssue: issue
-                ? offsetCodeRuntimeIssue(issue, -preludeLineCount)
-                : null,
+            runtimeIssue: issue ? offsetCodeRuntimeIssue(issue, offset) : null,
         };
+    }
+    function diagnosticInEditor(diagnostic) {
+        if (!diagnostic || (diagnostic.file && diagnostic.file !== fileName))
+            return null;
+        const line = diagnostic.range.startLine;
+        return line >= 0 && line < getUserRawLines().length ? diagnostic : null;
     }
     function updateLineGutters(diagnostic, runtimeIssue) {
         const lines = getUserRawLines();
+        const editorDiagnostic = diagnosticInEditor(diagnostic);
         const lineNumberClasses = new Map();
-        const problemLine = diagnostic?.range.startLine ?? runtimeIssue?.range.startLine;
-        if (problemLine !== undefined) {
+        const problemLine = editorDiagnostic?.range.startLine ?? runtimeIssue?.range.startLine;
+        if (problemLine !== undefined && problemLine >= 0 && problemLine < lines.length) {
             lineNumberClasses.set(problemLine, ["has-error"]);
         }
+        const prefixLines = prefixLineCount(state.visibleCase);
         updateCodeSurface({
             editor,
             lineNumbers,
             highlightEl,
             measureEl,
             lines,
-            lineNumberStart: preludeLineCount + 1,
-            decorations: diagnosticDecorations(diagnostic, lines),
+            lineNumberStart: prefixLines + 1,
+            decorations: diagnosticDecorations(editorDiagnostic, lines),
             lineNumberClasses,
         });
         syncEditorLinkedScroll();
         if (diagnostic) {
-            renderCodeDiagnostic(diagnosticEl, editor, diagnostic, { displayedLineOffset: preludeLineCount });
+            const inLearnerFile = !diagnostic.file || diagnostic.file === fileName;
+            renderCodeDiagnostic(diagnosticEl, editor, diagnostic, {
+                displayedLineOffset: inLearnerFile ? prefixLines : 0,
+                activeFile: shape.files?.length ? fileName : undefined,
+            });
         }
         else {
-            renderCodeRuntimeIssue(diagnosticEl, editor, runtimeIssue, preludeLineCount);
+            renderCodeRuntimeIssue(diagnosticEl, editor, runtimeIssue, prefixLines);
         }
     }
-    function validateOutputBoxes(finalState) {
-        const boxes = [];
-        for (const outputSpec of outputSpecs) {
-            const outputBox = finalState.find((box) => box.name === outputSpec.name) || null;
-            if (!outputBox) {
-                return { kind: "missing-output", outputBox: null, outputSpec };
-            }
-            if (String(outputBox.type || "").trim() !== outputSpec.type) {
-                return { kind: "wrong-output-type", outputBox, outputSpec };
-            }
-            boxes.push(outputBox);
-        }
-        return { kind: "ok", boxes };
-    }
-    function evaluateProgramBehaviorForCase(body, testCase) {
-        const text = fullProgramTextForBody(testCase, body);
-        const analyzed = runCProgram(text);
-        if (analyzed.kind !== "ok") {
+    function evaluateProgramBehavior(analyzed) {
+        if (analyzed.kind !== "ok")
             return { kind: analyzed.kind };
-        }
         const runtimeIssue = codeRuntimeIssue(analyzed);
         if (runtimeIssue) {
-            return {
-                kind: runtimeIssue.kind === "execution-limit"
-                    ? "step-limit"
-                    : "blocked-input",
-            };
+            return { kind: runtimeIssue.kind === "execution-limit" ? "step-limit" : "blocked-input" };
         }
-        const checked = validateOutputBoxes(analyzed.state);
-        if (checked.kind !== "ok") {
-            return { kind: checked.kind };
+        const outputBoxes = [];
+        for (const outputSpec of outputSpecs) {
+            const boxes = objectBoxes(analyzed.state, outputSpec.name);
+            const root = boxes.find((box) => box.name === outputSpec.name);
+            if (!root)
+                return { kind: "missing-output" };
+            if (!sameCType(root.type, outputSpec.type))
+                return { kind: "wrong-output-type" };
+            outputBoxes.push(boxes);
         }
-        return { kind: "ok", outputBoxes: checked.boxes };
+        return { kind: "ok", outputBoxes, stdout: analyzed.stdout };
+    }
+    // Whether actual has every expected box, with matching values.
+    function outputMatches(actual, expected) {
+        return expected.every((expectedBox) => {
+            const actualBox = actual.find((box) => box.name === expectedBox.name);
+            return !!actualBox && boxValueMatchesSpec(actualBox, expectedBox).ok;
+        });
     }
     function behavesLikeProgramOnTestInputs(program) {
-        if (!testCases.length)
+        const candidate = program.replace(/\r\n/g, "\n");
+        if (!candidate.trim())
             return false;
-        const candidateBody = normalizeProgramBody(program);
-        if (!candidateBody.trim())
-            return false;
-        const userBody = normalizeProgramBody(getUserText());
-        for (const testCase of testCases) {
-            const userBehavior = evaluateProgramBehaviorForCase(userBody, testCase);
-            const candidateBehavior = evaluateProgramBehaviorForCase(candidateBody, testCase);
-            if (userBehavior.kind !== candidateBehavior.kind)
+        const userBody = getUserText();
+        return testCases.every((testCase) => {
+            const user = evaluateProgramBehavior(runCase(testCase, userBody));
+            const other = evaluateProgramBehavior(runCase(testCase, candidate));
+            if (user.kind !== other.kind)
                 return false;
-            if (userBehavior.kind !== "ok" || candidateBehavior.kind !== "ok") {
-                continue;
-            }
-            for (let index = 0; index < outputSpecs.length; index += 1) {
-                if (!boxValueMatchesSpec(userBehavior.outputBoxes[index], candidateBehavior.outputBoxes[index]).ok) {
-                    return false;
-                }
-            }
-        }
-        return true;
+            if (user.kind !== "ok" || other.kind !== "ok")
+                return true;
+            return ((!checkStdout || user.stdout === other.stdout) &&
+                user.outputBoxes.every((boxes, index) => outputMatches(boxes, other.outputBoxes[index])));
+        });
     }
-    function evaluateCase(testCase, analyzed = runCProgram(fullProgramTextForCase(testCase))) {
-        const expectedBoxes = expectedBoxesForCase(testCase);
-        const fallbackExpected = expectedBoxes[0] || null;
-        const fallbackOutput = outputSpecs[0] || null;
+    function evaluateCase(testCase, analyzed = runCase(testCase)) {
+        const fallbackExpected = testCase.expectedOutputs[0]?.[0] ?? null;
+        const failure = (kind, resultState, extra = {}) => ({
+            ok: false,
+            kind,
+            state: resultState,
+            stdout: analyzed.kind === "ok" ? analyzed.stdout : "",
+            outputBox: null,
+            expected: fallbackExpected,
+            failingOutput: outputSpecs[0] ?? null,
+            ...extra,
+        });
         if (analyzed.kind !== "ok") {
-            return {
-                ok: false,
-                kind: analyzed.kind,
-                state: analyzed.diagnostic.runtimeContext?.state ?? null,
-                outputBox: null,
-                expected: fallbackExpected,
-                failingOutput: fallbackOutput,
-            };
+            return failure(analyzed.kind, analyzed.diagnostic.runtimeContext?.state ?? null);
         }
         const runtimeIssue = codeRuntimeIssue(analyzed);
         if (runtimeIssue) {
-            return {
-                ok: false,
-                kind: runtimeIssue.kind === "execution-limit"
-                    ? "step-limit"
-                    : "blocked-input",
-                state: runtimeIssue.kind === "blocked-input"
-                    ? analyzed.blocked?.state ?? analyzed.state
-                    : analyzed.state,
-                outputBox: null,
-                expected: fallbackExpected,
-                failingOutput: fallbackOutput,
-            };
+            return runtimeIssue.kind === "execution-limit"
+                ? failure("step-limit", analyzed.state)
+                : failure("blocked-input", analyzed.blocked?.state ?? analyzed.state);
         }
         const finalState = analyzed.state;
         for (let index = 0; index < outputSpecs.length; index += 1) {
             const outputSpec = outputSpecs[index];
-            const expected = expectedBoxes[index];
-            const actual = finalState.find((box) => box.name === outputSpec.name) || null;
-            if (!actual) {
-                return {
-                    ok: false,
-                    kind: "missing-output",
-                    state: finalState,
-                    outputBox: null,
-                    expected,
-                    failingOutput: outputSpec,
-                };
-            }
-            if (String(actual.type || "").trim() !== outputSpec.type) {
-                return {
-                    ok: false,
-                    kind: "wrong-output-type",
-                    state: finalState,
-                    outputBox: actual,
-                    expected,
-                    failingOutput: outputSpec,
-                };
-            }
-            if (!boxValueMatchesSpec(actual, expected).ok) {
-                return {
-                    ok: false,
-                    kind: "wrong-output-value",
-                    state: finalState,
-                    outputBox: actual,
-                    expected,
-                    failingOutput: outputSpec,
-                };
-            }
+            const expected = testCase.expectedOutputs[index];
+            const boxes = objectBoxes(finalState, outputSpec.name);
+            const actual = boxes.find((box) => box.name === outputSpec.name) ?? null;
+            const details = { outputBox: actual, expected: expected[0] ?? null, failingOutput: outputSpec };
+            if (!actual)
+                return failure("missing-output", finalState, details);
+            if (!sameCType(actual.type, outputSpec.type))
+                return failure("wrong-output-type", finalState, details);
+            if (!outputMatches(boxes, expected))
+                return failure("wrong-output-value", finalState, details);
+        }
+        if (checkStdout && analyzed.stdout !== testCase.expectedStdout) {
+            return failure("wrong-stdout", finalState, { failingOutput: null });
         }
         return {
             ok: true,
             kind: "ok",
             state: finalState,
-            outputBox: finalState.find((box) => box.name === (outputSpecs[0]?.name || "")) || null,
+            stdout: analyzed.stdout,
+            outputBox: finalState.find((box) => box.name === outputSpecs[0]?.name) ?? null,
             expected: fallbackExpected,
             failingOutput: null,
         };
     }
     function runAllCases() {
-        const allCases = state.testCases;
-        const items = allCases.map((testCase, index) => ({
+        const items = state.testCases.map((testCase, index) => ({
             index,
             testCase,
             result: evaluateCase(testCase),
         }));
         const firstFailure = items.find((item) => !item.result.ok) || null;
-        return {
-            pass: !firstFailure,
-            items,
-            firstFailure,
-        };
-    }
-    function expectedBoxesForCase(testCase) {
-        return outputSpecs.map((outputSpec, index) => ({
-            name: outputSpec.name,
-            type: outputSpec.type,
-            value: testCase.expectedLiterals[index] || "",
-        }));
+        return { pass: !firstFailure, items, firstFailure };
     }
     function expectedStateBoxesForCase(testCase) {
-        return expectedBoxesForCase(testCase).map((box) => ({
+        return testCase.expectedOutputs.flat().map((box) => ({
             ...box,
             address: "<i>(any)</i>",
+            aliases: [],
         }));
+    }
+    // How an expected output reads in a hint: a value, or an array's values.
+    function expectedValueText(boxes) {
+        const elements = boxes.filter((box) => box.arrayRoot);
+        if (!elements.length)
+            return `$v{${boxes[0]?.value ?? ""}}`;
+        return `$v{\\{ ${elements.map((box) => box.value).join(", ")} \\}}`;
     }
     function progressSnapshot() {
         return {
@@ -456,66 +408,100 @@ function createCodeOutputChallengeTemplate(config) {
     function persistProgress() {
         progress.save(progressSnapshot());
     }
+    function renderStdoutPanel(title, text, emptyMessage) {
+        const panel = document.createElement("div");
+        panel.className = "state-panel";
+        const heading = document.createElement("h3");
+        heading.className = "panel-title state-heading";
+        heading.textContent = title;
+        panel.appendChild(heading);
+        const pre = document.createElement("pre");
+        pre.className = "program-output-text";
+        if (text === null) {
+            pre.classList.add("muted");
+            pre.textContent = emptyMessage;
+        }
+        else {
+            pre.textContent = text;
+            const cursor = document.createElement("span");
+            cursor.className = "program-output-cursor";
+            cursor.setAttribute("aria-hidden", "true");
+            pre.appendChild(cursor);
+        }
+        panel.appendChild(pre);
+        return panel;
+    }
     function renderStage(currentResult) {
         if (!stage)
             return;
         clearNode(stage);
-        const group = document.createElement("div");
-        group.className = "state-group two-col";
-        const shownKind = currentResult.kind === "compile" || currentResult.kind === "ub"
-            ? currentResult.kind
-            : "ok";
-        const fullShownState = currentResult.state || [];
-        const filteredShownState = fullShownState.filter((box) => targetOutputNameSet.has(String(box.name || "")));
-        const hasExtraShownVars = shownKind === "ok" &&
-            fullShownState.some((box) => !targetOutputNameSet.has(String(box.name || "")));
-        const shownBoxes = shownKind !== "ok" || state.showFullShownOutput
-            ? currentResult.state
-            : filteredShownState;
-        const shownEmptyMessage = currentResult.kind === "compile"
+        const ran = currentResult.kind !== "compile" &&
+            currentResult.kind !== "ub" &&
+            currentResult.kind !== "step-limit" &&
+            currentResult.kind !== "blocked-input";
+        const notRunMessage = currentResult.kind === "compile"
             ? "(fix the error above to run the program)"
             : currentResult.kind === "step-limit"
-                ? "(no output was produced before the program was stopped)"
+                ? "(the program was stopped before it finished)"
                 : currentResult.kind === "blocked-input"
-                    ? "(no output was produced before the program began waiting)"
-                    : shownKind === "ok" && !state.showFullShownOutput
-                        ? outputSpecs.length === 1
-                            ? `(missing variable ${outputSpecs[0].name})`
-                            : "(missing one or more output variables)"
-                        : "(no variables)";
-        const shownTitle = currentResult.kind === "ub" && currentResult.state
-            ? "Last recorded state before undefined behavior"
-            : currentResult.kind === "step-limit"
-                ? "State before the repeating section"
-                : currentResult.kind === "blocked-input"
-                    ? "Program state when it began waiting"
-                    : currentResult.kind === "compile"
-                        ? "Program did not run"
-                        : "Your code's output";
-        const shownControls = (() => {
-            if (!hasExtraShownVars)
-                return null;
-            const toggle = document.createElement("button");
-            toggle.type = "button";
-            toggle.className = "state-panel-toggle";
-            toggle.textContent = state.showFullShownOutput
-                ? outputSpecs.length === 1
-                    ? "Show only output variable"
-                    : "Show only output variables"
-                : "Show full state";
-            toggle.addEventListener("click", () => {
-                state.showFullShownOutput = !state.showFullShownOutput;
-                renderStage(currentResult);
-                persistProgress();
-            });
-            return toggle;
-        })();
-        group.appendChild(renderStatePanel(shownTitle, shownBoxes, {
-            emptyMessage: shownEmptyMessage,
-            controls: shownControls,
-        }));
-        group.appendChild(renderStatePanel("Expected output", expectedStateBoxesForCase(state.visibleCase)));
-        stage.appendChild(group);
+                    ? "(the program began waiting for input)"
+                    : "(the program stopped because of undefined behavior)";
+        if (outputSpecs.length) {
+            const group = document.createElement("div");
+            group.className = "state-group two-col";
+            const fullShownState = currentResult.state || [];
+            const isTarget = (box) => targetOutputNameSet.has(box.name) || targetOutputNameSet.has(box.arrayRoot ?? "");
+            const hasExtraShownVars = ran && fullShownState.some((box) => !isTarget(box) && !box.anonymous);
+            const shownBoxes = !ran || state.showFullShownOutput
+                ? fullShownState
+                : fullShownState.filter(isTarget);
+            const shownTitle = currentResult.kind === "ub" && currentResult.state
+                ? "Last recorded state before undefined behavior"
+                : currentResult.kind === "step-limit"
+                    ? "State before the repeating section"
+                    : currentResult.kind === "blocked-input"
+                        ? "Program state when it began waiting"
+                        : currentResult.kind === "compile"
+                            ? "Program did not run"
+                            : "Your code's result";
+            const shownEmptyMessage = !ran
+                ? notRunMessage
+                : state.showFullShownOutput
+                    ? "(no variables)"
+                    : outputSpecs.length === 1
+                        ? `(missing variable ${outputSpecs[0].name})`
+                        : "(missing one or more result variables)";
+            const shownControls = (() => {
+                if (!hasExtraShownVars)
+                    return null;
+                const toggle = document.createElement("button");
+                toggle.type = "button";
+                toggle.className = "state-panel-toggle";
+                toggle.textContent = state.showFullShownOutput
+                    ? outputSpecs.length === 1
+                        ? "Show only result variable"
+                        : "Show only result variables"
+                    : "Show full state";
+                toggle.addEventListener("click", () => {
+                    state.showFullShownOutput = !state.showFullShownOutput;
+                    renderStage(currentResult);
+                    persistProgress();
+                });
+                return toggle;
+            })();
+            group.appendChild(renderStatePanel(shownTitle, shownBoxes, {
+                emptyMessage: shownEmptyMessage,
+                controls: shownControls,
+            }));
+            group.appendChild(renderStatePanel("Expected result", expectedStateBoxesForCase(state.visibleCase)));
+            stage.appendChild(group);
+        }
+        if (checkStdout) {
+            const group = document.createElement("div");
+            group.className = "state-group two-col";
+            group.append(renderStdoutPanel("Your program's output", ran ? currentResult.stdout : null, notRunMessage), renderStdoutPanel("Expected output", state.visibleCase.expectedStdout, ""));
+            stage.appendChild(group);
+        }
     }
     function buttonReplacements() {
         const backLabel = (prevBtn?.textContent || "Back ◀").trim();
@@ -534,45 +520,33 @@ function createCodeOutputChallengeTemplate(config) {
         status.textContent = text;
         status.className = cls;
     }
-    function updateLockedInputLine() {
-        const lines = lockedInputLinesForCase(state.visibleCase);
-        if (lockedInputLine) {
-            lockedInputLine.textContent = lines.join("\n");
-        }
-        if (lockedLineNumbers) {
-            const frag = document.createDocumentFragment();
-            for (let i = 0; i < lines.length; i += 1) {
-                const num = document.createElement("div");
-                num.className = "code-line-number";
-                num.textContent = String(i + 1);
-                frag.appendChild(num);
-            }
-            clearNode(lockedLineNumbers);
-            lockedLineNumbers.appendChild(frag);
-        }
+    function renderLockedLines(numbersEl, linesEl, text, firstLine) {
+        const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
+        linesEl?.closest(".code-locked-row")?.classList.toggle("hidden", lines.length === 0);
+        if (linesEl)
+            linesEl.textContent = lines.join("\n");
+        if (!numbersEl)
+            return;
+        clearNode(numbersEl);
+        lines.forEach((_, index) => {
+            const num = document.createElement("div");
+            num.className = "code-line-number";
+            num.textContent = String(firstLine + index);
+            numbersEl.appendChild(num);
+        });
+    }
+    function updateLockedLines() {
+        const { inputLiterals } = state.visibleCase;
+        const prefix = challengePrefix(shape, inputLiterals);
+        renderLockedLines(lockedLineNumbers, lockedInputLine, prefix, 1);
+        renderLockedLines(lockedSuffixNumbers, lockedSuffixLines, challengeSuffix(shape, inputLiterals), lineCount(prefix) + getUserRawLines().length + 1);
     }
     function updateInstructions() {
         if (state.pass) {
             setPartsContent(instructionsEl, "Challenge solved!");
             return;
         }
-        if (instructions) {
-            setPartsContent(instructionsEl, applyButtonTokens(instructions));
-            return;
-        }
-        const inputSummary = inputSpecs
-            .map((spec) => `${spec.type} ${spec.name}`)
-            .join(", ");
-        const outputSummary = outputSpecs
-            .map((spec) => `${spec.type} ${spec.name}`)
-            .join(", ");
-        const lockedLineSummary = preludeLineCount === 1
-            ? "Line 1 is the current input assignment and is locked."
-            : `Lines 1-${preludeLineCount} are the current input assignments and are locked.`;
-        const msg = `Write code that creates ${outputSummary} from ${inputSummary}. ` +
-            `${lockedLineSummary} ` +
-            `Press $checkButton to run all ${state.testCases.length} test input${state.testCases.length === 1 ? "" : "s"}.`;
-        setPartsContent(instructionsEl, applyButtonTokens(msg));
+        setPartsContent(instructionsEl, applyButtonTokens(instructions || null));
     }
     const { hide: hideHint, show: showHint } = createHintPresenter(hintPanel, applyButtonTokens);
     function defaultHint(current, report) {
@@ -595,41 +569,44 @@ function createCodeOutputChallengeTemplate(config) {
             return "The shown case has undefined behavior.";
         }
         if (current.kind === "step-limit") {
-            return "The shown case did not finish. Check whether a loop condition can become false or a recursive call can reach its base case.";
+            return "The shown case did not finish. Check whether every loop's condition eventually becomes zero.";
         }
         if (current.kind === "blocked-input") {
             return "The shown case is waiting for input, but code-writing lessons do not provide interactive input. Remove the input operation or initialize the value directly.";
         }
         if (current.kind === "missing-output") {
-            if (current.failingOutput) {
-                return `Create a variable named $n{${current.failingOutput.name}}.`;
-            }
-            return `Create the output variable${outputSpecs.length === 1 ? "" : "s"}: $n{${outputNamesText}}.`;
+            return current.failingOutput
+                ? `Create a variable named $n{${current.failingOutput.name}}.`
+                : "Create the result variables.";
         }
         if (current.kind === "wrong-output-type") {
-            if (current.failingOutput) {
-                return `$n{${current.failingOutput.name}} should have type $t{${current.failingOutput.type}}.`;
-            }
-            return `One output variable has the wrong type.`;
+            return current.failingOutput
+                ? `$n{${current.failingOutput.name}} should have type $t{${current.failingOutput.type}}.`
+                : "One result variable has the wrong type.";
         }
         if (current.kind === "wrong-output-value") {
-            if (current.failingOutput && current.expected) {
-                return `For the shown input, $n{${current.failingOutput.name}} should be $v{${current.expected.value}}.`;
+            const index = outputSpecs.findIndex((spec) => spec.name === current.failingOutput?.name);
+            const expected = state.visibleCase.expectedOutputs[index];
+            if (current.failingOutput && expected) {
+                return `For the shown input, $n{${current.failingOutput.name}} should be ${expectedValueText(expected)}.`;
             }
-            return "For the shown input, one output variable has the wrong value.";
+            return "For the shown input, one result variable has the wrong value.";
+        }
+        if (current.kind === "wrong-stdout") {
+            return "For the shown input, your program's output doesn't match the expected output.";
         }
         if (report && !report.pass) {
-            return "The shown input works, but at least one other test input fails. Make sure your code computes the value from the input instead of hardcoding.";
+            return "The shown input works, but at least one other test input fails. Click $showFailingCaseButton to see one that fails.";
         }
         return "Looks good. Press $checkButton.";
     }
     function render() {
-        const analyzed = runCProgram(fullProgramTextForCase(state.visibleCase));
+        const analyzed = runCase(state.visibleCase);
         const currentResult = evaluateCase(state.visibleCase, analyzed);
         visibleCaseResult = currentResult;
         visibleProgramFeedback = getVisibleProgramFeedback(analyzed);
         renderStage(currentResult);
-        updateLockedInputLine();
+        updateLockedLines();
         updateInstructions();
         updateLineGutters(visibleProgramFeedback.diagnostic, visibleProgramFeedback.runtimeIssue);
         if (state.pass) {
@@ -785,14 +762,17 @@ function createCodeOutputChallengeTemplate(config) {
                 state.pendingFailingCase = failingCase ? copyCase(failingCase) : null;
                 render();
                 const failureKind = report.firstFailure?.result.kind;
+                // The failing input may not be the one on screen.
+                const shown = (visibleCaseResult ?? evaluateCase(state.visibleCase)).kind === failureKind;
+                const where = shown ? "shown above" : "with another input";
                 const failureStatus = failureKind === "compile"
-                    ? "fix the error shown above"
+                    ? `fix the error ${where}`
                     : failureKind === "ub"
-                        ? "fix the undefined behavior shown above"
+                        ? `fix the undefined behavior ${where}`
                         : failureKind === "step-limit"
-                            ? "program did not finish"
+                            ? `program did not finish${shown ? "" : " with another input"}`
                             : failureKind === "blocked-input"
-                                ? "program is waiting for input"
+                                ? `program is waiting for input${shown ? "" : " with another input"}`
                                 : "incorrect";
                 setStatus(failureStatus, "err");
                 flashStatus(status);

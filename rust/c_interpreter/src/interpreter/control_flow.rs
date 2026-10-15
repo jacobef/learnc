@@ -225,8 +225,18 @@ impl<'a> Interpreter<'a> {
         let result = (|| -> Result<Flow, Diagnostic> {
             match stmt {
                 Statement::Block(block) => self.exec_block(block, frame, objects),
-                Statement::Break(_) => Ok(Flow::LoopBreak),
-                Statement::Continue(_) => Ok(Flow::LoopContinue),
+                // Jump statements run like any other statement, and then jump.
+                Statement::Break(span) => {
+                    let trace_index = self.cboxes_trace.len();
+                    self.trace_cboxes_main_event(*span, frame, objects)?;
+                    self.cboxes_last_break =
+                        (self.cboxes_trace.len() > trace_index).then_some((trace_index, *span));
+                    Ok(Flow::LoopBreak)
+                }
+                Statement::Continue(span) => {
+                    self.trace_cboxes_main_event(*span, frame, objects)?;
+                    Ok(Flow::LoopContinue)
+                }
                 Statement::DoWhile {
                     body,
                     condition,
@@ -283,7 +293,10 @@ impl<'a> Interpreter<'a> {
                     frame,
                     objects,
                 ),
-                Statement::Goto { label, span } => Ok(Flow::Goto(label.clone(), *span)),
+                Statement::Goto { label, span } => {
+                    self.trace_cboxes_main_event(*span, frame, objects)?;
+                    Ok(Flow::Goto(label.clone(), *span))
+                }
                 Statement::Labeled {
                     statement, span, ..
                 } => {
@@ -749,7 +762,7 @@ impl<'a> Interpreter<'a> {
                         flow = self.exec_controlled_substatement(body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, false_condition_span, frame, objects, result)?
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result, false)?
             }
             Statement::If { then_branch, .. }
                 if self.statement_contains_label(then_branch, label) =>
@@ -1109,7 +1122,7 @@ impl<'a> Interpreter<'a> {
                         flow = self.exec_controlled_substatement(body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, false_condition_span, frame, objects, result)
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result, false)
             }
             Statement::If { then_branch, .. }
                 if self.statement_contains_span(then_branch, site.stmt_span) =>
@@ -1324,7 +1337,7 @@ impl<'a> Interpreter<'a> {
                         self.exec_for_step(step.as_ref(), body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, false_condition_span, frame, objects, result)
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result, false)
             }
             (
                 Statement::Switch {
@@ -1340,7 +1353,7 @@ impl<'a> Interpreter<'a> {
                     objects,
                 )?;
                 let control = self.integer_promotion(control, expr.span())?;
-                self.exec_switch_with_control(control, body, frame, objects)
+                self.exec_switch_with_control(control, body, None, frame, objects)
             }
             _ => Err(Diagnostic::error(
                 "internal error: longjmp target site did not match the resumed statement",
@@ -1365,26 +1378,56 @@ impl<'a> Interpreter<'a> {
             objects,
         )?;
         let control = self.integer_promotion(control, expr.span())?;
-        self.exec_switch_with_control(control, body, frame, objects)
+        let header = Span::new(span.file, span.start, expr.span().end);
+        self.exec_switch_with_control(control, body, Some(header), frame, objects)
     }
 
+    // The traced header, if there is one, is the switch's own step, like an if's
+    // condition. It skips the cases before the one it jumps to.
     fn exec_switch_with_control(
         &mut self,
         control: TypedValue,
         body: &Block,
+        traced_header: Option<Span>,
         frame: &mut Frame,
         objects: &mut ObjectFrames,
     ) -> Result<Flow, Diagnostic> {
         let control_value = control.to_int()?;
         let dispatch = self.build_switch_dispatch(body, &control.ty, frame, objects)?;
         let target = Self::switch_dispatch_target(&dispatch, control_value);
+        let interior_end = body.span.end.saturating_sub(1);
+        if let Some(header) = traced_header {
+            let interior_start = body.span.start + 1;
+            let skipped_end = target.map_or(interior_end, |target| target.start);
+            let skipped = (skipped_end > interior_start)
+                .then(|| Span::new(body.span.file, interior_start, skipped_end));
+            self.trace_cboxes_main_branch_event(header, skipped, frame, objects)?;
+        }
         let Some(target) = target else {
             return Ok(Flow::Continue);
         };
         let _switch_depth = DepthGuard::enter(&mut self.active_switch_dispatch_depth);
         let result = self.enter_block_at_switch_label(body, target, frame, objects);
         match result? {
-            Some(Flow::LoopBreak) | Some(Flow::Continue) | None => Ok(Flow::Continue),
+            Some(Flow::LoopBreak) => {
+                // A break skips the rest of the switch.
+                if let Some((index, span)) = self.cboxes_last_break.take()
+                    && interior_end > span.end
+                {
+                    let (file, start_line, start_column, end_line, end_column) = self
+                        .sources
+                        .span_display_range(Span::new(span.file, span.end, interior_end));
+                    self.cboxes_trace[index].skipped_range = Some(ProgramSourceRange {
+                        file: file.display().to_string(),
+                        start_line,
+                        start_column,
+                        end_line,
+                        end_column,
+                    });
+                }
+                Ok(Flow::Continue)
+            }
+            Some(Flow::Continue) | None => Ok(Flow::Continue),
             Some(flow) => Ok(flow),
         }
     }
@@ -1728,7 +1771,7 @@ impl<'a> Interpreter<'a> {
                         flow = self.exec_controlled_substatement(body, frame, objects)?;
                     }
                 })();
-                self.finish_for_scope(*span, false_condition_span, frame, objects, result)?
+                self.finish_for_scope(*span, false_condition_span, frame, objects, result, false)?
             }
             Statement::If { then_branch, .. }
                 if Self::statement_contains_switch_label(then_branch, target) =>
@@ -1859,6 +1902,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Flow, Diagnostic> {
         self.push_for_scope(frame, span, step, body, objects);
         let mut false_condition_span = None;
+        let mut ended_by_break = false;
         let result = (|| -> Result<Flow, Diagnostic> {
             if let Some(init) = init {
                 match init {
@@ -1907,13 +1951,23 @@ impl<'a> Interpreter<'a> {
                 };
                 match body_flow {
                     Flow::Continue | Flow::LoopContinue => {}
-                    Flow::LoopBreak => break Ok(Flow::Continue),
+                    Flow::LoopBreak => {
+                        ended_by_break = true;
+                        break Ok(Flow::Continue);
+                    }
                     flow => break Ok(flow),
                 }
                 self.exec_for_step(step, body, frame, objects)?;
             }
         })();
-        self.finish_for_scope(span, false_condition_span, frame, objects, result)
+        self.finish_for_scope(
+            span,
+            false_condition_span,
+            frame,
+            objects,
+            result,
+            ended_by_break,
+        )
     }
 
     fn finish_for_scope(
@@ -1923,11 +1977,13 @@ impl<'a> Interpreter<'a> {
         frame: &mut Frame,
         objects: &mut ObjectFrames,
         result: Result<Flow, Diagnostic>,
+        ended_by_break: bool,
     ) -> Result<Flow, Diagnostic> {
         if let Some(scope) = self.pop_active_block_scope(frame.id, span) {
             self.restore_block_scope(scope, frame, objects);
         }
-        if matches!(&result, Ok(Flow::Continue)) {
+        // A break jumps straight past the loop, so its closing brace never runs.
+        if matches!(&result, Ok(Flow::Continue)) && !ended_by_break {
             if let Some(condition_span) = false_condition_span {
                 // Testing false and leaving the for-init scope are one step.
                 self.trace_cboxes_loop_event(condition_span, frame, objects)?;

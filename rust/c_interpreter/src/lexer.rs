@@ -613,6 +613,14 @@ impl<'a> Lexer<'a> {
                     self.bump();
                 }
             }
+        } else if self.text[start..self.offset] == *"0"
+            && matches!(self.peek_char(), Some('b' | 'B'))
+        {
+            // A C23 binary constant, like 0b101.
+            self.bump();
+            while self.peek_char().is_some_and(|ch| ch.is_ascii_digit()) {
+                self.bump();
+            }
         } else if self.text[start..self.offset].starts_with("0")
             && matches!(self.peek_char(), Some('x' | 'X'))
         {

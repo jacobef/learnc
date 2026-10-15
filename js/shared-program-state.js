@@ -1,4 +1,4 @@
-import { normalizeZeroDisplay } from "./shared-core-utils.js";
+import { normalizeZeroDisplay, sameCType } from "./shared-core-utils.js";
 import { boxValueMatchesSpec } from "./shared-c-value-semantics.js";
 /** Give inaccessible objects distinct display names without changing source-level names. */
 export function memoryDisplayState(boxes) {
@@ -22,6 +22,14 @@ export function memoryDisplayState(boxes) {
         };
     });
 }
+// Whether a type name like "int *[3]" or "int (*[2])[3]" is an array type, and
+// not, like "int (*)[3]", a pointer to one. The declarator in the innermost
+// parentheses, where the name would go, decides.
+function isArrayTypeName(type) {
+    const groups = [...type.matchAll(/\(([\s*[\]\d]*)\)/g)];
+    const declarator = groups.length ? groups[groups.length - 1][1] : type;
+    return /\[\s*\d+\s*\]\s*$/.test(declarator);
+}
 function isArrayRootStateBox(box) {
     if (box.arrayRoot)
         return false;
@@ -29,7 +37,9 @@ function isArrayRootStateBox(box) {
     const indices = Array.isArray(box.arrayIndices) ? box.arrayIndices : [];
     if (shape.length > 0 && indices.length === 0)
         return true;
-    return /\[\s*\d+\s*\]\s*$/.test(String(box.type || ""));
+    if (box.typeInfo)
+        return box.typeInfo.kind === "array";
+    return isArrayTypeName(String(box.type || ""));
 }
 export function stateWithArrayRoots(boxes) {
     const result = boxes.slice();
@@ -67,8 +77,13 @@ export function stateWithArrayRoots(boxes) {
     }
     return result;
 }
+// A struct or union itself, rather than one of its members. Like an array, it's
+// just a container: its members hold the values.
+function isAggregateStateBox(box) {
+    return !!box.aggregateKind;
+}
 function comparableStateBoxes(boxes) {
-    return boxes.filter((box) => !isArrayRootStateBox(box));
+    return boxes.filter((box) => !isArrayRootStateBox(box) && !isAggregateStateBox(box));
 }
 function comparableStateBoxKey(box) {
     const arrayRoot = String(box.arrayRoot || "").trim();
@@ -80,8 +95,13 @@ function comparableStateBoxKey(box) {
     }
     return `scalar:${box.name}`;
 }
+// Whole variables: arrays, structs, and unions count once, not once per part.
 function visibleStateBoxes(boxes) {
-    return stateWithArrayRoots(boxes).filter((box) => !box.arrayRoot);
+    return stateWithArrayRoots(boxes).filter((box) => !box.arrayRoot && !box.aggregateRoot);
+}
+// An array element or a struct or union member, which holds part of a variable's value.
+function isPartStateBox(box) {
+    return !!box.arrayRoot || (!!box.aggregateRoot && !box.aggregateKind);
 }
 export function stateMatches(actual, expected) {
     const actualBoxes = comparableStateBoxes(actual);
@@ -98,12 +118,37 @@ export function stateMatches(actual, expected) {
         const actualBox = actualByName.get(name);
         if (!actualBox)
             return false;
-        if ((actualBox.type || "").trim() !== (expectedBox.type || "").trim())
+        if (!sameCType(actualBox.type, expectedBox.type))
             return false;
         if (!boxValueMatchesSpec(actualBox, expectedBox).ok)
             return false;
     }
     return true;
+}
+// How a hint refers to part of a box, like "x's value". A nameless object, whose
+// name is an internal key like "<allocated block #7>[1]", is described instead.
+function namesPart(name, part) {
+    const nameless = /^<([^#>]+?) #\d+>(.*)$/.exec(name);
+    if (!nameless)
+        return `$n{${name}}'s ${part}`;
+    const [, kind, rest] = nameless;
+    if (!rest)
+        return `the ${part} of the ${kind}`;
+    if (/^(?:\[\d+\])+$/.test(rest))
+        return `the ${part} of element $v{${rest}} of the ${kind}`;
+    const member = /^\.(\w+)$/.exec(rest)?.[1];
+    return member
+        ? `the ${part} of the ${kind}'s member $n{${member}}`
+        : `the ${part} of $c{${rest}} in the ${kind}`;
+}
+// How a hint refers to a whole variable, or to a nameless object like a block
+// from malloc.
+function objectPhrase(name) {
+    const nameless = /^<([^#>]+?) #\d+>$/.exec(name);
+    return nameless ? `the ${nameless[1]}` : `the $n{${name}} variable`;
+}
+function capitalize(text) {
+    return text.charAt(0).toUpperCase() + text.slice(1);
 }
 function formatNameList(names) {
     const tokens = names.map((name) => `$n{${name}}`);
@@ -130,7 +175,7 @@ export function basicHintForBoxes(actual, expected, baseline, stage) {
     const removedName = missingExpectedNames.find((name) => baselineNames.has(name));
     if (removedName) {
         return {
-            message: `This line shouldn't remove the $n{${removedName}} variable.`,
+            message: `This line shouldn't remove ${objectPhrase(removedName)}.`,
             kind: "removed",
             variable: removedName,
         };
@@ -140,7 +185,7 @@ export function basicHintForBoxes(actual, expected, baseline, stage) {
         const name = extraBaselineNames[0] || "";
         if (name) {
             return {
-                message: `This line should remove the $n{${name}} variable.`,
+                message: `This line should remove ${objectPhrase(name)}.`,
                 kind: "not-removed",
                 variable: name,
             };
@@ -152,7 +197,7 @@ export function basicHintForBoxes(actual, expected, baseline, stage) {
             return { message: "You need to add a new variable.", kind: "count" };
         }
         return {
-            message: `You need to add the $n{${expectedName}} variable.`,
+            message: `You need to add ${objectPhrase(expectedName)}.`,
             kind: "count",
             variable: expectedName,
         };
@@ -218,9 +263,9 @@ export function basicHintForBoxes(actual, expected, baseline, stage) {
             continue;
         const expectedType = typeOf(expectedBox);
         const actualType = typeOf(actualBox);
-        if (actualType !== expectedType) {
+        if (!sameCType(actualType, expectedType)) {
             return {
-                message: `$n{${name}}'s type should be $t{${expectedType}}.`,
+                message: `${capitalize(namesPart(name, "type"))} should be $t{${expectedType}}.`,
                 kind: "type",
                 variable: name,
             };
@@ -234,7 +279,7 @@ export function basicHintForBoxes(actual, expected, baseline, stage) {
         const shouldRemain = baselineBox
             ? boxValueMatchesSpec(baselineBox, expectedBox).ok
             : false;
-        const message = `$n{${name}}'s value should ${shouldRemain ? "remain" : "be"} ${label}.`;
+        const message = `${capitalize(namesPart(name, "value"))} should ${shouldRemain ? "remain" : "be"} ${label}.`;
         if (shouldRemain) {
             return {
                 message,
@@ -251,27 +296,27 @@ export function basicHintForBoxes(actual, expected, baseline, stage) {
         }
     }
     const actualElementsByName = new Map(comparableStateBoxes(actual)
-        .filter((box) => !!box.arrayRoot)
+        .filter(isPartStateBox)
         .map((box) => [box.name, box]));
     const baselineElementsByName = new Map(comparableStateBoxes(baseline)
-        .filter((box) => !!box.arrayRoot)
+        .filter(isPartStateBox)
         .map((box) => [box.name, box]));
-    for (const expectedBox of comparableStateBoxes(expected).filter((box) => !!box.arrayRoot)) {
+    for (const expectedBox of comparableStateBoxes(expected).filter(isPartStateBox)) {
         const name = nameOf(expectedBox);
         if (!name)
             continue;
         const actualBox = actualElementsByName.get(name);
         if (!actualBox) {
             return {
-                message: `The $n{${name}} array element is missing.`,
+                message: `The $n{${name}} ${expectedBox.arrayRoot ? "array element" : "member"} is missing.`,
                 kind: "value",
                 variable: name,
             };
         }
         const expectedType = typeOf(expectedBox);
-        if (typeOf(actualBox) !== expectedType) {
+        if (!sameCType(typeOf(actualBox), expectedType)) {
             return {
-                message: `$n{${name}}'s type should be $t{${expectedType}}.`,
+                message: `${capitalize(namesPart(name, "type"))} should be $t{${expectedType}}.`,
                 kind: "type",
                 variable: name,
             };
@@ -287,7 +332,7 @@ export function basicHintForBoxes(actual, expected, baseline, stage) {
         const shouldRemain = baselineBox
             ? boxValueMatchesSpec(baselineBox, expectedBox).ok
             : false;
-        const message = `$n{${name}}'s value should ${shouldRemain ? "remain" : "be"} ${label}.`;
+        const message = `${capitalize(namesPart(name, "value"))} should ${shouldRemain ? "remain" : "be"} ${label}.`;
         if (shouldRemain) {
             return { message, kind: "value", variable: name };
         }

@@ -1,3 +1,11 @@
+/** Whether two spellings of a C type are the same, ignoring spacing like int* vs int *. */
+export function sameCType(left, right) {
+    return String(left ?? "").replace(/\s+/g, "") === String(right ?? "").replace(/\s+/g, "");
+}
+/** The internal name of a nameless object; the brackets keep it from ever matching a C name. */
+export function anonymousObjectName(kind, objectId) {
+    return `<${kind} #${objectId}>`;
+}
 export function normalizeZeroDisplay(value) {
     const trimmed = value.trim();
     if (trimmed === "-0")

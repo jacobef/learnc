@@ -1,3 +1,8 @@
+// Whether a C type name, as the interpreter writes it, is a pointer type: int*,
+// const char*, int (*)[3], int (*)(int). Not int*[3], which is an array.
+function isPointerTypeName(type) {
+    return /\*\s*(?:const|volatile|restrict|\s)*$/.test(type) || /^[^()]*\(\s*\*[^()]*\)/.test(type);
+}
 function compactDiagnosticMessage(message) {
     const firstLine = String(message || "").split(/\r?\n/, 1)[0] || "The program did not compile.";
     return firstLine
@@ -1006,7 +1011,7 @@ function executionDiagnostic(context) {
         if (noMember[1].includes("[") && /\{\s*\./.test(text)) {
             return { message: `.${noMember[2]} selects a struct or union member, but this initializer is for an array. Use [index] to select an array element.` };
         }
-        if (noMember[1].endsWith("*") && /\./.test(text)) {
+        if (isPointerTypeName(noMember[1]) && /\./.test(text)) {
             return { message: `${noMember[1]} is a pointer. Use ->${noMember[2]} to access the member, or dereference the pointer before using .${noMember[2]}.` };
         }
         return { message: `Type ${noMember[1]} has no member named ${noMember[2]}. Check the member's spelling and the struct or union definition.` };
@@ -1023,17 +1028,17 @@ function executionDiagnostic(context) {
     }
     const badSubscript = /^array subscripting requires an array or pointer and an integer index, but the operands have types (.+) and (.+)$/.exec(message);
     if (badSubscript) {
-        if (!badSubscript[1].endsWith("*") && !badSubscript[1].includes("[")) {
+        if (!isPointerTypeName(badSubscript[1]) && !badSubscript[1].includes("[")) {
             return { message: `The value before [ has type ${badSubscript[1]}, not an array or pointer. Only arrays and pointers can be indexed.` };
         }
         return { message: `The index inside [ ] has type ${badSubscript[2]}. An array index must have an integer type.` };
     }
     const badArithmetic = /^this arithmetic operator requires numeric operands, but the operands have types (.+) and (.+)$/.exec(message);
     if (badArithmetic) {
-        if (badArithmetic[1].endsWith("*") && badArithmetic[2].endsWith("*")) {
+        if (isPointerTypeName(badArithmetic[1]) && isPointerTypeName(badArithmetic[2])) {
             return { message: "C cannot add or multiply two pointers. Pointer subtraction is allowed only for positions in the same array; otherwise combine a pointer with an integer offset." };
         }
-        if (badArithmetic[1].endsWith("*") || badArithmetic[2].endsWith("*")) {
+        if (isPointerTypeName(badArithmetic[1]) || isPointerTypeName(badArithmetic[2])) {
             return { message: `This operator cannot be applied to a pointer and a number. Only + and - can adjust a pointer by an integer offset.` };
         }
         return { message: `This arithmetic operator works on numbers, but its operands have types ${badArithmetic[1]} and ${badArithmetic[2]}.` };
@@ -1335,10 +1340,10 @@ function fallbackDiagnostic(context) {
     if (cannotConvert) {
         const sourceType = cannotConvert[1];
         const targetType = cannotConvert[2];
-        if (sourceType.endsWith("*") && targetType.endsWith("*")) {
+        if (isPointerTypeName(sourceType) && isPointerTypeName(targetType)) {
             return { message: `This expression has type ${sourceType}, but this location expects ${targetType}. The pointers refer to different element types; make the pointed-to types agree.` };
         }
-        if (sourceType.endsWith("*") && !targetType.endsWith("*")) {
+        if (isPointerTypeName(sourceType) && !isPointerTypeName(targetType)) {
             const addressOfIsHighlighted = /^\(*\s*&/.test(textAtDiagnostic) || /&\s*$/.test(text.slice(0, col));
             if (addressOfIsHighlighted) {
                 const article = /^[aeiou]/i.test(targetType) ? "an" : "a";

@@ -157,11 +157,18 @@ test("for-init variables leave the displayed and expression scope before the nex
       const next = result.trace.findIndex(event => event.state.some(box => box.name === "j"));
       assert.ok(next > 0);
       const boundary = result.trace[next - 1];
-      assert.equal(boundary.kind, body.includes("break;") ? "block-close" : "loop");
-      assert.equal(boundary.state.find(box => box.name === "i")?.value, outer ? "99" : undefined, source);
-      const expression = evaluateCExpressionFiles(files, next - 1, "i", undefined, "", false);
-      assert.equal(expression.kind, outer ? "ok" : "compile", source);
-      if (expression.kind === "ok") assert.equal(expression.result.value, "99");
+      if (body.includes("break;")) {
+        // A break jumps straight past the loop, so the next step is the one that
+        // leaves the loop variable's scope; the brace it skips isn't a step.
+        assert.equal(boundary.kind, "statement");
+        assert.equal(result.trace[next].state.find(box => box.name === "i")?.value, outer ? "99" : undefined, source);
+      } else {
+        assert.equal(boundary.kind, "loop");
+        assert.equal(boundary.state.find(box => box.name === "i")?.value, outer ? "99" : undefined, source);
+        const expression = evaluateCExpressionFiles(files, next - 1, "i", undefined, "", false);
+        assert.equal(expression.kind, outer ? "ok" : "compile", source);
+        if (expression.kind === "ok") assert.equal(expression.result.value, "99");
+      }
       // A page ending precisely at scope exit must preserve that same state.
       const paged = runCFiles(files, undefined, "", false, {traceLimit: next, stepLimit: 100000});
       assert.equal(paged.kind, "ok");
@@ -186,7 +193,10 @@ test("background discovery finds lines beyond the loaded page without expanding 
   const jumped = execution.run(files, "", false);
   assert.equal(jumped.kind, "ok");
   assert.equal(jumped.trace[position].startLine, 5);
-  assert.deepEqual(jumped.trace[position - 1].state, []);
+  // Once the loop variable is gone, only the format string's nameless array remains.
+  const remaining = jumped.trace[position - 1].state;
+  assert.deepEqual(remaining.filter(box => box.anonymous !== "string literal"), []);
+  assert.deepEqual(remaining.filter(box => !box.arrayRoot).map(box => box.type), ["char[4]"]);
   const skipped = discoverSandboxBoundaries([{path: "program.c", source: "int main(void) {\nif (0) {\nint unreachable;\n}\nint end;\n}"}], "", false, 100000, 1024);
   assert.equal(skipped.boundaries.some(boundary => boundary?.line === 2), false);
 });

@@ -425,6 +425,12 @@ impl fmt::Display for CType {
                 }
                 write!(f, ") returning {}", return_type)
             }
+            // Derived types are written in C's declarator syntax, e.g. int (*)[3].
+            CType::Qualified(inner, _)
+                if matches!(inner.as_ref(), CType::Pointer(_) | CType::Array(..)) =>
+            {
+                write!(f, "{}", crate::interpreter::cboxes_type_string(self))
+            }
             CType::Qualified(inner, qualifiers) => {
                 if qualifiers.is_atomic {
                     write!(f, "_Atomic ")?;
@@ -440,10 +446,37 @@ impl fmt::Display for CType {
                 }
                 write!(f, "{}", inner)
             }
-            CType::Pointer(inner) => write!(f, "{}*", inner),
-            CType::Array(inner, 0) => write!(f, "{}[]", inner),
-            CType::Array(inner, CONSTRAINT_VLA_BOUND) => write!(f, "{}[*]", inner),
-            CType::Array(inner, len) => write!(f, "{}[{}]", inner, len),
+            CType::Array(_, CONSTRAINT_VLA_BOUND) => {
+                write!(
+                    f,
+                    "{}",
+                    crate::interpreter::cboxes_type_string(self)
+                        .replace(&format!("[{CONSTRAINT_VLA_BOUND}]"), "[*]")
+                )
+            }
+            CType::Pointer(_) | CType::Array(..) => {
+                write!(f, "{}", crate::interpreter::cboxes_type_string(self))
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::CType;
+
+    #[test]
+    fn derived_types_display_in_c_declarator_syntax() {
+        let int3 = CType::array_of(CType::Int, 3);
+        assert_eq!(CType::pointer_to(int3.clone()).to_string(), "int (*)[3]");
+        assert_eq!(CType::array_of(int3, 2).to_string(), "int[2][3]");
+        assert_eq!(
+            CType::array_of(CType::pointer_to(CType::Int), 3).to_string(),
+            "int*[3]"
+        );
+        assert_eq!(
+            CType::pointer_to(CType::pointer_to(CType::Char)).to_string(),
+            "char**"
+        );
     }
 }

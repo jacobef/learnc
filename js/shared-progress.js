@@ -1,5 +1,4 @@
 const PROGRESS_PREFIX = "cboxes-progress-v1:";
-const SANDBOX_PROGRESS_KEY = "cboxes:sandbox-state:v1";
 function storage() {
     try {
         return window.localStorage;
@@ -40,18 +39,33 @@ function writeWindowNameProgress(value) {
     try {
         const state = windowNameState();
         if (value === null)
-            delete state[SANDBOX_PROGRESS_KEY];
+            delete state[sandboxProgressKey()];
         else
-            state[SANDBOX_PROGRESS_KEY] = value;
+            state[sandboxProgressKey()] = value;
         window.name = Object.keys(state).length ? JSON.stringify(state) : "";
     }
     catch {
         // This fallback is best effort, just like localStorage.
     }
 }
+function pathParts() {
+    const parts = window.location.pathname.trim().split("/").filter(Boolean);
+    const last = parts[parts.length - 1] ?? "";
+    return last.includes(".")
+        ? { folder: parts[parts.length - 2], file: last }
+        : { folder: last, file: "index.html" };
+}
+// The work-in-progress copy of the site, in a wip folder, keeps its own progress,
+// so every saved id there starts with "wip/".
+function siteScope() {
+    return pathParts().folder === "wip" ? "wip/" : "";
+}
+function sandboxProgressKey() {
+    return `cboxes:sandbox-state:v1${siteScope() ? ":wip" : ""}`;
+}
+// A lesson's file name, wherever the site is hosted.
 export function currentLevelId() {
-    const path = window.location.pathname.trim();
-    return path.split("/").filter(Boolean).pop() || "index.html";
+    return siteScope() + pathParts().file;
 }
 function levelProgressKey(levelId) {
     return `${PROGRESS_PREFIX}${levelId}`;
@@ -83,16 +97,21 @@ export function writeLevelProgress(state, levelId = currentLevelId()) {
 export function clearLevelProgress(levelId = currentLevelId()) {
     removeStoredText(levelProgressKey(levelId));
 }
+// The ids saved by this copy of the site.
 function savedLevelIds() {
     const store = storage();
     if (!store)
         return [];
+    const scope = siteScope();
     try {
         const ids = [];
         for (let i = 0; i < store.length; i++) {
             const key = store.key(i);
-            if (key?.startsWith(PROGRESS_PREFIX))
-                ids.push(key.slice(PROGRESS_PREFIX.length));
+            if (!key?.startsWith(PROGRESS_PREFIX))
+                continue;
+            const id = key.slice(PROGRESS_PREFIX.length);
+            if (scope ? id.startsWith(scope) : !id.startsWith("wip/"))
+                ids.push(id);
         }
         return ids;
     }
@@ -106,14 +125,14 @@ export function savedLevelCount() {
 export function readSandboxProgress() {
     // A failed localStorage write may leave an older value behind. The fallback
     // is newer until a successful write clears it.
-    const fallback = windowNameState()[SANDBOX_PROGRESS_KEY];
-    return typeof fallback === "string" ? fallback : readStoredText(SANDBOX_PROGRESS_KEY);
+    const fallback = windowNameState()[sandboxProgressKey()];
+    return typeof fallback === "string" ? fallback : readStoredText(sandboxProgressKey());
 }
 export function writeSandboxProgress(value) {
     try {
         const store = storage();
         if (store) {
-            store.setItem(SANDBOX_PROGRESS_KEY, value);
+            store.setItem(sandboxProgressKey(), value);
             writeWindowNameProgress(null);
             return;
         }
@@ -131,6 +150,6 @@ export function clearAllLevelProgress() {
         clearLevelProgress(id);
 }
 export function clearSandboxProgress() {
-    removeStoredText(SANDBOX_PROGRESS_KEY);
+    removeStoredText(sandboxProgressKey());
     writeWindowNameProgress(null);
 }

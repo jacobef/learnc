@@ -177,6 +177,7 @@ pub struct Parser<'a> {
     file_tags: HashMap<String, TagBinding>,
     block_tag_scopes: Vec<HashMap<String, TagBinding>>,
     records: FastHashMap<usize, RecordType>,
+    anonymous_record_names: FastHashMap<usize, String>,
     enums: FastHashMap<usize, EnumType>,
     enum_constants: FastHashMap<(FileId, String), i128>,
     next_tag_id: usize,
@@ -211,6 +212,7 @@ impl<'a> Parser<'a> {
             file_tags: HashMap::new(),
             block_tag_scopes: Vec::new(),
             records: FastHashMap::default(),
+            anonymous_record_names: FastHashMap::default(),
             enums: FastHashMap::default(),
             enum_constants: FastHashMap::default(),
             next_tag_id: 0,
@@ -287,6 +289,7 @@ impl<'a> Parser<'a> {
             records: self.records,
             enums: self.enums,
             enum_constants: self.enum_constants,
+            anonymous_record_names: self.anonymous_record_names,
         })
     }
 
@@ -995,6 +998,11 @@ impl<'a> Parser<'a> {
                     span,
                 ));
             }
+        }
+        if let CType::Struct(id, None) | CType::Union(id, None) = ty.unqualified() {
+            self.anonymous_record_names
+                .entry(*id)
+                .or_insert_with(|| name.to_owned());
         }
         let entry = self.current_scope_mut().entry(name.to_owned()).or_default();
         entry.ordinary = None;

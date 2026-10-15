@@ -1694,8 +1694,6 @@ impl<'a> Interpreter<'a> {
         span: Span,
         zeroed: bool,
     ) -> Result<ObjectId, Diagnostic> {
-        self.next_encoded_pointer =
-            align_address(self.next_encoded_pointer, HOST_LONG_DOUBLE_ALIGN as u64);
         let object_ty = CType::array_of(CType::UnsignedChar, size);
         let object = self.allocate_object(
             objects,

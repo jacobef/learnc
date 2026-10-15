@@ -30,6 +30,15 @@ fn parse_integer_literal_impl(
                 ));
             }
             (&rest[..digits_len], &rest[digits_len..], false, 16)
+        } else if let Some(rest) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
+            // Binary constants are new in C23, and follow the octal and hexadecimal rules.
+            let digits_len = rest
+                .find(|ch: char| !matches!(ch, '0' | '1'))
+                .unwrap_or(rest.len());
+            if digits_len == 0 || rest[digits_len..].starts_with(|ch: char| ch.is_ascii_digit()) {
+                return Err(Diagnostic::error("invalid binary integer literal", span));
+            }
+            (&rest[..digits_len], &rest[digits_len..], false, 2)
         } else {
             let digits_len = text
                 .find(|ch: char| !ch.is_ascii_digit())

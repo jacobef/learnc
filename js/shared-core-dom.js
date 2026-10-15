@@ -1,7 +1,8 @@
 import { DEFAULT_NAV_ITEMS as NAV_ITEMS } from "./nav-items.js";
 import { startLevelReplay } from "./shared-replay.js";
+import { mountQuickReference } from "./shared-reference.js";
 import { clearNode, disableAutoText, el, queryElement, queryRole, txt, } from "./shared-dom-utils.js";
-import { applyOtherNames, appendStateObjects, disableBoxEditing, findArrayObjectBoxesForResult, makeAnswerBox, readBoxState, removeBoxDeleteButtons, restoreWorkspace, serializeWorkspace, vbox, } from "./shared-workspace-dom.js";
+import { applyOtherNames, appendStateObjects, disableBoxEditing, findArrayObjectBoxesForResult, makeAnswerBox, readBoxState, removeBoxDeleteButtons, reshapeDynamicBox, restoreWorkspace, serializeWorkspace, vbox, } from "./shared-workspace-dom.js";
 function onDomReady(fn, { once = true } = {}) {
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", () => {
@@ -126,14 +127,20 @@ function ensureSidebarControls(wrap, nav) {
     if (nav.parentElement !== sidebarWrap) {
         sidebarWrap.appendChild(nav);
     }
+    let actions = sidebarWrap.querySelector(".sidebar-actions");
+    if (!actions) {
+        actions = document.createElement("div");
+        actions.className = "sidebar-actions";
+        sidebarWrap.insertBefore(actions, sidebarWrap.firstChild);
+    }
     let btn = sidebarWrap.querySelector(".sidebar-toggle");
     if (!btn) {
         btn = el('<button type="button" class="sidebar-toggle"><span class="hamburger" aria-hidden="true"><span></span><span></span><span></span></span><span class="sidebar-toggle-caption" aria-hidden="true">Lessons</span><span class="sr-only">Show lessons</span></button>');
-        sidebarWrap.insertBefore(btn, sidebarWrap.firstChild);
     }
-    else if (btn.parentElement !== sidebarWrap) {
-        sidebarWrap.insertBefore(btn, sidebarWrap.firstChild);
+    if (btn.parentElement !== actions) {
+        actions.insertBefore(btn, actions.firstChild);
     }
+    mountQuickReference(actions, currentNavHref(), (target, text) => renderParts(target, text));
     btn.setAttribute("aria-controls", nav.id);
     nav.setAttribute("aria-label", "Lessons");
     let title = sidebarWrap.querySelector(".mobile-page-title");
@@ -443,7 +450,7 @@ function renderCodePane(root, lines, boundary, opts = {}) {
         else {
             src.textContent = rawLine;
         }
-        if (i < doneBoundary)
+        if (opts.doneLines ? opts.doneLines.has(i) : i < doneBoundary)
             lr.classList.add("done");
         if (nextRange && i >= nextRange[0] && i <= nextRange[1])
             lr.classList.add("is-next");
@@ -674,7 +681,7 @@ export function setStepperLabel(button, label, compactLabel = label) {
     compact.textContent = compactLabel;
     button.replaceChildren(full, compact);
 }
-function createStepper({ root, prevButtons = null, nextButtons = null, lines = [], previousPage = getPreviousNavHref(), nextPage = null, getBoundary, setBoundary, onBeforeChange, onAfterChange, isStepLocked, getStepBadge, getNextLabel, getNextBoundary, getPrevBoundary, isAtEnd, startLabel, endLabel, allowSameBoundary = false, } = {}) {
+function createStepper({ root, prevButtons = null, nextButtons = null, lines = [], previousPage = getPreviousNavHref(), nextPage = null, getBoundary, setBoundary, onBeforeChange, onAfterChange, isStepLocked, getStepBadge, getNextLabel, getNextBoundary, getPrevBoundary, isAtEnd, startLabel, endLabel, allowSameBoundary = false, backToIntro, } = {}) {
     const boundButtons = new WeakSet();
     const getPrevButtons = () => prevButtons || stepperButtons(root, "prev");
     const getNextButtons = () => nextButtons || stepperButtons(root, "next");
@@ -711,7 +718,7 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
         const nextButtons = getNextButtons();
         const current = boundary();
         prevButtons.forEach((btn) => {
-            const atStart = current === 0;
+            const atStart = current === 0 && !backToIntro;
             const canNavigateBack = atStart && !!previousPage;
             btn.disabled = atStart && !canNavigateBack;
             const label = canNavigateBack
@@ -791,6 +798,11 @@ function createStepper({ root, prevButtons = null, nextButtons = null, lines = [
             boundButtons.add(btn);
             btn.addEventListener("click", () => {
                 if (boundary() === 0) {
+                    if (backToIntro) {
+                        clearPulse();
+                        backToIntro();
+                        return;
+                    }
                     if (!btn.disabled && previousPage) {
                         const previousUrl = withSidebarParam(previousPage);
                         if (previousUrl)
@@ -1187,4 +1199,4 @@ function flashStatus(el) {
     void node.offsetWidth;
     node.classList.add("status-flash");
 }
-export { clearNode, buildNav, createStepper, withSidebarParam, disableBoxEditing, ensureBaseLayout, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, isMobileViewport, bindBtnRefPulse, makeAnswerBox, queryElement, queryRole, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, vbox, applyOtherNames, appendStateObjects, findArrayObjectBoxesForResult, };
+export { clearNode, buildNav, createStepper, withSidebarParam, disableBoxEditing, ensureBaseLayout, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, isMobileViewport, bindBtnRefPulse, makeAnswerBox, queryElement, queryRole, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, reshapeDynamicBox, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, vbox, applyOtherNames, appendStateObjects, findArrayObjectBoxesForResult, };

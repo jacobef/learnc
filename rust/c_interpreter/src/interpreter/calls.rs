@@ -11,12 +11,15 @@ impl<'a> Interpreter<'a> {
         call_span: Span,
         objects: &mut ObjectFrames,
     ) -> Result<TypedValue, Diagnostic> {
+        // Running out of stack happens while the program runs, so it's reported
+        // like undefined behavior, not as a compile error.
         if self.current_frame_ids.len() >= MAX_FUNCTION_CALL_DEPTH {
-            return Err(Diagnostic::error(
+            return Err(Diagnostic::ub(
                 format!(
                     "function call depth exceeded the interpreter limit of {MAX_FUNCTION_CALL_DEPTH}; check for recursion that does not reach its base case"
                 ),
                 call_span,
+                None,
             ));
         }
         let fixed_param_count =
@@ -185,6 +188,10 @@ impl<'a> Interpreter<'a> {
                     self.trace_cboxes_main_event_with_kind(call_span, &frame, objects, "call")?;
                 }
                 if function.name == "main" {
+                    if self.run_options.capture_visualization {
+                        self.cboxes_initial_state =
+                            self.cboxes_frame_state(&frame, objects, call_span)?;
+                    }
                     self.evaluate_cboxes_expression_at(u32::MAX as usize, &frame, objects)?;
                 }
                 let needs_longjmp_catch =

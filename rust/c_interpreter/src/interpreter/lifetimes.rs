@@ -83,7 +83,11 @@ impl<'a> Interpreter<'a> {
             self.allocate_object_id()
         };
         self.object_type_registry.insert(id, ty.clone());
-        self.assign_object_base_address(id, &ty);
+        if storage_duration == StorageDuration::Dynamic {
+            self.assign_heap_base_address(id, &ty);
+        } else {
+            self.assign_object_base_address(id, &ty);
+        }
         let initial_value = if storage_duration == StorageDuration::Dynamic
             || byte_size >= COMPACT_OBJECT_REPRESENTATION_THRESHOLD
         {
@@ -200,6 +204,14 @@ impl<'a> Interpreter<'a> {
         self.object_base_addresses.insert(object, base);
     }
 
+    fn assign_heap_base_address(&mut self, object: ObjectId, ty: &CType) {
+        let size = self.type_size_of(ty).unwrap_or(1).max(1) as u64;
+        let align = (self.type_align_of(ty).unwrap_or(1) as u64).max(HOST_LONG_DOUBLE_ALIGN as u64);
+        let base = align_address(self.next_heap_pointer, align);
+        self.next_heap_pointer = base.saturating_add(object_address_stride(size, align));
+        self.object_base_addresses.insert(object, base);
+    }
+
     pub(super) fn ensure_object_alignment(
         &mut self,
         object: ObjectId,
@@ -218,9 +230,14 @@ impl<'a> Interpreter<'a> {
             return;
         }
         let size = self.type_size_of(ty).unwrap_or(1).max(1) as u64;
-        let base = align_address(self.next_encoded_pointer, requested_alignment);
-        self.next_encoded_pointer =
-            base.saturating_add(object_address_stride(size, requested_alignment));
+        let stride = object_address_stride(size, requested_alignment);
+        let next = if self.dynamic_allocations.contains(&object) {
+            &mut self.next_heap_pointer
+        } else {
+            &mut self.next_encoded_pointer
+        };
+        let base = align_address(*next, requested_alignment);
+        *next = base.saturating_add(stride);
         self.object_base_addresses.insert(object, base);
     }
 

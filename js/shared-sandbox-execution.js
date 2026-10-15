@@ -11,6 +11,7 @@ export function sandboxTimeline(result) {
         implicitMainApplied: result.implicitMainApplied,
         implicitMainNotice: result.implicitMainNotice,
         state: context.state,
+        initialState: [],
         trace: [...context.trace, {
                 kind: "ub",
                 callDepth: context.trace[context.trace.length - 1]?.callDepth ?? 0,

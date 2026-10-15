@@ -1,3 +1,7 @@
+import { doneLinesForTrace, strikeFragmentsForTrace } from "./shared-trace-lines.js";
+import { renderSyntaxDiagrams } from "./shared-syntax-tree.js";
+import { renderLights } from "./shared-machine-template.js";
+import type { SyntaxDiagram } from "./shared-syntax-tree.js";
 import {
   applyOtherNames,
   appendStateObjects,
@@ -13,6 +17,7 @@ import {
   queryRole,
   readBoxState,
   renderCodePane,
+  reshapeDynamicBox,
   restoreWorkspace,
   serializeWorkspace,
   setPartsContent,
@@ -28,7 +33,8 @@ import {
   nextLessonLabel,
   resetLevelAfterConfirmation,
 } from "./shared-lesson-runtime.js";
-import { runCProgram } from "./shared-c-interpreter.js";
+import { runCFiles, runCProgram } from "./shared-c-interpreter.js";
+import type { CProgramResult } from "./shared-c-interpreter.js";
 import {
   basicHintForBoxes,
   stateMatches,
@@ -49,10 +55,20 @@ interface ProgramWorkspaceConfig {
   showOtherNames?: boolean;
   allowVariableCreation?: boolean;
   allowVariableDeletion?: boolean;
+  // Shows what the program has printed; editable stages then also ask for the output.
+  showOutput?: boolean;
+  // Leaves string literals' arrays out of the program state, for lessons where
+  // they'd only be clutter, like ones that print with printf.
+  hideStringLiterals?: boolean;
+  // Shows the bits of this unsigned char variable as eight lights, which can be
+  // clicked to change it while it's being edited.
+  lights?: string;
 }
 
 interface ProgramContext {
   boxes: BoxState[];
+  output: string;
+  expectedOutput: string;
   basicHint: string | null;
   basicHintTopicIs: (
     kind: BasicProgramHint["kind"],
@@ -65,22 +81,32 @@ interface ProgramContext {
 interface ProgramStep {
   code: string;
   instructions?: ProgramInstructionSpec;
+  // Drawn under the instructions whenever this step is the current one.
+  diagrams?: SyntaxDiagram[];
   hints?: ProgramHintSpec;
   editable?: ProgramEditableSpec;
 }
 
 interface ProgramTemplateConfig {
   steps: ProgramStep[];
+  // False for programs that define main (and other functions) themselves.
+  implicitMain?: boolean;
   initialInstructions?: string;
+  initialDiagrams?: SyntaxDiagram[];
   next: string | null;
   nextLabel?: string;
   workspace?: ProgramWorkspaceConfig;
+  // Runs when the lesson opens at its beginning, rather than partway through.
+  onOpenAtStart?: () => void;
+  // What the program reads from standard input, shown above the output.
+  stdin?: string;
 }
 
 interface ProgramTemplateProgress {
   executionSteps: number;
   solvedStage: number;
   workspaceByStage: Array<{ stageIndex: number; boxes: BoxState[] | null }>;
+  outputByStage?: Array<{ stageIndex: number; output: string }>;
   selectedBoundaryByStage: Array<{ stageIndex: number; boundary: number | null }>;
   otherNamesShown?: string[];
 }
@@ -90,6 +116,8 @@ interface ProgramElements {
   codeEl: HTMLElement | null;
   codeRoot: HTMLElement | null;
   stageEl: HTMLElement | null;
+  outputPanel: HTMLElement | null;
+  outputEl: HTMLElement | null;
   controlsActionsEl: HTMLElement | null;
   mobileActionsEl: HTMLElement | null;
   statusEl: HTMLElement | null;
@@ -109,8 +137,11 @@ type StepInfo = {
   lines: string[];
   startLine: number;
   endLine: number;
+  // The step's last line that isn't blank.
+  codeEndLine: number;
   boundary: number;
   instructions?: ProgramInstructionSpec;
+  diagrams?: SyntaxDiagram[];
   hints?: ProgramHintSpec;
   editable: ProgramEditableSpec;
 };
@@ -123,124 +154,19 @@ type RuntimeStage = {
   afterBoundary: number;
   stateBefore: BoxState[];
   stateAfter: BoxState[];
+  stdoutBefore: string;
+  stdoutAfter: string;
   step: StepInfo | null;
   traceKind?: string;
   stepVisitIndex: number;
   editableMode: "none" | "state" | "boundary";
+  // A call the learner solves also asks where execution continues, inside the function.
+  selectsResume: boolean;
   instructions?: Part;
   hints?: ProgramHint;
   branchTargets: number[];
   traceEndIndex: number | null;
 };
-
-type StrikeFragment = { line: number; start: number; end: number };
-
-function ifKeywordColumnsByLine(lines: string[]): Map<number, number[]> {
-  const columnsByLine = new Map<number, number[]>();
-  let inBlockComment = false;
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex] ?? "";
-    const columns: number[] = [];
-    let quote: "'" | '"' | null = null;
-    let escaped = false;
-    for (let column = 0; column < line.length; column += 1) {
-      const ch = line[column] ?? "";
-      const next = line[column + 1] ?? "";
-      if (inBlockComment) {
-        if (ch === "*" && next === "/") {
-          inBlockComment = false;
-          column += 1;
-        }
-        continue;
-      }
-      if (quote) {
-        if (escaped) escaped = false;
-        else if (ch === "\\") escaped = true;
-        else if (ch === quote) quote = null;
-        continue;
-      }
-      if (ch === "/" && next === "/") break;
-      if (ch === "/" && next === "*") {
-        inBlockComment = true;
-        column += 1;
-        continue;
-      }
-      if (ch === "'" || ch === '"') {
-        quote = ch;
-        continue;
-      }
-      if (ch !== "i" || next !== "f") continue;
-      const before = line[column - 1] ?? "";
-      const after = line[column + 2] ?? "";
-      if (/[A-Za-z0-9_]/.test(before) || /[A-Za-z0-9_]/.test(after)) {
-        continue;
-      }
-      let cursor = column + 2;
-      while (/\s/.test(line[cursor] ?? "")) cursor += 1;
-      if (line[cursor] === "(") columns.push(column);
-    }
-    if (columns.length) columnsByLine.set(lineIndex, columns);
-  }
-  return columnsByLine;
-}
-
-function strikeFragmentsForTrace(
-  lines: string[],
-  trace: Array<{
-    kind: string;
-    file: string;
-    startLine: number;
-    skippedRange: {
-      file: string;
-      startLine: number;
-      startColumn: number;
-      endLine: number;
-      endColumn: number;
-    } | null;
-  }>,
-  traceEndIndex: number,
-): StrikeFragment[] {
-  type SkippedRange = NonNullable<(typeof trace)[number]["skippedRange"]>;
-  const latestRangeByBranch = new Map<string, SkippedRange | null>();
-  const ifColumns = ifKeywordColumnsByLine(lines);
-  const nextBranchSiteByLine = new Map<string, number>();
-  for (let index = 0; index <= traceEndIndex && index < trace.length; index += 1) {
-    const event = trace[index]!;
-    if (event.kind !== "branch") continue;
-    const lineKey = `${event.file}:${event.startLine}`;
-    const columns = ifColumns.get(event.startLine) ?? [];
-    const range = event.skippedRange;
-    let siteIndex = -1;
-    if (range?.startLine === event.startLine) {
-      siteIndex = columns.indexOf(range.startColumn);
-    }
-    if (siteIndex < 0 && columns.length === 1) siteIndex = 0;
-    if (siteIndex < 0 && columns.length > 1) {
-      siteIndex = (nextBranchSiteByLine.get(lineKey) ?? 0) % columns.length;
-    }
-    if (siteIndex >= 0 && columns.length) {
-      nextBranchSiteByLine.set(lineKey, (siteIndex + 1) % columns.length);
-    }
-    const branchKey =
-      siteIndex >= 0
-        ? `${lineKey}:${siteIndex}`
-        : range
-          ? `${lineKey}:${range.startLine}:${range.startColumn}:${range.endLine}:${range.endColumn}`
-          : lineKey;
-    latestRangeByBranch.set(branchKey, range);
-  }
-  const fragments: StrikeFragment[] = [];
-  latestRangeByBranch.forEach((range) => {
-    if (!range) return;
-    for (let line = range.startLine; line <= range.endLine && line < lines.length; line += 1) {
-      const lineText = lines[line] ?? "";
-      const start = line === range.startLine ? range.startColumn : 0;
-      const end = line === range.endLine ? range.endColumn : lineText.length;
-      if (end > start) fragments.push({ line, start, end });
-    }
-  });
-  return fragments;
-}
 
 function collectProgramElements(root: ParentNode = document): ProgramElements {
   const role = <T extends Element>(name: string) => queryRole<T>(name, root);
@@ -249,6 +175,8 @@ function collectProgramElements(root: ParentNode = document): ProgramElements {
     codeEl: role<HTMLElement>("program-code"),
     codeRoot: role<HTMLElement>("program-root"),
     stageEl: role<HTMLElement>("program-stage"),
+    outputPanel: role<HTMLElement>("program-output-panel"),
+    outputEl: role<HTMLElement>("program-output"),
     controlsActionsEl: role<HTMLElement>("program-controls"),
     mobileActionsEl: role<HTMLElement>("program-mobile-actions"),
     statusEl: role<HTMLElement>("program-status"),
@@ -313,7 +241,17 @@ function ensureProgramLayout(): ProgramElements {
   const stageEl = document.createElement("div");
   stageEl.dataset.role = "program-stage";
   stageEl.className = "panel-body";
-  statePanel.append(stateTitle, stageEl);
+  const outputPanel = document.createElement("div");
+  outputPanel.dataset.role = "program-output-panel";
+  outputPanel.className = "program-output-panel hidden";
+  const outputTitle = document.createElement("div");
+  outputTitle.className = "panel-title";
+  outputTitle.textContent = "Output";
+  const outputEl = document.createElement("div");
+  outputEl.dataset.role = "program-output";
+  outputEl.className = "program-output";
+  outputPanel.append(outputTitle, outputEl);
+  statePanel.append(stateTitle, stageEl, outputPanel);
 
   const prevBtn = document.createElement("button");
   prevBtn.dataset.role = "program-prev";
@@ -369,8 +307,21 @@ function boxesNamed(boxes: BoxState[], ...names: string[]): Array<BoxState | und
   return names.map((name) => boxNamed(boxes, name));
 }
 
+// A line that decides where execution goes next: an if, a loop's condition (including
+// a do-while's, after its block), or a switch.
 function isHeaderLine(line: string): boolean {
-  return /^\s*(?:}\s*else\s+)?(?:if|while)\s*\(/.test(line || "");
+  return /^\s*(?:}\s*else\s+)?(?:if|while|for|switch)\s*\(|^\s*}\s*while\s*\(/.test(line || "");
+}
+
+// What decides where execution continues after a header the learner jumps from.
+function headerHint(header: string): string {
+  if (/\bswitch\s*\(/.test(header)) {
+    return "Find the $c{case} label whose value matches the $c{switch}'s value, or $c{default} if none does. Execution continues just after that label.";
+  }
+  if (/\b(?:while|for)\s*\(/.test(header)) {
+    return "Work out whether the condition is true, using the values in the program state. If it is, execution continues into the loop's body. If it isn't, it continues just after the loop.";
+  }
+  return "Work out whether the condition is true, using the values in the program state. If it is, execution continues inside the braces just below it. If it isn't, it skips past them, to the $c{else} if there is one.";
 }
 
 function resolveIndexed<T>(spec: T | T[] | undefined, index: number): T | undefined {
@@ -404,9 +355,13 @@ function formatRunLabel(
   const verb =
     stage.editableMode === "boundary" || (stage.editableMode === "none" && headerOnly)
       ? "Branch from"
-      : stage.editableMode === "state" && badge === "note"
-        ? "Solve"
-        : "Run";
+      : stage.traceKind === "call"
+        ? "Call from"
+        : stage.editableMode === "state" && badge === "note"
+          ? "Solve"
+          : stage.traceKind === "return"
+            ? "Return to"
+            : "Run";
   const suffix = withArrow ? " ▶" : "";
   const prefix = badge === "note" ? "🔧 " : badge === "check" ? "✅ " : "";
   return start === end
@@ -417,10 +372,14 @@ function formatRunLabel(
 function createProgramTemplate(config: ProgramTemplateConfig): void {
   const {
     steps,
+    implicitMain = true,
     initialInstructions = "",
+    initialDiagrams,
     next = null,
     workspace = {},
     nextLabel,
+    onOpenAtStart,
+    stdin = "",
   } = config;
   if (!Array.isArray(steps) || !steps.length) {
     throw new Error("Program steps must be a non-empty array.");
@@ -431,6 +390,8 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     codeEl,
     codeRoot,
     stageEl,
+    outputPanel,
+    outputEl,
     statusEl,
     controlsActionsEl,
     mobileActionsEl,
@@ -507,15 +468,26 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       lines: rawLines,
       startLine,
       endLine,
+      codeEndLine: Math.max(
+        startLine,
+        startLine + rawLines.reduce((last, line, index) => (line.trim() ? index : last), 0),
+      ),
       boundary: endLine + 1,
       instructions: step.instructions,
+      diagrams: step.diagrams,
       hints: step.hints,
       editable: step.editable ?? false,
     });
   });
   const totalLines = lineList.length;
   const fullCode = steps.map((step) => step.code).join("");
-  const run = runCProgram(fullCode);
+  const run: CProgramResult = implicitMain
+    ? runCProgram(fullCode, undefined, stdin)
+    : runCFiles([{ path: "program.c", source: fullCode }], undefined, stdin, false, {
+        stepLimit: 100_000,
+        followingTraceLimit: 256,
+        traceFunctions: true,
+      });
   if (run.kind !== "ok") {
     throw new Error(run.diagnostic.message || "Program template code does not compile.");
   }
@@ -524,9 +496,33 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     stepInfos.find((step) => line >= step.startLine && line <= step.endLine) || null;
   const visitCounts = new Map<number, number>();
   const runtimeStages: RuntimeStage[] = [];
+  const shownState = (boxes: BoxState[]) =>
+    workspace.hideStringLiterals ? boxes.filter((box) => box.anonymous !== "string literal") : boxes;
+  const trace = (run.trace || [])
+    .map((event) => (workspace.hideStringLiterals ? { ...event, state: shownState(event.state) } : event))
+    // A do-while's closing brace and its condition share a line, so reaching the
+    // brace is just part of checking the condition.
+    .filter((event, index, events) => {
+      const next = events[index + 1];
+      return !(
+        event.kind === "block-close" &&
+        next?.kind === "loop" &&
+        next.frameId === event.frameId &&
+        next.startLine === event.startLine
+      );
+    });
+  // Every struct and union in the program, so the learner can create one of the
+  // same type.
+  const aggregateModels = trace.flatMap((event) => event.state);
+  const exitStatus = run.exitStatus;
+  // What exists before the first line runs: string literals, globals, and main's parameters.
+  const initialState = shownState(run.initialState);
+  const stdoutDecoder = new TextDecoder();
+  const stdoutAt = (length: number) =>
+    stdoutDecoder.decode(run.stdoutBytes.subarray(0, length));
   let previousBoundary = 0;
-  let previousState: BoxState[] = [];
-  const trace = run.trace || [];
+  let previousState: BoxState[] = cloneBoxes(initialState);
+  let previousStdout = "";
 
   function matchingCloseBoundaryForHeader(headerLine: number): number | null {
     const header = lineList[headerLine] || "";
@@ -584,10 +580,13 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
         afterBoundary: step.boundary,
         stateBefore: cloneBoxes(previousState),
         stateAfter: cloneBoxes(stateAfterStep),
+        stdoutBefore: previousStdout,
+        stdoutAfter: previousStdout,
         step,
         traceKind: "synthetic",
         stepVisitIndex: visitIndex,
         editableMode: editable ? (headerEditable ? "boundary" : "state") : "none",
+        selectsResume: false,
         instructions: resolveIndexed(step.instructions, visitIndex),
         hints: resolveIndexed(step.hints, visitIndex),
         branchTargets: editable && headerEditable
@@ -624,6 +623,76 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     return `name:${box.name ?? ""}:${box.type ?? ""}:${box.arrayRoot ?? ""}:${(box.arrayIndices ?? []).join(",")}`;
   }
 
+  // Where execution starts: line 1, or the top of main's body.
+  const initialBoundary = implicitMain ? 0 : trace[0]?.startLine ?? 0;
+
+  // Programs with their own functions jump between distant lines, so their
+  // stages come straight from the trace instead of from walking the steps.
+  function pushTraceStages() {
+    previousBoundary = initialBoundary;
+    for (let i = 0; i < trace.length; i += 1) {
+      const event = trace[i]!;
+      const step = stepForLine(event.startLine);
+      if (!step) continue;
+      const visitIndex = visitCounts.get(step.index) ?? 0;
+      const editable = editableForVisit(step, visitIndex);
+      const headerOnly =
+        event.kind !== "block-close" &&
+        step.lines.length === 1 &&
+        isHeaderLine(step.lines[0] || "");
+      let j = i;
+      if (!headerOnly && event.kind !== "call") {
+        while (j + 1 < trace.length) {
+          const following = trace[j + 1]!;
+          if (following.kind === "call" || following.frameId !== event.frameId) break;
+          if (following.startLine < step.startLine || following.startLine > step.endLine) break;
+          j += 1;
+        }
+      }
+      const lastEvent = trace[j]!;
+      const nextTraceLine = trace[j + 1]?.startLine ?? totalLines;
+      const headerCloseBoundary = headerOnly
+        ? matchingCloseBoundaryForHeader(step.startLine)
+        : null;
+      const afterBoundary =
+        headerCloseBoundary != null &&
+        headerCloseBoundary < nextTraceLine &&
+        nextTraceLine > lastEvent.endLine + 1
+          ? headerCloseBoundary
+          : nextTraceLine;
+      runtimeStages.push({
+        index: runtimeStages.length,
+        runLine: step.startLine,
+        runEndLine: headerOnly ? event.endLine : step.codeEndLine,
+        beforeBoundary: previousBoundary,
+        afterBoundary,
+        stateBefore: cloneBoxes(previousState),
+        stateAfter: cloneBoxes(lastEvent.state),
+        stdoutBefore: previousStdout,
+        stdoutAfter: stdoutAt(lastEvent.stdoutLength),
+        step,
+        traceKind: event.kind,
+        stepVisitIndex: visitIndex,
+        editableMode: editable ? (headerOnly ? "boundary" : "state") : "none",
+        selectsResume: editable && !headerOnly && event.kind === "call",
+        instructions: resolveIndexed(step.instructions, visitIndex),
+        hints: resolveIndexed(step.hints, visitIndex),
+        branchTargets: editable && (headerOnly || event.kind === "call")
+          ? Array.from({ length: totalLines + 1 }, (_, index) => index)
+          : [],
+        traceEndIndex: j,
+      });
+      visitCounts.set(step.index, visitIndex + 1);
+      previousBoundary = afterBoundary;
+      previousState = cloneBoxes(lastEvent.state);
+      previousStdout = stdoutAt(lastEvent.stdoutLength);
+      i = j;
+    }
+  }
+
+  if (!implicitMain) {
+    pushTraceStages();
+  } else {
   for (let i = 0; i < trace.length; i += 1) {
     const event = trace[i]!;
     if (event.startLine < previousBoundary) {
@@ -694,10 +763,13 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       afterBoundary,
       stateBefore: cloneBoxes(previousState),
       stateAfter: cloneBoxes(stateAfterStage),
+      stdoutBefore: previousStdout,
+      stdoutAfter: stdoutAt(lastEvent.stdoutLength),
       step,
       traceKind: event.kind,
       stepVisitIndex: visitIndex,
       editableMode: editable ? (headerEditable ? "boundary" : "state") : "none",
+      selectsResume: false,
       instructions: resolveIndexed(step.instructions, visitIndex),
       hints: resolveIndexed(step.hints, visitIndex),
       branchTargets,
@@ -706,9 +778,11 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     visitCounts.set(step.index, visitIndex + 1);
     previousBoundary = afterBoundary;
     previousState = cloneBoxes(stateAfterStage);
+    previousStdout = stdoutAt(lastEvent.stdoutLength);
     i = j;
   }
-  pushNoEventStages(totalLines + 1, run.state || previousState);
+  pushNoEventStages(totalLines + 1, run.state ? shownState(run.state) : previousState);
+  }
 
   const progress = createLevelProgressController<ProgramTemplateProgress>(
     isDefaultProgress,
@@ -722,12 +796,34 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   const selectedBoundaryByStage = new Map<number, number | null>(
     (restored?.selectedBoundaryByStage || []).map((entry) => [entry.stageIndex, entry.boundary]),
   );
+  const showOutput = !!workspace.showOutput;
+  // The learner's predicted output for each editable stage.
+  const outputByStage = new Map<number, string>(
+    (restored?.outputByStage || []).map((entry) => [entry.stageIndex, entry.output]),
+  );
   const otherNamesShown = new Set(
     Array.isArray(restored?.otherNamesShown)
       ? restored.otherNamesShown.filter((addr): addr is string => typeof addr === "string")
       : [],
   );
 
+  // Where the learner starts editing a step: the state before it, plus any nameless
+  // objects it creates, like blocks from malloc. There's no declaration to copy
+  // those from, so they're laid out already, with their values left empty.
+  const workspaceStart = (stage: RuntimeStage): BoxState[] => {
+    const before = new Set(stage.stateBefore.map((box) => box.name));
+    const created = new Set(
+      stage.stateAfter
+        .filter((box) => box.anonymous && !before.has(box.name) && !box.arrayRoot && !box.aggregateRoot)
+        .map((box) => box.name),
+    );
+    const parts = stage.stateAfter.filter((box) =>
+      [box.name, box.arrayRoot, box.aggregateRoot].some((name) => !!name && created.has(name)));
+    return [
+      ...cloneBoxes(stage.stateBefore),
+      ...cloneBoxes(parts).map((box) => ({ ...box, value: "", rawValue: "", displayValue: null })),
+    ];
+  };
   const currentStage = () => (executionSteps >= 0 ? runtimeStages[executionSteps] || null : null);
   const stageNeedsSolve = (stage: RuntimeStage | null) =>
     !!stage && stage.editableMode !== "none" && stage.index > solvedStage;
@@ -737,7 +833,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   };
   const currentBoundary = () => {
     const stage = currentStage();
-    if (!stage) return 0;
+    if (!stage) return initialBoundary;
     if (stageNeedsSolve(stage) && stage.editableMode === "boundary") {
       return stage.step?.boundary ?? stage.afterBoundary;
     }
@@ -756,7 +852,8 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       : "Back ◀";
   const nextButtonLabel = () => {
     const stage = currentStage();
-    if (stageNeedsSolve(stage) && stage?.editableMode === "boundary") {
+    // Naming the next line would give away where execution continues.
+    if (stageNeedsSolve(stage) && (stage?.editableMode === "boundary" || stage?.selectsResume)) {
       return "🔧 ??? ▶";
     }
     if (executionSteps >= runtimeStages.length - 1) {
@@ -781,6 +878,10 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
         boundary,
       })),
       otherNamesShown: Array.from(otherNamesShown),
+      outputByStage: Array.from(outputByStage.entries()).map(([stageIndex, output]) => ({
+        stageIndex,
+        output,
+      })),
     };
   }
 
@@ -790,7 +891,8 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       snapshot.solvedStage === -1 &&
       snapshot.workspaceByStage.length === 0 &&
       snapshot.selectedBoundaryByStage.length === 0 &&
-      (snapshot.otherNamesShown?.length ?? 0) === 0
+      (snapshot.otherNamesShown?.length ?? 0) === 0 &&
+      (snapshot.outputByStage?.length ?? 0) === 0
     );
   }
 
@@ -830,6 +932,16 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       stage?.instructions ??
       (executionSteps < 0 ? initialInstructions : null);
     setPartsContent(instructionsEl, applyButtonTokens(text));
+    const diagrams = stage ? stage.step?.diagrams : initialDiagrams;
+    let diagramsEl = queryRole<HTMLElement>("program-diagrams");
+    if (!diagramsEl && instructionsEl) {
+      diagramsEl = document.createElement("div");
+      diagramsEl.dataset.role = "program-diagrams";
+      instructionsEl.after(diagramsEl);
+    }
+    if (diagramsEl) {
+      diagramsEl.replaceChildren(...(diagrams?.length ? [renderSyntaxDiagrams(diagrams)] : []));
+    }
   }
 
   function refreshOtherNames() {
@@ -909,7 +1021,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     const editable = !!stage && stageNeedsSolve(stage) && stage.editableMode === "state";
     if (editable && stage) {
       const snapshot = workspaceByStage.get(stage.index) ?? null;
-      const wrap = restoreWorkspace(snapshot, stage.stateBefore, {
+      const wrap = restoreWorkspace(snapshot, workspaceStart(stage), {
         editable: true,
         deletable: !!workspace.allowVariableDeletion,
         allowNameEdit: null,
@@ -917,6 +1029,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       });
       stageEl.appendChild(wrap);
       refreshDynamicAddresses(wrap, stage);
+      renderVariableLights(wrap, true);
       wrap.addEventListener("input", (event) => {
         const target = event.target;
         const dynamicBox =
@@ -932,6 +1045,17 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
         updateResetVisibility();
         persistProgress();
         if (workspace.showOtherNames) refreshOtherNames();
+        renderVariableLights(wrap, true);
+      });
+      wrap.addEventListener("focusout", (event) => {
+        const target = event.target;
+        // A struct needs both its name and its type before it can be laid out.
+        if (!(target instanceof HTMLElement) || !target.matches(".type, .array-type, .name-text")) return;
+        if (!reshapeDynamicBox(target, aggregateModels)) return;
+        refreshDynamicAddresses(wrap, stage);
+        workspaceByStage.set(stage.index, serializeWorkspace(wrap) || []);
+        updateResetVisibility();
+        persistProgress();
       });
       wrap.addEventListener("click", () => {
         window.setTimeout(() => {
@@ -950,7 +1074,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     const wrap = document.createElement("div");
     wrap.dataset.role = "workspace";
     wrap.className = "grid";
-    const boxes = cloneBoxes(stage?.stateAfter || []);
+    const boxes = cloneBoxes(stage?.stateAfter || initialState);
     if (!boxes.length) {
       const msg = document.createElement("div");
       msg.className = "muted";
@@ -964,9 +1088,49 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       });
     }
     stageEl.appendChild(wrap);
+    renderVariableLights(wrap, false);
+    // Once main has returned, the program is over, and what it returned is its exit status.
+    if (!implicitMain && stage && stage.index === runtimeStages.length - 1) {
+      const exit = document.createElement("div");
+      exit.className = "program-exit-status";
+      exit.append("The program has ended, with exit status ");
+      const status = document.createElement("span");
+      status.className = "program-exit-status-value";
+      status.textContent = String(exitStatus);
+      exit.append(status, ".");
+      stageEl.appendChild(exit);
+    }
     if (workspace.showOtherNames) {
       refreshOtherNames();
     }
+  }
+
+  // The lights panel for workspace.lights, above the program state.
+  function renderVariableLights(wrap: HTMLElement, editable: boolean) {
+    const name = workspace.lights;
+    if (!name || !stageEl) return;
+    stageEl.querySelector(".program-lights")?.remove();
+    const valueEl = [...wrap.querySelectorAll<HTMLElement>(".vbox")]
+      .find((box) => (box.dataset.stateName || box.querySelector(".name-text")?.textContent?.trim()) === name)
+      ?.querySelector<HTMLElement>(".value");
+    const holder = document.createElement("div");
+    holder.className = "program-lights";
+    stageEl.prepend(holder);
+    if (!valueEl) return;
+    const value = Number((valueEl.dataset.rawValue ?? valueEl.textContent ?? "").trim()) & 0xff;
+    holder.appendChild(
+      renderLights(
+        value,
+        editable && valueEl.isContentEditable
+          ? (bit) => {
+              valueEl.textContent = String(value ^ (1 << bit));
+              // The workspace's input listener saves the change and redraws the lights.
+              valueEl.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+          : undefined,
+        `the value of ${name}`,
+      ),
+    );
   }
 
   function getWorkspaceEl(): HTMLElement | null {
@@ -985,8 +1149,91 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       return;
     }
     const current = readWorkspace();
-    const baseline = stage.stateBefore;
-    resetBtn.classList.toggle("hidden", stateMatches(current, baseline));
+    const baseline = workspaceStart(stage);
+    const outputUnchanged = enteredOutput(stage) === stage.stdoutBefore;
+    resetBtn.classList.toggle("hidden", stateMatches(current, baseline) && outputUnchanged);
+  }
+
+  function enteredOutput(stage: RuntimeStage): string {
+    return outputByStage.get(stage.index) ?? stage.stdoutBefore;
+  }
+
+  function solvingState(stage: RuntimeStage | null): boolean {
+    return !!stage && stageNeedsSolve(stage) && stage.editableMode === "state";
+  }
+
+  function outputMatches(stage: RuntimeStage): boolean {
+    return !showOutput || enteredOutput(stage) === stage.stdoutAfter;
+  }
+
+  // A terminal-like view of stdout. The cursor shows where the next character goes,
+  // which makes a trailing newline visible.
+  function renderOutput(stage: RuntimeStage | null) {
+    if (!outputPanel || !outputEl) return;
+    outputPanel.classList.toggle("hidden", !showOutput);
+    if (!showOutput) return;
+    clearNode(outputEl);
+    if (stdin) {
+      const input = document.createElement("div");
+      input.className = "program-stdin";
+      const label = document.createElement("div");
+      label.className = "program-stdin-label";
+      label.textContent = "Standard input:";
+      const text = document.createElement("pre");
+      text.className = "program-output-text";
+      text.textContent = stdin;
+      input.append(label, text);
+      outputEl.appendChild(input);
+    }
+    if (stage && solvingState(stage)) {
+      const input = document.createElement("textarea");
+      input.className = "program-output-text program-output-input";
+      input.setAttribute("aria-label", "Predicted output");
+      input.spellcheck = false;
+      input.value = enteredOutput(stage);
+      input.addEventListener("input", () => {
+        outputByStage.set(stage.index, input.value.replace(/\r\n/g, "\n"));
+        updateResetVisibility();
+        persistProgress();
+      });
+      outputEl.appendChild(input);
+      return;
+    }
+    const text = stage ? stage.stdoutAfter : "";
+    const pre = document.createElement("pre");
+    pre.className = "program-output-text";
+    pre.textContent = text;
+    const cursor = document.createElement("span");
+    cursor.className = "program-output-cursor";
+    cursor.setAttribute("aria-hidden", "true");
+    pre.appendChild(cursor);
+    outputEl.appendChild(pre);
+  }
+
+  function basicOutputHint(stage: RuntimeStage): string | null {
+    const entered = enteredOutput(stage);
+    const expected = stage.stdoutAfter;
+    if (!showOutput || entered === expected) return null;
+    if (entered === stage.stdoutBefore) {
+      return "This line should change the output.";
+    }
+    if (expected === stage.stdoutBefore) {
+      return "This line shouldn't change the output.";
+    }
+    if (`${entered}\n` === expected) {
+      return "The output is missing a newline at the end. A newline moves the cursor to the start of the next line; press Enter to type one.";
+    }
+    if (entered === `${expected}\n`) {
+      return "The output shouldn't end with a newline here.";
+    }
+    if (!entered.startsWith(stage.stdoutBefore)) {
+      return "What was printed before stays printed: this line can only add to the end of the output.";
+    }
+    const conversion = /%[-+ #0]*\d*(?:\.\d+)?[a-z]/i;
+    if (conversion.test(entered.slice(stage.stdoutBefore.length)) && !conversion.test(expected.slice(stage.stdoutBefore.length))) {
+      return "Conversion specifications like $c{%d} aren't printed as they are: each one is replaced by the next argument, formatted.";
+    }
+    return "The output isn't right yet.";
   }
 
   function renderCode() {
@@ -998,12 +1245,17 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       stage?.traceKind !== "block-close" &&
       stage?.step?.lines.length === 1 &&
       isHeaderLine(stage.step.lines[0] || "");
+    // After a call, execution is inside the function, not back on the line with the
+    // call. After a function returns, the marker stays just below the line that
+    // returned, until the next step goes back to the caller.
     const displayBoundary =
-      stage && !headerOnly && stage.step && !isElseLine(stage.step)
-        ? Math.min(rawBoundary, stage.step.boundary)
-        : rawBoundary;
+      stage?.traceKind === "function-exit" && stage.step
+        ? stage.step.codeEndLine + 1
+        : stage && !headerOnly && stage.step && !isElseLine(stage.step) && stage.traceKind !== "call"
+          ? Math.min(rawBoundary, stage.step.codeEndLine + 1)
+          : rawBoundary;
     const selectable =
-      stage && solving && stage.editableMode === "boundary"
+      stage && solving && (stage.editableMode === "boundary" || stage.selectsResume)
         ? stage.branchTargets
         : [];
     const lastResolvedStageIndex = solving && stage ? stage.index - 1 : executionSteps;
@@ -1019,6 +1271,14 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       trace,
       resolvedTraceEnd,
     );
+    const doneLines = doneLinesForTrace(lineList, trace, resolvedTraceEnd);
+    // Stepping onto a line that only opens a block is entering the block, so it counts.
+    for (let index = 0; index <= lastResolvedStageIndex; index += 1) {
+      const resolved = runtimeStages[index];
+      if (resolved?.traceEndIndex == null && (lineList[resolved?.runLine ?? -1] ?? "").trim() === "{") {
+        doneLines.add(resolved!.runLine);
+      }
+    }
     const nextStage = solving ? null : nextLabelStage();
     renderCodePane(codeEl, lineList, displayBoundary, {
       nextRange: nextStage ? { start: nextStage.runLine, end: nextStage.runEndLine } : undefined,
@@ -1030,6 +1290,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
           ? rawBoundary
           : stage.runLine
         : displayBoundary,
+      doneLines,
       suppressProgressMid: solving && stage?.editableMode === "boundary",
       hideBoundary: selectable.length > 0,
       boundaryTargets: selectable.length > 0,
@@ -1067,7 +1328,9 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     );
     return {
       boxes,
-      basicHint: basic?.message ?? null,
+      output: solvingState(stage) ? enteredOutput(stage) : stage.stdoutAfter,
+      expectedOutput: stage.stdoutAfter,
+      basicHint: basic?.message ?? (solvingState(stage) ? basicOutputHint(stage) : null),
       basicHintTopicIs: (kind, variable) =>
         basic?.kind === kind && (variable == null || basic.variable === variable),
       boxNamed: (name) => boxNamed(boxes, name),
@@ -1100,7 +1363,16 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     } else {
       const actual = readWorkspace();
       workspaceByStage.set(stage.index, cloneBoxes(actual));
-      if (!stateMatches(actual, stage.stateAfter)) {
+      if (stage.selectsResume && selectedBoundaryByStage.get(stage.index) == null) {
+        setStatus("Select where execution continues.", "err");
+        flashStatus(statusEl);
+        return false;
+      }
+      if (
+        !stateMatches(actual, stage.stateAfter) ||
+        !outputMatches(stage) ||
+        (stage.selectsResume && selectedBoundaryByStage.get(stage.index) !== stage.afterBoundary)
+      ) {
         setStatus("incorrect", "err");
         flashStatus(statusEl);
         return false;
@@ -1111,6 +1383,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     flashStatus(statusEl);
     hideHint();
     workspaceByStage.delete(stage.index);
+    outputByStage.delete(stage.index);
     persistProgress();
     render();
     pulseNext();
@@ -1135,7 +1408,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       nextBtn.dataset.stepperEnd = String(complete);
     }
     if (checkBtn) checkBtn.classList.toggle("hidden", !locked);
-    if (hintBtn) hintBtn.classList.toggle("hidden", !(locked && stage?.editableMode === "state"));
+    if (hintBtn) hintBtn.classList.toggle("hidden", !(locked && stage?.editableMode !== "none"));
     if (addBtn) {
       addBtn.classList.toggle(
         "hidden",
@@ -1153,6 +1426,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     renderInstructions();
     renderCode();
     renderWorkspace(currentStage());
+    renderOutput(currentStage());
     renderControls();
     persistProgress();
   }
@@ -1263,34 +1537,61 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     });
   }
 
+  // Scrolls the code so the statement that just ran is visible, along with as much
+  // of its surroundings as fits: first the lines right around it, then the whole
+  // statements that ran before it and will run after it.
   function scrollCodeStatementIntoView(stage: RuntimeStage | null) {
     if (!codeEl || !stage) return;
     window.requestAnimationFrame(() => {
       const lines = codeEl.querySelectorAll<HTMLElement>(".line");
-      const firstLine = lines[stage.runLine] ?? null;
-      const lastLine = lines[stage.runEndLine] ?? firstLine;
-      if (!firstLine || !lastLine) return;
-
-      const hostRect = codeEl.getBoundingClientRect();
-      const firstRect = firstLine.getBoundingClientRect();
-      const lastRect = lastLine.getBoundingClientRect();
+      if (!lines.length) return;
+      const hostTop = codeEl.getBoundingClientRect().top;
+      const extent = (start: number, end: number) => {
+        const first = lines[Math.max(0, Math.min(lines.length - 1, start))]!;
+        const last = lines[Math.max(0, Math.min(lines.length - 1, end))]!;
+        return {
+          top: codeEl.scrollTop + first.getBoundingClientRect().top - hostTop,
+          bottom: codeEl.scrollTop + last.getBoundingClientRect().bottom - hostTop,
+        };
+      };
       const padding = 8;
-      const statementTop =
-        codeEl.scrollTop + firstRect.top - hostRect.top;
-      const statementBottom =
-        codeEl.scrollTop + lastRect.bottom - hostRect.top;
-      const statementHeight = statementBottom - statementTop;
-      const availableHeight = Math.max(0, codeEl.clientHeight - padding * 2);
-      let target = codeEl.scrollTop;
-
-      if (statementHeight > availableHeight) {
-        target = statementBottom - codeEl.clientHeight + padding;
-      } else {
-        const minimum = statementBottom - codeEl.clientHeight + padding;
-        const maximum = statementTop - padding;
-        target = Math.max(minimum, Math.min(maximum, target));
+      const available = Math.max(0, codeEl.clientHeight - padding * 2);
+      const previous = runtimeStages[stage.index - 1];
+      const following = runtimeStages[stage.index + 1];
+      // Once a step has run, where execution is now matters most, which is
+      // somewhere else entirely after a call, return, or jump. The marker sits
+      // just above the line at its index.
+      const markerEl = stageNeedsSolve(stage) ? null : codeEl.querySelector(".boundary:not(.selectable)");
+      let markerIndex = 0;
+      for (let node = markerEl?.previousElementSibling; node; node = node.previousElementSibling) {
+        if (node.classList.contains("line")) markerIndex += 1;
+      }
+      const marker = markerEl ? [[markerIndex - 1, markerIndex]] : [];
+      const [first, ...wanted] = [
+        ...marker,
+        [stage.runLine, stage.runEndLine],
+        [stage.runLine - 1, stage.runLine - 1],
+        [stage.runEndLine + 1, stage.runEndLine + 1],
+        ...(previous ? [[previous.runLine, previous.runEndLine]] : []),
+        ...(following ? [[following.runLine, following.runEndLine]] : []),
+      ]
+        .map(([start, end]) => [Math.max(0, start!), Math.min(lines.length - 1, end!)] as const)
+        .filter(([start, end]) => start <= end);
+      let shown = extent(first![0], first![1]);
+      for (const [start, end] of wanted) {
+        const range = extent(start, end);
+        const grown = { top: Math.min(shown.top, range.top), bottom: Math.max(shown.bottom, range.bottom) };
+        if (grown.bottom - grown.top <= available) shown = grown;
       }
 
+      let target = codeEl.scrollTop;
+      if (shown.bottom - shown.top > available) {
+        target = shown.bottom - codeEl.clientHeight + padding;
+      } else {
+        const minimum = shown.bottom - codeEl.clientHeight + padding;
+        const maximum = shown.top - padding;
+        target = Math.max(minimum, Math.min(maximum, target));
+      }
       const maxScroll = Math.max(0, codeEl.scrollHeight - codeEl.clientHeight);
       codeEl.scrollTo({
         top: Math.max(0, Math.min(maxScroll, target)),
@@ -1326,18 +1627,18 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     const nextStage = currentStage();
     const nextDisplayedState =
       nextStage?.editableMode === "state" && stageNeedsSolve(nextStage)
-        ? nextStage.stateBefore
+        ? workspaceStart(nextStage)
         : nextStage?.stateAfter || [];
     const shouldScrollState = introducesVisibleObject(
-      stage?.stateAfter || [],
+      stage?.stateAfter || initialState,
       nextDisplayedState,
     );
     const changedBoxes = changedValueBoxes(
-      stage?.stateAfter || [],
+      stage?.stateAfter || initialState,
       nextDisplayedState,
     );
     if (nextStage?.editableMode === "state" && !workspaceByStage.has(nextStage.index)) {
-      workspaceByStage.set(nextStage.index, cloneBoxes(nextStage.stateBefore));
+      workspaceByStage.set(nextStage.index, workspaceStart(nextStage));
     }
     setStatus("", "muted");
     hideHint();
@@ -1347,6 +1648,23 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     else minimallyRevealChangedValue(changedBoxes);
   });
 
+  // For checking that every step can be solved: with ?solve in the URL, this puts
+  // the current step's expected answer into the editor, as a learner would.
+  if (new URLSearchParams(window.location.search).has("solve")) {
+    (window as unknown as { solveCurrentStage: () => void }).solveCurrentStage = () => {
+      const stage = currentStage();
+      if (!stage || !stageNeedsSolve(stage)) return;
+      if (stage.editableMode === "state") {
+        workspaceByStage.set(stage.index, cloneBoxes(stage.stateAfter));
+        outputByStage.set(stage.index, stage.stdoutAfter);
+      }
+      if (stage.editableMode === "boundary" || stage.selectsResume) {
+        selectedBoundaryByStage.set(stage.index, stage.afterBoundary);
+      }
+      render();
+    };
+  }
+
   checkBtn?.addEventListener("click", () => {
     checkCurrentStage();
   });
@@ -1355,8 +1673,13 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     const stage = currentStage();
     if (stage?.editableMode === "state" && stageNeedsSolve(stage)) {
       const boxes = readWorkspace();
-      if (stateMatches(boxes, stage.stateAfter)) {
-        showHint("Looks good. Press $checkButton.");
+      const resumeRight = !stage.selectsResume || selectedBoundaryByStage.get(stage.index) === stage.afterBoundary;
+      if (stateMatches(boxes, stage.stateAfter) && outputMatches(stage)) {
+        showHint(
+          resumeRight
+            ? "Looks good. Press $checkButton."
+            : "The program state is right. Now select where execution continues: once a function is called, it runs its body from the top.",
+        );
         return;
       }
       const parts = currentHint();
@@ -1375,13 +1698,21 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       showHint(parts);
       return;
     }
-    showHint(currentHint());
+    if (stage?.editableMode === "boundary" && stageNeedsSolve(stage)) {
+      showHint(
+        selectedBoundaryByStage.get(stage.index) === stage.afterBoundary
+          ? "Looks good. Press $checkButton."
+          : stage.hints?.(hintContext(stage)) || headerHint(stage.step?.lines.find(isHeaderLine) ?? ""),
+      );
+    }
   });
 
   resetBtn?.addEventListener("click", () => {
     const stage = currentStage();
     if (!stage || stage.editableMode !== "state") return;
-    workspaceByStage.set(stage.index, cloneBoxes(stage.stateBefore));
+    workspaceByStage.set(stage.index, workspaceStart(stage));
+    outputByStage.delete(stage.index);
+    selectedBoundaryByStage.delete(stage.index);
     setStatus("", "muted");
     hideHint();
     render();
@@ -1442,6 +1773,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
       solvedStage = -1;
       workspaceByStage.clear();
       selectedBoundaryByStage.clear();
+      outputByStage.clear();
       otherNamesShown.clear();
       setStatus("", "muted");
       hideHint();
@@ -1450,6 +1782,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
   });
 
   render();
+  if (executionSteps === -1) onOpenAtStart?.();
 }
 
 export { createProgramTemplate };

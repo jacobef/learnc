@@ -1,5 +1,6 @@
 import { DEFAULT_NAV_ITEMS as NAV_ITEMS } from "./nav-items.js";
 import { startLevelReplay } from "./shared-replay.js";
+import { mountQuickReference } from "./shared-reference.js";
 import {
   clearNode,
   disableAutoText,
@@ -16,6 +17,7 @@ import {
   makeAnswerBox,
   readBoxState,
   removeBoxDeleteButtons,
+  reshapeDynamicBox,
   restoreWorkspace,
   serializeWorkspace,
   vbox,
@@ -31,6 +33,8 @@ interface RenderCodePaneOptions {
   progressIndex?: number;
   progressRange?: [number, number] | { start: number; end: number };
   doneBoundary?: number;
+  // The lines that have finished running, when that isn't just every line above the boundary.
+  doneLines?: ReadonlySet<number>;
   hideBoundary?: boolean;
   selectableBoundaries?: number[];
   selectedBoundary?: number | null;
@@ -68,6 +72,9 @@ interface StepperOptions {
   startLabel?: string;
   endLabel?: string;
   allowSameBoundary?: boolean;
+  // When set, going back from the first step shows the lesson's intro instead of
+  // leaving for the previous lesson.
+  backToIntro?: () => void;
 }
 export interface Stepper {
   update: () => void;
@@ -229,6 +236,12 @@ function ensureSidebarControls(wrap: HTMLElement, nav: HTMLElement) {
     sidebarWrap.appendChild(nav);
   }
 
+  let actions = sidebarWrap.querySelector<HTMLElement>(".sidebar-actions");
+  if (!actions) {
+    actions = document.createElement("div");
+    actions.className = "sidebar-actions";
+    sidebarWrap.insertBefore(actions, sidebarWrap.firstChild);
+  }
   let btn = sidebarWrap.querySelector(
     ".sidebar-toggle",
   ) as HTMLButtonElement | null;
@@ -236,10 +249,11 @@ function ensureSidebarControls(wrap: HTMLElement, nav: HTMLElement) {
     btn = el(
       '<button type="button" class="sidebar-toggle"><span class="hamburger" aria-hidden="true"><span></span><span></span><span></span></span><span class="sidebar-toggle-caption" aria-hidden="true">Lessons</span><span class="sr-only">Show lessons</span></button>',
     ) as HTMLButtonElement;
-    sidebarWrap.insertBefore(btn, sidebarWrap.firstChild);
-  } else if (btn.parentElement !== sidebarWrap) {
-    sidebarWrap.insertBefore(btn, sidebarWrap.firstChild);
   }
+  if (btn.parentElement !== actions) {
+    actions.insertBefore(btn, actions.firstChild);
+  }
+  mountQuickReference(actions, currentNavHref(), (target, text) => renderParts(target, text));
   btn.setAttribute("aria-controls", nav.id);
   nav.setAttribute("aria-label", "Lessons");
   let title = sidebarWrap.querySelector<HTMLElement>(".mobile-page-title");
@@ -562,7 +576,7 @@ function renderCodePane(
     } else {
       src.textContent = rawLine;
     }
-    if (i < doneBoundary) lr.classList.add("done");
+    if (opts.doneLines ? opts.doneLines.has(i) : i < doneBoundary) lr.classList.add("done");
     if (nextRange && i >= nextRange[0] && i <= nextRange[1]) lr.classList.add("is-next");
     const inProgressRange =
       progressRangeStart !== null &&
@@ -826,6 +840,7 @@ function createStepper({
   startLabel,
   endLabel,
   allowSameBoundary = false,
+  backToIntro,
 }: StepperOptions = {}): Stepper {
   const boundButtons = new WeakSet();
   const getPrevButtons = () =>
@@ -869,7 +884,7 @@ function createStepper({
     const nextButtons = getNextButtons();
     const current = boundary();
     prevButtons.forEach((btn) => {
-      const atStart = current === 0;
+      const atStart = current === 0 && !backToIntro;
       const canNavigateBack = atStart && !!previousPage;
       btn.disabled = atStart && !canNavigateBack;
       const label = canNavigateBack
@@ -951,6 +966,11 @@ function createStepper({
       boundButtons.add(btn);
       btn.addEventListener("click", () => {
         if (boundary() === 0) {
+          if (backToIntro) {
+            clearPulse();
+            backToIntro();
+            return;
+          }
           if (!btn.disabled && previousPage) {
             const previousUrl = withSidebarParam(previousPage);
             if (previousUrl) window.location.href = previousUrl;
@@ -1404,6 +1424,7 @@ export {
   removeBoxDeleteButtons,
   renderCodePane,
   renderParts,
+  reshapeDynamicBox,
   resolveActiveNavItem,
   restoreWorkspace,
   serializeWorkspace,
