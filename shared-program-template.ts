@@ -1092,7 +1092,7 @@ function createProgramTemplate(config: ProgramTemplateConfig): void {
     renderVariableLights(wrap, false);
     // Once the program has ended, say how: what main returned, or which call ended it.
     if (!implicitMain && endedBy && stage && stage.index === runtimeStages.length - 1) {
-      stageEl.appendChild(renderExitStatus(exitStatus));
+      stageEl.appendChild(renderExitStatus(exitStatus, endedBy));
     }
     if (workspace.showOtherNames) {
       refreshOtherNames();

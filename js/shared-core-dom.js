@@ -1199,16 +1199,25 @@ function flashStatus(el) {
     void node.offsetWidth;
     node.classList.add("status-flash");
 }
-// Shown once main has returned, with the value it returned.
-function renderExitStatus(status) {
+// Shown once the program has ended: what main returned, or which call ended it.
+function renderExitStatus(status, endedBy) {
     const exit = document.createElement("div");
     exit.className = "program-exit-status";
-    const main = document.createElement("code");
-    main.textContent = "main";
     const value = document.createElement("span");
     value.className = "program-exit-status-value";
     value.textContent = String(status);
-    exit.append("The program has ended: ", main, " returned ", value, ".");
+    const code = document.createElement("code");
+    if (endedBy === "return") {
+        code.textContent = "main";
+        exit.append("The program has ended: ", code, " returned ", value, ".");
+    }
+    else {
+        if (endedBy === "abort")
+            code.textContent = "abort()";
+        else
+            code.append(`${endedBy}(`, value, ")");
+        exit.append("The program has ended: it called ", code, ".");
+    }
     return exit;
 }
 export { clearNode, buildNav, createStepper, withSidebarParam, disableBoxEditing, ensureBaseLayout, ensurePanelizedMain, flashStatus, getNavLabelForHref, getPreviousNavHref, isMobileViewport, bindBtnRefPulse, makeAnswerBox, queryElement, queryRole, readBoxState, removeBoxDeleteButtons, renderCodePane, renderParts, reshapeDynamicBox, resolveActiveNavItem, restoreWorkspace, serializeWorkspace, setPartsContent, syncDocumentTitleFromNav, vbox, applyOtherNames, appendStateObjects, findArrayObjectBoxesForResult, renderExitStatus, };
