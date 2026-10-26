@@ -3,7 +3,7 @@ name: Publish work in progress
 
 on:
   push:
-    branches: [claude/new-learning-levels-e238a3]
+    branches: [wip]
 
 permissions:
   actions: write
